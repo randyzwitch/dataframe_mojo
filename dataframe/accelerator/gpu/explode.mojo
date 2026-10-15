@@ -477,4 +477,8 @@ def execute(
         ref field = frame.fields[index]
         if field.table and len(field.table.value().text):
             result.text[index] = field.table.value().text[0].copy()
+            result.categories[index] = field.table.value().categories[0].copy()
+            result.category_leases.extend(
+                field.table.value().category_leases.copy()
+            )
     return result^

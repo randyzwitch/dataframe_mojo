@@ -12,6 +12,9 @@ from . import join_runtime as common
 from .runtime import _width, _stage, _checked_add, _checked_mul, CELL_BYTES
 from .residency import Scope, Matrix, Table, raise_value_error
 from .text_domains import MapPlan, Submission, submit as submit_text
+from dataframe.accelerator.code_domains import TextField
+from .runtime import _stage_category_column
+from . import category_keys
 
 
 @fieldwise_init
@@ -116,7 +119,12 @@ def _report(
             "synchronizations", Column[Int64]([Int64(traffic[3] - before[3])])
         )
     )
-    fields.append(Series("peak_requested_bytes", Column[Int64]([Int64(peak)])))
+    fields.append(
+        Series(
+            "peak_requested_bytes",
+            Column[Int64]([Int64(max(peak, scope.info()[1]))]),
+        )
+    )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
     fields.append(
         Series("upload_bytes", Column[Int64]([Int64(traffic[0] - before[0])]))
@@ -150,10 +158,12 @@ def execute_plan(
     right_resident: Optional[Table] = None,
     export_values: Bool = True,
     var text_remap: Optional[MapPlan] = None,
+    source_text: List[TextField] = List[TextField](),
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
     var text_submission = Optional[Submission]()
+    var category_submission = category_keys.Submission(task)
     var prepared = preflight(
         task,
         left,
@@ -229,6 +239,16 @@ def execute_plan(
                     words,
                     validity,
                 )
+            if not resident:
+                for field in source_text:
+                    if field.name == String(column):
+                        _stage_category_column(
+                            field,
+                            len(source),
+                            Int(layout.columns[column * j.COLUMN_WORDS]),
+                            words,
+                        )
+                        break
             column += 1
     var ctx = scope.context()
     # Allocate owners before submissions, so catch synchronizes before any
@@ -300,6 +320,18 @@ def execute_plan(
                 dv,
                 de,
                 layout.capacity,
+            )
+        if text_submission:
+            category_submission.prepare(
+                scope,
+                task,
+                source_text,
+                text_submission.value().host.target,
+                layout.columns,
+                dw,
+                dv,
+                True,
+                peak,
             )
         ctx.enqueue_copy(dc, layout.columns.unsafe_ptr())
         ctx.enqueue_copy(dk, layout.keys.unsafe_ptr())
@@ -465,6 +497,7 @@ def execute_plan(
                 grid_dim=lg,
                 block_dim=256,
             )
+            category_submission.enqueue(scope, dw, dv, True)
             ctx.enqueue_function[a.asof_gather](
                 dw.unsafe_ptr(),
                 dv.unsafe_ptr(),
@@ -492,6 +525,28 @@ def execute_plan(
             slots^,
             rows,
         )
+        category_submission.attach(result)
+        if left_resident:
+            result.category_leases.extend(
+                left_resident.value().category_leases.copy()
+            )
+        if right_resident:
+            result.category_leases.extend(
+                right_resident.value().category_leases.copy()
+            )
+        # Non-key fields and ASOF outputs retain their exact source owner.
+        for output in range(len(task.fields)):
+            if result.categories[output]:
+                continue
+            ref field = task.fields[output]
+            var source = (
+                field.right if field.prefer_right
+                or field.left < 0 else field.left
+            )
+            for metadata in source_text:
+                if metadata.name == String(source):
+                    result.categories[output] = metadata.category.copy()
+                    break
         scope.record_launches(launches)
         var report = _report(
             task,
@@ -528,10 +583,12 @@ def execute_plan(
         _ = output_validity_owner^
         _ = output_errors_owner^
         _ = text_submission^
+        _ = category_submission^
         return (result^, report^)
     except error:
         scope.synchronize()
         _ = text_submission^
+        _ = category_submission^
         _ = words^
         _ = validity^
         _ = errors^

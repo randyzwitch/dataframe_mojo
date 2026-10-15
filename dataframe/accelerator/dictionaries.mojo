@@ -6,7 +6,15 @@ encoding and decoding are host staging work and belong in end-to-end costs.
 """
 from .metadata import schema_frame
 from .window_keys import WindowKey
-from .code_domains import TextField, TextQuery, TEXT_LITERAL
+from .code_domains import (
+    TextField,
+    TextQuery,
+    TEXT_LITERAL,
+    CategoryField,
+    CategoryOwner,
+)
+from dataframe.column import Column
+from std.sys import size_of
 from .selectors import _live_nodes
 from std.collections import Dict
 from std.memory import ArcPointer
@@ -48,6 +56,52 @@ from dataframe.series import Series
 from dataframe.string_column import StringColumn
 from dataframe.str_kernels import string_op, concat_strings
 from dataframe.partition import _hash_bytes
+
+
+def _coded_string_dtype(source: Series) -> Optional[DataType]:
+    """Metadata-only certificate matching CPU same-dictionary String keys."""
+    if source.dtype() != DataType.STRING:
+        return None
+    var dtype = Optional[DataType]()
+    for part in source.chunks():
+        if not part._data.isa[StringColumn]():
+            return None
+        ref strings = part._data[StringColumn]
+        if not strings._codes:
+            return None
+        var current = strings._codes.value()[].dtype
+        if dtype and current != dtype.value():
+            return None
+        if not dtype:
+            dtype = current
+    return dtype^
+
+
+def has_category_transport(query: LazyFrame) raises -> Bool:
+    """Original categorical/code owners require certified HIGH transport.
+
+    Inspect only reachable immutable sources and logical metadata. Plain
+    UInt32 carriers are not evidence; retained resident certificates are.
+    """
+    var live = _live_nodes(query)
+    for index in range(len(query._nodes)):
+        if not live[index]:
+            continue
+        ref node = query._nodes[index]
+        for field in node.text_fields:
+            if field.category:
+                return True
+        if node.kind == SCAN_FRAME:
+            for column in query._frames[node.offset]._columns:
+                if column.dtype().is_categorical() or _coded_string_dtype(
+                    column
+                ):
+                    return True
+        var logical = schema_frame(query, index)
+        for column in logical._columns:
+            if column.dtype().is_categorical() or _coded_string_dtype(column):
+                return True
+    return False
 
 
 def dictionary_dtype(dtype: DataType) -> Bool:
@@ -98,6 +152,29 @@ struct DictionaryCodes(Movable):
                 if dictionary_dtype(column.dtype()):
                     total = checked_add(total, checked_mul(len(column), 4))
                     total = checked_add(total, checked_add(len(column), 7) // 8)
+                    if column.dtype().is_categorical() or _coded_string_dtype(
+                        column
+                    ):
+                        if column.dtype() == DataType.STRING:
+                            # Gathered coded Strings may materialize original
+                            # codes in addition to ordinary label transport.
+                            total = checked_add(
+                                total,
+                                checked_add(
+                                    checked_mul(len(column), 4),
+                                    (len(column) + 7) // 8,
+                                ),
+                            )
+                        total = checked_add(
+                            total,
+                            size_of[CategoryOwner]() + size_of[CategoryField](),
+                        )
+                        total = checked_add(
+                            total,
+                            checked_mul(
+                                len(column.chunks()), size_of[Column[UInt32]]()
+                            ),
+                        )
         # Each captured key retains one immutable lookup table throughout
         # normalized DAG execution. Plan/task copies share that owner; row
         # lowering and the device separately charge their flattened copies.
@@ -604,8 +681,39 @@ def encode_query(
             encoded._nodes[index].code_domain = dictionary.dtype
             for column in logical._columns:
                 if dictionary_dtype(column.dtype()):
+                    var category = Optional[CategoryField]()
+                    var original = Optional[DataType](
+                        column.dtype()
+                    ) if column.dtype().is_categorical() else _coded_string_dtype(
+                        column
+                    )
+                    if original:
+                        var codes = List[Column[UInt32]]()
+                        # Only a scan field certifies row-code staging. Derived
+                        # fields obtain code provenance from resident inputs.
+                        if query._nodes[index].kind == SCAN_FRAME:
+                            ref input = query._frames[
+                                query._nodes[index].offset
+                            ]
+                            ref source = input._columns[
+                                input._index(column.name())
+                            ]
+                            var captured = source.copy()
+                            if column.dtype() == DataType.STRING:
+                                var retained_codes = source._dictionary_codes()
+                                if not retained_codes:
+                                    raise Error(
+                                        "Coded String scan lost original dictionary codes"
+                                    )
+                                captured = retained_codes.take()
+                            for chunk in captured.chunks():
+                                codes.append(chunk._data[Column[UInt32]].copy())
+                        category = CategoryField(
+                            ArcPointer(CategoryOwner(original.value(), codes^)),
+                            string_codes=column.dtype() == DataType.STRING,
+                        )
                     encoded._nodes[index].text_fields.append(
-                        TextField(column.name(), column.dtype())
+                        TextField(column.name(), column.dtype(), category)
                     )
     # The captured dtype owns the original categorical dictionary, even
     # when the source is a metadata-only resident table. Populate lookups
@@ -700,7 +808,16 @@ def restore_frame(
             )
         if context and i < len(context.value()[].final_domains):
             domain = context.value()[].final_domains[i]
-        var column = dictionary.restore(
+        var column = frame._columns[i].copy() if (
+            (
+                frame._columns[i].dtype().is_categorical()
+                and schema._columns[i].dtype().is_categorical()
+            )
+            or (
+                frame._columns[i].dtype() == DataType.STRING
+                and schema._columns[i].dtype() == DataType.STRING
+            )
+        ) else dictionary.restore(
             frame._columns[i], schema._columns[i].dtype(), domain
         )
         # The original CPU schema distinguishes a bare field/alias from a
