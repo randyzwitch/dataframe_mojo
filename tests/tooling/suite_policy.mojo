@@ -3698,4 +3698,16 @@ def production_policy() -> SuitePolicy:
             ],
         )
     )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_publication_layouts_slices_mixed_siblings_and_resident_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_publication_empty_foreign_owner_checked_phase_order_and_exact_budget",
+            "metal",
+        )
+    )
     return policy^
