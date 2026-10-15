@@ -172,3 +172,25 @@ def test_observed_integer_boundary_signatures_and_original_order() raises:
         with assert_raises(contains="group metadata changed"):
             _ = lower_rows(changed, _capabilities(), terminal_boundary=True)
     assert_true(found)
+
+
+def test_integer_candidate_scan_preserves_deferred_cut_controls() raises:
+    from dataframe import when
+    from dataframe.accelerator.cuts import lower_cuts
+    from dataframe.accelerator.joins import _integer_producer
+
+    var source = _source(True)
+    for quantiles in [False, True]:
+        var operand = col("v") + lit(Int64(1))
+        var state = operand.qcut(
+            [-1], ["a", "b"]
+        ) if quantiles else operand.cut([1, 1])
+        var lowered = lower_cuts(
+            source.lazy().select(
+                when(lit(False)).then(state).otherwise(lit("safe"))
+            )
+        )
+        # The final infallible label consumer is not a checked-integer
+        # candidate. Inspecting it must not evaluate the preceding invalid
+        # controls while constructing its ancestor schema.
+        assert_equal(_integer_producer(lowered, len(lowered._nodes) - 1), False)

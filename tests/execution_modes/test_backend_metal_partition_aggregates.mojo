@@ -342,16 +342,18 @@ def test_native_metal_partition_window_checked_children_and_bool_reductions() ra
         _ = query.collect(engine="cpu")
     with assert_raises(contains="overflow"):
         _ = query.collect(accelerator=MetalRuntime())
-    # An ordinary checked join input still has no full-window observation
-    # guarantee and must keep its existing metadata rejection.
+    # Ordinary checked JOIN inputs now have their own fully observed producer.
+    # An overflow must be raised before matching or exporting any JOIN rows.
     var right = DataFrame([Series("g", Column[Int32]([1]))])
     var ordinary = (
         bad.lazy()
         .select_exprs([col("g"), (col("x") + lit(Int16(2))).alias("x")])
         .join(right.lazy(), "g")
     )
-    with assert_raises(contains="terminal projections without head"):
-        _ = ordinary.collect(accelerator=MetalRuntime())
+    with assert_raises(contains="overflow"):
+        _ = ordinary.collect(engine="cpu", streaming=False, optimize=False)
+    with assert_raises(contains="overflow"):
+        _ = ordinary.collect(accelerator=MetalRuntime(), optimize=False)
 
 
 def test_native_metal_partition_floating_reduction_bits_and_decimal_sums() raises:

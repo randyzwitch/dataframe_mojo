@@ -1,6 +1,6 @@
 """Distinct counts reuse resident grouping, including null categories."""
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
-from std.testing import assert_true, assert_raises
+from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
@@ -126,14 +126,19 @@ def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() rai
             Series("x", Column[Int64]([1, 2, 3, 4])),
         ]
     )
-    with assert_raises(contains="checked sums require a terminal boundary"):
-        _ = (
-            wide.lazy()
-            .group_by("g")
-            .agg(expressions)
-            .head(1)
-            .collect(accelerator=MetalRuntime())
-        )
+    # Checked grouped SUM now has a fully observed task before final head.
+    # Keep the original unordered/head query and assert independent CPU literals
+    # before checking the newly supported GPU path.
+    var grouped_head = wide.lazy().group_by("g").agg(expressions).head(1)
+    var cpu_head = grouped_head.collect(engine="cpu", streaming=False)
+    assert_equal(cpu_head.height(), 1)
+    var key = cpu_head.column("g").int32()._get(0)
+    assert_true(key == 1 or key == 2)
+    assert_equal(cpu_head.item(0, "distinct").int64(), 2)
+    assert_equal(cpu_head.item(0, "total").int64(), Int64(3 if key == 1 else 7))
+    assert_true(
+        grouped_head.collect(accelerator=MetalRuntime()).equals(cpu_head)
+    )
     with assert_raises(contains="checked sums require a terminal boundary"):
         _ = (
             wide.lazy()

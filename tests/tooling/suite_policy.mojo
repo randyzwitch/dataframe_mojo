@@ -59,6 +59,12 @@ def mojo_variant_abort_exit_code() -> Int:
 
 def production_policy() -> SuitePolicy:
     var policy = empty_policy()
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_integer_candidate_scan_preserves_deferred_cut_controls",
+            "mojo_gpu",
+        )
+    )
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
@@ -3219,6 +3225,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",

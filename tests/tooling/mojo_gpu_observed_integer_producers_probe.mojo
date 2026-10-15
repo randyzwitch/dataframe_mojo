@@ -4,10 +4,13 @@ from tests.execution_modes.test_mojo_gpu_observed_integer_producers import (
     test_mojo_gpu_observed_unused_integer_overflow_before_consumers,
     test_mojo_gpu_observed_first_group_overflow_before_regroup_and_head,
     test_observed_integer_boundary_signatures_and_original_order,
+    test_integer_candidate_scan_preserves_deferred_cut_controls,
 )
 
 
 def main() raises:
+    test_integer_candidate_scan_preserves_deferred_cut_controls()
+    print("PASS integer candidate scan preserves deferred CUT/QCUT controls")
     test_observed_integer_boundary_signatures_and_original_order()
     print("PASS 1/4 signature/order guards", flush=True)
     test_mojo_gpu_observed_integer_producer_success_and_nested_groups()
