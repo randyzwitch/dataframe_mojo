@@ -5,6 +5,7 @@ are not terminal boundaries for checked expressions. Executing these tasks
 may materialize intermediate frames; the provider reports those boundaries.
 """
 from .metadata import prune_projections, schema_frame
+from .selectors import _live_nodes
 from .qcuts import is_qcut_marker, controls as qcut_controls
 from .capabilities import RowCapabilities
 from .rows import lower_rows
@@ -26,7 +27,18 @@ from dataframe.lazy import (
     EXPLODE,
 )
 from dataframe.series import Series
-from dataframe.expr import is_reduction, ADD, SUB, MUL, DIV, NEG, ABS
+from dataframe.expr import (
+    is_reduction,
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    NEG,
+    ABS,
+    FLOORDIV,
+    POW,
+    SUM,
+)
 from dataframe.binding import bind, ROWS
 from .integer_ranges import proven_integer_nodes
 from . import ordered_rows, implode_ordered
@@ -87,6 +99,94 @@ def _mark_decimal_producers(mut query: LazyFrame) raises:
                 query._nodes[index].names2.append(
                     implode_ordered.signature(bind(expression, schema._columns))
                 )
+
+
+comptime INTEGER_MATERIALIZATION = "metal_integer_materialization"
+comptime GROUP_MATERIALIZATION = "metal_group_materialization"
+
+
+def _integer_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
+        return False
+    var schema = schema_frame(query, operation.left)
+    var checked = False
+    for expression in operation.exprs:
+        var bound = bind(expression, schema._columns)
+        if bound.shape() != ROWS or not ordered_rows.eligible(bound):
+            return False
+        var proven = proven_integer_nodes(bound)
+        for at in range(len(bound.expr._nodes)):
+            checked |= (
+                bound.dtypes[at].is_integer()
+                and bound.expr._nodes[at].op
+                in [ADD, SUB, MUL, NEG, ABS, FLOORDIV, POW]
+                and not proven[at]
+            )
+    return checked
+
+
+def _checked_group(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != AGG:
+        return False
+    var schema = schema_frame(query, operation.left)
+    for expression in operation.exprs:
+        var bound = bind(expression, schema._columns)
+        var last = len(bound.expr._nodes) - 1
+        if (
+            last >= 0
+            and bound.expr._nodes[last].op == SUM
+            and bound.dtypes[last].is_integer()
+        ):
+            return True
+    return False
+
+
+def has_checked_integer_consumers(query: LazyFrame) raises -> Bool:
+    var live = _live_nodes(query)
+    for index in range(len(query._nodes) - 1):
+        if live[index] and (
+            _integer_producer(query, index) or _checked_group(query, index)
+        ):
+            return True
+    return False
+
+
+def _observed_marker(text: String) -> Bool:
+    return (
+        text == DECIMAL_MATERIALIZATION
+        or text == INTEGER_MATERIALIZATION
+        or text == GROUP_MATERIALIZATION
+    )
+
+
+def _mark_integer_producers(mut query: LazyFrame) raises:
+    var live = _live_nodes(query)
+    # The public terminal already observes its own errors. Cut only producers
+    # with a later consumer; a head remains in that later consumer's region.
+    for index in range(len(query._nodes) - 1):
+        if not live[index] or query._nodes[index].text:
+            continue
+        var grouped = _checked_group(query, index)
+        if not grouped and not _integer_producer(query, index):
+            continue
+        var schema = schema_frame(query, query._nodes[index].left)
+        var marker = (
+            GROUP_MATERIALIZATION if grouped else INTEGER_MATERIALIZATION
+        )
+        query._nodes[index].text = marker
+        query._nodes[index].names2 = [marker]
+        if grouped:
+            query._nodes[index].names2.append(
+                String(query._nodes[index].maintain_order)
+            )
+            for name in query._nodes[index].names:
+                query._nodes[index].names2.append(name)
+        for expression in query._nodes[index].exprs:
+            query._nodes[index].names2.append(
+                implode_ordered.signature(bind(expression, schema._columns))
+            )
 
 
 comptime DAG_ROWS = 0
@@ -563,7 +663,7 @@ def _task(
         or query._nodes[root].text == "metal_window_materialization"
         or query._nodes[root].text == "metal_distribution_materialization"
         or query._nodes[root].text == "metal_implode_materialization"
-        or query._nodes[root].text == DECIMAL_MATERIALIZATION
+        or _observed_marker(query._nodes[root].text)
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
@@ -604,9 +704,7 @@ def _task(
         and query._nodes[cursor].kind != ASOF
         and query._nodes[cursor].kind != EXPLODE
         and (cursor == root or query._nodes[cursor].kind != SLICE)
-        and (
-            cursor == root or query._nodes[root].text != DECIMAL_MATERIALIZATION
-        )
+        and (cursor == root or not _observed_marker(query._nodes[root].text))
         and (
             cursor == root
             or (
@@ -614,7 +712,7 @@ def _task(
                 and query._nodes[cursor].text
                 != "metal_distribution_materialization"
                 and query._nodes[cursor].text != "metal_implode_materialization"
-                and query._nodes[cursor].text != DECIMAL_MATERIALIZATION
+                and not _observed_marker(query._nodes[cursor].text)
             )
         )
         and (
@@ -638,7 +736,7 @@ def _task(
         query._nodes[cursor].kind == JOIN
         or (
             cursor != root
-            and query._nodes[root].text == DECIMAL_MATERIALIZATION
+            and _observed_marker(query._nodes[root].text)
             and query._nodes[cursor].kind != SCAN_FRAME
         )
         or query._nodes[cursor].kind == ASOF
@@ -651,7 +749,7 @@ def _task(
                 or query._nodes[cursor].text
                 == "metal_distribution_materialization"
                 or query._nodes[cursor].text == "metal_implode_materialization"
-                or query._nodes[cursor].text == DECIMAL_MATERIALIZATION
+                or _observed_marker(query._nodes[cursor].text)
             )
         )
         or (
@@ -752,10 +850,13 @@ def lower_join_dag(
         not query._accelerator_settings
         or query._accelerator_settings.value().optimize
     )
-    if optimize and has_decimal_consumers(query):
+    if optimize and (
+        has_decimal_consumers(query) or has_checked_integer_consumers(query)
+    ):
         projected._push_slices()
     prune_projections(projected)
     _mark_decimal_producers(projected)
+    _mark_integer_producers(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected, len(projected._nodes) - 1, True, capabilities, tasks

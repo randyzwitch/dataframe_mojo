@@ -1202,7 +1202,10 @@ def lower_rows(
         ordered_terminal &= needs_order
         if ordered_terminal:
             ordered_mode = 2
-        var ordered_decimal = node.text == "metal_decimal_materialization"
+        var ordered_decimal = (
+            node.text == "metal_decimal_materialization"
+            or node.text == "metal_integer_materialization"
+        )
         if ordered_decimal:
             if (
                 len(chain) != 1
@@ -1210,12 +1213,32 @@ def lower_rows(
                 or limit >= 0
                 or (node.kind != SELECT and node.kind != WITH_COLUMNS)
                 or len(node.names2) != 1 + len(node.exprs)
-                or node.names2[0] != "metal_decimal_materialization"
+                or node.names2[0] != node.text
             ):
                 capabilities.reject(
                     "ordered decimal", "invalid observed producer"
                 )
             ordered_mode = 4
+        var observed_group = node.text == "metal_group_materialization"
+        if observed_group:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != AGG
+                or len(node.names2) != 2 + len(node.names) + len(node.exprs)
+            ):
+                capabilities.reject(
+                    "observed group", "invalid observed producer"
+                )
+            if node.names2[0] != node.text or node.names2[1] != String(
+                node.maintain_order
+            ):
+                capabilities.reject("observed group", "group metadata changed")
+            for at in range(len(node.names)):
+                if node.names2[2 + at] != node.names[at]:
+                    capabilities.reject("observed group", "group key changed")
+        var grouped_expression = 0
         var decimal_expression = 0
         var ordered_private = implode_ordered.tagged(node)
         if ordered_private:
@@ -1239,6 +1262,15 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if observed_group:
+                if node.names2[
+                    2 + len(node.names) + grouped_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "observed group",
+                        "producer AST or logical metadata changed",
+                    )
+                grouped_expression += 1
             if ordered_decimal:
                 if not ordered_rows.eligible(bound) or node.names2[
                     1 + decimal_expression

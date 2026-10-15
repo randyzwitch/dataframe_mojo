@@ -86,6 +86,7 @@ from .accelerator.joins import (
     has_join,
     has_scalar_consumers,
     has_decimal_consumers,
+    has_checked_integer_consumers,
 )
 from .accelerator.explodes import has_explode
 from .lazy import AcceleratorBackend, LazyFrame
@@ -123,6 +124,7 @@ def _describe_mojo_gpu(
     if (
         has_join(query)
         or has_decimal_consumers(query)
+        or has_checked_integer_consumers(query)
         or has_explode(query)
         or has_scalar_consumers(query)
         or has_cut_materializations(query)
@@ -910,6 +912,7 @@ struct MetalRuntime(AcceleratorBackend):
         if (
             has_join(query)
             or has_decimal_consumers(query)
+            or has_checked_integer_consumers(query)
             or has_scalar_consumers(query)
             or has_cut_materializations(query)
             or has_implode_materializations(query)

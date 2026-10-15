@@ -62,6 +62,30 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_mojo_gpu_observed_integer_producer_success_and_nested_groups",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_mojo_gpu_observed_unused_integer_overflow_before_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_mojo_gpu_observed_first_group_overflow_before_regroup_and_head",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_observed_integer_boundary_signatures_and_original_order",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_explode.mojo::test_mojo_gpu_explode_source_layouts_hidden_spans_high_words_and_metadata",
             "metal",
         )
