@@ -831,6 +831,15 @@ def _conditional[
     grouped: Bool,
     mask: List[Bool],
 ) raises -> Series:
+    if not grouped and len(mask) == 0 and _null_otherwise(bound, index):
+        # `when(c).then(x)` with null other rows: the branch's values under
+        # a validity that adds the predicate, as a streamed reduction's
+        # input already took (`_feed`), rather than chosen row by row. The
+        # aggregate table's inputs are evaluated whole: TPC-DS q2's seven
+        # weekday sums spent 18% in `choose` and its masks.
+        return _masked_branch[width](
+            bound, columns, aggregates, index, offset, length
+        )
     ref node = bound.expr._nodes[index]
     var shape = bound.shapes[index]
     var size = (
