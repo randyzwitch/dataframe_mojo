@@ -11,6 +11,8 @@ written. DuckDB evaluates such conjunctions on one selection vector the same
 way. Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
 floats, so a NaN compares false except with `!=`.
 """
+from std.memory import pack_bits
+
 from .binding import bind
 from .bool_column import BoolColumn
 from .column import Column
@@ -144,14 +146,11 @@ def _block[
     """Bits of `values[first : first + rows] op constant` into `bits`, one
     byte per eight rows (`rows` a multiple of 8 except at the end), or
     ANDed into what is there unless `initial`."""
-    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
     var splat = SIMD[D, 8](constant)
     var full = rows // 8
     for k in range(full):
         var x = values.unsafe_load[width=8](first + 8 * k)
-        var byte = (
-            _compare_lanes[op, D, 8](x, splat).cast[DType.uint8]() * weights
-        ).reduce_add()
+        var byte = pack_bits[DType.uint8](_compare_lanes[op, D, 8](x, splat))
         if initial:
             bits[unsafe_offset=k] = byte
         else:

@@ -2,6 +2,7 @@
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.ffi import external_call
 from std.sys import size_of
+from std.memory import pack_bits
 from .float_ops import arithmetic, compare
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
@@ -1423,7 +1424,6 @@ def _compare_bits[
     var values = List[UInt8](length=count, fill=0)
     if n == 0:
         return Series("", BoolColumn(values=values^, bits=valid^, length=0))
-    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
     var left_one = len(left) == 1
     var right_one = len(right) == 1
     var x_splat = SIMD[D, 8](left._get(0))
@@ -1436,14 +1436,17 @@ def _compare_bits[
         for k in range(full):
             var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
             var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
-            var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
-            out[unsafe_offset=k] = (hits * weights).reduce_add()
+            out[unsafe_offset=k] = pack_bits[DType.uint8](
+                _compare_lanes[op, D, 8](x, y)
+            )
     else:
         for k in range(full):
             var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
             var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
-            var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
-            out[unsafe_offset=k] = (hits * weights).reduce_add() & valid[k]
+            out[unsafe_offset=k] = (
+                pack_bits[DType.uint8](_compare_lanes[op, D, 8](x, y))
+                & valid[k]
+            )
     if full < count:
         var byte = UInt8(0)
         for i in range(8 * full, n):
@@ -1966,16 +1969,13 @@ def integer_is_in(input: Series, text: String) raises -> Series:
                 var packed = List[UInt8](length=(n + 7) // 8, fill=0)
                 var out = packed.unsafe_ptr()
                 var xs = column._ptr()
-                var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
                 var full = n // 8
                 for k in range(full):
                     var x = xs.unsafe_load[width=8](8 * k)
                     var hits = SIMD[DType.bool, 8](fill=False)
                     for t in range(count):
                         hits = hits | x.eq(SIMD[D, 8](table.unsafe_offset(t)[]))
-                    out[unsafe_offset=k] = (
-                        hits.cast[DType.uint8]() * weights
-                    ).reduce_add()
+                    out[unsafe_offset=k] = pack_bits[DType.uint8](hits)
                 if full * 8 < n:
                     var byte: UInt8 = 0
                     for i in range(full * 8, n):
