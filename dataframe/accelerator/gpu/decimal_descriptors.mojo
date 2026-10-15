@@ -130,8 +130,11 @@ def prepare(
                         | Int64(other.scale()) << 6
                         | op << 12
                     )
-                    code[
-                        at
-                    ] = (
-                        DECIMAL_BINARY if target.is_decimal() else DECIMAL_COMPARE
+                    code[at] = (
+                        DECIMAL_BINARY if op == ADD
+                        or op == SUB
+                        or op == MUL
+                        or op == DIV else DECIMAL_COMPARE
                     )
+                    if op == MUL:
+                        literals[node] = UInt64(target.precision())

@@ -501,25 +501,11 @@ def _program(
             or capabilities.decimal_multiplicative
             and (op == MUL or op == DIV)
         )
-        # The device computes decimal sums, differences and products in
-        # 128 bits at the larger input scale, and decimal quotients. The
-        # CPU gives DuckDB's types: a sum or difference at the larger scale
-        # (the same values; the device runs it when the type is 128 bits),
-        # an exact product at the scales added (the same when one side has
-        # scale 0), a quotient as DOUBLE (never on the device).
-        if left_type.is_decimal() and (
-            op == ADD or op == SUB or op == MUL or op == DIV
-        ):
+        # Products and Float64 quotients use their exact bound result type.
+        # Addition/subtraction width admission is changed separately.
+        if left_type.is_decimal() and (op == ADD or op == SUB):
             var result = bound.dtypes[i]
-            var same_type = (
-                op != DIV
-                and result.is_decimal()
-                and result.decimal_width() == 128
-                and (
-                    op != MUL or min(left_type.scale(), right_type.scale()) == 0
-                )
-            )
-            if not same_type:
+            if not result.is_decimal() or result.decimal_width() != 128:
                 capabilities.reject(
                     "logical",
                     "decimal arithmetic at its exact result type requires"
@@ -1488,25 +1474,6 @@ def lower_rows(
                         "plan",
                         "checked decimal arithmetic requires terminal projections without head",
                     )
-                if (
-                    capabilities.decimal_multiplicative
-                    and part.op == MUL
-                    and bound.dtypes[part_index].is_decimal()
-                ):
-                    var left = bound.dtypes[part.left]
-                    var right = bound.dtypes[part.right]
-                    var scale = max(left.scale(), right.scale())
-                    # CPU's nullable/masked multiplication checks unused
-                    # rescaling that its dense fast path skips. Require a
-                    # proof so results cannot depend on those paths.
-                    if not (
-                        _decimal_scale_safe(left, scale)
-                        and _decimal_scale_safe(right, scale)
-                    ):
-                        capabilities.reject(
-                            "plan",
-                            "decimal multiplication with different scales requires a static rescaling proof",
-                        )
                 if (
                     is_comparison(part.op)
                     and part.left >= 0
