@@ -16,7 +16,7 @@ from .grouped_key_domains import KeyDomain, reservation, FIXED
 
 
 @fieldwise_init
-struct KeyQuery(Movable):
+struct KeyQuery(Deinitable, Movable):
     var query: LazyFrame
     var schema: DataFrame
     var domains: List[KeyDomain]
