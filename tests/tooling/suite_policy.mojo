@@ -800,6 +800,18 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_moments_fma.mojo::test_mojo_gpu_public_moments_local_fma_exact_layouts_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_moments_fma.mojo::test_mojo_gpu_public_moments_nan_payload_first_input_layouts_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_grouping.mojo::test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts",
             "mojo_gpu",
         )

@@ -51,7 +51,7 @@ struct State(Copyable):
             return
         if op == VAR or op == STD:
             var state = VarianceState(self.count, self.a, self.b)
-            state.add(x)
+            state.add(x, retain_nan_accumulator=True)
             self.count = state.count
             self.a = state.mean
             self.b = state.m2
@@ -69,7 +69,7 @@ struct State(Copyable):
             var state = CovarianceState(
                 self.count, self.a, self.b, self.c, self.d, self.e
             )
-            state.add(x, y)
+            state.add(x, y, retain_nan_accumulator=True)
             self.count = state.count
             self.a = state.mean_x
             self.b = state.mean_y
