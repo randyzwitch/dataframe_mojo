@@ -572,9 +572,10 @@ def _render(
 ) -> String:
     """Render wall-clock `value`; %z, %:z and %Z are empty unless aware."""
     var p = split(value, dtype)
-    var f = (
-        pattern if pattern.byte_length() > 0 else default_format(dtype)
-    ).as_bytes()
+    var resolved = pattern if pattern.byte_length() > 0 else default_format(
+        dtype
+    )
+    var f = resolved.as_bytes()
     var out = String()
     var i = 0
     while i < len(f):
@@ -609,14 +610,22 @@ def _render(
                 i += 1
                 if aware:
                     out += _offset_text(offset, True)
+            elif d == 37:
+                out += "%"
             elif d == 90:  # Z
                 if aware:
                     out += abbreviation
             else:
-                out += "%" + chr(Int(d))
+                var start = i - 1
+                while i < len(f) and f[i] >= 128 and f[i] < 192:
+                    i += 1
+                out += "%" + String(resolved[byte=start:i])
         else:
-            out += chr(Int(f[i]))
+            var start = i
             i += 1
+            while i < len(f) and f[i] != 37:
+                i += 1
+            out += String(resolved[byte=start:i])
     return out^
 
 

@@ -991,14 +991,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_temporal.mojo::test_temporal_strftime_escaped_percent_formats_one_literal_percent",
-            "Temporal strftime emits two percent characters for the documented %% escape.",
-            "strftime escaped percent must emit one literal percent",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_inspection.mojo::test_empty_selector_expansion_preserves_input_height",
             "An empty selector expansion collapses input height to one.",
             "empty selector expansion must preserve input height",
@@ -2855,6 +2847,7 @@ def production_policy() -> SuitePolicy:
             "expr.temporal",
             [
                 "tests/public_contracts/test_temporal.mojo",
+                "tests/public_contracts/test_temporal_text_utf8.mojo",
                 "tests/public_contracts/test_temporal_edges.mojo",
                 "tests/public_contracts/test_temporal_extremes.mojo",
                 "tests/public_contracts/test_temporal_transitions.mojo",
