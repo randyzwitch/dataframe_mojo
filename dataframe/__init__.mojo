@@ -34,7 +34,7 @@ from .expr import (
     null,
     when,
 )
-from .arrow import (
+from .io.arrow import (
     ArrowArray,
     ArrowSchema,
     export_arrow,
@@ -42,7 +42,7 @@ from .arrow import (
     import_arrow,
     import_arrow_series,
 )
-from .csv import (
+from .io.csv import (
     CsvField,
     CsvOptions,
     CsvSchema,
@@ -50,7 +50,7 @@ from .csv import (
     to_csv_string,
     write_csv,
 )
-from .parquet import (
+from .io.parquet import (
     parquet_backend_version,
     parquet_library_candidates,
     parquet_row_group_statistics,
@@ -68,6 +68,6 @@ from .geometry import (
     total_bounds,
 )
 from .wkb import GeometryBounds
-from .geojson import read_geojson, from_geojson
+from .io.geojson import read_geojson, from_geojson
 
-from .shapefile import read_shapefile
+from .io.shapefile import read_shapefile

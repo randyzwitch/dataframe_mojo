@@ -186,7 +186,7 @@ def main():
         payload = json.loads(args.from_json.read_text())
     else:
         catalog = build_catalog(work, args.data_root)
-        sources = sorted((ROOT / 'dataframe').glob('*.mojo')) + sorted((ROOT / 'benchmarks/suites').glob('*.mojo'))
+        sources = sorted((ROOT / 'dataframe').glob('*.mojo')) + sorted((ROOT / 'dataframe/io').glob('*.mojo')) + sorted((ROOT / 'benchmarks/suites').glob('*.mojo'))
         fingerprint = hashlib.sha256(b''.join(p.read_bytes() for p in sources)).hexdigest()
         payload = {"catalog": catalog, "fingerprint": fingerprint,
                    "revision": subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),

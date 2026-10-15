@@ -17,8 +17,8 @@ from std.collections import Dict
 
 from .csv_types import CsvField, CsvOptions, CsvSchema
 from .csv_splitfields import CsvSplitFields
-from .dtype import DataType
-from .temporal import has_offset, parse as parse_temporal
+from ..dtype import DataType
+from ..temporal import has_offset, parse as parse_temporal
 
 
 comptime _BOOL = 1

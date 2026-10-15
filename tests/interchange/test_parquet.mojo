@@ -27,7 +27,7 @@ from tests.support.arrow_foreign import (
     schema_release,
 )
 from tests.support.lifecycle_stream import at
-from dataframe.parquet import (
+from dataframe.io.parquet import (
     _ParquetBatches,
     parquet_library_candidates,
     parquet_backend_version,

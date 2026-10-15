@@ -1,11 +1,11 @@
 """RFC 7946 GeoJSON ingestion into WKB geometry and attribute columns."""
 from std.memory import Pointer
-from .json_value import JsonValue
-from .column import Column
-from .series import Series
-from .frame import DataFrame
-from .geometry import from_wkb
-from .parse import parse_integer
+from ..json_value import JsonValue
+from ..column import Column
+from ..series import Series
+from ..frame import DataFrame
+from ..geometry import from_wkb
+from ..parse import parse_integer
 
 
 def _uint(mut out: List[UInt8], value: Int):

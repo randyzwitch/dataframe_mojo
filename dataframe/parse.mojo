@@ -4,7 +4,7 @@ from std.memory import bitcast
 from std.sys import size_of
 from std.sys import Endian
 
-from .csv_numeric import _pow10_f64
+from .io.csv_numeric import _pow10_f64
 
 # Private APIs from the Mojo 1.2 nightly pinned in pixi.lock. These are the
 # same conversion routines Float64(String) uses; keep reference-bit tests
