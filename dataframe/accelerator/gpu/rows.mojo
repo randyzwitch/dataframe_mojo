@@ -358,7 +358,11 @@ def _row_program[
                     var result: decimal.Arithmetic
                     if operation == MUL:
                         result = decimal.multiply(
-                            lhs, rhs, left_scale, right_scale
+                            lhs,
+                            rhs,
+                            left_scale,
+                            right_scale,
+                            UInt32(literals[unsafe_offset=absolute]),
                         )
                     elif operation == DIV:
                         result = decimal.divide_rows(
@@ -366,7 +370,12 @@ def _row_program[
                         )
                     else:
                         result = decimal.add_subtract(
-                            lhs, rhs, left_scale, right_scale, operation == SUB
+                            lhs,
+                            rhs,
+                            left_scale,
+                            right_scale,
+                            operation == SUB,
+                            UInt32(literals[unsafe_offset=absolute]),
                         )
                     value = result.value.low
                     high = result.value.high

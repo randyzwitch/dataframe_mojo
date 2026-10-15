@@ -213,6 +213,7 @@ def add_subtract(
     left_scale: UInt32,
     right_scale: UInt32,
     subtract: Bool,
+    precision: UInt32 = 38,
 ) -> Arithmetic:
     var common = max(left_scale, right_scale)
     var a = scale_checked(left, common - left_scale)
@@ -224,7 +225,10 @@ def add_subtract(
         a.value, b.value
     )
     return Arithmetic(
-        value, UInt32(2) if precision_overflow(value) else UInt32(0)
+        value,
+        UInt32(2) if wide_ge(
+            magnitude(value), wide_pow10(precision)
+        ) else UInt32(0),
     )
 
 
@@ -296,15 +300,17 @@ def round_signed(value: Wide, remainder: Wide, divisor: Wide) -> Wide:
 
 
 def multiply(
-    left: Wide, right: Wide, left_scale: UInt32, right_scale: UInt32
+    left: Wide,
+    right: Wide,
+    left_scale: UInt32,
+    right_scale: UInt32,
+    precision: UInt32 = 38,
 ) -> Arithmetic:
-    var common = max(left_scale, right_scale)
-    if (
-        not scale_checked(left, common - left_scale).valid
-        or not scale_checked(right, common - right_scale).valid
-    ):
-        return Arithmetic(Wide(0), 1)
-    # Preserve the CPU's signed bounds and abs(Int128.MIN) behavior.
+    """Exact unscaled product checked against the bound result precision.
+
+    The result scale is left_scale + right_scale. No input alignment or
+    rounding is needed. Preserve the CPU's signed multiplication bounds.
+    """
     if wide_equal(left, Wide(0, 0x8000000000000000)):
         return Arithmetic(Wide(0), 1)
     if is_zero(left):
@@ -317,52 +323,36 @@ def multiply(
     if wide_ge(absolute, permitted) and not wide_equal(absolute, permitted):
         return Arithmetic(Wide(0), 1)
     var value = wide_multiply(left, right)
-    var scale = min(left_scale, right_scale)
-    if scale:
-        var minimum = wide_equal(value, Wide(0, 0x8000000000000000))
-        if minimum and scale <= 18:
-            value = Wide(0)
-        else:
-            value = half_even(value, scale)
-            if minimum:
-                value = negate(value)
     return Arithmetic(
-        value, UInt32(2) if precision_overflow(value) else UInt32(0)
+        value,
+        UInt32(2) if wide_ge(
+            magnitude(value), wide_pow10(precision)
+        ) else UInt32(0),
     )
 
 
 def divide_rows(
     left: Wide, right: Wide, left_scale: UInt32, right_scale: UInt32
 ) -> Arithmetic:
-    var common = max(left_scale, right_scale)
-    if (
-        not scale_checked(left, common - left_scale).valid
-        or not scale_checked(right, common - right_scale).valid
-    ):
-        return Arithmetic(Wide(0), 1)
+    """CPU quotient: convert each decimal to Float64, then divide.
+
+    Three separately rounded divisions are intentional. Combining the
+    integer ratio and scale factor changes the final Float64 bits.
+    Error 4 denotes the CPU's null quotient for a zero divisor.
+    """
     if is_zero(right):
-        return Arithmetic(Wide(0), 4)  # CPU null quotient.
-    var negative = ((left.high ^ right.high) >> 63) != 0
-    var numerator = magnitude(left)
-    var divisor = magnitude(right)
-    var parts = signed_divide(numerator, divisor)
-    var value = parts.value
-    var remainder = parts.remainder
-    if precision_overflow(value):
-        return Arithmetic(Wide(0), 2)
-    var shift = common + right_scale - left_scale
-    for _ in range(Int(shift)):
-        value = wide_multiply(value, Wide(10))
-        if precision_overflow(value):
-            return Arithmetic(Wide(0), 2)
-        remainder = wide_multiply(remainder, Wide(10))
-        parts = signed_divide(remainder, divisor)
-        value = wide_add(value, parts.value)
-        remainder = parts.remainder
-    value = round_signed(value, remainder, divisor)
-    if precision_overflow(value):
-        return Arithmetic(Wide(0), 2)
-    return Arithmetic(negate(value) if negative else value, 0)
+        return Arithmetic(Wide(0), 4)
+    var left_unit = wide_pow10(left_scale)
+    var right_unit = wide_pow10(right_scale)
+    var a = f.div(
+        f.from_wide(left.low, left.high, False),
+        f.from_wide(left_unit.low, left_unit.high, True),
+    )
+    var b = f.div(
+        f.from_wide(right.low, right.high, False),
+        f.from_wide(right_unit.low, right_unit.high, True),
+    )
+    return Arithmetic(Wide(f.div(a, b)), 0)
 
 
 def compare(

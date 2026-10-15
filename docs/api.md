@@ -1017,7 +1017,7 @@ A window onto shared list offsets, validity, and one child series.
 - `def is_null(self, i: Int) -> Bool`
 - `def null_count(self) -> Int`
 - `def element_count(self, i: Int) -> Int`
-  Elements in row i (0 for null rows).
+  Logical elements in row i (0 for null rows).
 - `def row(self, i: Int) -> Series`
   Row i's elements as a series (empty for an empty or null row).
 - `def slice(self, offset: Int, length: Int) -> Self`

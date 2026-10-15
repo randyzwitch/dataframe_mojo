@@ -64,7 +64,24 @@ def expected(op, a, b, ls, rs, option, bits, flags):
         value = nearest(a, 10**ls)
     elif op == 6:
         value, extra = scaled(a, ls)
-    elif op in (7, 8, 9, 10, 12):
+    elif op == 9:
+        if a == MINIMUM:
+            extra = 1
+        elif a == 0:
+            value = 0
+        elif abs(b) > ((-MINIMUM if b < 0 else MAXIMUM) // abs(a)):
+            extra = 1
+        else:
+            value = signed(a * b)
+            extra = 2 if abs(value) >= 10**(option or 38) else 0
+    elif op == 10:
+        if not b:
+            extra = 4
+        else:
+            left = float(a) / float(10**ls)
+            right = float(b) / float(10**rs)
+            value = struct.unpack("<Q", struct.pack("<d", left / right))[0]
+    elif op in (7, 8, 12):
         common = max(ls, rs)
         left, left_ok = scaled(a, common - ls)
         right, right_ok = scaled(b, common - rs)
@@ -73,50 +90,6 @@ def expected(op, a, b, ls, rs, option, bits, flags):
         elif op in (7, 8):
             value = signed(left + (-right if op == 8 else right))
             extra = 2 if abs(value) >= PRECISION else 0
-        elif op == 9:
-            if a == MINIMUM:
-                extra = 1
-            elif a == 0:
-                value = 0
-            elif abs(b) > ((-MINIMUM if b < 0 else MAXIMUM) // abs(a)):
-                extra = 1
-            else:
-                value = signed(a * b)
-                scale = min(ls, rs)
-                if scale:
-                    if value == MINIMUM and scale <= 18:
-                        value = 0
-                    elif value == MINIMUM:
-                        value = -nearest(value, 10**scale)
-                    else:
-                        value = nearest(value, 10**scale)
-                extra = 2 if abs(value) >= PRECISION else 0
-        elif op == 10:
-            if not b:
-                extra = 4
-            else:
-                divisor = signed(abs(b))
-                value, remainder = division(signed(abs(a)), divisor)
-                if abs(value) >= PRECISION:
-                    value, extra = 0, 2
-                else:
-                    for _ in range(common + rs - ls):
-                        value = signed(value * 10)
-                        if abs(value) >= PRECISION:
-                            value, extra = 0, 2
-                            break
-                        q, remainder = division(signed(remainder * 10), divisor)
-                        value = signed(value + q)
-                    if not extra:
-                        rest = signed(divisor - remainder)
-                        if rest < remainder or (
-                            rest == remainder and value % 2
-                        ):
-                            value = signed(value + 1)
-                        if abs(value) >= PRECISION:
-                            value, extra = 0, 2
-                        elif (a < 0) != (b < 0):
-                            value = -value
         else:
             extra = 1
             value = {
@@ -221,6 +194,9 @@ def generate(path):
             MAXIMUM,
             MINIMUM,
         ]
+        for precision in (4, 9, 18, 19, 38):
+            for a, b in ((25, 50), (-25, 50), (10**(precision - 1), 10)):
+                emit(9, a, b, 2, 2, option=precision)
         for a in edge:
             for b in edge:
                 for op in (0, 1, 2, 17, 18):
