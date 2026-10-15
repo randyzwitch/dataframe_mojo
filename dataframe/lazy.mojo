@@ -2976,7 +2976,7 @@ struct LazyFrame(Copyable):
                         supported = supported and not key.dtype().is_nested()
                         sources.append(key.copy())
                     if supported:
-                        prepared = prepare_hash_index(sources)
+                        prepared = prepare_hash_index(sources, probe_rows=bound)
                         if prepared:
                             algorithm = "hash_index"
                 self._record(
