@@ -285,3 +285,19 @@ def test_mojo_gpu_grouped_explode_original_phase_errors_empty_observer_and_exact
     )
     with assert_raises(contains="original raw source provenance"):
         _ = execute_dag(uncertified, 999999, 0, False, capabilities())
+
+
+def test_mojo_gpu_grouped_publication_layouts_slices_mixed_siblings_and_resident_consumers() raises:
+    from tests.support.resident_grouped_publication_reference import (
+        layouts_slices_mixed_siblings_and_resident_consumers,
+    )
+
+    layouts_slices_mixed_siblings_and_resident_consumers()
+
+
+def test_mojo_gpu_grouped_publication_empty_foreign_owner_checked_phase_order_and_exact_budget() raises:
+    from tests.support.resident_grouped_publication_reference import (
+        empty_foreign_owner_checked_phase_order_and_exact_budget,
+    )
+
+    empty_foreign_owner_checked_phase_order_and_exact_budget()
