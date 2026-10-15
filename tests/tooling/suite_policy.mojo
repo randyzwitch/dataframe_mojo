@@ -124,6 +124,12 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo::test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo::test_mojo_gpu_grouped_implode_var_std_siblings_local_fma_literal",
             "metal",
         )
