@@ -55,7 +55,7 @@ includes the following operations and their valid compositions:
 | Rows and keys | Stable filters, slices, mixed-key sorting, grouped aggregation, distinct rows/counts, unions and rank methods |
 | Windows | Partition aggregates, cumulative operations, shift/fill, fixed-size rolling operations, interpolation and coordinate interpolation |
 | Duration windows | Numeric/Date/Datetime indices, supported closed bounds, fixed/calendar intervals, UTC and fixed-offset zones |
-| Temporal expressions | UTC, fixed-offset and IANA local fields; fixed/calendar offsets and truncation, duration totals, timezone metadata conversion, bounded UTC replacement; direct temporal arithmetic and physical casts |
+| Temporal expressions | UTC, fixed-offset and IANA local fields; fixed/calendar offsets and truncation, duration totals, timezone metadata conversion; direct IANA replacement, offsets and truncation; temporal arithmetic and physical casts |
 | Joins | Inner, left, right, full, semi, anti and cross; typed composite keys, null-equal left joins and key coalescing; backward/forward/nearest as-of joins with typed by-keys and tolerance |
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
@@ -92,8 +92,11 @@ CPU's wrapped local ticks. IANA local fields serialize the CPU timezone's
 transition table and POSIX footer once per distinct zone, then select offsets
 and extract fields on the GPU. Transition endpoints, historical offsets and
 footer rules follow the CPU lookup; table owners and uploads count toward the
-query budget. Replacement is limited to naive/UTC values and preserves the CPU's checked
-reconstruction behavior.
+query budget. IANA timezone replacement, calendar offsets and truncation support
+a direct in-memory scan followed by a single SELECT. They preserve datetime
+units, ambiguity/gap policies, checked reconstruction, conditional masks and
+scalar activation within each original CPU batch. Prefix and resident temporal
+compositions remain outside this route.
 
 Temporal arithmetic and physical casts currently require a direct in-memory
 scan and terminal row projection without a final head. Operand and predicate
