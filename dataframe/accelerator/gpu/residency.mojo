@@ -578,7 +578,22 @@ struct Table(Copyable):
                 ) == Int(Pointer(to=owner[]))
             if not duplicate:
                 categories += owner[].retained
-        return payload + self._text_bytes() + categories
+        var grouped = 0
+        var seen = List[Int]()
+        for field in self.grouped_keys:
+            if not field:
+                continue
+            var owner = field.value().owner
+            var identity = Int(Pointer(to=owner[]))
+            var duplicate = False
+            for old in seen:
+                duplicate |= old == identity
+            if not duplicate:
+                seen.append(identity)
+                grouped += (
+                    owner[].staging[].bytes + owner[].source.retained_bytes()
+                )
+        return payload + self._text_bytes() + categories + grouped
 
     def same_storage(self, other: Self) -> Bool:
         if self.identity_storage and other.identity_storage:

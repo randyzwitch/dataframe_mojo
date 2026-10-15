@@ -398,4 +398,5 @@ def produce(
     _ = scalars^
     _ = final_tables^
     _ = final_lists^
+    _ = typed^
     return result^

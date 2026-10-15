@@ -5,7 +5,8 @@ matrix view and its staging charge. A UInt32 column alone is never a key
 certificate, including when its values happen to fit a dictionary.
 """
 from std.memory import ArcPointer, Pointer
-from dataframe import DataType, Column
+from std.sys import size_of
+from dataframe import DataType, Column, Series
 from dataframe.accelerator.grouped_key_queries import KeyQuery
 from dataframe.accelerator.grouped_lists import GroupedListsPlan
 from dataframe.accelerator.grouped_key_domains import (
@@ -24,12 +25,17 @@ from .device_lists import HostReservation
 def staging_bytes(query: KeyQuery) raises -> Int:
     var total = query.staging_bytes
     for domain in query.domains:
-        if domain.kind != FIXED:
+        if domain.kind != FIXED and query.rows:
             total = checked_add(
                 total,
                 checked_add(
-                    checked_mul(query.rows, 8),
-                    checked_mul(len(domain.provenance.values[]), 4),
+                    checked_mul(query.rows, 16),
+                    checked_add(
+                        checked_mul(len(domain.provenance.values[]), 4),
+                        checked_mul(
+                            2 * domain.encoded.n_chunks(), size_of[Series]()
+                        ),
+                    ),
                 ),
             )
     return total
@@ -63,6 +69,11 @@ struct GroupedKeyOwner(Movable):
             plan[].names
         ):
             raise Error("Grouped key original domain certificate differs")
+        for field in source.grouped_keys:
+            if field:
+                raise Error(
+                    "Grouped key source must retain its original scan certificate"
+                )
         if source.schema.width() != len(plan[].source.outputs):
             raise Error("Grouped key source schema certificate differs")
         for index in range(source.schema.width()):
