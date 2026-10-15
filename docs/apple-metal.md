@@ -113,19 +113,19 @@ those tables through GPU row/join operations. Profiles report dictionary staging
 and restoration separately; they do not imply that string transformation code
 executes on the GPU.
 
-Categorical transport preserves original codes and dictionary owners through
-row, filter, sort, group, window, join and as-of operations. Duplicate category
-labels remain distinct codes. Temporary join dictionaries do not replace the
-output's original dictionary. Coded String grouping follows decoded byte
-equality and publishes ordinary String values; numeric UInt32 columns retain
-numeric semantics.
-
 Direct keyed aggregation can produce primitive Lists alongside independent
 primitive reductions, followed by direct outputs, List `len`/constant-index
 `get`, or slices. The route preserves original key domains, child validity,
 input order and supported checked-expression fault order. General composed
 List consumers and uncertified parallel reduction associations remain outside
 this route.
+
+Categorical transport preserves original codes and dictionary owners through
+row, filter, sort, group, window, join and as-of operations. Duplicate category
+labels remain distinct codes. Temporary join dictionaries do not replace the
+output's original dictionary. Coded String grouping follows decoded byte
+equality and publishes ordinary String values; numeric UInt32 columns retain
+numeric semantics.
 
 ## Residency, errors and memory
 
