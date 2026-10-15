@@ -897,10 +897,10 @@ def _decimal_dense64[
 ) raises -> Optional[Series]:
     """Decimal ADD, SUB or MUL with a result of at most 18 digits, from
     64-bit operands without nulls, in 64-bit arithmetic as DuckDB does.
-    The result is checked against its precision only where its type was
-    capped at 18 digits (DuckDB's `check_overflow`); the check folds into
-    one flag, and on overflow the 128-bit path reruns to name the row.
-    None when aligning a sum's operands could itself overflow 64 bits."""
+    Results are checked against their bound precision; raw physical
+    operands may exceed their declared digits after with_dtype. The check
+    folds into one flag, and on overflow the 128-bit path reruns to name
+    the row. None when aligned operands could overflow 64-bit arithmetic."""
     var n = _length(len(a), len(b))
     var xs = a._ptr()
     var ys = b._ptr()
