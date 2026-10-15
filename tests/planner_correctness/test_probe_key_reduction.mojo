@@ -3,7 +3,8 @@ aggregates grouped by the join key, the probe side runs first and its
 distinct keys filter each aggregate's input. Every result equals the same
 joins over the separately collected inputs: two aggregates on one key above
 a selective join chain (PDS-H q21's shape, distinct counts included), a semi
-join, and an aggregate on another key, which is left alone."""
+join, an aggregate on another key, which is left alone, and an aggregate
+grouped on both keys of a two-key join (PDS-H q20's shape)."""
 from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame
@@ -147,3 +148,49 @@ def test_semi_joins_and_other_keys_keep_their_results() raises:
         .sort(["s"])
     )
     assert_frame(other.collect(), eager_other)
+
+
+def test_an_aggregate_on_both_keys_of_a_two_key_join_takes_the_key_pairs() raises:
+    # Quantities per (order, supplier), joined on both keys by the few
+    # lines a selective supplier filter keeps; a filter on the joined sum
+    # follows, as PDS-H q20's availability check does.
+    var line = lines()
+    var supp = suppliers()
+    var totals = (
+        line.lazy()
+        .filter(col("late") <= lit(Int64(1)))
+        .group_by(["o", "s"])
+        .agg([col("late").len().alias("n")])
+    )
+    var chosen = (
+        line.lazy()
+        .join(
+            supp.lazy().filter(col("nation") == lit(Int64(7))),
+            left_on=["s"],
+            right_on=["sk"],
+        )
+        .select_exprs([col("o"), col("s"), col("late")])
+    )
+    var query = (
+        chosen.join(totals, left_on=["o", "s"], right_on=["o", "s"])
+        .filter(col("n") > col("late"))
+        .group_by("s")
+        .agg([col("n").sum().alias("n")])
+        .sort("s")
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var reduced = query.collect()
+    var took = "dataframe-path: stream.probe_key_reduction\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the two-key aggregate was not reduced by key pairs")
+    var eager = (
+        chosen.collect()
+        .join(totals.collect(), on=["o", "s"])
+        .filter(col("n") > col("late"))
+        .group_by(["s"])
+        .agg([col("n").sum().alias("n")])
+        .sort(["s"])
+    )
+    assert_frame(reduced, eager)
