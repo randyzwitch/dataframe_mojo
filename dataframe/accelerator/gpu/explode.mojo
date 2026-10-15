@@ -227,7 +227,7 @@ def execute(
     var valid = Optional[DeviceBuffer[DType.uint8]]()
     var errors = Optional[DeviceBuffer[DType.uint32]]()
     var held = frame.copy()
-    var output_rows = 0
+    var output_rows: Int
     try:
         # Existing primitive producers are fully observed before cardinality.
         # List parent failures also remain observable beneath null parents.
