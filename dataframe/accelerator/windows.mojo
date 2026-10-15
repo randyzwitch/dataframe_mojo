@@ -24,6 +24,7 @@ from dataframe.expr import (
     BACKWARD_FILL,
     SELECTOR,
     col,
+    null,
     is_reduction,
     is_window,
     subtree,
@@ -217,6 +218,58 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                             window_keys.append(
                                 WindowKey(key, dtype, string_hash)
                             )
+                    # CPU prepares the entire bound expression before OVER.
+                    # A read CAT key therefore groups and broadcasts by decoded
+                    # String bytes. Use a private key on BOTH edges; visible CAT
+                    # columns still retain their original code/dictionary owner.
+                    var comparison_keys = keys.copy()
+                    var decoded = List[Expr]()
+                    for key in range(len(window_keys)):
+                        if (
+                            not window_keys[key].dtype.is_categorical()
+                            or not window_keys[key].string_hash
+                        ):
+                            continue
+                        var alias = "__dataframe_metal_window_key_" + String(
+                            serial
+                        )
+                        serial += 1
+                        while alias in names:
+                            alias += "_"
+                        names[alias] = True
+                        temporary.append(alias)
+                        decoded.append(
+                            col(keys[key])
+                            .fill_null(null(DataType.STRING))
+                            .alias(alias)
+                        )
+                        comparison_keys[key] = alias
+                        window_keys[key] = WindowKey(
+                            alias, DataType.STRING, True
+                        )
+                    if len(decoded):
+                        var original_producer = producer
+                        result._nodes.append(
+                            _plan_node(
+                                WITH_COLUMNS,
+                                producer,
+                                exprs=decoded.copy(),
+                                text="metal_shared_prefix",
+                            )
+                        )
+                        producer = len(result._nodes) - 1
+                        if aligned == original_producer:
+                            aligned = producer
+                        else:
+                            result._nodes.append(
+                                _plan_node(
+                                    WITH_COLUMNS,
+                                    aligned,
+                                    exprs=decoded.copy(),
+                                    text="metal_shared_prefix",
+                                )
+                            )
+                            aligned = len(result._nodes) - 1
                     if inner_bound.shape() == ROWS:
                         result._nodes.append(
                             _plan_node(
@@ -225,7 +278,7 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                                 exprs=[
                                     (
                                         inner.over(
-                                            keys
+                                            comparison_keys
                                         ) if windowed else inner.copy()
                                     ).alias(name)
                                 ],
@@ -238,7 +291,7 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                                 AGG,
                                 producer,
                                 exprs=[inner.alias(name)],
-                                names=keys,
+                                names=comparison_keys,
                                 # The rewritten graph has no OVER nodes;
                                 # retain the original nested eligibility.
                                 # Flag0 remains first/last representation.
@@ -254,8 +307,8 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                                 JOIN,
                                 aligned,
                                 grouped,
-                                names=keys,
-                                right_keys=keys,
+                                names=comparison_keys,
+                                right_keys=comparison_keys,
                                 names2=["_right"],
                                 how=1,
                                 text="left",

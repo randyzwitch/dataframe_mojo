@@ -125,7 +125,6 @@ def production_policy() -> SuitePolicy:
             "metal",
         )
     )
-    policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo::test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads",
@@ -237,6 +236,61 @@ def production_policy() -> SuitePolicy:
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_iana_mutations.mojo::test_mojo_gpu_iana_replay_selected_row",
+            "metal",
+        )
+    )
+    policy.capabilities = ["metal", "mojo_gpu"]
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_categorical_activation_requires_reachable_logical_or_code_owners",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_mojo_gpu_category_activation_preserves_original_public_code_owners",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_mojo_gpu_categorical_self_key_over_decodes_only_captured_string_keys",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_original_rows_filter_sort_group_and_over",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_join_duplicate_codes_and_dictionary_union",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_asof_temporary_by_union_preserves_output_owner",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_dictionary_budget_owners",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_mixed_join_control_readback_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_coded_string_group_publication_drops_original_code_identity",
             "metal",
         )
     )
@@ -3419,6 +3473,8 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo",
+                "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",

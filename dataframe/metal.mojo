@@ -37,6 +37,7 @@ from .accelerator.opaque import (
 from .accelerator.dictionaries import (
     DictionaryCodes,
     has_dictionary_columns,
+    has_category_transport,
     encode_query,
     restore_frame,
     lower_dictionary_operations,
@@ -840,7 +841,9 @@ struct MetalRuntime(AcceleratorBackend):
                         "Metal dictionary staging exceeds payload budget"
                     )
                 budget -= staging_bytes
-            var dynamic_text = has_default_qcuts(staged_query)
+            var dynamic_text = has_default_qcuts(
+                staged_query
+            ) or has_category_transport(staged_query)
             var encoded = encode_query(
                 staged_query, dictionary, dynamic_text=dynamic_text
             )
@@ -957,7 +960,8 @@ struct MetalRuntime(AcceleratorBackend):
             )
             return (result^, report^)
         if (
-            has_join(query)
+            Bool(self._text_context)
+            or has_join(query)
             or has_decimal_consumers(query)
             or has_checked_integer_consumers(query)
             or has_scalar_consumers(query)

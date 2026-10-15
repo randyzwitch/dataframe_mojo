@@ -132,6 +132,9 @@ from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
 from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
+from dataframe.accelerator.code_domains import TextField, CategoryField
+from dataframe.categorical import decode
+from dataframe.string_column import StringCodes, StringColumn
 from .rows import row_program, row_program_ordered, row_program_iana
 from . import iana_scalar_scopes
 from dataframe.accelerator import iana_certificate
@@ -607,6 +610,44 @@ def _width(dtype: DataType) raises -> Int:
     raise Error("Mojo GPU unsupported output width")
 
 
+def _host_column_bytes(column: Series) raises -> Int:
+    """Count the published host storage after logical dictionary restoration."""
+    if column.is_chunked():
+        var total = 0
+        for chunk in column.chunks():
+            total = _checked_add(total, _host_column_bytes(chunk))
+        return total
+    var rows = len(column)
+    var bitmap = (rows + 7) // 8
+    if column.dtype() != DataType.STRING:
+        return _checked_add(_checked_mul(rows, _width(column.dtype())), bitmap)
+    from dataframe.string_column import StringColumn
+    from dataframe.string_view import StringView
+
+    ref strings = column._data[StringColumn]
+    var total = bitmap
+    if strings._view_storage:
+        total = _checked_add(total, _checked_mul(rows, size_of[StringView]()))
+        total = _checked_add(
+            total, strings._view_storage.value().total_buffer_bytes()
+        )
+    else:
+        total = _checked_add(total, _checked_mul(rows + 1, 8))
+        total = _checked_add(total, len(strings._bytes[]))
+    if strings._codes:
+        total = _checked_add(
+            total, _checked_mul(len(strings._codes.value()[].codes[]), 4)
+        )
+        if strings._codes.value()[].rows:
+            total = _checked_add(
+                total,
+                _checked_mul(
+                    len(strings._codes.value()[].rows.value()[]), size_of[Int]()
+                ),
+            )
+    return total
+
+
 def _stage(
     column: Series,
     rows: Int,
@@ -663,6 +704,47 @@ def _stage(
                         words[base + row] = input._get(row).cast[DType.uint64]()
             return
     raise Error("Mojo GPU unsupported input storage")
+
+
+def _stage_categories(
+    fields: List[TextField],
+    schema: DataFrame,
+    rows: Int,
+    mut words: List[UInt64],
+) raises:
+    """Stage certified original codes in HIGH without changing text LOW."""
+    var cells = len(words) // 2
+    for field in fields:
+        if not field.category:
+            continue
+        var slot = -1
+        for index in range(schema.width()):
+            if schema._columns[index].name() == field.name:
+                slot = index
+        if slot < 0:
+            continue
+        _stage_category_column(field, rows, slot * rows, words)
+
+
+def _stage_category_column(
+    field: TextField,
+    rows: Int,
+    base: Int,
+    mut words: List[UInt64],
+) raises:
+    if not field.category:
+        return
+    var cells = len(words) // 2
+    var row = 0
+    for chunk in field.category.value().owner[].codes:
+        for at in range(len(chunk)):
+            if row >= rows:
+                raise Error("Original categorical scan row range mismatch")
+            if chunk._valid(at):
+                words[cells + base + row] = UInt64(chunk._get(at)) + 1
+            row += 1
+    if row != rows:
+        raise Error("Original categorical scan owner is missing")
 
 
 def _output(
@@ -1046,6 +1128,40 @@ def estimate_resources(
 def materialize(table: Table) raises -> DataFrame:
     """Export one compact resident result through the existing typed builder."""
     var host = table.readback()
+    var additional = 0
+    for category in table.categories:
+        if category and category.value().string_codes:
+            var dtype = category.value().owner[].dtype
+            # Numeric transport coexists with decoded String views, original
+            # code retention, copied dictionary bytes and decoder lookup views.
+            additional = _checked_add(
+                additional,
+                _checked_add(
+                    _checked_mul(host.rows, 32),
+                    _checked_add(
+                        _checked_mul(len(dtype.dictionary()[].bytes), 2),
+                        _checked_mul(len(dtype.dictionary()[]), 32),
+                    ),
+                ),
+            )
+    if additional:
+        var envelope = _checked_mul(host.rows * host.schema.width(), CELL_BYTES)
+        for field in host.schema._columns:
+            envelope = _checked_add(
+                envelope,
+                _checked_add(
+                    _checked_mul(host.rows, _width(field.dtype())),
+                    (host.rows + 7) // 8,
+                ),
+            )
+        if table.storage:
+            _ = table.storage.value()[].scope.check(
+                _checked_add(envelope, additional)
+            )
+        elif table.identity_storage:
+            _ = table.identity_storage.value()[].scope.check(
+                _checked_add(envelope, additional)
+            )
     var columns = List[Series](capacity=host.schema.width())
     for column in range(host.schema.width()):
         ref field = host.schema._columns[column]
@@ -1058,6 +1174,40 @@ def materialize(table: Table) raises -> DataFrame:
             host.words,
             host.validity,
         )
+        if table.categories[column]:
+            var owner = table.categories[column].value().owner
+            var codes = List[UInt32](capacity=host.rows)
+            var valid = List[Bool](capacity=host.rows)
+            for row in range(host.rows):
+                var at = column * host.rows + row
+                var present = host.validity[at] != 0
+                var original = host.words[host.rows * host.schema.width() + at]
+                if present and (
+                    original == 0
+                    or original > UInt64(len(owner[].dtype.dictionary()[]))
+                ):
+                    raise Error(
+                        "Original categorical output code provenance is missing"
+                    )
+                codes.append(UInt32(original - 1) if present else UInt32(0))
+                valid.append(present)
+            output = Series(
+                field.name(), Column[UInt32](codes^, valid^)
+            ).with_dtype(owner[].dtype)
+            if table.categories[column].value().string_codes:
+                # A source coded String keeps its own codes when transported.
+                # CPU grouped String publication has no category certificate
+                # and therefore follows ordinary decoded String restoration.
+                var raw = output._data[Column[UInt32]].copy()
+                var retained = List[UInt32](capacity=host.rows)
+                for row in range(host.rows):
+                    retained.append(
+                        raw._get(row) if raw._valid(row) else UInt32(0)
+                    )
+                output = decode(output)
+                output._data[StringColumn]._codes = ArcPointer(
+                    StringCodes(ArcPointer(retained^), owner[].dtype)
+                )
         output._field_metadata = field._field_metadata
         columns.append(output^)
     return DataFrame(columns^, height=host.rows)
@@ -1113,10 +1263,7 @@ def execute(
     for column in result._columns:
         host_result_bytes = _checked_add(
             host_result_bytes,
-            _checked_add(
-                _checked_mul(result.height(), _width(column.dtype())),
-                (result.height() + 7) // 8,
-            ),
+            _host_column_bytes(column),
         )
     report = report.with_column(
         Series("host_result_bytes", Column[Int64]([Int64(host_result_bytes)]))
@@ -1243,12 +1390,19 @@ def execute_plan(
             )
             duration_windows = duration_windows or header == ROW_DURATION_KEY
         movement = movement or step.filter or step.order or step.grouped
+    var program = Program(plan, resident_input, Optional[Scope](scope.copy()))
     var resources = estimate_resources(
         plan, rows, Bool(resident_input), terminal_boundary, export_values
     )
     var remap_plan = Optional[MapPlan]()
     var remap_owner = Optional[Submission]()
-    var peak = resources.peak_bytes
+    var peak = _checked_add(
+        resources.peak_bytes,
+        _checked_mul(
+            len(program.literals) - len(plan.literals) - len(plan.zone_words),
+            16,
+        ),
+    )
     if text_domain:
         var base_domain = ArcPointer(
             TextDomain(scope, plan.source_domain.value(), False)
@@ -1278,7 +1432,6 @@ def execute_plan(
         )
     var schema = DataFrame(schema_columns^)
     var resident_result: Optional[Table] = None
-    var program = Program(plan)
     ref reduction_code = program.outputs
     var has_statistics = program.has_statistics
     var has_quantiles = program.has_quantiles
@@ -1303,6 +1456,7 @@ def execute_plan(
     if not resident_input:
         for slot in range(plan.source.width()):
             _stage(plan.source._columns[slot], rows, slot, 0, words, validity)
+        _stage_categories(plan.source_text, plan.source, rows, words)
     var submissions = 0
     var waits = 0
     var uploaded = 0
@@ -1527,6 +1681,7 @@ def execute_plan(
                                 UInt32(rows),
                                 UInt32(run_width),
                                 UInt32(plan.slots),
+                                device_literals.unsafe_ptr(),
                                 grid_dim=blocks,
                                 block_dim=256,
                             )
@@ -1809,6 +1964,7 @@ def execute_plan(
                                     UInt32(rows),
                                     UInt32(run_width),
                                     UInt32(plan.slots),
+                                    device_literals.unsafe_ptr(),
                                     grid_dim=blocks,
                                     block_dim=256,
                                 )
@@ -2009,6 +2165,7 @@ def execute_plan(
                                 UInt32(rows),
                                 UInt32(run_width),
                                 UInt32(plan.slots),
+                                device_literals.unsafe_ptr(),
                                 grid_dim=blocks,
                                 block_dim=256,
                             )
@@ -2688,6 +2845,38 @@ def execute_plan(
     var result = resident_result.value().copy()
     if text_domain:
         result.attach_text(plan.output_text, text_domain.value())
+        if resident_input:
+            result.category_leases = (
+                resident_input.value().category_leases.copy()
+            )
+        for output in range(len(plan.outputs)):
+            if not result.categories[output]:
+                continue
+            var slot = plan.outputs[output].slot
+            if slot < 0 or slot >= plan.source.width():
+                continue
+            var name = plan.source._columns[slot].name()
+            if resident_input:
+                for column in range(resident_input.value().schema.width()):
+                    if (
+                        resident_input.value().schema._columns[column].name()
+                        == name
+                        and resident_input.value().categories[column]
+                    ):
+                        result.categories[output] = CategoryField(
+                            resident_input.value()
+                            .categories[column]
+                            .value()
+                            .owner.copy(),
+                            result.categories[output].value().string_codes,
+                        )
+            else:
+                for field in plan.source_text:
+                    if field.name == name and field.category:
+                        result.categories[output] = CategoryField(
+                            field.category.value().owner.copy(),
+                            result.categories[output].value().string_codes,
+                        )
     if not terminal_boundary:
         result.observe_errors()
     var traffic = scope.transfers()
@@ -2713,7 +2902,12 @@ def execute_plan(
     fields.append(Series("synchronizations", Column[Int64]([Int64(waits)])))
     fields.append(Series("upload_bytes", Column[Int64]([Int64(uploaded)])))
     fields.append(Series("download_bytes", Column[Int64]([Int64(downloaded)])))
-    fields.append(Series("peak_requested_bytes", Column[Int64]([Int64(peak)])))
+    fields.append(
+        Series(
+            "peak_requested_bytes",
+            Column[Int64]([Int64(max(peak, scope.info()[1]))]),
+        )
+    )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
     fields.append(Series("host_result_bytes", Column[Int64]([Int64(0)])))
     fields.append(

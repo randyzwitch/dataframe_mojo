@@ -278,6 +278,8 @@ def _case(kind: Int, n: Int, grouped: Bool) raises:
             UInt32(n),
             UInt32(capacity),
             UInt32(width),
+            UInt32(0),
+            dl.unsafe_ptr(),
             grid_dim=blocks,
             block_dim=256,
         )

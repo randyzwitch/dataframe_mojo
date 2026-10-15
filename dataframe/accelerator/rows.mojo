@@ -251,6 +251,7 @@ struct RowPlan(Movable):
     var output_text: List[TextField]
     var code_domain: Optional[DataType]
     var source_domain: Optional[DataType]
+    var category_sorts: List[Tuple[Int, Int, DataType]]
     var iana_mask_bases: List[Int]
     var iana_descriptors: List[Int]
     var iana_diagnostics: List[String]
@@ -1071,6 +1072,7 @@ def lower_rows(
     var steps = List[RowStep]()
     var outputs = List[RowOutput]()
     var key_values = List[UInt64]()
+    var category_sorts = List[Tuple[Int, Int, DataType]]()
     var next_slot = len(schema)
     var reduced = False
     var reused_columns = False
@@ -1140,6 +1142,19 @@ def lower_rows(
                 if found < 0:
                     raise Error("Unknown column: " + node.names[i])
                 capabilities.require_key(schema[found].dtype())
+                for field in node.text_fields:
+                    if (
+                        field.name == node.names[i]
+                        and field.category
+                        and not field.category.value().string_codes
+                    ):
+                        category_sorts.append(
+                            (
+                                len(literals),
+                                slots[found],
+                                field.category.value().owner[].dtype,
+                            )
+                        )
                 code.extend(
                     [
                         Int64(ROW_SORT_KEY),
@@ -2573,10 +2588,18 @@ def lower_rows(
             var grouped_slots = List[Int]()
             var group_names = List[String]()
             for key in group_keys:
+                var categorical_identity = False
+                for field in query._nodes[node.left].text_fields:
+                    if field.name == schema[key].name() and field.category:
+                        categorical_identity = True
                 var key_descriptor = UInt64(0)
                 for original_key in node.window_keys:
                     if original_key.name != schema[key].name():
                         continue
+                    # The original whole-expression binding may decode just
+                    # this CAT key before preparing its OVER partition.
+                    if original_key.string_hash:
+                        categorical_identity = False
                     if (
                         original_key.dtype == DataType.STRING
                         or original_key.dtype._is_bytes()
@@ -2604,13 +2627,23 @@ def lower_rows(
                             # Opaque byte dictionaries retain their own exact
                             # raw-byte family and are never text unions.
                             key_values.extend(original_key.values[].copy())
+                    if (
+                        categorical_identity
+                        and original_key.dtype.is_categorical()
+                        and not original_key.string_hash
+                    ):
+                        key_descriptor = (
+                            (UInt64(1) << 63)
+                            | (UInt64(1) << 62)
+                            | (UInt64(1) << 61)
+                        )
                     break
                 code.extend(
                     [
                         Int64(ROW_GROUP_KEY),
                         Int64(slots[key]),
                         Int64(0),
-                        Int64(0),
+                        Int64(2) if categorical_identity else Int64(0),
                     ]
                 )
                 literals.append(bitcast[DType.float64](key_descriptor))
@@ -2887,6 +2920,7 @@ def lower_rows(
         query._nodes[root].text_fields.copy(),
         query._nodes[root].code_domain,
         query._nodes[cursor].code_domain,
+        category_sorts^,
         iana_mask_bases^,
         capsule.descriptors.copy(),
         capsule.diagnostics.copy(),
