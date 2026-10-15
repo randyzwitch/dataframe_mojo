@@ -110,6 +110,13 @@ those tables through GPU row/join operations. Profiles report dictionary staging
 and restoration separately; they do not imply that string transformation code
 executes on the GPU.
 
+Categorical transport preserves original codes and dictionary owners through
+row, filter, sort, group, window, join and as-of operations. Duplicate category
+labels remain distinct codes. Temporary join dictionaries do not replace the
+output's original dictionary. Coded String grouping follows decoded byte
+equality and publishes ordinary String values; numeric UInt32 columns retain
+numeric semantics.
+
 ## Residency, errors and memory
 
 Computed query regions retain immutable Mojo-owned device tables. A consumer
