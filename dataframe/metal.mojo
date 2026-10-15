@@ -963,11 +963,10 @@ struct MetalRuntime(AcceleratorBackend):
 
     def _describe(self, query: LazyFrame, original_entry: Bool) -> String:
         from .accelerator.gpu.runtime import _preflight
+        from .accelerator.grouped_stream_routes import candidate
+        from .parallel import configured_workers
 
         try:
-            from .accelerator.grouped_stream_routes import candidate
-            from .parallel import configured_workers
-
             var float_route = candidate(
                 query,
                 configured_workers(),

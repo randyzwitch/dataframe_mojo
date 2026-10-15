@@ -560,10 +560,12 @@ def test_public_float_stream_null_negative_keys_independent_partition_flush_and_
                 )
             else:
                 comptime if D == DType.float32:
-                    values[row] = bitcast[DType.float32](UInt32(0x7F800123))
+                    values[row] = Scalar[D](
+                        bitcast[DType.float32](UInt32(0x7F800123))
+                    )
                 else:
-                    values[row] = bitcast[DType.float64](
-                        UInt64(0x7FF0000000000123)
+                    values[row] = Scalar[D](
+                        bitcast[DType.float64](UInt64(0x7FF0000000000123))
                     )
         var frame = DataFrame(
             [
