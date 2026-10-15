@@ -11,7 +11,9 @@ from . import (
     implode_ordered,
     iana_mutations,
     iana_certificate,
+    producer_phases,
 )
+from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
 from .text_key_domains import append_partition_values
 from .gpu.temporal_descriptors import (
@@ -256,6 +258,7 @@ struct RowPlan(Movable):
     var iana_descriptors: List[Int]
     var iana_diagnostics: List[String]
     var iana_construction_peak_bytes: Int
+    var producer_region: Optional[ArcPointer[RegionProof]]
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -1018,7 +1021,8 @@ def lower_rows(
     # Reuse core projection analysis after validating the resident chain.
     # This only narrows the source: no expression evaluation or row movement.
     var projected_query = query.copy()
-    prune_projections(projected_query)
+    if not producer_phases.has_certified(query):
+        prune_projections(projected_query)
     var frame = query._frames[query._nodes[cursor].offset].copy()
     var source_count = frame.height() if source_rows < 0 else source_rows
     if len(projected_query._nodes[cursor].names):
@@ -1078,6 +1082,7 @@ def lower_rows(
     var reused_columns = False
     var ordered_ranks = List[UInt32]()
     var ordered_mode = 0
+    var producer_region = Optional[ArcPointer[RegionProof]]()
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -1289,6 +1294,28 @@ def lower_rows(
                     capabilities.reject("observed group", "group key changed")
         var grouped_expression = 0
         var decimal_expression = 0
+        var ordered_producer = Bool(node.producer_origin)
+        if ordered_producer:
+            producer_phases.validate_region(query, node)
+            if (
+                node.producer_origin.value()[].phase
+                != producer_phases.OBSERVED_IANA
+            ):
+                capabilities.reject(
+                    "observed temporal", "unknown producer phase"
+                )
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or (node.kind != SELECT and node.kind != WITH_COLUMNS)
+            ):
+                capabilities.reject(
+                    "observed temporal", "requires one certified row producer"
+                )
+            ordered_mode = producer_phases.OBSERVED_IANA
+            producer_region = node.producer_region
+        var producer_expression = 0
         var ordered_private = implode_ordered.tagged(node)
         if ordered_private:
             if (
@@ -1329,9 +1356,17 @@ def lower_rows(
                         "producer AST or logical metadata changed",
                     )
                 decimal_expression += 1
+            if ordered_producer:
+                producer_phases.validate_bound(node, bound, producer_expression)
+                producer_expression += 1
             if ordered_private:
                 implode_ordered.validate(node, bound)
-            if ordered_terminal or ordered_private or ordered_decimal:
+            if (
+                ordered_terminal
+                or ordered_private
+                or ordered_decimal
+                or ordered_producer
+            ):
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
                 )
@@ -1413,18 +1448,27 @@ def lower_rows(
                 capabilities.temporal_binary_arithmetic
                 or capabilities.temporal_physical_casts
             ) and temporal_expressions.contains(bound):
-                if not ordered_private and (
-                    len(chain) != 1
-                    or node.kind != SELECT
-                    or not terminal_boundary
-                    or limit >= 0
-                    or source_rows >= 0
+                if (
+                    not ordered_private
+                    and not ordered_producer
+                    and (
+                        len(chain) != 1
+                        or node.kind != SELECT
+                        or not terminal_boundary
+                        or limit >= 0
+                        or source_rows >= 0
+                    )
                 ):
                     capabilities.reject(
                         "temporal",
                         "prototype requires a direct scan and terminal projections without head (SELECT only)",
                     )
-                if ordered_terminal or ordered_private or ordered_decimal:
+                if (
+                    ordered_terminal
+                    or ordered_private
+                    or ordered_decimal
+                    or ordered_producer
+                ):
                     temporal_expressions.validate_pairs(bound)
                 else:
                     temporal_expressions.validate(bound)
@@ -1432,7 +1476,11 @@ def lower_rows(
                 for part in bound.expr._nodes:
                     if (
                         part.op == DT_TRUNCATE
-                        and not (ordered_terminal and iana_terminal)
+                        and not (
+                            ordered_terminal
+                            and iana_terminal
+                            or ordered_producer
+                        )
                         and bound.dtypes[part.left].is_datetime()
                     ):
                         var interval = parse_every(part.text)
@@ -1477,7 +1525,9 @@ def lower_rows(
                 if (
                     bound.expr._nodes[part_index].op == DT_OFFSET_BY
                     and capabilities.temporal_offsets
-                    and not (ordered_terminal and iana_terminal)
+                    and not (
+                        ordered_terminal and iana_terminal or ordered_producer
+                    )
                 ):
                     var interval = parse_every(
                         bound.expr._nodes[part_index].text
@@ -2458,9 +2508,9 @@ def lower_rows(
                 literals,
                 node_dtypes,
                 capabilities,
-                ordered_terminal and iana_terminal,
+                ordered_terminal and iana_terminal or ordered_producer,
             )
-            if ordered_terminal and iana_terminal:
+            if ordered_terminal and iana_terminal or ordered_producer:
                 while len(iana_mask_bases) < len(steps):
                     iana_mask_bases.append(-1)
                 var mask_words = iana_certificate.mask_words(
@@ -2484,7 +2534,12 @@ def lower_rows(
                     ),
                 )
                 capsule.words.extend(mask_words^)
-            if ordered_terminal or ordered_private or ordered_decimal:
+            if (
+                ordered_terminal
+                or ordered_private
+                or ordered_decimal
+                or ordered_producer
+            ):
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
                 ordered_ranks.extend(expression_ranks.copy())
@@ -2493,6 +2548,7 @@ def lower_rows(
                 or ordered_terminal
                 or ordered_private
                 or ordered_decimal
+                or ordered_producer
             ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
@@ -2806,6 +2862,7 @@ def lower_rows(
         or ordered_mode == 3
         or ordered_mode == 4
         or ordered_mode == 5
+        or ordered_mode == 6
     ):
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(
@@ -2822,7 +2879,7 @@ def lower_rows(
             if code[4 * occurrence] == iana_mutations.ROW_IANA_MUTATION:
                 var descriptor = Int(code[4 * occurrence + 2])
                 if (
-                    ordered_mode != 5
+                    (ordered_mode != 5 and ordered_mode != 6)
                     or descriptor not in capsule.descriptors
                     or step_index >= len(iana_mask_bases)
                     or iana_mask_bases[step_index] < 0
@@ -2832,7 +2889,7 @@ def lower_rows(
                         "IANA mutation requires an occurrence-certified phase",
                     )
                 iana_mutations.validate_descriptor(capsule.words, descriptor)
-        if ordered_mode == 5:
+        if ordered_mode == 5 or ordered_mode == 6:
             if step_index >= len(iana_mask_bases):
                 capabilities.reject(
                     "temporal", "IANA mask certificate is missing"
@@ -2925,4 +2982,5 @@ def lower_rows(
         capsule.descriptors.copy(),
         capsule.diagnostics.copy(),
         capsule_peak,
+        producer_region,
     )

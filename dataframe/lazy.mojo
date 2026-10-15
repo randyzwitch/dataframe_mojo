@@ -142,6 +142,7 @@ from .accelerator.opaque_dictionary import ByteDomain
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
+from .producer_origin import ProducerOrigin, RegionProof
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -209,6 +210,11 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # Private text-code provenance; never inferred from UInt32 storage.
     var code_domain: Optional[DataType]
     var text_fields: List[TextField]
+    # Typed proof of an original row expression and its exact input prefix.
+    # Synthetic plans begin without either token; verified copies share it.
+    var producer_origin: Optional[ArcPointer[ProducerOrigin]]
+    var lineage_anchor: Optional[ArcPointer[Int]]
+    var producer_region: Optional[ArcPointer[RegionProof]]
     # Original grouped key domains survive whole-query code normalization.
     var grouped_keys: Optional[ArcPointer[KeyQuery]]
     var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
@@ -266,6 +272,9 @@ def _plan_node(
         source_failure,
         code_domain,
         text_fields.copy(),
+        Optional[ArcPointer[ProducerOrigin]](),
+        Optional[ArcPointer[Int]](),
+        Optional[ArcPointer[RegionProof]](),
         None,
         None,
     )

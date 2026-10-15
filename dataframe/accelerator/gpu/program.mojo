@@ -97,7 +97,7 @@ struct Program(Movable):
         for node in range(len(plan.node_dtypes)):
             var op = self.code[4 * node]
             if op == ROW_IANA_MUTATION:
-                if plan.ordered_mode != 5:
+                if plan.ordered_mode != 5 and plan.ordered_mode != 6:
                     raise Error(
                         "IANA mutation cannot enter a legacy row program"
                     )
