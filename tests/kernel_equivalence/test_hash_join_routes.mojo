@@ -451,3 +451,73 @@ def test_smaller_build_order_restoration_capacity_boundary_and_compact_progressi
     )
     assert_equal(float_pairs[0], [0, 0, 1, 2, 3])
     assert_equal(float_pairs[1], [1, 2, 3, 0, -1])
+
+
+def test_build_key_bits_reject_only_absent_keys_in_joins_semi_and_anti() raises:
+    # A sparse Int64 build (every 37th value over a span, duplicates, a
+    # null, negative values) probed by more rows than it has: the build
+    # keys' bits are made, and a probe key below, inside or past the span,
+    # null or not, matches exactly as a scalar scan says.
+    var build_values = List[Int64]()
+    var build_valid = List[Bool]()
+    for i in range(400):
+        build_values.append(Int64(i * 37 - 5000))
+        build_valid.append(i % 97 != 5)
+    build_values.append(Int64(37 * 3 - 5000))
+    build_valid.append(True)
+    var build = Series(
+        "k", Column[Int64](build_values.copy(), build_valid.copy())
+    )
+    var probe_values = List[Int64]()
+    var probe_valid = List[Bool]()
+    for i in range(20_000):
+        probe_values.append(Int64((i * 7919) % 30_000 - 12_000))
+        probe_valid.append(i % 211 != 7)
+    probe_values.append(Int64.MIN)
+    probe_valid.append(True)
+    probe_values.append(Int64.MAX)
+    probe_valid.append(True)
+    var probe = Series(
+        "k", Column[Int64](probe_values.copy(), probe_valid.copy())
+    )
+    var prepared = prepare_hash_index(
+        [build.copy()], allow_progression=False, probe_rows=len(probe)
+    )
+    assert_true(
+        len(prepared.filter[]) > 0, "the build keys' bits were not made"
+    )
+    var expected_pairs = List[Int]()
+    var semi = List[Int]()
+    var anti = List[Int]()
+    for i in range(len(probe_values)):
+        var count = 0
+        if probe_valid[i]:
+            for j in range(len(build_values)):
+                if build_valid[j] and build_values[j] == probe_values[i]:
+                    count += 1
+        expected_pairs.append(count)
+        if count > 0:
+            semi.append(i)
+        else:
+            anti.append(i)
+    var rows = prepared_hash_join_rows([probe.copy()], prepared, False)
+    var seen = List[Int](length=len(probe_values), fill=0)
+    for k in range(len(rows[1])):
+        var left = rows[0][k]
+        var right = rows[1][k]
+        assert_equal(build_values[right], probe_values[left])
+        assert_true(build_valid[right])
+        seen[left] += 1
+    for i in range(len(probe_values)):
+        assert_equal(seen[i], expected_pairs[i])
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], prepared, True), semi
+    )
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], prepared, False), anti
+    )
+    # A build with more rows than probe it makes no bits.
+    var small = prepare_hash_index(
+        [build.copy()], allow_progression=False, probe_rows=10
+    )
+    assert_equal(len(small.filter[]), 0)
