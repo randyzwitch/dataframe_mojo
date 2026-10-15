@@ -107,3 +107,43 @@ def test_public_partition_cuts_original_categorical_keys() raises:
     assert_equal(decoded.item(0, "x").string(), "(-inf, 6]")
     assert_equal(decoded.item(1, "x").string(), "(6, inf]")
     print("PASS public partition original categorical codes and decoded key scope")
+
+
+def test_public_partition_cuts_nested_numeric_scopes() raises:
+    _ = require_metal()
+    var frame = DataFrame([
+        Series("x", Column[Int64]([0, 10, 2, 14])),
+        Series("k", Column[Int32]([0, 1, 0, 1])),
+        Series("h", Column[Int32]([1, 1, 0, 0])),
+    ])
+    var probabilities: List[Float64] = [0.5]
+    var inner = (col("x") + lit(Int64(1))).over("h")
+    var nested = inner.copy().qcut(probabilities).over("k")
+    _check(frame.lazy().select(nested.copy()))
+    _check(frame.lazy().select_exprs([
+        col("x").qcut(probabilities).over("k").alias("prior"),
+        nested.copy().alias("nested"),
+        (inner.copy() + lit(Int64(2))).over("k").qcut(probabilities).over("h").alias("deep"),
+    ]))
+    _check(frame.lazy().with_columns(nested.alias("nested")))
+    var actual = frame.lazy().select(nested).collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    assert_equal(actual.item(0, "x").string(), "(-inf, 2]")
+    assert_equal(actual.item(1, "x").string(), "(-inf, 13]")
+    var values = List[Int64](length=8192, fill=0)
+    values[4096] = Int64.MAX
+    var keys = List[Int32](length=8192, fill=0)
+    for row in range(4096, 8192):
+        keys[row] = 1
+    var faults = DataFrame([Series("x", Column[Int64](values^)), Series("k", Column[Int32](keys^))])
+    for workers in [1, 4]:
+        var setting = WorkerSetting(workers)
+        # The nested numeric state fails before the outer qcut observes its
+        # duplicate edges, regardless of the outer fallback's group order.
+        var state = (col("x") + lit(Int64(1))).over("k").qcut([0.0, 0.5]).over("k")
+        for query in [faults.lazy().select(state.copy()).head(0), faults.lazy().select(when(lit(False)).then(state.copy()).otherwise(lit("safe")))]:
+            with assert_raises(contains="overflow"):
+                _ = query.collect(engine="cpu", optimize=False, streaming=False)
+            with assert_raises(contains="overflow"):
+                _ = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+        _ = setting^
+    print("PASS public partition nested numeric states and cache snapshots")

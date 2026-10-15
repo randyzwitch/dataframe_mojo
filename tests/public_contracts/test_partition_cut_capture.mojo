@@ -60,3 +60,41 @@ def test_partition_cut_capture_keeps_original_controls_and_eager_state() raises:
             var captured = capture(eager_bound, source, node)
             assert_equal(captured.specifications[0], UInt64(0x3FE0000000000000))
             validate(captured, eager, source)
+
+
+def test_partition_nested_scope_cache_entry_snapshots() raises:
+    from dataframe.accelerator.gpu.partition_state import Context
+    from dataframe.accelerator.cuts import lower_cuts
+    from dataframe.accelerator.partition_cuts import is_marker, marker_capture
+    from dataframe.lazy import LazyFrame
+
+    var context = Context()
+    context.snapshot("projection0", "outer", "outer_state")
+    assert_equal(context.dispatch("projection0", "outer", "inner_state", True, 4), True)
+    # The outer scope selected fallback ids before its inner same-key scope
+    # created a contiguous layout. It cannot observe that later cache change.
+    assert_equal(context.dispatch("projection0", "outer", "outer_state", False, 4), False)
+    assert_equal(context.dispatch("projection0", "outer", "later_state", False, 4), True)
+    assert_equal(context.dispatch("projection1", "outer", "new_scope", False, 4), False)
+    assert_equal(context.dispatch("projection0", "small", "single_lane", True, 1), False)
+    var source = DataFrame([
+        Series("x", Column[Int64]([0, 2])),
+        Series("k", Column[Int32]([0, 0])),
+    ])
+    var state = (col("x") + lit(Int64(1))).over("k").qcut([0.5]).over("k")
+    var original = bind(state, source._columns)
+    var saved = capture(original, source, len(state._nodes) - 1)
+    assert_equal(saved.nested, True)
+    assert_equal(saved.numeric_state, False)
+    var lowered = lower_cuts(source.lazy().select(state))
+    var markers = 0
+    var entering = 0
+    var numeric = 0
+    for node in lowered._nodes:
+        if len(node.names2) and node.names2[0] == "metal_partition_cut_operand":
+            markers += 1
+            entering += Int(node.flags[0])
+            numeric += Int(node.flags[1])
+    assert_equal(markers, 3)
+    assert_equal(entering, 1)
+    assert_equal(numeric, 1)

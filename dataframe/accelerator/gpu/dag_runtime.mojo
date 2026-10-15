@@ -187,6 +187,7 @@ def execute(
     var started = Int(perf_counter_ns())
     var dag = preflight(query, capabilities)
     var scope = Scope(device_id, budget)
+    var partition_context = ArcPointer(partition_cuts.StateContext())
     var base_domain = Optional[ArcPointer[TextDomain]]()
     if text_context:
         base_domain = ArcPointer(
@@ -466,6 +467,7 @@ def execute(
                     scope,
                     export_values=not (observation_only and index == dag.root),
                     text_domain=target_domain,
+                    state_context=partition_context,
                 )
             elif is_qcut_marker(task.query):
                 if not resident:

@@ -495,13 +495,6 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
             ref bound = bounds[expression_index]
             var expression = bound.expr.copy()
             for node in expression._nodes:
-                if node.op == OVER and (
-                    node.left < 0
-                    or expression._nodes[node.left].op not in [CUT, QCUT]
-                ):
-                    raise Error(
-                        "Metal unsupported [cut]: partition scope requires a direct bin state"
-                    )
                 if node.op == STRUCT_PACK or node.op == STRUCT_FIELD:
                     raise Error(
                         "Metal unsupported [cut]: intermediate Struct consumers are pending"
@@ -549,7 +542,8 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                     continue
                 if node.op == OVER:
                     ref bins = expression._nodes[node.left]
-                    if (bins.integer & 2) and (
+                    var include_breaks = bins.op in [CUT, QCUT] and (bins.integer & 2) != 0
+                    if include_breaks and (
                         n != len(expression._nodes) - 1
                         or operation.kind != SELECT
                         or index != len(query._nodes) - 1
@@ -562,14 +556,19 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                     var breakpoint = _name(used, serial)
                     serial += 1
                     temporary.append(category)
-                    if bins.integer & 2:
+                    if include_breaks:
                         temporary.append(breakpoint)
+                    var first_marker = len(result._nodes)
                     var replacement = stage_partition_cut(
                         result, aligned, schema, bound, n, category,
                         breakpoint, index, True,
                     )
                     aligned = len(result._nodes) - 1
-                    if bins.integer & 2:
+                    for marker in range(first_marker, len(result._nodes)):
+                        for produced in result._nodes[marker].exprs:
+                            if produced._name not in temporary:
+                                temporary.append(produced._name)
+                    if include_breaks:
                         packed_value = replacement^
                         packed = True
                     else:

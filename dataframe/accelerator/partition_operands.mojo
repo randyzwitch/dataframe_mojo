@@ -111,6 +111,7 @@ def prepare(
     expected_signature: String,
     *,
     source_proved: Bool = False,
+    numeric_state: Bool = False,
 ) raises -> RowPlan:
     """Return one exact ranked Float64 operand; never evaluate input values."""
     if not source_proved:
@@ -125,7 +126,8 @@ def prepare(
     var lifted = lift_literals(original, source)
     # CPU _bins performs this infallible numeric conversion after _full. It
     # receives a positive occurrence rank too; no checked rank0 CAST is needed.
-    var converted = bind(lifted.expr.cast(DataType.FLOAT64), source._columns)
+    var converted = lifted.copy() if numeric_state else bind(lifted.expr.cast(DataType.FLOAT64), source._columns)
+    var output_dtype = original.dtypes[len(original.dtypes) - 1] if numeric_state else DataType.FLOAT64
     var cloned = ordered_rows.occurrences(converted, 128)
     var rebound = bind(cloned[0].expr, source._columns)
     if signature(rebound) != signature(cloned[0]):
@@ -143,7 +145,7 @@ def prepare(
         or plan.steps[0].grouped
         or plan.steps[0].start != 0
         or plan.steps[0].nodes != len(cloned[1])
-        or plan.outputs[0].dtype != DataType.FLOAT64
+        or plan.outputs[0].dtype != output_dtype
     ):
         raise Error("Partition operand private program geometry changed")
     var ranks = cloned[1].copy()

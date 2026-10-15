@@ -29,6 +29,8 @@ from .partition_bins import execute_default
 from .partition_labels import build as build_labels
 from .qcut_runtime import _report as _base_report
 from . import qcuts, floating as f
+from .partition_state import Context as StateContext
+from .partition_numeric import execute as execute_numeric
 
 
 def _report(scope: Scope, input: Table, result: Table, before: Tuple[Int, Int, Int, Int], started: Int, qcut: Bool) raises -> DataFrame:
@@ -44,7 +46,9 @@ def preflight(query: LazyFrame) raises -> Capture:
     ref operation = query._nodes[1]
     if (
         operation.left != 0
-        or len(operation.exprs) != (2 if saved.include_breaks else 1)
+        or len(operation.flags) != 2
+        or operation.flags[1] != saved.numeric_state
+        or len(operation.exprs) != (0 if operation.flags[0] else 2 if saved.include_breaks else 1)
         or not operation.names2[2]
         or (saved.include_breaks and not operation.names2[3])
     ):
@@ -53,7 +57,8 @@ def preflight(query: LazyFrame) raises -> Capture:
     # operand proof now, before any context initialization or submission.
     var source = DataFrame(operation.partition_columns.copy())
     _ = prepare(
-        saved.operand, source, 0, saved.operand_signature, source_proved=True
+        saved.operand, source, 0, saved.operand_signature,
+        source_proved=True, numeric_state=saved.numeric_state,
     )
     return saved^
 
@@ -153,6 +158,7 @@ def execute_plan(
     *,
     export_values: Bool = True,
     text_domain: Optional[ArcPointer[TextDomain]] = None,
+    state_context: Optional[ArcPointer[StateContext]] = None,
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
@@ -161,6 +167,16 @@ def execute_plan(
     var source = DataFrame(operation.partition_columns.copy())
     var category = operation.names2[2]
     var breakpoint = operation.names2[3]
+    if not state_context:
+        raise Error("Partition CUT shared OVER scope certificate is missing")
+    var state = state_context.value().copy()
+    if operation.flags[0]:
+        state[].snapshot(operation.names2[6], saved.key_set, category)
+        return (input.copy(), _report(scope, input, input, before, started, saved.qcut))
+    var cached = state[].dispatch(
+        operation.names2[6], saved.key_set, category, not saved.nested,
+        min(configured_workers(), input.rows // 2048),
+    )
     var custom = Optional[ArcPointer[TextDomain]]()
     var codes = List[UInt32]()
     if len(saved.labels):
@@ -170,6 +186,10 @@ def execute_plan(
             )
         custom = text_domain.copy()
         codes = _label_codes(saved, custom.value())
+    if not input.rows and saved.numeric_state:
+        var output = Table.empty(DataFrame([Series.full_null(category, saved.operand_dtype, 0)]))
+        var result = _append(input, output, scope)
+        return (result.copy(), _report(scope, input, result, before, started, False))
     if not input.rows:
         # CPU evaluates the virtual empty partition's controls even head(0).
         # No numeric input values are evaluated or downloaded.
@@ -211,11 +231,24 @@ def execute_plan(
             result.copy(),
             _report(scope, input, result, before, started, saved.qcut),
         )
+    # Fresh dictionaries can extend after preceding dynamic label states.
+    # These runtime key lookup owners coexist with captured base-domain
+    # metadata; layout.build separately charges its flattened host/device copy.
+    var lookup_owner_bytes = 0
+    for key in operation.window_keys:
+        if key.dtype == DataType.STRING or (key.dtype.is_categorical() and key.string_hash):
+            var field = input.schema._index(key.name)
+            if not input.text[field]:
+                raise Error("Partition CUT String key domain certificate is missing")
+            lookup_owner_bytes = checked_add(lookup_owner_bytes, checked_mul(len(input.text[field].value().domain[].dtype.dictionary()[]), 8))
+        elif key.dtype.is_categorical():
+            lookup_owner_bytes = checked_add(lookup_owner_bytes, checked_mul(len(key.dtype.dictionary()[]), 8))
+    var lookup_reservation = _Reservation(scope, lookup_owner_bytes)
     var keys = List[KeyInput](capacity=len(operation.window_keys))
     for original in operation.window_keys:
         var key = original.copy()
         var field = input.schema._index(key.name)
-        if key.string_hash or key.dtype == DataType.STRING:
+        if key.dtype == DataType.STRING or (key.dtype.is_categorical() and key.string_hash):
             if not input.text[field]:
                 raise Error("Partition CUT String key domain certificate is missing")
             ref dictionary = input.text[field].value().domain[].dtype.dictionary()[]
@@ -240,8 +273,8 @@ def execute_plan(
         keys,
         scope,
         configured_workers(),
-        cached_layout=Bool(parse_int64(operation.names2[7]))
-        and min(configured_workers(), input.rows // 2048) > 1,
+        allow_contiguous=not saved.nested,
+        cached_layout=cached,
     )
     var plan = prepare(
         saved.operand,
@@ -249,8 +282,13 @@ def execute_plan(
         input.rows,
         saved.operand_signature,
         source_proved=True,
+        numeric_state=saved.numeric_state,
     )
     var operand = evaluate(plan, input, scope)
+    if saved.numeric_state:
+        var output = execute_numeric(operand, layout, scope, saved.operand_dtype, category)
+        var result = _append(input, output, scope)
+        return (result.copy(), _report(scope, input, result, before, started, False))
     var output = execute_default(
         operand,
         layout,

@@ -5,7 +5,7 @@ It is deliberately separate from admission: the execution scope must also
 prove eager OVER state order, shared WindowLayouts, and resident key codes.
 """
 from std.memory import bitcast
-from dataframe import DataFrame, DataType, Expr, col, lit, when, as_struct
+from dataframe import DataFrame, DataType, Expr, Series, col, lit, when, as_struct
 from dataframe.binding import BoundExpr, bind
 from dataframe.expr import CUT, QCUT, OVER, COL, SEP, subtree, split_names
 from dataframe.parse import parse_float64, parse_int64
@@ -29,7 +29,46 @@ struct Capture(Copyable):
     var left_closed: Bool
     var include_breaks: Bool
     var allow_duplicates: Bool
+    var numeric_state: Bool
+    var nested: Bool
+    var operand_dtype: DataType
 
+
+
+def substitute(
+    expression: Expr,
+    root: Int,
+    replacements: List[String],
+    *,
+    strip_over: Bool = False,
+) raises -> Expr:
+    from dataframe.expr import Node
+
+    if len(replacements) != len(expression._nodes):
+        raise Error("Partition original scope replacement geometry changed")
+    var positions = List[Int](length=len(expression._nodes), fill=-1)
+    var nodes = List[Node]()
+    for at in range(root + 1):
+        var node = expression._nodes[at].copy()
+        if replacements[at]:
+            if node.op != OVER:
+                raise Error("Partition replacement is not an original OVER state")
+            positions[at] = len(nodes)
+            nodes.append(col(replacements[at])._nodes[0].copy())
+            continue
+        if strip_over and node.op == OVER:
+            positions[at] = positions[node.left]
+            continue
+        if node.left >= 0:
+            node.left = positions[node.left]
+        if node.right >= 0:
+            node.right = positions[node.right]
+        if node.extra >= 0:
+            node.extra = positions[node.extra]
+        positions[at] = len(nodes)
+        nodes.append(node^)
+    var rewritten = Expr(nodes^, "")
+    return subtree(rewritten, positions[root])
 
 def capture(
     original: BoundExpr, source: DataFrame, over_node: Int
@@ -46,20 +85,29 @@ def capture(
     if over.op != OVER or over.left < 0:
         raise Error("Partition CUT requires an original OVER occurrence")
     ref operation = original.expr._nodes[over.left]
-    if operation.op != CUT and operation.op != QCUT:
-        raise Error("Partition CUT requires a direct original bin state")
-    if operation.left < 0:
+    var numeric_state = operation.op != CUT and operation.op != QCUT
+    var root = over.left if numeric_state else operation.left
+    if root < 0:
         raise Error("Partition CUT original operand is missing")
-    var operand = subtree(original.expr, operation.left)
-    var proof = operand_certificate(operand, source)
+    var operand = subtree(original.expr, root)
+    var bound_operand = bind(operand, source._columns)
+    var proof = signature(bound_operand)
+    var nested = False
+    var identity = List[String](length=len(original.expr._nodes), fill="")
+    for node in operand._nodes:
+        nested |= node.op == OVER
+    # Replacing OVER by its numeric child here checks only supported value
+    # geometry. Each original scope still executes through its own observer.
+    var stripped = substitute(original.expr, root, identity, strip_over=True)
+    _ = operand_certificate(stripped, source)
     var specifications = List[UInt64]()
-    if operation.text.byte_length():
+    if not numeric_state and operation.text.byte_length():
         for part in operation.text.split(SEP):
             specifications.append(
                 bitcast[DType.uint64](parse_float64(String(part)))
             )
     var labels = List[String]()
-    if operation.text2.byte_length():
+    if not numeric_state and operation.text2.byte_length():
         labels = split_names(operation.text2)
     if len(labels) and len(labels) != len(specifications) + 1:
         raise Error("Partition CUT literal label count changed after binding")
@@ -83,10 +131,13 @@ def capture(
         over.text2,
         specifications^,
         labels^,
-        operation.op == QCUT,
-        (operation.integer & 1) != 0,
-        (operation.integer & 2) != 0,
-        (operation.integer & 4) != 0,
+        not numeric_state and operation.op == QCUT,
+        not numeric_state and (operation.integer & 1) != 0,
+        not numeric_state and (operation.integer & 2) != 0,
+        not numeric_state and (operation.integer & 4) != 0,
+        numeric_state,
+        nested,
+        original.dtypes[root],
     )
 
 
@@ -105,6 +156,9 @@ def validate(saved: Capture, expression: Expr, source: DataFrame) raises:
         or current.left_closed != saved.left_closed
         or current.include_breaks != saved.include_breaks
         or current.allow_duplicates != saved.allow_duplicates
+        or current.numeric_state != saved.numeric_state
+        or current.nested != saved.nested
+        or current.operand_dtype != saved.operand_dtype
         or len(current.keys) != len(saved.keys)
     ):
         raise Error("Partition CUT immutable control certificate changed")
@@ -138,7 +192,7 @@ def marker_capture(query: LazyFrame) raises -> Capture:
     if not is_marker(query):
         raise Error("Partition CUT private state marker is missing")
     ref operation = query._nodes[len(query._nodes) - 1]
-    if len(operation.partition_exprs) != 1:
+    if len(operation.partition_exprs) != 2:
         raise Error("Partition CUT original expression certificate is missing")
     var original = operation.partition_exprs[0]
     var source = DataFrame(operation.partition_columns.copy())
@@ -156,7 +210,52 @@ def marker_capture(query: LazyFrame) raises -> Capture:
             != saved.keys[at].string_hash
         ):
             raise Error("Partition CUT original key certificate changed")
+    ref over = original._nodes[saved.over_node]
+    ref bins = original._nodes[over.left]
+    var root = over.left if saved.numeric_state else bins.left
+    var entering = len(operation.flags) == 2 and operation.flags[0]
+    var rewritten = substitute(original, root, operation.names, strip_over=entering)
+    var rewritten_bound = bind(rewritten, source._columns)
+    var stored_bound = bind(operation.partition_exprs[1], source._columns)
+    if signature(rewritten_bound) != signature(stored_bound):
+        raise Error("Partition original nested-state substitution changed")
+    saved.operand = rewritten^
+    saved.operand_signature = operand_certificate(saved.operand, source)
     return saved^
+
+
+
+def _marker(
+    mut query: LazyFrame,
+    left: Int,
+    source: DataFrame,
+    original: BoundExpr,
+    saved: Capture,
+    lowered: Expr,
+    replacements: List[String],
+    expressions: List[Expr],
+    category: String,
+    breakpoint: String,
+    scope_id: Int,
+    enter: Bool,
+) raises:
+    query._nodes.append(
+        _plan_node(
+            WITH_COLUMNS,
+            left,
+            exprs=expressions,
+            names=replacements,
+            flags=[enter, saved.numeric_state],
+            text="metal_window_materialization",
+            names2=[
+                TAG, VERSION, category, breakpoint, String(saved.over_node),
+                saved.original, String(scope_id), "1",
+            ],
+            window_keys=saved.keys,
+            partition_exprs=[original.expr.copy(), lowered.copy()],
+            partition_columns=source.clear()._columns,
+        )
+    )
 
 
 def stage(
@@ -171,71 +270,82 @@ def stage(
     cached_layout: Bool,
 ) raises -> Expr:
     var saved = capture(original, source, over_node)
-    var anchor = ""
-    var operand = bind(saved.operand, source._columns)
-    for input in operand.sources:
-        if input >= 0:
-            anchor = source._columns[input].name()
-            break
-    var label = lit("") if not len(saved.labels) else lit(saved.labels[0])
-    # Keep every custom literal in the harmless schema AST for normal text
-    # dictionary collection and later query-domain recoding.
-    for at in range(1, len(saved.labels)):
-        label = (
-            when(col(anchor).is_not_null())
-            .then(label)
-            .otherwise(lit(saved.labels[at]))
-        )
-    # Projection pruning must retain every original operand/key source even
-    # though the harmless placeholder itself never executes on device.
+    ref over = original.expr._nodes[over_node]
+    ref bins = original.expr._nodes[over.left]
+    var root = over.left if saved.numeric_state else bins.left
+    var replacements = List[String](length=len(original.expr._nodes), fill="")
+    var aligned = left
+    var schema = source.copy()
+    if saved.nested:
+        # CPU chooses the outer fallback's cache before evaluating nested
+        # states. Record that entry snapshot before any inner scope creates
+        # another layout for the same key set.
+        var identity = List[String](length=len(original.expr._nodes), fill="")
+        var stripped = substitute(original.expr, root, identity, strip_over=True)
+        _marker(query, aligned, schema, original, saved, stripped, identity,
+                List[Expr](), category, breakpoint, scope_id, True)
+        aligned = len(query._nodes) - 1
+        var top = List[Int]()
+        var pending: List[Int] = [root]
+        var seen = List[Bool](length=len(original.expr._nodes), fill=False)
+        while len(pending):
+            var at = pending.pop()
+            if at < 0 or seen[at]:
+                continue
+            seen[at] = True
+            ref node = original.expr._nodes[at]
+            if node.op == OVER:
+                top.append(at)
+                continue
+            if node.left >= 0:
+                pending.append(node.left)
+            if node.right >= 0:
+                pending.append(node.right)
+            if node.extra >= 0:
+                pending.append(node.extra)
+        sort(top)
+        for at in top:
+            var name = category + "_nested_" + String(at)
+            while name in schema.columns():
+                name += "_"
+            var nested = stage(query, aligned, schema, original, at, name,
+                               name + "_breakpoint", scope_id, cached_layout)
+            aligned = len(query._nodes) - 1
+            replacements[at] = name
+            var columns = schema._columns.copy()
+            columns.append(Series.full_null(name, original.dtypes[at], 0))
+            schema = DataFrame(columns^)
+    var lowered = substitute(original.expr, root, replacements)
+    _ = operand_certificate(lowered, schema)
     var dependencies = List[String]()
-    for node in saved.operand._nodes:
+    for node in lowered._nodes:
         if node.op == COL and node.text not in dependencies:
             dependencies.append(node.text)
     for key in saved.keys:
         if key.name not in dependencies:
             dependencies.append(key.name)
+    var value: Expr
+    if saved.numeric_state:
+        value = col(dependencies[0]).cast(saved.operand_dtype)
+    else:
+        value = lit("") if not len(saved.labels) else lit(saved.labels[0])
+        for at in range(1, len(saved.labels)):
+            value = when(col(dependencies[0]).is_not_null()).then(value).otherwise(lit(saved.labels[at]))
+    # Harmless schema placeholders retain all original sources through pruning;
+    # the dedicated runtime never interprets these row values.
     for dependency in dependencies:
-        label = (
-            when(col(dependency).is_not_null())
-            .then(label.copy())
-            .otherwise(label)
-        )
-    var expressions: List[Expr] = [label.alias(category)]
+        value = when(col(dependency).is_not_null()).then(value.copy()).otherwise(value)
+    var expressions: List[Expr] = [value.alias(category)]
     if saved.include_breaks:
         expressions.append(
-            when(col(anchor).is_not_null())
-            .then(lit(Float64(0)))
-            .otherwise(lit(Float64(0)))
-            .alias(breakpoint)
+            when(col(dependencies[0]).is_not_null()).then(lit(Float64(0)))
+            .otherwise(lit(Float64(0))).alias(breakpoint)
         )
-    query._nodes.append(
-        _plan_node(
-            WITH_COLUMNS,
-            left,
-            exprs=expressions,
-            text="metal_window_materialization",
-            names2=[
-                TAG,
-                VERSION,
-                category,
-                breakpoint,
-                String(over_node),
-                saved.original,
-                String(scope_id),
-                String(Int(cached_layout)),
-            ],
-            window_keys=saved.keys,
-            partition_exprs=[original.expr.copy()],
-            partition_columns=source.clear()._columns,
-        )
-    )
+    _marker(query, aligned, schema, original, saved, lowered, replacements,
+            expressions, category, breakpoint, scope_id, False)
     if saved.include_breaks:
         return as_struct(
-            [
-                col(breakpoint).alias("breakpoint"),
-                col(category).alias("category"),
-            ],
+            [col(breakpoint).alias("breakpoint"), col(category).alias("category")],
             "",
         )
     return col(category)
