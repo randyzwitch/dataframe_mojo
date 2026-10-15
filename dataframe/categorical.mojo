@@ -285,6 +285,62 @@ def sort_ranks(values: Series) raises -> Series:
     return Series(values.name(), Column[UInt32](ranks^, valid))
 
 
+def string_sort_ranks(values: Series) raises -> Optional[Series]:
+    """A string sort key replaced by each value's rank among its distinct
+    values in sorted order, as a plain UInt32 column (nulls stay null), when
+    its values repeat: sorting by the ranks sorts by the strings, and the
+    ranks pack with the other keys into the integer sort (`sort_ranks` does
+    this for categorical codes). Each distinct value is compared once, not
+    once per row: PDS-H q16's 18K result rows hold 150 part types whose
+    first 18 bytes agree, so a row comparison read them all again. None
+    when an evenly spaced sample shows most values distinct (ranking would
+    sort as many strings as the sort itself) or the key is not a string."""
+    if values.dtype().physical() != DataType.STRING:
+        return None
+    var n = len(values)
+    if n < 2:
+        return None
+    var flat = values.rechunk() if values.is_chunked() else values.copy()
+    var sample = min(n, 1024)
+    var picked = List[Int](capacity=sample)
+    for k in range(sample):
+        picked.append(k * n // sample)
+    var sampled = encode_string_rows_parallel(
+        flat.take(picked), nulls_equal=False, workers=1
+    )
+    if 2 * sampled.count() > sample:
+        return None
+    var keys = encode_string_rows_parallel(
+        flat, nulls_equal=False, workers=worker_count(n)
+    )
+    var count = keys.count()
+    if 2 * count > n:
+        return None
+    ref column = flat._data[StringColumn]
+    var order = List[Int](capacity=count)
+    for code in range(count):
+        order.append(code)
+    ref firsts = keys.representatives
+
+    def less(a: Int, b: Int) {imm column, imm firsts} -> Bool:
+        return column._get(firsts[a]) < column._get(firsts[b])
+
+    sort(order, less)
+    var rank = List[UInt32](length=count, fill=0)
+    for position in range(count):
+        rank[order[position]] = UInt32(position)
+    var ranks = List[UInt32](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    ref ids = keys.ids
+    for i in range(n):
+        var id = ids[i]
+        if id < 0:
+            valid[i] = False
+        else:
+            ranks[i] = rank[id]
+    return Series(values.name(), Column[UInt32](ranks^, valid^))
+
+
 struct _GatherJob[D: DType, packed: Bool](Job):
     """Rows [first, last) of a gather by code: each row takes its code's
     entry of a small per-value table, or entry `null_index` when its code

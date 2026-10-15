@@ -1,7 +1,7 @@
 """Exact key membership and stable row order across encoding specializations."""
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
-from dataframe import BoolColumn, Column, DataType, Series
+from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
 from dataframe.string_column import StringColumn
 from dataframe.hashing import (
@@ -16,7 +16,12 @@ from dataframe.hashing import (
 )
 from dataframe.row_sort import row_arg_sort
 from dataframe.packed_sort import packed_arg_sort, packed_top_rows
-from dataframe.categorical import decode, sort_ranks, unify
+from dataframe.categorical import (
+    decode,
+    sort_ranks,
+    string_sort_ranks,
+    unify,
+)
 from tests.support.key_kernel_reference import (
     KeyCell,
     cell_equal,
@@ -25,6 +30,10 @@ from tests.support.key_kernel_reference import (
     expected_order,
 )
 from tests.support.row_kernel_reference import integer_bounds, row_valid
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 
 comptime KEY_INTEGER_DTYPES = (
     DType.int8,
@@ -497,6 +506,100 @@ def test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_seman
                 row_arg_sort(keys, [first, second], [True, True]),
                 expected_order(rows, [first, second], [True, True]),
             )
+
+
+def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
+    # A string key whose values repeat sorts by each value's rank: the
+    # ranks keep byte order (embedded NULs, shared long prefixes, Unicode),
+    # equal values keep row order, nulls stay null, and a later integer
+    # key orders rows of one value.
+    var pattern: List[String] = [
+        "prefix0123456789abcdefghijkl-B",
+        "",
+        "a\x00b",
+        "α",
+        "prefix0123456789abcdefghijkl-A",
+        "a",
+        "a\x00",
+        "prefix0123456789abcdefghijkl-A\x00",
+        "abcdefghijklm",
+    ]
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    for n in [64, 300]:
+        for mode in range(3):
+            var values = List[String]()
+            var valid = List[Bool]()
+            var numbers = List[Int64]()
+            var rows = List[List[KeyCell]]()
+            for row in range(n):
+                var present = row_valid(row, mode)
+                var text = pattern[(row * 7) % len(pattern)].copy()
+                values.append(text.copy() if present else "poison text")
+                valid.append(present)
+                numbers.append(Int64((row * 31) % 5))
+                rows.append(
+                    [
+                        KeyCell(2, present, text=text^),
+                        KeyCell(0, integer=Int128((row * 31) % 5)),
+                    ]
+                )
+            var first_keys = List[List[KeyCell]]()
+            for ref row in rows:
+                first_keys.append([row[0].copy()])
+            var strings = Series("s", Column[String](values^, valid^))
+            assert_true(
+                Bool(string_sort_ranks(strings)), "repeated strings rank"
+            )
+            for layout in [0, 2]:
+                var frame = DataFrame(
+                    [
+                        key_layout(strings, layout),
+                        Series("i", Column[Int64](numbers.copy())),
+                    ]
+                )
+                for descending in [False, True]:
+                    for nulls_last in [False, True]:
+                        var observed = StrategyTrace()
+                        assert_equal(
+                            frame.arg_sort(
+                                ["s"],
+                                descending=[descending],
+                                nulls_last=[nulls_last],
+                            ),
+                            expected_order(
+                                first_keys,
+                                [descending],
+                                [nulls_last],
+                            ),
+                        )
+                        assert_equal(
+                            frame.arg_sort(
+                                ["s", "i"],
+                                descending=[descending, not descending],
+                                nulls_last=[nulls_last, True],
+                            ),
+                            expected_order(
+                                rows,
+                                [descending, not descending],
+                                [nulls_last, True],
+                            ),
+                        )
+                        assert_true(
+                            "dataframe-path: sort.string_ranks\n"
+                            in observed.text(),
+                            "repeated strings did not sort by their ranks",
+                        )
+                        _ = observed^
+    _ = trace^
+    # Mostly distinct values sort as strings: ranking them would sort as
+    # many strings as the sort itself.
+    var distinct = List[String]()
+    for row in range(2000):
+        distinct.append("value " + String(row * 7919 % 2000))
+    assert_true(
+        not string_sort_ranks(Series("s", Column[String](distinct^))),
+        "distinct strings are not ranked",
+    )
 
 
 def categorical_fixture(n: Int, offset: Int, mode: Int) raises -> Series:

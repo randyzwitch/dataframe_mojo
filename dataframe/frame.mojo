@@ -125,7 +125,14 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
-from .categorical import decode, recode, sort_ranks, unify, union_of
+from .categorical import (
+    decode,
+    recode,
+    sort_ranks,
+    string_sort_ranks,
+    unify,
+    union_of,
+)
 from .packed_sort import (
     chunked_top_rows,
     packed_arg_sort,
@@ -1068,6 +1075,21 @@ struct DataFrame(Copyable, Sized, Writable):
             var keys = List[Series](capacity=len(by))
             for name in by:
                 keys.append(self.column(name))
+            # String keys whose values repeat sort by their ranks: each
+            # distinct value is compared once, and the ranks pack with the
+            # other keys where the strings would not.
+            var ranked = keys.copy()
+            var ranked_any = False
+            for k in range(len(ranked)):
+                var ranks = string_sort_ranks(ranked[k])
+                if ranks:
+                    ranked[k] = ranks.take()
+                    ranked_any = True
+            if ranked_any:
+                var packed = packed_arg_sort(ranked, descending, nulls_last)
+                if packed:
+                    trace_path("sort.string_ranks")
+                    return packed.take()
             var packed = packed_arg_sort(keys, descending, nulls_last)
             if packed:
                 trace_path("sort.packed")
