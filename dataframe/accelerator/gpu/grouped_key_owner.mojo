@@ -24,7 +24,8 @@ from .device_lists import HostReservation
 
 def staging_bytes(query: KeyQuery) raises -> Int:
     var total = query.staging_bytes
-    for domain in query.domains:
+    for index in range(len(query.domains)):
+        ref domain = query.domains[index]
         if domain.kind != FIXED and query.rows:
             total = checked_add(
                 total,
