@@ -69,6 +69,13 @@ struct CapturedRanges(Movable):
     var values: List[UInt32]
     var peak: Int
 
+    def take_values(mut self) -> List[UInt32]:
+        # Reinitialize the field so the capture remains wholly destructible.
+        # Moving the List preserves its allocation and exact charged capacity.
+        var values = self.values^
+        self.values = List[UInt32]()
+        return values^
+
 
 def _capture_ranges(
     frame: DataFrame, morsel_rows: Int, workers: Int, budget: Int
@@ -235,7 +242,7 @@ def capture(
         frame, batch_size, configured_workers, budget
     )
     var capture_peak = captured.peak
-    var ranges = captured.values^
+    var ranges = captured.take_values()
     # run_pipeline launches one shared-cursor job per morsel at most. A
     # configured crew greater than one is still exact when only one job
     # exists; multiple jobs have no fixed morsel-to-worker assignment.
