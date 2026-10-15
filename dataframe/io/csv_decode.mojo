@@ -10,9 +10,9 @@ from .csv_bits import _mask64
 from .csv_types import CsvOptions, CsvSchema
 from .csv_buffers import CsvBuffer, CsvCell
 from .csv_splitfields import CsvSplitFields
-from .dtype import DataType
-from .frame import DataFrame
-from .series import Series
+from ..dtype import DataType
+from ..frame import DataFrame
+from ..series import Series
 
 
 # Bound temporary field metadata to a small group per projected column.

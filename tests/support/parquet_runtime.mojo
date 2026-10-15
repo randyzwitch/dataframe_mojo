@@ -5,7 +5,7 @@ from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 from std.testing import assert_equal, assert_true
-from dataframe.parquet import parquet_library_candidates
+from dataframe.io.parquet import parquet_library_candidates
 
 comptime ResetFn = def() thin abi("C") -> None
 comptime GetFn = def(Int32) thin abi("C") -> Int64

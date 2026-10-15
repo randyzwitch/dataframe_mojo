@@ -10,8 +10,8 @@ from dataframe import (
     Series,
     import_arrow,
 )
-from dataframe.arrow import _export_frame
-from dataframe.parquet import _ParquetBatches, _collect_stream
+from dataframe.io.arrow import _export_frame
+from dataframe.io.parquet import _ParquetBatches, _collect_stream
 from tests.support.lifecycle_stream import (
     StreamState,
     counted_stream,
@@ -236,8 +236,8 @@ def test_arrow_import_errors_and_released_inputs_consume_each_live_export_once()
 def consume_discarded_csv_pages(path: String) raises -> List[DataFrame]:
     from std.ffi import external_call
     from dataframe import CsvField, CsvSchema
-    from dataframe.csv_types import _map_file
-    from dataframe.csv_reader import _CsvBatches
+    from dataframe.io.csv_types import _map_file
+    from dataframe.io.csv_reader import _CsvBatches
 
     var mapping = _map_file(path)
     assert_true(mapping.address != 0)

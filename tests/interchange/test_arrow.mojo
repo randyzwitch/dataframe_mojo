@@ -655,7 +655,7 @@ def test_arrow_imports_actual_pyarrow_c_exports_with_literal_typed_expectations(
 
 
 def test_arrow_empty_arrays_and_zero_batch_eof_release_each_live_producer() raises:
-    from dataframe.parquet import _ParquetBatches
+    from dataframe.io.parquet import _ParquetBatches
     from tests.support.lifecycle_stream import StreamState, counted_stream
 
     var empty = fixed_foreign("l", 8, [], 0)
