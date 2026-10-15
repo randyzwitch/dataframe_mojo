@@ -149,6 +149,7 @@ from .join_type import (
     join_code,
     join_type,
 )
+from .join_order import JoinEdge, order_joins
 from .join_hash import (
     _PERFECT_SPAN,
     PreparedHashIndex,
@@ -4809,6 +4810,13 @@ struct LazyFrame(Copyable):
         """
         var original_frames = len(self._frames)
         var root = len(self._nodes) - 1
+        # Join graphs whose row order cannot show are ordered by estimated
+        # cost (`_cost_order_joins`); the passes below order the rest.
+        if self._cost_order_joins(root, streaming, batch_size):
+            self._reorder(root)
+            self._compact_scan_slots()
+            self._push_projections()
+            return
         # First choose each chain's first input, then order what joins it.
         var changed = self._probe_largest_inputs(root, streaming, batch_size)
         # The chains' top nodes, found before any is reordered: reordering
@@ -5281,6 +5289,277 @@ struct LazyFrame(Copyable):
                 return False
             cursor = node.left
         return False
+
+    def _graph_step(self, index: Int) -> Bool:
+        """Whether node `index` is part of a join graph: an inner join with
+        coalesced keys, or a row-local filter or plain column selection
+        over one (through others of its kind)."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == JOIN:
+                return _chain_member(node)
+            if not _chain_member(node):
+                return False
+            cursor = node.left
+        return False
+
+    def _collect_graph(
+        self,
+        index: Int,
+        mut relations: List[Int],
+        mut pairs: List[Tuple[String, String]],
+        mut filters: List[Int],
+    ):
+        """The relations, key pairs and filters of the join graph under
+        node `index` (DuckDB's `ExtractJoinRelations`): both inputs of each
+        inner join, through filters (kept to place again) and plain column
+        selections; anything else is a relation."""
+        ref node = self._nodes[index]
+        if not self._graph_step(index):
+            relations.append(index)
+            return
+        if node.kind == JOIN:
+            self._collect_graph(node.left, relations, pairs, filters)
+            self._collect_graph(node.right, relations, pairs, filters)
+            for i in range(len(node.names)):
+                pairs.append((node.names[i], node.right_keys[i]))
+            return
+        if node.kind == FILTER:
+            filters.append(index)
+        self._collect_graph(node.left, relations, pairs, filters)
+
+    def _cost_order_joins(
+        mut self, root: Int, streaming: Bool, batch_size: Int
+    ) raises -> Bool:
+        """Order each join graph of three or more relations by estimated
+        cost, as DuckDB's join order optimizer does (`join_order.mojo`):
+        inner joins flattened across nested inputs into relations and key
+        pairs, each relation's rows counted after its own filters (run
+        when they cannot be counted otherwise, as `_order_chain` measures
+        them), and the cheapest tree built, each join hashing the side
+        DuckDB's build side optimizer would (fewer rows times columns,
+        with a lone relation on the build side 15% dearer when the other
+        side is a join). Filters between joins follow the lowest join
+        holding their columns; a selection restores the graph's output,
+        a key a join dropped read from the key it matched.
+
+        Only where nothing above reads the rows' order
+        (`_order_free_above`) and every column name is unique across the
+        relations, so no join renames one. True when a graph changed."""
+        var parents = self._live_parents(root)
+        var changed = False
+        var count = len(self._nodes)
+        for top in range(count):
+            if parents[top] == -2 or not self._graph_step(top):
+                continue
+            # The graph's top: no graph step above it.
+            var up = parents[top]
+            if up >= 0 and self._graph_step(up):
+                continue
+            if not self._order_free_above(top, parents):
+                continue
+            var relations = List[Int]()
+            var pairs = List[Tuple[String, String]]()
+            var filters = List[Int]()
+            self._collect_graph(top, relations, pairs, filters)
+            var n = len(relations)
+            if n < 3 or n > 62:
+                continue
+            var provider = Dict[String, Int]()
+            var unique = True
+            var columns = List[List[String]]()
+            for r in range(n):
+                var names = self._columns_of(relations[r])
+                for c in names:
+                    if c in provider:
+                        unique = False
+                    provider[c] = r
+                columns.append(names^)
+            if not unique:
+                continue
+            # Edges: the key pairs between each two relations.
+            var edges = List[JoinEdge]()
+            var known = True
+            for pair in pairs:
+                var a = provider.get(pair[0], -1)
+                var b = provider.get(pair[1], -1)
+                if a < 0 or b < 0 or a == b:
+                    known = False
+                    break
+                var found = False
+                for k in range(len(edges)):
+                    if edges[k].a == a and edges[k].b == b:
+                        edges[k].a_keys.append(pair[0])
+                        edges[k].b_keys.append(pair[1])
+                        found = True
+                    elif edges[k].a == b and edges[k].b == a:
+                        edges[k].a_keys.append(pair[1])
+                        edges[k].b_keys.append(pair[0])
+                        found = True
+                if not found:
+                    edges.append(JoinEdge(a, b, [pair[0]], [pair[1]]))
+            if not known:
+                continue
+            # Each filter's relations; one reading a name no relation holds
+            # (made along the way) leaves the graph alone.
+            var filter_masks = List[Int]()
+            for f in filters:
+                var reads = _references(self._nodes[f].exprs[0])
+                if not reads:
+                    known = False
+                    break
+                var mask = 0
+                for name in reads.value():
+                    var r = provider.get(name, -1)
+                    if r < 0:
+                        known = False
+                    else:
+                        mask |= 1 << r
+                filter_masks.append(mask)
+            if not known:
+                continue
+            var output = self._columns_of(top)
+            # Rows per relation after its own filters: counted, or
+            # estimated from a sample of the table, else run.
+            var rows = List[Float64](capacity=n)
+            # Each relation's table rows before its filters: its columns'
+            # distinct counts, as DuckDB takes them with no statistics.
+            var domains = List[Float64](capacity=n)
+            for r in range(n):
+                var table = self._spine_rows(relations[r])
+                var estimated = self._estimated_rows(relations[r])
+                if estimated < 0:
+                    var frame = self._execute(
+                        relations[r], False, streaming, batch_size
+                    )
+                    estimated = frame.height()
+                    self._frames.append(frame^)
+                    self._schemas.append(Optional[CsvSchema]())
+                    self._nodes[relations[r]] = _plan_node(
+                        SCAN_FRAME, offset=len(self._frames) - 1
+                    )
+                rows.append(Float64(estimated))
+                domains.append(Float64(table if table > 0 else estimated))
+            var chosen = order_joins(rows, domains, edges)
+            if not chosen:
+                continue
+            var tree = chosen.take()
+            # Build the chosen tree. `node_of` is each tree entry's plan
+            # node; `renamed` maps each key a join dropped to the key it
+            # matched; `joined` marks entries holding a join.
+            var entries = len(tree.mask)
+            var node_of = List[Int](length=entries, fill=-1)
+            var width = List[Int](length=entries, fill=0)
+            var joined = List[Bool](length=entries, fill=False)
+            for r in range(n):
+                node_of[r] = relations[r]
+                width[r] = len(columns[r])
+            var renamed = Dict[String, String]()
+            var placed = List[Bool](length=len(filters), fill=False)
+            var added = List[PlanNode]()
+            var base = len(self._nodes)
+            for e in range(n, entries):
+                var left = tree.left[e]
+                var right = tree.right[e]
+                # DuckDB's build side: the side of fewer rows times
+                # columns builds, a relation 15% dearer against a join.
+                var left_cost = tree.rows[left] * Float64(width[left])
+                var right_cost = tree.rows[right] * Float64(width[right])
+                if not joined[right] and joined[left]:
+                    right_cost *= 1.15
+                if not joined[left] and joined[right]:
+                    left_cost *= 1.15
+                if right_cost > left_cost:
+                    var t = left
+                    left = right
+                    right = t
+                var lmask = tree.mask[left]
+                var rmask = tree.mask[right]
+                var left_keys = List[String]()
+                var right_keys = List[String]()
+                for edge in edges:
+                    var forward = (
+                        lmask & (1 << edge.a) != 0
+                        and rmask & (1 << edge.b) != 0
+                    )
+                    var backward = (
+                        lmask & (1 << edge.b) != 0
+                        and rmask & (1 << edge.a) != 0
+                    )
+                    if not (forward or backward):
+                        continue
+                    for i in range(len(edge.a_keys)):
+                        var lk = edge.a_keys[i] if forward else edge.b_keys[i]
+                        var rk = edge.b_keys[i] if forward else edge.a_keys[i]
+                        while lk in renamed:
+                            lk = renamed[lk]
+                        while rk in renamed:
+                            rk = renamed[rk]
+                        left_keys.append(lk)
+                        right_keys.append(rk)
+                for i in range(len(right_keys)):
+                    if right_keys[i] != left_keys[i]:
+                        renamed[right_keys[i]] = left_keys[i]
+                var join = _plan_node(
+                    JOIN,
+                    node_of[left],
+                    node_of[right],
+                    names=left_keys^,
+                    text="inner",
+                    how=JOIN_INNER,
+                    right_keys=right_keys^,
+                )
+                join.names2 = ["_right"]
+                added.append(join^)
+                var current = base + len(added) - 1
+                # Filters whose relations this join completes, while their
+                # names are all still held.
+                for f in range(len(filters)):
+                    if placed[f] or filter_masks[f] & ~tree.mask[e] != 0:
+                        continue
+                    var reads = (
+                        _references(self._nodes[filters[f]].exprs[0])
+                        .value()
+                        .copy()
+                    )
+                    var held = True
+                    for name in reads:
+                        held = held and name not in renamed
+                    if not held:
+                        continue
+                    var filter = self._nodes[filters[f]].copy()
+                    filter.left = current
+                    added.append(filter^)
+                    current = base + len(added) - 1
+                    placed[f] = True
+                node_of[e] = current
+                width[e] = width[left] + width[right] - len(left_keys)
+                joined[e] = True
+            var keep = List[Expr]()
+            for name in output:
+                var source = name
+                while source in renamed:
+                    source = renamed[source]
+                keep.append(
+                    col(source) if source == name else col(source).alias(name)
+                )
+            var restore = _plan_node(SELECT, node_of[entries - 1], exprs=keep)
+            # Filters left: read names a join dropped; they run on the
+            # restored columns.
+            var last = restore^
+            for f in range(len(filters)):
+                if placed[f]:
+                    continue
+                added.append(last^)
+                last = self._nodes[filters[f]].copy()
+                last.left = base + len(added) - 1
+            for node in added:
+                self._nodes.append(node.copy())
+            self._nodes[top] = last^
+            trace_path("lazy.cost_join_order")
+            changed = True
+        return changed
 
     def _probe_largest_inputs(
         mut self, root: Int, streaming: Bool, batch_size: Int
