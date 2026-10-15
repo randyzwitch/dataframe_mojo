@@ -1,5 +1,7 @@
 # Worker-count and machine calibration (#273)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
+
 ## Machines and method
 
 Measured 2026-09-26 with Mojo 1.2.0.dev2026092105 (e9569894):
@@ -101,23 +103,8 @@ CPUs or an instruction to use sixteen workers on an eight-core Mac.
 
 ## Reproduce
 
-```bash
-pixi run python3 scripts/bench_workers.py --build
-BENCH_WAIT_FOR_COMPILERS=1 pixi run python3 scripts/bench_workers.py --scaling
-for threads in 4 8 16; do
-  for group in spin builders gather minrows; do
-    BENCH_WAIT_FOR_COMPILERS=1 pixi run python3 scripts/bench_workers.py --run "$group" --threads "$threads"
-  done
-done
-pixi run python3 scripts/bench_workers.py --sort-policy
-```
-
-Run the same commands on the second machine. To reproduce the combined
-artifact, put its CSVs in `build/workers/mac`, then run:
-
-```bash
-pixi run python3 scripts/bench_workers.py --report docs/worker-calibration.csv
-```
+The benchmarks and their driver were retired; check out revision `8a50a95`,
+where this section lists the commands for both machines.
 
 Pool tests cover multi-round reuse, ordered errors, dynamic/produced jobs,
 teardown, and an oversubscribed parked pool that continues after a worker

@@ -47,8 +47,9 @@ machine, dtype, distribution or payload.
 Both hosts use four workers and Mojo 1.2.0.dev2026092105 (e9569894), without
 CPU pinning. The Linux host is a Threadripper 3970X; the Mac is an Apple M1.
 
-Reproduce by building `benchmarks/bench_join_build_ratio.mojo` with `-O3 -g1`
-and running it with `DATAFRAME_THREADS=4` after compilation has stopped.
+The benchmark was built with `-O3 -g1` and run with `DATAFRAME_THREADS=4`
+after compilation had stopped; it is retired, so check out the revision above
+to rerun it.
 
 ## Semantic validation
 
