@@ -11,12 +11,11 @@ from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG, SELECT, SLICE
 from .metadata import schema_frame
 from .memory import checked_add
 from .window_keys import WindowKey
-from .grouped_lists import prepare as prepare_grouped
 from .grouped_key_domains import KeyDomain, reservation, FIXED
 
 
 @fieldwise_init
-struct KeyQuery(Deinitable, Movable):
+struct KeyQuery(Movable):
     var query: LazyFrame
     var schema: DataFrame
     var domains: List[KeyDomain]
@@ -137,6 +136,8 @@ def prepare_keys(
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> KeyQuery:
+    from .grouped_lists import prepare as prepare_grouped
+
     var shape = _shape(query)
     var original = shape[0].copy()
     var group = shape[1]

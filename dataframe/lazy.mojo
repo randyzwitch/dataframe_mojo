@@ -181,7 +181,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable, Deinitable, Movable):
+struct PlanNode(Copyable):
     var kind: Int
     var left: Int
     var right: Int
@@ -212,11 +212,6 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # Original grouped key domains survive whole-query code normalization.
     var grouped_keys: Optional[ArcPointer[KeyQuery]]
     var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
-
-    def __deinit__(deinit self):
-        # Provide the recursive plan owner's deinitialization witness.
-        # Owned fields are destroyed automatically after this body.
-        pass
 
     def _record_execution(self):
         if self._executions:
@@ -1387,7 +1382,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable, Deinitable, Movable):
+struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
