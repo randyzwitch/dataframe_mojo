@@ -205,11 +205,42 @@ def test_native_metal_duration_decimal_observed_prefix_errors_null_payloads_and_
             Series("t", Column[Int64]([0, 0])).with_dtype(DataType.DATE),
         ]
     )
-    fails(
-        small.lazy().select(col("x").rolling_sum_by("t", "1d")),
-        runtime,
-        "precision",
-    )
+    # Decimal128 inputs also widen to precision 38, just like narrow storage.
+    var small_query = small.lazy().select(col("x").rolling_sum_by("t", "1d"))
+    var small_result = small_query.collect(accelerator=runtime)
+    check(small_query, runtime)
+    assert_true(small_result.column("x").dtype() == DataType.decimal(38, 0))
+    for row in range(2):
+        assert_equal(
+            small_result.column("x").numeric[DType.int128]().value(row),
+            Int128(1000),
+        )
+    # CPU validates each observed operand before adding it. Cancellation must
+    # not hide a physical Int128 payload outside the result's precision.
+    for negative in [False, True]:
+        var malformed = source.with_column(
+            Series(
+                "x",
+                Column[Int128](
+                    [maximum, Int128.MIN, maximum] if negative else [
+                        -maximum,
+                        Int128.MAX,
+                        -maximum,
+                    ]
+                ),
+            ).with_dtype(DataType.decimal(38, 0))
+        )
+        fails(
+            malformed.lazy().select(col("x").rolling_sum_by("t", "1d")),
+            runtime,
+            "precision",
+        )
+        check(
+            malformed.lazy().select(
+                col("x").rolling_sum_by("t", "1d", "right", 4)
+            ),
+            runtime,
+        )
     check(
         small.lazy().select(col("x").rolling_sum_by("t", "1d", "right", 3)),
         runtime,
