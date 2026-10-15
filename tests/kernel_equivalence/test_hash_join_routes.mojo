@@ -19,6 +19,7 @@ from dataframe.frame import (
     _range_int64_membership_rows,
     _range_int64_membership_domain,
     _range_join_table_capacity,
+    _left_builds,
 )
 
 
@@ -521,3 +522,77 @@ def test_build_key_bits_reject_only_absent_keys_in_joins_semi_and_anti() raises:
         [build.copy()], allow_progression=False, probe_rows=10
     )
     assert_equal(len(small.filter[]), 0)
+
+
+def test_eager_join_builds_on_the_side_of_fewer_rows_times_columns() raises:
+    # DuckDB's build side: fewer rows times columns builds, the right on a
+    # tie, with no minimum size. A 300-row left against a 20,000-row right
+    # builds on the left and still returns left-major rows in right order,
+    # nulls and duplicate keys on both sides included.
+    var narrow = DataFrame([Series("k", Column[Int64]([1, 2]))])
+    var wide = DataFrame(
+        [Series("k", Column[Int64]([1])), Series("v", Column[Int64]([2]))]
+    )
+    # Two rows of one column against one row of two: a tie either way.
+    assert_true(not _left_builds(narrow, wide))
+    assert_true(not _left_builds(wide, narrow))
+    assert_true(not _left_builds(narrow.slice(0, 0), wide))
+    var left_rows = 300
+    var right_rows = 20000
+    var left_keys = List[Int64]()
+    var left_valid = List[Bool]()
+    for i in range(left_rows):
+        left_keys.append(Int64(i % 250))
+        left_valid.append(i % 41 != 3)
+    var right_keys = List[Int64]()
+    var right_valid = List[Bool]()
+    var right_ids = List[Int64]()
+    for j in range(right_rows):
+        right_keys.append(Int64((j * 7) % 400))
+        right_valid.append(j % 37 != 5)
+        right_ids.append(Int64(j))
+    var left_ids = List[Int64]()
+    for i in range(left_rows):
+        left_ids.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys.copy(), left_valid.copy())),
+            Series("l", Column[Int64](left_ids^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys.copy(), right_valid.copy())),
+            Series("r", Column[Int64](right_ids^)),
+        ]
+    )
+    assert_true(_left_builds(left, right))
+    assert_true(not _left_builds(right, left))
+    assert_true(not prefer_left_build(left.height(), right.height()))
+    for outer in [False, True]:
+        var expected_left = List[Int]()
+        var expected_right = List[Int]()
+        for i in range(left_rows):
+            var found = False
+            for j in range(right_rows):
+                if (
+                    left_valid[i]
+                    and right_valid[j]
+                    and left_keys[i] == right_keys[j]
+                ):
+                    expected_left.append(i)
+                    expected_right.append(j)
+                    found = True
+            if outer and not found:
+                expected_left.append(i)
+                expected_right.append(-1)
+        var actual = left.join(right, ["k"], "left" if outer else "inner")
+        assert_equal(actual.height(), len(expected_left))
+        for row in range(actual.height()):
+            assert_equal(
+                actual.item(row, "l").int64(), Int64(expected_left[row])
+            )
+            var j = expected_right[row]
+            assert_equal(actual.item(row, "r").is_null(), j < 0)
+            if j >= 0:
+                assert_equal(actual.item(row, "r").int64(), Int64(j))
