@@ -450,6 +450,7 @@ def execute(
         _ = valid^
         _ = errors^
         _ = held^
+        _ = reservation^
         raise error^
     _ = logical^
     _ = prefix^
@@ -457,6 +458,9 @@ def execute(
     _ = host^
     _ = parents^
     _ = held^
+    # Keep the scratch charge live through synchronization and disposal of all
+    # scratch owners. A lexical local alone permits Mojo ASAP destruction.
+    _ = reservation^
     var matrix = Matrix(
         scope,
         output_rows,

@@ -1,6 +1,6 @@
 """Source transport proof layered on the resident EXPLODE storage milestone."""
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import DataFrame
+from dataframe import Column, DataFrame, ListColumn, Series
 from dataframe.accelerator.gpu.residency import Scope
 from dataframe.accelerator.gpu.source_fields import stage, staging_bytes
 from dataframe.accelerator.gpu.explode import execute as explode
@@ -83,3 +83,36 @@ def reservations_exact_budget_and_early_admission() raises:
     with assert_raises(contains="memory budget"):
         _ = _run(initial[1] - 1)
     assert_true(_run(-1)[0].equals(initial[0]))
+
+
+def simultaneous_scratch_and_output_literal_budget() raises:
+    # One Int64 child: 21 device bytes. One parent: 16 offsets + 1 validity
+    # + 4 error = 21 descriptor bytes. Input owners therefore retain 42.
+    var offsets: List[Int64] = [0, 1]
+    var source = DataFrame(
+        [Series("xs", ListColumn(offsets^, Series("item", Column[Int64]([7]))))]
+    )
+    # EXPLODE scratch = 8 logical + 16 prefix + 16 device controls + 16
+    # host controls = 56. Output allocation needs 4 parent-map + 21 matrix.
+    # All coexist: 42 + 56 + 4 + 21 = 123, independently of reported peak.
+    var limited = Scope(budget=122)
+    var input = stage(source, limited)
+    assert_equal(limited.info()[0], 42)
+    var before = limited.transfers()[2]
+    with assert_raises(contains="memory budget"):
+        _ = explode(input, ["xs"], limited)
+    # Parent validation and full cardinality ran, but repeat/gather did not.
+    assert_equal(limited.transfers()[2] - before, 2)
+    assert_equal(limited.info()[0], 42)
+    _ = input^
+    assert_equal(limited.info()[0], 0)
+    var exact = Scope(budget=123)
+    var fields = stage(source, exact)
+    var output = explode(fields, ["xs"], exact)
+    assert_equal(output.rows, 1)
+    assert_equal(exact.info()[0], 63)
+    assert_equal(exact.info()[1], 123)
+    _ = output^
+    assert_equal(exact.info()[0], 42)
+    _ = fields^
+    assert_equal(exact.info()[0], 0)

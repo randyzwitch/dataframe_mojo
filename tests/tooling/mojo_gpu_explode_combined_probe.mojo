@@ -8,6 +8,7 @@ from tests.support.resident_explode_reference import (
 from tests.support.source_explode_reference import (
     layouts_clean_metadata_and_private_cache,
     reservations_exact_budget_and_early_admission,
+    simultaneous_scratch_and_output_literal_budget,
 )
 from tests.execution_modes.test_mojo_gpu_explode import (
     test_mojo_gpu_explode_source_layouts_hidden_spans_high_words_and_metadata,
@@ -26,6 +27,7 @@ def raw() raises:
 def source() raises:
     layouts_clean_metadata_and_private_cache()
     reservations_exact_budget_and_early_admission()
+    simultaneous_scratch_and_output_literal_budget()
 
 
 def public_queries() raises:
