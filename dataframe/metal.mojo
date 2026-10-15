@@ -226,6 +226,33 @@ struct MetalRuntime(AcceleratorBackend):
 
         if self._execution_settings.batch_size <= 0:
             raise Error("batch_size must be positive")
+        from .accelerator.grouped_stream_routes import candidate
+        from .accelerator.gpu.grouped_stream_dispatch import (
+            execute as execute_float_stream,
+        )
+        from .parallel import configured_workers
+
+        var float_started = Int(perf_counter_ns())
+        var float_route = candidate(
+            query,
+            configured_workers(),
+            self._execution_settings.batch_size,
+            optimize=self._execution_settings.optimize,
+            streaming=self._execution_settings.streaming,
+            original_source=original_entry,
+            budget=self._budget,
+        )
+        if float_route:
+            var selected_float_route = float_route.take()
+            return execute_float_stream(
+                selected_float_route,
+                self._device,
+                self._budget,
+                self._execution_settings.batch_size,
+                profiling=profiling,
+                observation_only=self._observation_only,
+                started=float_started,
+            )
         var start = Int(perf_counter_ns())
         if len(file_source_nodes(query)):
             var staged = prepare_file_sources(
@@ -944,8 +971,20 @@ struct MetalRuntime(AcceleratorBackend):
 
     def _describe(self, query: LazyFrame, original_entry: Bool) -> String:
         from .accelerator.gpu.runtime import _preflight
+        from .accelerator.grouped_stream_routes import candidate
+        from .parallel import configured_workers
 
         try:
+            var float_route = candidate(
+                query,
+                configured_workers(),
+                self._execution_settings.batch_size,
+                optimize=self._execution_settings.optimize,
+                streaming=self._execution_settings.streaming,
+                original_source=original_entry,
+            )
+            if float_route:
+                return "Metal ordered grouped floating states; captured CPU single-job morsels; device sample selects inserted epochs or generic collected GPU reductions"
             if len(file_source_nodes(query)):
                 var staged = stage_file_sources(
                     query,
