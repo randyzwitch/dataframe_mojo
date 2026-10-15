@@ -3492,6 +3492,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo",
                 "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
