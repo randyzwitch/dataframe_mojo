@@ -4,7 +4,7 @@ from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, DataType, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.decimal import pow10
+from dataframe.decimal import pow10, decimal_add_type
 from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
@@ -90,14 +90,17 @@ def test_native_metal_decimal_add_subtract_all_widths_scales_and_unary_metadata(
         for scale in range(39):
             var left_scale = min(scale, left_max)
             var right_scale = min((scale * 7) % 39, right_max)
-            var magnitude = (
-                pow10(
-                    min(
-                        min(left_max, right_max),
-                        max(37 - abs(left_scale - right_scale), 0),
-                    )
-                )
-                - 1
+            var result_type = decimal_add_type(
+                DataType.decimal(left_max, left_scale, widths[pair]),
+                DataType.decimal(right_max, right_scale, others[pair]),
+            )
+            # Both narrow inputs retain an 18-digit result, even when scale
+            # alignment needs more declared digits. Bound actual operands
+            # by the exact result precision, including the sum's carry.
+            var magnitude = min(
+                pow10(min(left_max, right_max)) - 1,
+                (pow10(result_type.precision()) - 1)
+                // (pow10(abs(left_scale - right_scale)) + 1),
             )
             var frame = DataFrame(
                 [
@@ -114,6 +117,27 @@ def test_native_metal_decimal_add_subtract_all_widths_scales_and_unary_metadata(
             )
             same(
                 unary.collect(accelerator=runtime), unary.collect(engine="cpu")
+            )
+    # The previous matrix's raw magnitude overflowed the new capped result
+    # at this scale pair on both engines: (18, 14) cannot hold 10**18 raw.
+    var overflowing = DataFrame(
+        [
+            Series("a", Column[Int32]([1_000_000])).with_dtype(
+                DataType.decimal(9, 2, 32)
+            ),
+            Series("b", Column[Int64]([0])).with_dtype(
+                DataType.decimal(18, 14, 64)
+            ),
+        ]
+    )
+    for expression in arithmetic():
+        with assert_raises(contains="decimal precision"):
+            _ = overflowing.lazy().select(expression).collect(engine="cpu")
+        with assert_raises(contains="decimal precision"):
+            _ = (
+                overflowing.lazy()
+                .select(expression)
+                .collect(accelerator=runtime)
             )
     var frame = safe_fixture()
     var query = frame.lazy().select_exprs(arithmetic())
