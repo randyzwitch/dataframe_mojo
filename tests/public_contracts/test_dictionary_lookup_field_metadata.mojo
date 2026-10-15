@@ -185,9 +185,18 @@ def test_dictionary_lookup_metadata_schema_cpu_literals_and_decimal_admission() 
 
 
 def test_dictionary_lookup_does_not_change_public_metadata_conflicts() raises:
-    var original = field_text_source(False)
-    var fresh = DataFrame([Series("label", StringColumn(["z"]))])
-    var invalid = original.lazy().join(fresh.lazy(), on="label", how="left")
+    # Both CAT sides preserve their field owners during dictionary unification.
+    # Four equal right keys force low_cardinality's dictionary path for FULL;
+    # tiny LEFT/FULL direct hash shortcuts do not append/check key metadata.
+    var original = field_text_source(True)
+    var fresh = DataFrame(
+        [
+            Series("label", StringColumn(["z", "z", "z", "z"])).cast(
+                DataType.CATEGORICAL
+            )
+        ]
+    )
+    var invalid = original.lazy().join(fresh.lazy(), on="label", how="full")
     with assert_raises(contains="Conflicting Arrow field metadata"):
         _ = schema_frame(invalid, len(invalid._nodes) - 1)
     with assert_raises(contains="Conflicting Arrow field metadata"):
