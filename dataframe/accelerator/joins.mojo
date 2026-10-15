@@ -12,6 +12,7 @@ from .qcuts import is_qcut_marker, controls as qcut_controls
 from .cuts import has_cut_materializations
 from .capabilities import RowCapabilities
 from .rows import lower_rows
+from . import producer_phases
 from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
@@ -227,6 +228,19 @@ def _mark_integer_producers(mut query: LazyFrame) raises:
             )
 
 
+def prepare_temporal_prefix(
+    query: LazyFrame, optimize: Bool
+) raises -> LazyFrame:
+    """Finalize existing CPU-equivalent bridges before temporal signatures."""
+    var result = query.copy()
+    if optimize:
+        result._push_slices()
+        prune_projections(result)
+    _mark_decimal_producers(result)
+    _mark_integer_producers(result)
+    return result^
+
+
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
 comptime DAG_ASOF = 2
@@ -355,13 +369,18 @@ def _region_query(
     chain: List[Int],
     source: DataFrame,
     source_failure: String = "",
-) -> LazyFrame:
+    source_task: Int = -1,
+) raises -> LazyFrame:
     var region = LazyFrame(source)
     region._nodes[0].source_failure = source_failure
     for reverse in range(len(chain)):
         var node = query._nodes[chain[len(chain) - reverse - 1]].copy()
         node.left = len(region._nodes) - 1
         node.right = -1
+        if node.producer_origin:
+            node.producer_region = producer_phases.bind_region(
+                query, chain[len(chain) - reverse - 1], source, source_task
+            )
         region._nodes.append(node^)
     return region^
 
@@ -825,6 +844,7 @@ def _task(
         or query._nodes[root].text == "metal_distribution_materialization"
         or query._nodes[root].text == "metal_implode_materialization"
         or _observed_marker(query._nodes[root].text)
+        or Bool(query._nodes[root].producer_origin)
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
@@ -905,6 +925,8 @@ def _task(
         and query._nodes[cursor].kind != EXPLODE
         and (cursor == root or query._nodes[cursor].kind != SLICE)
         and (cursor == root or not _observed_marker(query._nodes[root].text))
+        and (cursor == root or not query._nodes[root].producer_origin)
+        and (cursor == root or not query._nodes[cursor].producer_origin)
         and (
             cursor == root
             or (
@@ -936,9 +958,13 @@ def _task(
         query._nodes[cursor].kind == JOIN
         or (
             cursor != root
-            and _observed_marker(query._nodes[root].text)
+            and (
+                _observed_marker(query._nodes[root].text)
+                or Bool(query._nodes[root].producer_origin)
+            )
             and query._nodes[cursor].kind != SCAN_FRAME
         )
+        or Bool(query._nodes[cursor].producer_origin)
         or query._nodes[cursor].kind == ASOF
         or query._nodes[cursor].kind == EXPLODE
         or query._nodes[cursor].kind == SLICE
@@ -965,7 +991,7 @@ def _task(
         source = _task(
             query,
             cursor,
-            False,
+            Bool(query._nodes[root].producer_origin),
             capabilities,
             tasks,
             ordered_source=ordered_source,
@@ -982,6 +1008,7 @@ def _task(
         chain,
         frame,
         query._nodes[cursor].source_failure if source < 0 else "",
+        source,
     )
     region._nodes[0].code_domain = query._nodes[cursor].code_domain
     region._nodes[0].text_fields = query._nodes[cursor].text_fields.copy()
@@ -1060,24 +1087,30 @@ def lower_join_dag(
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
     var projected = query.copy()
-    var optimize = (
-        not query._accelerator_settings
-        or query._accelerator_settings.value().optimize
-    )
-    if (
-        optimize
-        and not has_cut_materializations(projected)
-        and (
-            has_decimal_consumers(query) or has_checked_integer_consumers(query)
+    if producer_phases.has_certified(projected):
+        # Original-entry normalization records the annotations as part of
+        # each immutable prefix. No optimizer or marker may mutate it later.
+        for index in range(len(projected._nodes)):
+            if projected._nodes[index].producer_origin:
+                producer_phases.validate_prefix(projected, index)
+    else:
+        var optimize = (
+            not query._accelerator_settings
+            or query._accelerator_settings.value().optimize
         )
-    ):
-        # Lowered CUT/QCUT markers are eager observation boundaries even when
-        # their private operand AST is row-local. A later head cannot cross
-        # them; their normalizer already preserves CPU expression order.
-        projected._push_slices()
-    prune_projections(projected)
-    _mark_decimal_producers(projected)
-    _mark_integer_producers(projected)
+        if (
+            optimize
+            and not has_cut_materializations(projected)
+            and (
+                has_decimal_consumers(query)
+                or has_checked_integer_consumers(query)
+            )
+        ):
+            # Lowered CUT/QCUT markers are eager observation boundaries.
+            projected._push_slices()
+        prune_projections(projected)
+        _mark_decimal_producers(projected)
+        _mark_integer_producers(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected,
