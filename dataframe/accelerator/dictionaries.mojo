@@ -22,6 +22,7 @@ from dataframe.expr import (
     Expr,
     _node,
     col,
+    null,
     is_string_op,
     subtree,
     STR_PAD,
@@ -505,35 +506,51 @@ def lower_dictionary_operations(
                         if value not in seen:
                             seen[value] = True
                             pool.append(value^)
+                # A lookup key is a fresh computed String field. Explicitly
+                # decode CAT operands and use a null-preserving identity so
+                # eager execution and LazyFrame's zero-row schema fastpath
+                # agree about both dtype and field metadata. Bare aliases
+                # otherwise retain source owners only on the eager path.
                 var sources = List[Expr](
-                    [subtree(expression, node.left).alias(key_name)]
+                    [
+                        subtree(expression, node.left)
+                        .fill_null(null(DataType.STRING))
+                        .alias(key_name)
+                    ]
                 )
                 var key_names = List[String]([key_name])
                 if node.op == STR_CONCAT:
                     sources.append(
-                        subtree(expression, node.right).alias(right_name)
+                        subtree(expression, node.right)
+                        .fill_null(null(DataType.STRING))
+                        .alias(right_name)
                     )
                     key_names.append(right_name)
                 result._nodes.append(
                     _plan_node(WITH_COLUMNS, operation.left, exprs=sources^)
                 )
                 var left = len(result._nodes) - 1
-                # Private aliases retain their source Arrow field owners. The
-                # generated lookup keys must carry the same owners so this
-                # internal coalesced join has the same metadata on both sides.
-                # Inspect metadata-only rows; no source values execute here.
+                # Verify the generated identity itself. Public join owners
+                # remain subject to the ordinary CPU conflict checks.
                 var key_schema = schema_frame(result, left)
                 var left_key = key_schema.column(key_name)
-                if left_key.dtype().is_categorical():
-                    # CPU categorical unification preserves metadata when
-                    # recoding categorical inputs; String-to-CAT is a fresh
-                    # computed field. Give this lookup the matching family.
-                    keys = keys.cast(DataType.CATEGORICAL)
+                if (
+                    left_key.dtype() != DataType.STRING
+                    or left_key._field_metadata
+                ):
+                    raise Error(
+                        "Private dictionary key identity is not a fresh String field"
+                    )
                 keys._field_metadata = left_key._field_metadata
                 if node.op == STR_CONCAT:
                     var right_key = key_schema.column(right_name)
-                    if right_key.dtype().is_categorical():
-                        right_keys = right_keys.cast(DataType.CATEGORICAL)
+                    if (
+                        right_key.dtype() != DataType.STRING
+                        or right_key._field_metadata
+                    ):
+                        raise Error(
+                            "Private dictionary right-key identity is not a fresh String field"
+                        )
                     right_keys._field_metadata = right_key._field_metadata
                 var frame = len(result._frames)
                 var columns = List[Series]([keys^, mapped^])
