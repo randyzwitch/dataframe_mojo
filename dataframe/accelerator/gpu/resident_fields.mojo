@@ -7,6 +7,7 @@ field variants can extend this owner without changing primitive Table storage.
 from dataframe import Series
 from .residency import Scope, Table
 from .device_lists import DeviceLists, validate
+from .grouped_key_owner import GroupedKeyField
 
 
 @fieldwise_init
@@ -41,10 +42,21 @@ def validate_field(field: ResidentField, scope: Scope, rows: Int) raises:
             raise Error("Resident List field rows or logical dtype differ")
         return
     ref value = field.table.value()
+    var typed = (
+        value.grouped_keys[0] if len(value.grouped_keys)
+        == 1 else Optional[GroupedKeyField]()
+    )
+    if typed:
+        typed.value().validate(value, scope)
     if (
         value.rows != rows
         or value.schema.width() != 1
-        or value.schema._columns[0].dtype() != field.prototype.dtype()
+        or (
+            typed.value()
+            .logical_dtype() if typed else value.schema._columns[0]
+            .dtype()
+        )
+        != field.prototype.dtype()
     ):
         raise Error("Resident primitive field rows or logical dtype differ")
     if field.prototype.dtype().is_nested():

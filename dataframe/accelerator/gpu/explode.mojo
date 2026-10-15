@@ -208,7 +208,11 @@ def execute(
                 .renamed(field.prototype.name())
             )
         else:
-            prototypes.append(field.prototype.copy())
+            prototypes.append(
+                field.table.value()
+                .schema._columns[0]
+                .renamed(field.prototype.name())
+            )
     var schema = DataFrame(prototypes^)
     if not frame.rows:
         return Table.empty(schema^)
@@ -477,8 +481,13 @@ def execute(
         ref field = frame.fields[index]
         if field.table and len(field.table.value().text):
             result.text[index] = field.table.value().text[0].copy()
+        if field.table:
             result.categories[index] = field.table.value().categories[0].copy()
             result.category_leases.extend(
                 field.table.value().category_leases.copy()
+            )
+        if field.table and len(field.table.value().grouped_keys):
+            result.grouped_keys[index] = (
+                field.table.value().grouped_keys[0].copy()
             )
     return result^

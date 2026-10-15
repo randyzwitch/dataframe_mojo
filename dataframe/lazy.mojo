@@ -137,6 +137,8 @@ from .execution import direct_reductions
 from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
+from .accelerator.grouped_key_queries import KeyQuery
+from .accelerator.opaque_dictionary import ByteDomain
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
@@ -207,6 +209,9 @@ struct PlanNode(Copyable):
     # Private text-code provenance; never inferred from UInt32 storage.
     var code_domain: Optional[DataType]
     var text_fields: List[TextField]
+    # Original grouped key domains survive whole-query code normalization.
+    var grouped_keys: Optional[ArcPointer[KeyQuery]]
+    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
 
     def _record_execution(self):
         if self._executions:
@@ -255,6 +260,8 @@ def _plan_node(
         source_failure,
         code_domain,
         text_fields.copy(),
+        None,
+        None,
     )
 
 

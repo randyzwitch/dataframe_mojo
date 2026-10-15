@@ -22,6 +22,8 @@ from dataframe.accelerator.code_domains import (
     text_less,
 )
 
+from .grouped_key_owner import GroupedKeyField
+
 comptime CELL_BYTES = 21
 
 
@@ -396,6 +398,7 @@ struct Table(Copyable):
     var text: List[Optional[TextColumn]]
     var categories: List[Optional[CategoryField]]
     var category_leases: List[ArcPointer[CategoryLease]]
+    var grouped_keys: List[Optional[GroupedKeyField]]
 
     def __init__(
         out self,
@@ -429,6 +432,9 @@ struct Table(Copyable):
             capacity=self.schema.width()
         )
         self.category_leases = List[ArcPointer[CategoryLease]]()
+        self.grouped_keys = List[Optional[GroupedKeyField]](
+            length=self.schema.width(), fill=None
+        )
         for _ in range(self.schema.width()):
             self.text.append(None)
             self.categories.append(None)
@@ -449,6 +455,9 @@ struct Table(Copyable):
             capacity=self.schema.width()
         )
         self.category_leases = List[ArcPointer[CategoryLease]]()
+        self.grouped_keys = List[Optional[GroupedKeyField]](
+            length=self.schema.width(), fill=None
+        )
         for _ in range(self.schema.width()):
             self.text.append(None)
             self.categories.append(None)

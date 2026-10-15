@@ -3,9 +3,10 @@
 Numeric payload ASTs, source origins, row counts and original projection order
 are unchanged. No grouping, query operand or source value is evaluated on CPU.
 """
+from std.memory import ArcPointer
 from dataframe import DataFrame, DataType
 from dataframe.binding import bind
-from dataframe.expr import COL, COUNT, NULL_COUNT, LIST_LEN, LIST_GET
+from dataframe.expr import COL, COUNT, NULL_COUNT, LIST_LEN, LIST_GET, IMPLODE
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG, SELECT, SLICE
 from .metadata import schema_frame
 from .memory import checked_add
@@ -179,3 +180,86 @@ def prepare_keys(
     return KeyQuery(
         staged^, schema^, domains^, names^, rows, staging, key_outputs^
     )
+
+
+def needs_grouped_key_normalization(query: LazyFrame) raises -> Bool:
+    for index in range(len(query._nodes)):
+        ref node = query._nodes[index]
+        if node.kind != AGG or node.grouped_keys:
+            continue
+        var lists = False
+        for expression in node.exprs:
+            for operand in expression._nodes:
+                lists |= operand.op == IMPLODE
+        if not lists or node.left < 0:
+            continue
+        var schema = schema_frame(query, node.left)
+        for name in node.names:
+            var dtype = schema.column(name).dtype()
+            if (
+                dtype == DataType.STRING
+                or dtype.is_categorical()
+                or dtype._is_bytes()
+            ):
+                return True
+    return False
+
+
+def has_grouped_key_owners(query: LazyFrame) -> Bool:
+    for node in query._nodes:
+        if node.grouped_keys:
+            return True
+    return False
+
+
+def retain_grouped_key_queries(
+    query: LazyFrame,
+    *,
+    memory_limit_bytes: Int = -1,
+    metadata_only: Bool = False,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
+) raises -> LazyFrame:
+    _ = schema_frame(query, len(query._nodes) - 1)
+    var result = query.copy()
+    # Downstream GROUP keys need their original raw-byte/code hash semantics,
+    # even when their input is a published grouped field rather than a scan.
+    for index in range(len(result._nodes)):
+        ref node = result._nodes[index]
+        if node.kind != AGG or node.left < 0:
+            continue
+        var input_schema = schema_frame(query, node.left)
+        for name in node.names:
+            var domain = KeyDomain(
+                input_schema.column(name), metadata_only=True
+            )
+            if domain.kind != FIXED:
+                _replace_provenance(node.window_keys, domain.provenance)
+    var retained = 0
+    for index in range(len(result._nodes)):
+        ref node = result._nodes[index]
+        if node.kind != AGG or node.grouped_keys:
+            continue
+        var lists = False
+        for expression in node.exprs:
+            for operand in expression._nodes:
+                lists |= operand.op == IMPLODE
+        if not lists:
+            continue
+        var original = query.copy()
+        original._reorder(index)
+        original._compact_scan_slots()
+        var limit = (
+            memory_limit_bytes - retained if memory_limit_bytes >= 0 else -1
+        )
+        var keys = prepare_keys(
+            original,
+            memory_limit_bytes=limit,
+            metadata_only=metadata_only,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
+        )
+        retained = checked_add(retained, keys.staging_bytes)
+        node.window_keys = keys.query._nodes[1].window_keys.copy()
+        node.grouped_keys = ArcPointer(keys^)
+    return result^

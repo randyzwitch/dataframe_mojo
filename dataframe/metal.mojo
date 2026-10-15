@@ -66,6 +66,9 @@ from .accelerator.grouped_lists import has_grouped_implode
 from .accelerator.grouped_feeds import has_checked_grouped_feeds
 from .accelerator.grouped_key_queries import (
     prepare_keys as prepare_grouped_keys,
+    needs_grouped_key_normalization,
+    retain_grouped_key_queries,
+    has_grouped_key_owners,
 )
 from .accelerator.lists import (
     has_implode,
@@ -347,7 +350,18 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
-        if has_explode(query):
+        if has_explode(query) and needs_grouped_key_normalization(query):
+            var retained = retain_grouped_key_queries(
+                query,
+                memory_limit_bytes=self._budget,
+                ordered_source=original_entry,
+                eager_feed=not self._execution_settings.streaming,
+            )
+            return self._run(retained, profiling, original_entry=original_entry)
+        var normalize_grouped_keys = has_grouped_key_owners(query) and (
+            has_opaque_columns(query) or has_dictionary_columns(query)
+        )
+        if has_explode(query) and not normalize_grouped_keys:
             return execute_dag(
                 query,
                 self._device,
@@ -359,8 +373,11 @@ struct MetalRuntime(AcceleratorBackend):
                 ordered_source=original_entry,
                 eager_feed=not self._execution_settings.streaming,
             )
-        if has_grouped_implode(query) or has_checked_grouped_feeds(
-            query, eager_feed=not self._execution_settings.streaming
+        if not has_explode(query) and (
+            has_grouped_implode(query)
+            or has_checked_grouped_feeds(
+                query, eager_feed=not self._execution_settings.streaming
+            )
         ):
             return execute_grouped_lists(
                 query,
@@ -371,7 +388,7 @@ struct MetalRuntime(AcceleratorBackend):
                 ordered_source=original_entry,
                 eager_feed=not self._execution_settings.streaming,
             )
-        if has_implode(query):
+        if has_implode(query) and not has_explode(query):
             var plan = lower_terminal_implode(
                 query, ordered_source=original_entry
             )
@@ -845,7 +862,7 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var dynamic_text = has_default_qcuts(
                 staged_query
-            ) or has_category_transport(staged_query)
+            ) or has_category_transport(staged_query) or has_grouped_key_owners(staged_query)
             var encoded = encode_query(
                 staged_query, dictionary, dynamic_text=dynamic_text
             )
@@ -1021,15 +1038,29 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal schema selector expansion; " + self._describe(
                     lower_selectors(query), False
                 )
-            if has_explode(query):
+            if has_explode(query) and needs_grouped_key_normalization(query):
+                var retained = retain_grouped_key_queries(
+                    query,
+                    metadata_only=True,
+                    ordered_source=original_entry,
+                    eager_feed=not self._execution_settings.streaming,
+                )
+                return self._describe(retained, original_entry)
+            var normalize_grouped_keys = has_grouped_key_owners(query) and (
+                has_opaque_columns(query) or has_dictionary_columns(query)
+            )
+            if has_explode(query) and not normalize_grouped_keys:
                 return describe_nested_dag(
                     query,
                     _capabilities(),
                     ordered_source=original_entry,
                     eager_feed=not self._execution_settings.streaming,
                 )
-            if has_grouped_implode(query) or has_checked_grouped_feeds(
-                query, eager_feed=not self._execution_settings.streaming
+            if not has_explode(query) and (
+                has_grouped_implode(query)
+                or has_checked_grouped_feeds(
+                    query, eager_feed=not self._execution_settings.streaming
+                )
             ):
                 _ = prepare_grouped_keys(
                     query,
@@ -1038,7 +1069,7 @@ struct MetalRuntime(AcceleratorBackend):
                     eager_feed=not self._execution_settings.streaming,
                 )
                 return "Metal resident grouped primitive Lists and typed key domains; CPU bucket producer order"
-            if has_implode(query):
+            if has_implode(query) and not has_explode(query):
                 var plan = lower_terminal_implode(
                     query, ordered_source=original_entry
                 )
@@ -1121,7 +1152,7 @@ struct MetalRuntime(AcceleratorBackend):
                 var lowered = lower_dictionary_operations(metadata)
                 var staged_query = lowered[0].copy()
                 var dictionary = DictionaryCodes(staged_query)
-                var encoded = encode_query(staged_query, dictionary)
+                var encoded = encode_query(staged_query, dictionary, dynamic_text=has_grouped_key_owners(staged_query))
                 return "Metal ordered dictionary staging; " + self._describe(
                     encoded, False
                 )
