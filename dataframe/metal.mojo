@@ -239,27 +239,30 @@ struct MetalRuntime(AcceleratorBackend):
         )
         from .parallel import configured_workers
 
-        var float_started = Int(perf_counter_ns())
-        var float_route = candidate(
-            query,
-            configured_workers(),
-            self._execution_settings.batch_size,
-            optimize=self._execution_settings.optimize,
-            streaming=self._execution_settings.streaming,
-            original_source=original_entry,
-            budget=self._budget,
-        )
-        if float_route:
-            var selected_float_route = float_route.take()
-            return execute_float_stream(
-                selected_float_route,
-                self._device,
-                self._budget,
+        # Grouped Lists keep their existing normalizers and producer contract.
+        # The disjoint BASIC scalar family retains its original route below.
+        if not has_grouped_implode(query):
+            var float_started = Int(perf_counter_ns())
+            var float_route = candidate(
+                query,
+                configured_workers(),
                 self._execution_settings.batch_size,
-                profiling=profiling,
-                observation_only=self._observation_only,
-                started=float_started,
+                optimize=self._execution_settings.optimize,
+                streaming=self._execution_settings.streaming,
+                original_source=original_entry,
+                budget=self._budget,
             )
+            if float_route:
+                var selected_float_route = float_route.take()
+                return execute_float_stream(
+                    selected_float_route,
+                    self._device,
+                    self._budget,
+                    self._execution_settings.batch_size,
+                    profiling=profiling,
+                    observation_only=self._observation_only,
+                    started=float_started,
+                )
         var start = Int(perf_counter_ns())
         if len(file_source_nodes(query)):
             var staged = prepare_file_sources(
@@ -991,16 +994,17 @@ struct MetalRuntime(AcceleratorBackend):
         from .parallel import configured_workers
 
         try:
-            var float_route = candidate(
-                query,
-                configured_workers(),
-                self._execution_settings.batch_size,
-                optimize=self._execution_settings.optimize,
-                streaming=self._execution_settings.streaming,
-                original_source=original_entry,
-            )
-            if float_route:
-                return "Metal ordered grouped floating states; captured CPU single-job morsels; device sample selects inserted epochs or generic collected GPU reductions"
+            if not has_grouped_implode(query):
+                var float_route = candidate(
+                    query,
+                    configured_workers(),
+                    self._execution_settings.batch_size,
+                    optimize=self._execution_settings.optimize,
+                    streaming=self._execution_settings.streaming,
+                    original_source=original_entry,
+                )
+                if float_route:
+                    return "Metal ordered grouped floating states; captured CPU single-job morsels; device sample selects inserted epochs or generic collected GPU reductions"
             if len(file_source_nodes(query)):
                 var staged = stage_file_sources(
                     query,
