@@ -518,6 +518,23 @@ def lower_dictionary_operations(
                     _plan_node(WITH_COLUMNS, operation.left, exprs=sources^)
                 )
                 var left = len(result._nodes) - 1
+                # Private aliases retain their source Arrow field owners. The
+                # generated lookup keys must carry the same owners so this
+                # internal coalesced join has the same metadata on both sides.
+                # Inspect metadata-only rows; no source values execute here.
+                var key_schema = schema_frame(result, left)
+                var left_key = key_schema.column(key_name)
+                if left_key.dtype().is_categorical():
+                    # CPU categorical unification preserves metadata when
+                    # recoding categorical inputs; String-to-CAT is a fresh
+                    # computed field. Give this lookup the matching family.
+                    keys = keys.cast(DataType.CATEGORICAL)
+                keys._field_metadata = left_key._field_metadata
+                if node.op == STR_CONCAT:
+                    var right_key = key_schema.column(right_name)
+                    if right_key.dtype().is_categorical():
+                        right_keys = right_keys.cast(DataType.CATEGORICAL)
+                    right_keys._field_metadata = right_key._field_metadata
                 var frame = len(result._frames)
                 var columns = List[Series]([keys^, mapped^])
                 if node.op == STR_CONCAT:

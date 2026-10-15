@@ -38,6 +38,12 @@ def _decimal_producer(query: LazyFrame, index: Int) raises -> Bool:
     ref operation = query._nodes[index]
     if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
         return False
+    var possible = False
+    for expression in operation.exprs:
+        for node in expression._nodes:
+            possible |= node.op in [ADD, SUB, MUL, DIV, NEG, ABS]
+    if not possible:
+        return False
     var schema = schema_frame(query, operation.left)
     var checked = False
     for expression in operation.exprs:
