@@ -8,6 +8,20 @@ Callers apply input validity before add and result validity before finish.
 from . import floating as f
 
 
+def _moment_update_fma(
+    a: UInt64, b: UInt64, accumulator: UInt64, retain_nan_accumulator: Bool
+) -> UInt64:
+    """Local contraction with an explicit caller NaN payload certificate.
+
+    Actual scalar/eager/grouped-stream query witnesses retain the earlier
+    accumulator payload. The standalone Apple CPU VarState witness instead chooses
+    the new operand payload; this is a compiled caller-context distinction.
+    """
+    if retain_nan_accumulator and f.is_nan(accumulator):
+        return f.quiet(accumulator)
+    return f.fma(a, b, accumulator)
+
+
 @fieldwise_init
 struct VarianceState(Copyable):
     var count: UInt64
@@ -19,11 +33,13 @@ struct VarianceState(Copyable):
         self.mean = 0
         self.m2 = 0
 
-    def add(mut self, value: UInt64):
+    def add(mut self, value: UInt64, *, retain_nan_accumulator: Bool = False):
         self.count += 1
         var delta = f.sub(value, self.mean)
         self.mean = f.add(self.mean, f.div(delta, f.from_unsigned(self.count)))
-        self.m2 = f.add(self.m2, f.mul(delta, f.sub(value, self.mean)))
+        self.m2 = _moment_update_fma(
+            delta, f.sub(value, self.mean), self.m2, retain_nan_accumulator
+        )
 
     def merge(mut self, other: Self):
         if other.count == 0:
@@ -216,16 +232,24 @@ struct CovarianceState(Copyable):
         self.m2x = 0
         self.m2y = 0
 
-    def add(mut self, x: UInt64, y: UInt64):
+    def add(
+        mut self, x: UInt64, y: UInt64, *, retain_nan_accumulator: Bool = False
+    ):
         self.count += 1
         var n = f.from_unsigned(self.count)
         var dx = f.sub(x, self.mean_x)
         self.mean_x = f.add(self.mean_x, f.div(dx, n))
         var dy = f.sub(y, self.mean_y)
         self.mean_y = f.add(self.mean_y, f.div(dy, n))
-        self.cxy = f.add(self.cxy, f.mul(dx, f.sub(y, self.mean_y)))
-        self.m2x = f.add(self.m2x, f.mul(dx, f.sub(x, self.mean_x)))
-        self.m2y = f.add(self.m2y, f.mul(dy, f.sub(y, self.mean_y)))
+        self.cxy = _moment_update_fma(
+            dx, f.sub(y, self.mean_y), self.cxy, retain_nan_accumulator
+        )
+        self.m2x = _moment_update_fma(
+            dx, f.sub(x, self.mean_x), self.m2x, retain_nan_accumulator
+        )
+        self.m2y = _moment_update_fma(
+            dy, f.sub(y, self.mean_y), self.m2y, retain_nan_accumulator
+        )
 
     def merge(mut self, other: Self):
         if other.count == 0:
