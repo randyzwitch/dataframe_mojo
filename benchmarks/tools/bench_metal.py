@@ -16,7 +16,7 @@ import statistics
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 WORKLOADS = [
     "sort_radix",
     "group_hash",
@@ -72,7 +72,7 @@ def metadata(binaries, threads):
                 "--porcelain",
                 "--",
                 "benchmarks/bench_metal.mojo",
-                "scripts/bench_metal.py",
+                "benchmarks/tools/bench_metal.py",
             ]
         ),
         "mojo_version": command(["mojo", "--version"]),

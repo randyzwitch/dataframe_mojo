@@ -78,7 +78,7 @@ requirements for extending these tests.
 Run the issue's 10M-left/1M-right development measurement with:
 
 ```sh
-pixi run -e oracle python3 scripts/bench_asof.py
+pixi run -e oracle python3 benchmarks/tools/bench_asof.py
 ```
 
 The two engines load identical Parquet files outside the timer and materialize

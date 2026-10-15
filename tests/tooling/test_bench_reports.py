@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "benchmarks" / "tools"))
 import bench_html
 import bench_policy
 import bench_suites as bench
@@ -191,7 +191,7 @@ class BenchmarkReports(unittest.TestCase):
             subprocess.run(
                 [
                     sys.executable,
-                    str(ROOT / "scripts/bench_suites.py"),
+                    str(ROOT / "benchmarks/tools/bench_suites.py"),
                     "--report-from",
                     str(raw),
                 ],

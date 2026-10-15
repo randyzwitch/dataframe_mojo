@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location('query_diagrams', ROOT / 'scripts/query_diagrams.py')
+spec = importlib.util.spec_from_file_location('query_diagrams', ROOT / 'benchmarks/tools/query_diagrams.py')
 diagrams = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(diagrams)
 

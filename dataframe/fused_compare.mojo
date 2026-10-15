@@ -18,8 +18,22 @@ from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .execution import evaluate
-from .expr import COL, EQ, GE, GT, LE, LT, NE, Expr, subtree
-from .expr_kernels import _compare_lanes
+from .expr import (
+    AND,
+    COL,
+    EQ,
+    GE,
+    GT,
+    IS_NOT_NULL,
+    IS_NULL,
+    LE,
+    LT,
+    NE,
+    OR,
+    Expr,
+    subtree,
+)
+from .expr_kernels import _compare_lanes, _validity_bytes
 from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
 
@@ -299,3 +313,206 @@ def fused_comparisons(
 def fused_mask(mask: List[UInt8], height: Int) -> BoolColumn:
     """The bitmap as an all-valid Boolean column."""
     return BoolColumn(values=mask.copy(), bits=List[UInt8](), length=height)
+
+
+# Selection trees: a filter part's AND/OR of comparisons and null tests,
+# evaluated on a list of row positions rather than on every row, the way
+# DuckDB's ConjunctionAnd/Or select narrow one selection vector. AND hands
+# each child the rows the earlier ones kept; OR keeps a child's matches and
+# offers the next child only the rows still unmatched. A comparison or test
+# reads the source column at each listed row, so nothing is gathered.
+comptime _COMPARE = 0
+comptime _ALL = 1
+comptime _ANY = 2
+comptime _VALID = 3
+comptime _MISSING = 4
+
+
+@fieldwise_init
+struct _TreeNode(Copyable, Movable):
+    var kind: Int
+    var left: Int
+    var right: Int
+    # The comparison (`_COMPARE`) or tested column (`_VALID`, `_MISSING`).
+    var leaf: Int
+
+
+struct SelectionTree(Movable):
+    """One filter part as an AND/OR tree over comparisons and null tests.
+    A row is selected when the part is true there; null counts as false,
+    which is exact for AND and OR of these leaves under a filter."""
+
+    var nodes: List[_TreeNode]
+    var comparisons: List[_Comparison]
+    # Each null test's column validity, one bit a row from row 0.
+    var tested: List[List[UInt8]]
+
+    def __init__(out self):
+        self.nodes = List[_TreeNode]()
+        self.comparisons = List[_Comparison]()
+        self.tested = List[List[UInt8]]()
+
+    def select(self, rows: List[Int]) raises -> List[Int]:
+        """The rows of `rows` (ascending) where the part is true."""
+        return self._select(len(self.nodes) - 1, rows)
+
+    def _select(self, at: Int, rows: List[Int]) raises -> List[Int]:
+        ref node = self.nodes[at]
+        if node.kind == _ALL:
+            var kept = self._select(node.left, rows)
+            return self._select(node.right, kept)
+        if node.kind == _ANY:
+            var first = self._select(node.left, rows)
+            var rest = _without(rows, first)
+            var second = self._select(node.right, rest)
+            return _merged(first, second)
+        if node.kind == _COMPARE:
+            ref comparison = self.comparisons[node.leaf]
+            comptime for d in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[d]
+                if comparison.column._data.isa[Column[Scalar[D]]]():
+                    return _select_compare[D](comparison, rows)
+            raise Error("selection tree: unsupported comparison column")
+        var out = List[Int](capacity=len(rows))
+        var want = UInt8(1) if node.kind == _VALID else UInt8(0)
+        ref bits = self.tested[node.leaf]
+        for row in rows:
+            if (bits[row >> 3] >> UInt8(row & 7)) & 1 == want:
+                out.append(row)
+        return out^
+
+
+def selection_tree(
+    part: Expr, columns: List[Series]
+) raises -> Optional[SelectionTree]:
+    """`part` as a selection tree when every leaf is a comparison of a
+    numeric column with a constant of its dtype, or a null test of a
+    column; None otherwise."""
+    var tree = SelectionTree()
+    if not _add_tree(part, len(part._nodes) - 1, columns, tree):
+        return None
+    return Optional(tree^)
+
+
+def _add_tree(
+    part: Expr, at: Int, columns: List[Series], mut tree: SelectionTree
+) raises -> Bool:
+    """Append the subtree rooted at `at`, its root last; False when some
+    leaf is unsupported."""
+    ref node = part._nodes[at]
+    if (node.op == AND or node.op == OR) and node.left >= 0 and node.right >= 0:
+        if not _add_tree(part, node.left, columns, tree):
+            return False
+        var left = len(tree.nodes) - 1
+        if not _add_tree(part, node.right, columns, tree):
+            return False
+        var right = len(tree.nodes) - 1
+        tree.nodes.append(
+            _TreeNode(_ALL if node.op == AND else _ANY, left, right, -1)
+        )
+        return True
+    if (node.op == IS_NULL or node.op == IS_NOT_NULL) and node.left >= 0:
+        ref child = part._nodes[node.left]
+        if child.op != COL:
+            return False
+        for column in columns:
+            if column.name() == child.text and not column.is_chunked():
+                tree.tested.append(_validity_bytes(column, len(column)))
+                tree.nodes.append(
+                    _TreeNode(
+                        _VALID if node.op == IS_NOT_NULL else _MISSING,
+                        -1,
+                        -1,
+                        len(tree.tested) - 1,
+                    )
+                )
+                return True
+        return False
+    var found = _comparison(subtree(part, at), columns)
+    if not found:
+        return False
+    tree.comparisons.append(found.value().copy())
+    tree.nodes.append(_TreeNode(_COMPARE, -1, -1, len(tree.comparisons) - 1))
+    return True
+
+
+def _select_compare[
+    D: DType
+](comparison: _Comparison, rows: List[Int]) -> List[Int]:
+    var op = comparison.op
+    if op == LT:
+        return _select_rows[D, LT](comparison, rows)
+    if op == LE:
+        return _select_rows[D, LE](comparison, rows)
+    if op == GT:
+        return _select_rows[D, GT](comparison, rows)
+    if op == GE:
+        return _select_rows[D, GE](comparison, rows)
+    if op == EQ:
+        return _select_rows[D, EQ](comparison, rows)
+    return _select_rows[D, NE](comparison, rows)
+
+
+def _select_rows[
+    D: DType, op: Int
+](comparison: _Comparison, rows: List[Int]) -> List[Int]:
+    """The rows whose value compares true; a null row compares false. The
+    output is written branch-free: each row is stored, and the cursor moves
+    past it only when it matched."""
+    ref column = comparison.column._data[Column[Scalar[D]]]
+    var values = column._ptr()
+    var constant = comparison.value._data[Column[Scalar[D]]]._get(0)
+    var out = List[Int](unsafe_uninit_length=len(rows))
+    var dst = out.unsafe_ptr()
+    var src = rows.unsafe_ptr()
+    var count = 0
+    if comparison.nulls:
+        for i in range(len(rows)):
+            var row = src[unsafe_offset=i]
+            dst[unsafe_offset=count] = row
+            var hit = _compare_lanes[op, D, 1](
+                values[unsafe_offset=row], constant
+            )[0] and column._valid(row)
+            count += Int(hit)
+    else:
+        for i in range(len(rows)):
+            var row = src[unsafe_offset=i]
+            dst[unsafe_offset=count] = row
+            count += Int(
+                _compare_lanes[op, D, 1](values[unsafe_offset=row], constant)[0]
+            )
+    out.shrink(count)
+    return out^
+
+
+def _without(rows: List[Int], taken: List[Int]) -> List[Int]:
+    """`rows` minus `taken`, a subsequence of it; both ascending."""
+    var out = List[Int](capacity=len(rows) - len(taken))
+    var t = 0
+    for row in rows:
+        if t < len(taken) and taken[t] == row:
+            t += 1
+        else:
+            out.append(row)
+    return out^
+
+
+def _merged(a: List[Int], b: List[Int]) -> List[Int]:
+    """The union of two disjoint ascending lists, ascending."""
+    var out = List[Int](capacity=len(a) + len(b))
+    var i = 0
+    var j = 0
+    while i < len(a) and j < len(b):
+        if a[i] < b[j]:
+            out.append(a[i])
+            i += 1
+        else:
+            out.append(b[j])
+            j += 1
+    while i < len(a):
+        out.append(a[i])
+        i += 1
+    while j < len(b):
+        out.append(b[j])
+        j += 1
+    return out^
