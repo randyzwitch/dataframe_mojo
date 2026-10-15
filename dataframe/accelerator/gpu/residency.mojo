@@ -56,9 +56,7 @@ def checked_mul(a: Int, b: Int) raises -> Int:
 # Metadata-only targets retain accounting and lease ownership without
 # instantiating an unavailable DeviceContext destructor. Real Metal keeps
 # the exact context owner type, including its queue lifetime and teardown.
-comptime _ContextCell = Optional[DeviceContext] if METAL_TARGET else Optional[
-    Int
-]
+comptime _ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
 
 
 struct _ScopeState(Movable):
