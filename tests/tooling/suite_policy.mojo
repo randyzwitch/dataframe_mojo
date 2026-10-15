@@ -1960,6 +1960,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_arithmetic.mojo::test_native_metal_decimal_add_subtract_literal_result_types_and_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_multiplicative.mojo::test_native_metal_decimal_exact_product_literals_layouts_and_precision",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_multiplicative.mojo::test_native_metal_decimal_product_width_and_quotient_literal_bits",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_decimal_arithmetic.mojo::test_native_metal_decimal_arithmetic_proven_consumers_aggregates_and_windows",
             "metal",
         )
