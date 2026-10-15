@@ -911,21 +911,16 @@ def _decimal_dense64[
     var limit = Int64(precision_limit(dtype.precision()))
     var overflow = False
     comptime if op == MUL:
-        if left.precision() + right.precision() <= 18:
-            # The digits add up to at most 18: nothing to check.
-            for i in range(n):
-                out[unsafe_offset=i] = (
-                    xs[unsafe_offset=0 if left_one else i]
-                    * ys[unsafe_offset=0 if right_one else i]
-                )
-        else:
-            var wide_limit = Int128(limit)
-            for i in range(n):
-                var product = Int128(
-                    xs[unsafe_offset=0 if left_one else i]
-                ) * Int128(ys[unsafe_offset=0 if right_one else i])
-                overflow |= product >= wide_limit or product <= -wide_limit
-                out[unsafe_offset=i] = Int64(product)
+        # Logical decimal metadata can be attached to physical values that
+        # exceed its digit count. Check the actual widened product before
+        # narrowing, just as the nullable Int128 path does.
+        var wide_limit = Int128(limit)
+        for i in range(n):
+            var product = Int128(
+                xs[unsafe_offset=0 if left_one else i]
+            ) * Int128(ys[unsafe_offset=0 if right_one else i])
+            overflow |= product >= wide_limit or product <= -wide_limit
+            out[unsafe_offset=i] = Int64(product)
     else:
         var scale = dtype.scale()
         # Digits of the operands once aligned to the result's scale.

@@ -90,3 +90,45 @@ def test_decimal_exact_product_precision_and_mask() raises:
             )
             assert_equal(masked.column("a")._decimal_raw(0), Int128(0))
             assert_equal(masked.column("a").null_count(), Int(nullable))
+
+
+def test_decimal_product_physical_values_check_result_before_narrowing() raises:
+    for nullable in [False, True]:
+        for raw in [Int64(99), Int64.MAX]:
+            var source = DataFrame(
+                [
+                    Series(
+                        "a", Column[Int64]([raw, 1], [True, not nullable])
+                    ).with_dtype(DataType.decimal(1, 0, 64)),
+                    Series("b", Column[Int64]([2, 1])).with_dtype(
+                        DataType.decimal(1, 0, 64)
+                    ),
+                ]
+            )
+            for frame in [
+                source.copy(),
+                offset_layout(source),
+                chunk_layout(source),
+            ]:
+                with assert_raises(contains="decimal precision"):
+                    _ = (
+                        frame.lazy()
+                        .select(col("a") * col("b"))
+                        .collect(engine="cpu")
+                    )
+        var fitting = DataFrame(
+            [
+                Series(
+                    "a", Column[Int64]([39, 1], [True, not nullable])
+                ).with_dtype(DataType.decimal(1, 0, 64)),
+                Series("b", Column[Int64]([2, 1])).with_dtype(
+                    DataType.decimal(1, 0, 64)
+                ),
+            ]
+        )
+        var result = (
+            fitting.lazy().select(col("a") * col("b")).collect(engine="cpu")
+        )
+        assert_equal(result.column("a").dtype(), DataType.decimal(2, 0, 32))
+        assert_equal(result.column("a")._decimal_raw(0), Int128(78))
+        assert_equal(result.column("a").null_count(), Int(nullable))
