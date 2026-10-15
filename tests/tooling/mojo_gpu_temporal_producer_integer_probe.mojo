@@ -2,6 +2,7 @@
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.metal import MetalRuntime
+from tests.support.coverage_compare import assert_frame
 
 
 def main() raises:
@@ -73,7 +74,14 @@ def main() raises:
         .sort("z")
     )
     var recovered = safe.collect(accelerator=runtime, optimize=False)
-    assert_equal(recovered.item(0, "z").int64(), Int64(18000000000))
+    assert_frame(
+        recovered,
+        safe.collect(engine="cpu", streaming=False, optimize=False),
+    )
+    assert_equal(
+        recovered.select(col("z").cast(DataType.INT64)).item().int64(),
+        Int64(18000000000),
+    )
     assert_equal(
         recovered["z"].dtype(), DataType.datetime("us", "America/New_York")
     )
