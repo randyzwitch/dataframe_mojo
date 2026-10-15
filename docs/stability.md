@@ -2,9 +2,9 @@
 
 The project uses semantic versioning. Before 1.0, a minor release (0.x.0) may
 contain breaking changes and a patch release (0.x.y) may not; from 1.0 on,
-breaking changes require a major release. Every release lists its changes in
-[CHANGELOG.md](../CHANGELOG.md), with breaking changes under **Breaking** and
-migration notes for each.
+breaking changes require a major release. Every release's notes are generated
+from the pull requests merged since the previous release; a pull request that
+breaks the public API says so in its description, with migration notes.
 
 ## What is public
 
@@ -27,11 +27,11 @@ and the behavior documented in [semantics](semantics.md),
 
 ## Deprecation
 
-Before 1.0, APIs may be removed without a deprecation period when the
-replacement is documented in the changelog, as with the legacy column kernels
-in the first changelog entry. From 1.0 on, a public name is first marked
-deprecated in its docstring and the changelog for at least one minor release,
-then removed in the next major release.
+Before 1.0, APIs may be removed without a deprecation period when the pull
+request that removes them documents the replacement. From 1.0 on, a public
+name is first marked deprecated in its docstring, and in the description of
+the pull request that deprecates it, for at least one minor release, then
+removed in the next major release.
 
 ## Releases
 
@@ -39,5 +39,5 @@ Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it runs the tests,
 checks public docstrings, precompiles `dist/dataframe.mojoc`, runs an example
 from outside the source tree against only that package, regenerates
 [api.md](api.md), and publishes a GitHub release with the package, the API
-reference, and the matching changelog section as notes. Consumers put the
+reference, and notes generated from the merged pull requests. Consumers put the
 package directory on the import path: `mojo run -I path/to/dist app.mojo`.
