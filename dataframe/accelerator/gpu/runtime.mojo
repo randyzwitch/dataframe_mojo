@@ -593,6 +593,44 @@ def _width(dtype: DataType) raises -> Int:
     raise Error("Mojo GPU unsupported output width")
 
 
+def _host_column_bytes(column: Series) raises -> Int:
+    """Count the published host storage after logical dictionary restoration."""
+    if column.is_chunked():
+        var total = 0
+        for chunk in column.chunks():
+            total = _checked_add(total, _host_column_bytes(chunk))
+        return total
+    var rows = len(column)
+    var bitmap = (rows + 7) // 8
+    if column.dtype() != DataType.STRING:
+        return _checked_add(_checked_mul(rows, _width(column.dtype())), bitmap)
+    from dataframe.string_column import StringColumn
+    from dataframe.string_view import StringView
+
+    ref strings = column._data[StringColumn]
+    var total = bitmap
+    if strings._view_storage:
+        total = _checked_add(total, _checked_mul(rows, size_of[StringView]()))
+        total = _checked_add(
+            total, strings._view_storage.value().total_buffer_bytes()
+        )
+    else:
+        total = _checked_add(total, _checked_mul(rows + 1, 8))
+        total = _checked_add(total, len(strings._bytes[]))
+    if strings._codes:
+        total = _checked_add(
+            total, _checked_mul(len(strings._codes.value()[].codes[]), 4)
+        )
+        if strings._codes.value()[].rows:
+            total = _checked_add(
+                total,
+                _checked_mul(
+                    len(strings._codes.value()[].rows.value()[]), size_of[Int]()
+                ),
+            )
+    return total
+
+
 def _stage(
     column: Series,
     rows: Int,
@@ -1166,10 +1204,7 @@ def execute(
     for column in result._columns:
         host_result_bytes = _checked_add(
             host_result_bytes,
-            _checked_add(
-                _checked_mul(result.height(), _width(column.dtype())),
-                (result.height() + 7) // 8,
-            ),
+            _host_column_bytes(column),
         )
     report = report.with_column(
         Series("host_result_bytes", Column[Int64]([Int64(host_result_bytes)]))

@@ -533,12 +533,7 @@ def execute(
             for column in result._columns:
                 host_result_bytes = rows._checked_add(
                     host_result_bytes,
-                    rows._checked_add(
-                        rows._checked_mul(
-                            result.height(), rows._width(column.dtype())
-                        ),
-                        (result.height() + 7) // 8,
-                    ),
+                    rows._host_column_bytes(column),
                 )
         query_host_result_bytes = (
             host_result_bytes if index == dag.root else query_host_result_bytes
