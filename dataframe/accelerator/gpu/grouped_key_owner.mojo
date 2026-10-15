@@ -65,6 +65,8 @@ struct GroupedKeyOwner(Movable):
             )
         if query[].rows != plan[].rows or source.rows != plan[].rows:
             raise Error("Grouped key source row certificate differs")
+        if query[].schema.width() != len(query[].key_outputs):
+            raise Error("Grouped key original publication width differs")
         if query[].names != plan[].names or len(query[].domains) != len(
             plan[].names
         ):
@@ -232,6 +234,14 @@ struct GroupedKeyOwner(Movable):
         self.staging = staging.copy()
         self.publication_maps = maps^
 
+    def publication(self, domain: Int) raises -> Series:
+        if domain < 0 or domain >= len(self.query[].domains):
+            raise Error("Grouped key field domain is outside its owner")
+        for index in range(len(self.query[].key_outputs)):
+            if self.query[].key_outputs[index] == domain:
+                return self.query[].schema._columns[index].slice(0, 0)
+        raise Error("Grouped key original publication field is missing")
+
     def validate(
         self, plan: GroupedListsPlan, source: Table, scope: Scope
     ) raises:
@@ -286,7 +296,7 @@ struct GroupedKeyField(Copyable):
     def logical_dtype(self) raises -> DataType:
         if self.domain < 0 or self.domain >= len(self.owner[].query[].domains):
             raise Error("Grouped key field domain is outside its owner")
-        return self.owner[].query[].schema._columns[self.domain].dtype()
+        return self.owner[].publication(self.domain).dtype()
 
     def validate(self, table: Table, scope: Scope) raises:
         if not self.owner[].scope.same_query(scope):

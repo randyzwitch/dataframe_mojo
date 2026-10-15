@@ -331,7 +331,7 @@ def produce(
                     GroupedKeyField(typed.value().copy(), request.source)
                 ]
                 ref original = typed.value()[].query[]
-                ref logical = original.schema._columns[request.source]
+                var logical = typed.value()[].publication(request.source)
                 table.schema._columns[
                     0
                 ]._field_metadata = logical._field_metadata
@@ -363,28 +363,20 @@ def produce(
             ]._field_metadata
             if table.grouped_keys[0]:
                 ref certificate = table.grouped_keys[0].value()
-                table.schema._columns[0]._field_metadata = (
-                    certificate.owner[]
-                    .query[]
-                    .schema._columns[certificate.domain]
-                    ._field_metadata
+                var publication = certificate.owner[].publication(
+                    certificate.domain
                 )
+                table.schema._columns[
+                    0
+                ]._field_metadata = publication._field_metadata
             var field = ResidentField.primitive(table)
             if table.grouped_keys[0]:
                 ref certificate = table.grouped_keys[0].value()
                 field.prototype = (
                     certificate.owner[]
-                    .query[]
-                    .schema._columns[certificate.domain]
+                    .publication(certificate.domain)
                     .renamed(plan.schema._columns[index].name())
                 )
-                field.prototype._field_metadata = (
-                    certificate.owner[]
-                    .query[]
-                    .schema._columns[certificate.domain]
-                    ._field_metadata
-                )
-
             fields.append(field^)
     var result = ResidentFrame(scope.copy(), keys.rows, fields^)
     validate_frame(result, scope)
