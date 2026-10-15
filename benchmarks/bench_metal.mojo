@@ -1,6 +1,6 @@
 """Development measurements of direct Mojo GPU mechanisms, not an external suite.
 
-Run with scripts/bench_metal.py. Inputs and validation are outside timings;
+Run with benchmarks/tools/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
 """
 from dataframe import Column, DataFrame, Series, LazyFrame, col, lit

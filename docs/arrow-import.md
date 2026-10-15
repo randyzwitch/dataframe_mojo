@@ -51,9 +51,9 @@ the same native library; worker-pool calibration in #292 is separate.
 ## Reproduction
 
 ```bash
-pixi run python3 scripts/bench_arrow_import.py --build
-# Generate fixtures once using scripts/bench_parquet_stream.py --run.
-BENCH_WAIT_FOR_COMPILERS=1 pixi run python3 scripts/bench_arrow_import.py --run
+pixi run python3 benchmarks/tools/bench_arrow_import.py --build
+# Generate fixtures once using benchmarks/tools/bench_parquet_stream.py --run.
+BENCH_WAIT_FOR_COMPILERS=1 pixi run python3 benchmarks/tools/bench_arrow_import.py --run
 ```
 
 Set `DATAFRAME_PARQUET_LIBRARY` when the native library is elsewhere. Run

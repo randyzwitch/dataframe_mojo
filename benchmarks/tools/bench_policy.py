@@ -48,7 +48,7 @@ def record(root, selected, suites):
         if p.suffix in (".py", ".mojo")
     )
     paths += [
-        root / "scripts" / name
+        root / "benchmarks" / "tools" / name
         for name in ("bench_suites.py", "bench_html.py", "bench_policy.py")
     ]
     hashes = {
