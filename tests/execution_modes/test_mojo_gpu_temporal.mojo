@@ -15,6 +15,9 @@ from dataframe import (
 from dataframe.metal import MetalRuntime
 from dataframe.calendar import days_from_civil
 from tests.execution_modes.test_backend_metal_float64_emulation import same
+from tests.execution_modes.test_mojo_gpu_timezone_conversion import (
+    _check_local_literals,
+)
 
 
 def _check(query: LazyFrame) raises -> DataFrame:
@@ -386,14 +389,36 @@ def test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges() r
                 .select(col("t").dt().offset_by("-1d"))
                 .collect(accelerator=MetalRuntime(), engine="accel")
             )
-        with assert_raises(contains="naive or UTC"):
-            _ = (
-                zoned.lazy()
-                .select(col("t").dt().replace_time_zone("UTC"))
-                .collect(
-                    accelerator=MetalRuntime(device_id=999999), engine="accel"
+        var replaced = zoned.lazy().select(
+            col("t").dt().replace_time_zone("UTC")
+        )
+        # The original extreme storage values now reach the mutation kernel.
+        # Compare any checked reconstruction diagnostic exactly with CPU.
+        var expected_error = String("")
+        var actual_error = String("")
+        try:
+            _ = replaced.collect(engine="cpu", optimize=False)
+        except error:
+            expected_error = String(error)
+        try:
+            _ = replaced.collect(accelerator=MetalRuntime(), optimize=False)
+        except error:
+            actual_error = String(error)
+        assert_equal(actual_error, expected_error)
+        if not expected_error:
+            _ = _check(replaced)
+        var epoch = DataFrame(
+            [
+                Series("t", Column[Int64]([0])).with_dtype(
+                    DataType.datetime(unit, "America/New_York")
                 )
-            )
+            ]
+        )
+        _check_local_literals(
+            epoch.lazy().select(col("t").dt().replace_time_zone("UTC")),
+            DataType.datetime(unit, "UTC"),
+            [Int64(-18000) * per],
+        )
         _ = _check(
             utc.lazy().select(
                 col("t").dt().convert_time_zone("America/New_York").dt().year()

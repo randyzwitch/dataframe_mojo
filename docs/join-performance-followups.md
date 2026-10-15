@@ -97,15 +97,9 @@ including loading and warmup, not a query-only counter. Raw captures remain
 in `build/profiles`. The profile motivates the later probe-efficiency work;
 its percentages are not speedup estimates.
 
-Reproduce with baseline and candidate matrix runners built from their
-respective revisions, then run after all compilation has stopped:
-
-```bash
-python3 scripts/bench_join_revision.py \
-  --baseline /path/to/baseline/bench_join_matrix \
-  --candidate build/bench_join_matrix_prepared \
-  --data /path/to/bench_polars --output build/prepared-comparison.json
-```
+The comparison paired baseline and candidate join-matrix runners built from
+their own revisions, run after all compilation had stopped. The scripts are
+retired; check out the revision above to rerun it.
 
 Opportunities 2–5 remain separate changes; these measurements do not claim
 the high-cardinality or duplicate-string count gaps are closed.

@@ -7,6 +7,9 @@ from dataframe.accelerator.rows import lower_rows, ROW_IANA_ZONE_FIELDS
 from dataframe.accelerator.gpu.runtime import capabilities, estimate_resources
 from dataframe.accelerator.gpu.program import Program
 from tests.support.coverage_compare import assert_frame
+from tests.execution_modes.test_mojo_gpu_timezone_conversion import (
+    _check_local_literals,
+)
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
@@ -1406,18 +1409,18 @@ def test_mojo_gpu_iana_fields_descriptor_dedup_budgets_conversion_and_refusals()
         .to_list(),
         [Int64(3), Int64(18)],
     )
-    with assert_raises(contains="time zone field extraction"):
-        _ = (
-            source.lazy()
-            .select(col("t").dt().truncate("1d"))
-            .collect(accelerator=MetalRuntime())
-        )
-    with assert_raises(contains="time zone replacement"):
-        _ = (
-            source.lazy()
-            .select(col("t").dt().replace_time_zone("UTC"))
-            .collect(accelerator=MetalRuntime())
-        )
+    # 2024-03-10T07:00Z is 03:00 EDT; local midnight is still EST.
+    # -1ms is the preceding local day, whose midnight was 05:00Z.
+    _check_local_literals(
+        source.lazy().select(col("t").dt().truncate("1d")),
+        DataType.datetime("ms", "America/New_York"),
+        [Int64(1710046800000), Int64(-68400000)],
+    )
+    _check_local_literals(
+        source.lazy().select(col("t").dt().replace_time_zone("UTC")),
+        DataType.datetime("ms", "UTC"),
+        [Int64(1710039600000), Int64(-18000001)],
+    )
 
 
 def _check_distinct_zone_tables_after_decimal_program() raises:

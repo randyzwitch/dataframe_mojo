@@ -12,7 +12,7 @@ from .text_domains import (
     source_maps,
     submit as submit_text,
 )
-from std.memory import bitcast, ArcPointer
+from std.memory import bitcast, ArcPointer, Pointer
 from std.time import perf_counter_ns
 from std.sys import size_of
 from max.gpu.host import DeviceBuffer
@@ -135,7 +135,14 @@ from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
-from .rows import row_program, row_program_ordered
+from .rows import row_program, row_program_ordered, row_program_iana
+from . import iana_scalar_scopes
+from dataframe.accelerator import iana_certificate
+from dataframe.accelerator.iana_mutations import (
+    ROW_IANA_MUTATION,
+    validate_descriptor,
+)
+from dataframe.temporal import _naive_text
 from . import ordered_faults
 from .temporal_descriptors import (
     ROW_TEMPORAL_BINARY,
@@ -236,6 +243,7 @@ def capabilities() -> RowCapabilities:
         utc_temporal_conversions=True,
         fixed_zone_temporal_fields=True,
         iana_zone_temporal_fields=True,
+        iana_zone_mutations=True,
         duration_totals=True,
         temporal_offsets=True,
         calendar_offsets=True,
@@ -310,6 +318,7 @@ def _preflight(
     for dtype in plan.slot_dtypes:
         _ = _kind(dtype)
     var supported: List[Int] = [
+        Int(ROW_IANA_MUTATION),
         Int(ROW_TEMPORAL_BINARY),
         Int(ROW_TEMPORAL_CAST),
         ROW_CALENDAR_OFFSET,
@@ -550,6 +559,14 @@ def _preflight(
                 if (unit & 7) != expected_unit:
                     raise Error("Mojo GPU IANA field source unit differs")
                 validate_zone_table(
+                    plan.zone_words, Int(plan.code[4 * node + 2])
+                )
+            if op == Int(ROW_IANA_MUTATION):
+                if plan.ordered_mode != 5 or plan.code[4 * node + 2] < 0:
+                    raise Error(
+                        "Mojo GPU IANA mutation requires an occurrence-certified phase"
+                    )
+                validate_descriptor(
                     plan.zone_words, Int(plan.code[4 * node + 2])
                 )
             if op == CAST:
@@ -810,6 +827,21 @@ def _quantile_indices(plan: RowPlan) -> Bool:
     return False
 
 
+def _iana_scalar_slots(plan: RowPlan) raises -> Int:
+    var slots = 0
+    if plan.ordered_mode == 5:
+        for at in range(len(plan.steps)):
+            slots = max(
+                slots,
+                iana_certificate.scalar_count(
+                    plan.zone_words,
+                    plan.iana_mask_bases[at],
+                    plan.steps[at].nodes,
+                ),
+            )
+    return slots
+
+
 def estimate_resources(
     plan: RowPlan,
     rows_override: Int = -1,
@@ -935,7 +967,18 @@ def estimate_resources(
     var peak = _checked_add(_checked_add(shared, result_bytes), scratch)
     # Program host tail and device tail are in program_bytes above. Keep the
     # captured host zone owner too; empty execution still creates two host tails.
-    var captured_zone_bytes = _checked_mul(len(plan.zone_words), 8)
+    var captured_zone_bytes = _checked_mul(
+        plan.zone_words.capacity() if plan.ordered_mode
+        == 5 else len(plan.zone_words),
+        8,
+    )
+    if plan.ordered_mode == 5:
+        var scalar_workspace = iana_scalar_scopes.resources(
+            rows, _iana_scalar_slots(plan)
+        )
+        peak = _checked_add(peak, scalar_workspace.workspace_bytes)
+        peak = _checked_add(peak, 48 if rows else 0)
+        peak = _checked_add(peak, _checked_mul(len(plan.iana_mask_bases), 16))
     peak = _checked_add(
         peak, _checked_mul(captured_zone_bytes, 1 if rows else 2)
     )
@@ -951,6 +994,7 @@ def estimate_resources(
             plan.ordered_mode == 2
             or plan.ordered_mode == 3
             or plan.ordered_mode == 4
+            or plan.ordered_mode == 5
         ):
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
@@ -1039,6 +1083,19 @@ def estimate_resources(
                 + 3 * Int(has_quantiles)
                 + Int(has_float_sums),
             )
+    if rows and plan.ordered_mode == 5:
+        for at in range(len(plan.steps)):
+            launches = _checked_add(
+                launches,
+                _checked_mul(
+                    2,
+                    iana_certificate.scalar_count(
+                        plan.zone_words,
+                        plan.iana_mask_bases[at],
+                        plan.steps[at].nodes,
+                    ),
+                ),
+            )
     if rows and len(plan.ordered_ranks[]):
         var observations = 2 if plan.ordered_mode == 1 else len(
             plan.steps
@@ -1049,11 +1106,13 @@ def estimate_resources(
             * (
                 2 if plan.ordered_mode == 2
                 or plan.ordered_mode == 3
-                or plan.ordered_mode == 4 else 1
+                or plan.ordered_mode == 4
+                or plan.ordered_mode == 5 else 1
             ),
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
+    peak = max(peak, plan.iana_construction_peak_bytes)
     return ResourceFacts(
         peak,
         matrix_bytes,
@@ -1248,7 +1307,8 @@ def execute_plan(
         resident_input.value().rows if resident_input else plan.source.height()
     )
     var ordered_scalar = plan.ordered_mode == 1
-    var ordered_terminal = plan.ordered_mode == 2
+    var iana_certified = plan.ordered_mode == 5
+    var ordered_terminal = plan.ordered_mode == 2 or iana_certified
     var ordered_private = plan.ordered_mode == 3
     var ordered_decimal = plan.ordered_mode == 4
     var ordered_rows = ordered_terminal or ordered_private or ordered_decimal
@@ -1404,6 +1464,12 @@ def execute_plan(
     var device_key_values = Optional[DeviceBuffer[DType.uint64]]()
     var quantile_indices = Optional[DeviceBuffer[DType.uint32]]()
     var device_ranks = Optional[DeviceBuffer[DType.uint32]]()
+    var iana_replay = Optional[DeviceBuffer[DType.uint64]]()
+    var iana_scalar_cache = Optional[DeviceBuffer[DType.uint8]]()
+    var iana_active_scratch = Optional[DeviceBuffer[DType.uint8]]()
+    var iana_scalar_resources = iana_scalar_scopes.resources(
+        rows, _iana_scalar_slots(plan)
+    )
     var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     var ordered_partials = Optional[DeviceBuffer[DType.uint32]]()
     var fault_groups = min(1024, max(1, (rows + 255) // 256))
@@ -1487,6 +1553,15 @@ def execute_plan(
                     )
                     uploaded += len(program.ordered_ranks[]) * 4
                     ordered_control = ctx.enqueue_create_buffer[DType.uint32](2)
+                    if iana_certified:
+                        iana_replay = ctx.enqueue_create_buffer[DType.uint64](3)
+                        if iana_scalar_resources.cache_bytes:
+                            iana_scalar_cache = ctx.enqueue_create_buffer[
+                                DType.uint8
+                            ](iana_scalar_resources.cache_bytes)
+                            iana_active_scratch = ctx.enqueue_create_buffer[
+                                DType.uint8
+                            ](iana_scalar_resources.scratch_bytes)
                     if ordered_rows:
                         ordered_partials = ctx.enqueue_create_buffer[
                             DType.uint32
@@ -2163,23 +2238,138 @@ def execute_plan(
                         device_errors = gathered_errors^
                         continue
                     if ordered:
-                        ctx.enqueue_function[row_program_ordered](
-                            device_words.unsafe_ptr(),
-                            device_valid.unsafe_ptr(),
-                            device_errors.unsafe_ptr(),
-                            device_code.unsafe_ptr(),
-                            device_literals.unsafe_ptr(),
-                            device_types.unsafe_ptr(),
-                            device_ranks.value().unsafe_ptr(),
-                            UInt32(step.start),
-                            UInt32(step.nodes),
-                            UInt32(step.slot),
-                            UInt32(current_rows),
-                            UInt32(rows),
-                            UInt32(plan.slots),
-                            grid_dim=(current_rows + 255) // 256,
-                            block_dim=256,
-                        )
+                        if iana_certified:
+                            var mask_base = -1
+                            for at in range(len(plan.steps)):
+                                if plan.steps[at].start == step.start:
+                                    mask_base = program.iana_mask_bases[at]
+                                    break
+                            if mask_base < 0:
+                                raise Error(
+                                    "IANA certificate scope plane is missing"
+                                )
+                            # Distinct existing control owners provide unused fallback
+                            # pointers when there are no scalar slots. Explicit erased
+                            # origins permit switching to the separately retained buffers.
+                            var scalar_cache: Pointer[UInt8, MutAnyOrigin] = (
+                                ordered_partials.value()
+                                .unsafe_ptr()
+                                .unsafe_bitcast[UInt8]()
+                                .unsafe_origin_cast[MutAnyOrigin]()
+                            )
+                            var active_scratch: Pointer[UInt8, MutAnyOrigin] = (
+                                ordered_control.value()
+                                .unsafe_ptr()
+                                .unsafe_bitcast[UInt8]()
+                                .unsafe_origin_cast[MutAnyOrigin]()
+                            )
+                            if iana_scalar_resources.cache_bytes:
+                                scalar_cache = (
+                                    iana_scalar_cache.value()
+                                    .unsafe_ptr()
+                                    .unsafe_origin_cast[MutAnyOrigin]()
+                                )
+                                active_scratch = (
+                                    iana_active_scratch.value()
+                                    .unsafe_ptr()
+                                    .unsafe_origin_cast[MutAnyOrigin]()
+                                )
+                            var policies = (
+                                mask_base
+                                + 2
+                                + 3 * Int(program.literals[mask_base + 1])
+                                + step.nodes
+                            )
+                            for node in range(step.nodes):
+                                var scalar_slot = (
+                                    program.literals[policies + node] >> 1
+                                )
+                                if not scalar_slot:
+                                    continue
+                                ctx.enqueue_function[row_program_iana](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    device_errors.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_literals.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    device_ranks.value().unsafe_ptr(),
+                                    iana_replay.value().unsafe_ptr(),
+                                    scalar_cache,
+                                    active_scratch,
+                                    UInt32(step.start),
+                                    UInt32(step.nodes),
+                                    UInt32(step.slot),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(plan.slots),
+                                    UInt32(mask_base),
+                                    UInt32.MAX,
+                                    UInt32.MAX,
+                                    UInt32(node),
+                                    UInt32(8192),
+                                    grid_dim=(current_rows + 255) // 256,
+                                    block_dim=256,
+                                )
+                                ctx.enqueue_function[
+                                    iana_scalar_scopes.reduce_scalar_any
+                                ](
+                                    active_scratch,
+                                    scalar_cache,
+                                    UInt32(current_rows),
+                                    UInt32(8192),
+                                    UInt32(iana_scalar_resources.batches),
+                                    UInt32(scalar_slot - 1),
+                                    grid_dim=(
+                                        iana_scalar_resources.batches + 255
+                                    )
+                                    // 256,
+                                    block_dim=256,
+                                )
+                                submissions += 2
+                            ctx.enqueue_function[row_program_iana](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                device_errors.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_literals.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                device_ranks.value().unsafe_ptr(),
+                                iana_replay.value().unsafe_ptr(),
+                                scalar_cache,
+                                active_scratch,
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(step.slot),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(plan.slots),
+                                UInt32(mask_base),
+                                UInt32.MAX,
+                                UInt32.MAX,
+                                UInt32.MAX,
+                                UInt32(8192),
+                                grid_dim=(current_rows + 255) // 256,
+                                block_dim=256,
+                            )
+                        else:
+                            ctx.enqueue_function[row_program_ordered](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                device_errors.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_literals.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                device_ranks.value().unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(step.slot),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(plan.slots),
+                                grid_dim=(current_rows + 255) // 256,
+                                block_dim=256,
+                            )
                         if ordered_rows:
                             ctx.enqueue_function[
                                 ordered_faults.observe_partials
@@ -2219,6 +2409,82 @@ def execute_plan(
                         downloaded += 8
                         waits += 1
                         if fault[0]:
+                            var category = ordered_faults.category(fault[0])
+                            if iana_certified and category > 64:
+                                var mask_base = -1
+                                for at in range(len(plan.steps)):
+                                    if plan.steps[at].start == step.start:
+                                        mask_base = program.iana_mask_bases[at]
+                                        break
+                                # Distinct existing control owners provide unused fallback
+                                # pointers when there are no scalar slots. Explicit erased
+                                # origins permit switching to the separately retained buffers.
+                                var scalar_cache: Pointer[
+                                    UInt8, MutAnyOrigin
+                                ] = (
+                                    ordered_partials.value()
+                                    .unsafe_ptr()
+                                    .unsafe_bitcast[UInt8]()
+                                    .unsafe_origin_cast[MutAnyOrigin]()
+                                )
+                                var active_scratch: Pointer[
+                                    UInt8, MutAnyOrigin
+                                ] = (
+                                    ordered_control.value()
+                                    .unsafe_ptr()
+                                    .unsafe_bitcast[UInt8]()
+                                    .unsafe_origin_cast[MutAnyOrigin]()
+                                )
+                                if iana_scalar_resources.cache_bytes:
+                                    scalar_cache = (
+                                        iana_scalar_cache.value()
+                                        .unsafe_ptr()
+                                        .unsafe_origin_cast[MutAnyOrigin]()
+                                    )
+                                    active_scratch = (
+                                        iana_active_scratch.value()
+                                        .unsafe_ptr()
+                                        .unsafe_origin_cast[MutAnyOrigin]()
+                                    )
+                                ctx.enqueue_function[row_program_iana](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    device_errors.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_literals.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    device_ranks.value().unsafe_ptr(),
+                                    iana_replay.value().unsafe_ptr(),
+                                    scalar_cache,
+                                    active_scratch,
+                                    UInt32(step.start),
+                                    UInt32(step.nodes),
+                                    UInt32(step.slot),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(plan.slots),
+                                    UInt32(mask_base),
+                                    ordered_faults.rank(fault[0]),
+                                    fault[1],
+                                    UInt32.MAX,
+                                    UInt32(8192),
+                                    grid_dim=1,
+                                    block_dim=1,
+                                )
+                                var detail = List[UInt64](length=3, fill=0)
+                                scope.read_control_into(
+                                    iana_replay.value(), detail
+                                )
+                                downloaded += 24
+                                waits += 1
+                                submissions += 1
+                                _raise_iana(
+                                    plan,
+                                    step.start,
+                                    step.nodes,
+                                    fault[0],
+                                    detail,
+                                )
                             raise_value_error(
                                 ordered_faults.category(fault[0]),
                                 "Mojo GPU arithmetic overflow or strict cast failed",
@@ -2509,6 +2775,9 @@ def execute_plan(
             _ = program^
             _ = slot_types^
             _ = device_ranks^
+            _ = iana_scalar_cache^
+            _ = iana_active_scratch^
+            _ = iana_replay^
             _ = ordered_control^
             _ = ordered_partials^
             _ = remap_owner^
@@ -2546,6 +2815,9 @@ def execute_plan(
     _ = device_key_values^
     _ = quantile_indices^
     _ = device_ranks^
+    _ = iana_scalar_cache^
+    _ = iana_active_scratch^
+    _ = iana_replay^
     _ = ordered_control^
     _ = ordered_partials^
     _ = remap_owner^
@@ -2680,3 +2952,61 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"
+
+
+def _raise_iana(
+    plan: RowPlan, start: Int, nodes: Int, token: UInt32, detail: List[UInt64]
+) raises:
+    var rank = ordered_faults.rank(token)
+    var status = ordered_faults.category(token) & 63
+    if detail[1] != UInt64(rank) or detail[2] != UInt64(status):
+        raise Error(
+            "IANA diagnostic replay did not reproduce the observed occurrence"
+        )
+    var node = -1
+    for at in range(start, start + nodes):
+        if plan.ordered_ranks[][at] == rank:
+            node = at
+            break
+    if node < 0 or plan.code[4 * node] != ROW_IANA_MUTATION:
+        raise Error("IANA diagnostic occurrence is invalid")
+    var base = Int(plan.code[4 * node + 2])
+    var dtype = plan.node_dtypes[node]
+    var name = dtype.time_zone()
+    if status == 7:
+        for at in range(len(plan.iana_descriptors)):
+            if plan.iana_descriptors[at] == base:
+                raise Error(plan.iana_diagnostics[at])
+        raise Error("IANA interval diagnostic is missing")
+    if status == 4:
+        raise Error("temporal value overflows Int64")
+    if status == 1:
+        raise Error(
+            "could not localize a shifted datetime to time zone '" + name + "'"
+        )
+    if status == 2 or status == 3:
+        raise Error(
+            "a shifted datetime is "
+            + ("non-existent" if status == 2 else "ambiguous")
+            + " in time zone '"
+            + name
+            + "'"
+        )
+    var wall = _naive_text(detail[0].cast[DType.int64](), dtype)
+    if status == 5:
+        raise Error(
+            "datetime '"
+            + wall
+            + "' is non-existent in time zone '"
+            + name
+            + "'; use non_existent='null' to return null instead"
+        )
+    if status == 6:
+        raise Error(
+            "datetime '"
+            + wall
+            + "' is ambiguous in time zone '"
+            + name
+            + "'; use ambiguous='earliest', 'latest' or 'null'"
+        )
+    raise Error("IANA diagnostic status is invalid")

@@ -463,7 +463,7 @@ reliance on hash uniqueness. A null is a key value of its own column: rows group
 together only when their nulls fall in the same key columns. Float64 keys treat
 every NaN as one value and `-0.0` as equal to `0.0`. The same layer, with nulls
 never matching, is used for joins. `GroupBy.len(name="len")` counts rows per
-group. `pixi run bench-group-by` reports cost by key count and cardinality.
+group.
 
 `agg` accepts aggregate-shaped expressions, including arithmetic on reductions;
 bare columns, literals alone, and mixed row/aggregate outputs are rejected.

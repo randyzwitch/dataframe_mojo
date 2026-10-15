@@ -2,6 +2,12 @@
 from dataframe.binding import BoundExpr, ROWS
 from dataframe.dtype import DataType
 from dataframe.expr import (
+    DT_REPLACE_TZ,
+    DT_TRUNCATE,
+    DT_OFFSET_BY,
+    DT_YEAR,
+    DT_TIME,
+    DT_CONVERT_TZ,
     Expr,
     Node,
     COL,
@@ -49,11 +55,11 @@ from dataframe.expr import (
     CLIP_HIGH,
     INT_IS_IN,
 )
-from . import temporal_expressions
+from . import temporal_expressions, iana_mutations
 from .integer_ranges import proven_integer_nodes
 
 
-def eligible(bound: BoundExpr) -> Bool:
+def eligible(bound: BoundExpr, allow_iana: Bool = False) -> Bool:
     """Exclude state phases and structural/dictionary operations, not data."""
     if bound.shape() != ROWS:
         return False
@@ -104,7 +110,19 @@ def eligible(bound: BoundExpr) -> Bool:
         INT_IS_IN,
     ]
     for index in range(len(bound.expr._nodes)):
-        if bound.expr._nodes[index].op not in supported:
+        if bound.expr._nodes[index].op not in supported and not (
+            allow_iana
+            and (
+                (
+                    bound.expr._nodes[index].op >= DT_YEAR
+                    and bound.expr._nodes[index].op <= DT_TIME
+                )
+                or bound.expr._nodes[index].op
+                in List[Int](
+                    [DT_REPLACE_TZ, DT_CONVERT_TZ, DT_TRUNCATE, DT_OFFSET_BY]
+                )
+            )
+        ):
             return False
         var dtype = bound.dtypes[index]
         if not (
@@ -116,7 +134,7 @@ def eligible(bound: BoundExpr) -> Bool:
 
 def needed(bound: BoundExpr) -> Bool:
     """Retain the ordinary route for infallible or single-fault expressions."""
-    if temporal_expressions.contains(bound):
+    if temporal_expressions.contains(bound) or iana_mutations.contains(bound):
         return True
     var checked = 0
     var proven = proven_integer_nodes(bound)

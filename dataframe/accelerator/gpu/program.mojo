@@ -17,6 +17,10 @@ from dataframe.expr import (
 from dataframe.accelerator.rows import RowPlan, ROW_IANA_ZONE_FIELDS
 from . import decimal_descriptors, statistics, quantiles
 from .residency import Table, Scope, checked_mul
+from dataframe.accelerator.iana_mutations import (
+    ROW_IANA_MUTATION,
+    validate_descriptor,
+)
 
 
 def kind(dtype: DataType) raises -> Int64:
@@ -50,6 +54,7 @@ struct Program(Movable):
     var node_types: List[Int64]
     var outputs: List[Int64]
     var ordered_ranks: ArcPointer[List[UInt32]]
+    var iana_mask_bases: List[Int]
     var has_statistics: Bool
     var has_quantiles: Bool
 
@@ -60,6 +65,7 @@ struct Program(Movable):
         scope: Optional[Scope] = None,
     ) raises:
         self.code = plan.code.copy()
+        self.iana_mask_bases = plan.iana_mask_bases.copy()
         self.ordered_ranks = plan.ordered_ranks.copy()
         self.literals = List[UInt64](
             capacity=len(plan.literals) + len(plan.zone_words)
@@ -90,6 +96,15 @@ struct Program(Movable):
         var ordinary_literals = len(self.literals)
         for node in range(len(plan.node_dtypes)):
             var op = self.code[4 * node]
+            if op == ROW_IANA_MUTATION:
+                if plan.ordered_mode != 5:
+                    raise Error(
+                        "IANA mutation cannot enter a legacy row program"
+                    )
+                validate_descriptor(
+                    plan.zone_words, Int(plan.code[4 * node + 2])
+                )
+                self.code[4 * node + 2] += Int64(ordinary_literals)
             if (
                 op >= DT_YEAR
                 and op <= DT_TIME
@@ -98,6 +113,14 @@ struct Program(Movable):
                 self.code[4 * node + 2] += Int64(ordinary_literals)
         for word in plan.zone_words:
             self.literals.append(word)
+        for base in plan.iana_descriptors:
+            for field in [2, 3, 4, 5]:
+                self.literals[ordinary_literals + base + field] += UInt64(
+                    ordinary_literals
+                )
+        for step in range(len(self.iana_mask_bases)):
+            if self.iana_mask_bases[step] >= 0:
+                self.iana_mask_bases[step] += ordinary_literals
         for descriptor in plan.category_sorts:
             var node = descriptor[0]
             var slot = descriptor[1]
