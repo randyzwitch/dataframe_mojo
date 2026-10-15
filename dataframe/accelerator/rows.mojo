@@ -238,7 +238,7 @@ struct RowPlan(Movable):
     # Shared immutable ranks avoid a second host payload during Program prep.
     var ordered_ranks: ArcPointer[List[UInt32]]
     # 0 legacy flags, 1 private CUT scalar, 2 direct terminal ROWS projections,
-    # 3 certified private IMPLODE ROWS producer.
+    # 3 certified private IMPLODE ROWS producer, 4 observed Decimal producer.
     var ordered_mode: Int
     var source_text: List[TextField]
     var output_text: List[TextField]
