@@ -13,6 +13,7 @@ from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
+from .target import METAL_TARGET
 from dataframe.accelerator.code_domains import (
     TextField,
     CategoryField,
@@ -52,8 +53,16 @@ def checked_mul(a: Int, b: Int) raises -> Int:
     return a * b
 
 
+# Metadata-only targets retain accounting and lease ownership without
+# instantiating an unavailable DeviceContext destructor. Real Metal keeps
+# the exact context owner type, including its queue lifetime and teardown.
+comptime _ContextCell = Optional[DeviceContext] if METAL_TARGET else Optional[
+    Int
+]
+
+
 struct _ScopeState(Movable):
-    var context: Optional[DeviceContext]
+    var context: _ContextCell
     var device: Int
     var budget: Int
     var live: Atomic[Int64]
@@ -95,22 +104,29 @@ struct Scope(Copyable):
         return self._state[].context_ready.load() != 0
 
     def context(self) raises -> DeviceContext:
-        # Arc ownership is immutable externally. This one protected cell is
-        # interior mutable so copied scopes initialize exactly the same queue.
-        var unlocked = Int64(0)
-        while not self._state[].context_lock.compare_exchange(unlocked, 1):
-            unlocked = 0
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
-        try:
-            if not state[].context:
-                state[].context = DeviceContext(state[].device, api="metal")
-                state[].context_ready.store(1)
-            var result = state[].context.value().copy()
-            state[].context_lock.store(0)
-            return result^
-        except error:
-            state[].context_lock.store(0)
-            raise error^
+        comptime if not METAL_TARGET:
+            raise Error(
+                "Mojo GPU resident context requires a compiled Metal target"
+            )
+        else:
+            # Arc ownership is immutable externally. This one protected cell is
+            # interior mutable so copied scopes initialize exactly the same queue.
+            var unlocked = Int64(0)
+            while not self._state[].context_lock.compare_exchange(unlocked, 1):
+                unlocked = 0
+            var state = Pointer(to=self._state[]).unsafe_origin_cast[
+                MutAnyOrigin
+            ]()
+            try:
+                if not state[].context:
+                    state[].context = DeviceContext(state[].device, api="metal")
+                    state[].context_ready.store(1)
+                var result = state[].context.value().copy()
+                state[].context_lock.store(0)
+                return result^
+            except error:
+                state[].context_lock.store(0)
+                raise error^
 
     def same_query(self, other: Self) -> Bool:
         return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
