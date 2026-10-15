@@ -181,7 +181,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable):
+struct PlanNode(Copyable, Deinitable, Movable):
     var kind: Int
     var left: Int
     var right: Int
@@ -212,6 +212,12 @@ struct PlanNode(Copyable):
     # Original grouped key domains survive whole-query code normalization.
     var grouped_keys: Optional[ArcPointer[KeyQuery]]
     var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def _record_execution(self):
         if self._executions:
@@ -1382,7 +1388,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable):
+struct LazyFrame(Copyable, Deinitable, Movable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
@@ -1407,6 +1413,12 @@ struct LazyFrame(Copyable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def __init__(out self, *, deinit move: Self):
         # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,

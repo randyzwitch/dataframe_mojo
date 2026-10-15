@@ -15,7 +15,7 @@ from .grouped_key_domains import KeyDomain, reservation, FIXED
 
 
 @fieldwise_init
-struct KeyQuery(Movable):
+struct KeyQuery(Deinitable, Movable):
     var query: LazyFrame
     var schema: DataFrame
     var domains: List[KeyDomain]
@@ -23,6 +23,12 @@ struct KeyQuery(Movable):
     var rows: Int
     var staging_bytes: Int
     var key_outputs: List[Int]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def __init__(out self, *, deinit move: Self):
         # Spell the move explicitly to break LazyFrame/PlanNode/KeyQuery's
