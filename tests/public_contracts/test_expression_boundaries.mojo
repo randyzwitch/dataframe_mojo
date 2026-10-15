@@ -1,6 +1,7 @@
 """Binding precedes evaluation; nested branches evaluate only selected rows."""
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
+from dataframe.execution import _total_cast
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
@@ -104,3 +105,112 @@ def test_binding_error_precedes_overflow_and_aggregate_conditions_keep_group_sha
     assert_equal(broadcast.height(), 4)
     for row in range(4):
         assert_equal(broadcast.item(row, "selected").int64(), Int64(-3))
+
+
+def test_masked_means_under_a_scalar_condition_and_total_strict_casts() raises:
+    # TPC-DS q9's shape: a scalar `when` choosing between the means of two
+    # null-otherwise conditionals, whose branches cast strictly to Float64.
+    # Plain, offset and chunked layouts give the same values; a strict
+    # narrowing cast still never raises on rows its predicate drops, even
+    # under the scalar branch that is not taken.
+    assert_true(_total_cast(DataType.FLOAT64, DataType.FLOAT64))
+    assert_true(_total_cast(DataType.INT64, DataType.FLOAT32))
+    assert_true(_total_cast(DataType.INT8, DataType.INT64))
+    assert_true(_total_cast(DataType.UINT32, DataType.INT64))
+    assert_true(_total_cast(DataType.UINT16, DataType.UINT16))
+    assert_true(not _total_cast(DataType.INT64, DataType.INT8))
+    assert_true(not _total_cast(DataType.UINT64, DataType.INT64))
+    assert_true(not _total_cast(DataType.INT16, DataType.UINT32))
+    assert_true(not _total_cast(DataType.FLOAT64, DataType.INT64))
+    var n = 300
+    var quantity = List[Int64]()
+    var quantity_valid = List[Bool]()
+    var paid = List[Float64]()
+    var paid_valid = List[Bool]()
+    var wide = List[Int64]()
+    for row in range(n):
+        quantity.append(Int64(row % 100))
+        quantity_valid.append(row % 17 != 4)
+        paid.append(Float64(row) * 0.5)
+        paid_valid.append(row % 11 != 6)
+        wide.append(Int64(row % 100) * 1000)
+    var raw = DataFrame(
+        [
+            Series("q", Column[Int64](quantity.copy(), quantity_valid.copy())),
+            Series("p", Column[Float64](paid.copy(), paid_valid.copy())),
+            Series("w", Column[Int64](wide^)),
+        ]
+    )
+    # The mean of p over valid rows with 20 <= q <= 39, and of q itself.
+    var p_total = Float64(0)
+    var p_count = 0
+    var q_total = Float64(0)
+    var q_count = 0
+    var banded = 0
+    for row in range(n):
+        if not quantity_valid[row] or quantity[row] < 20 or quantity[row] > 39:
+            continue
+        banded += 1
+        q_total += Float64(quantity[row])
+        q_count += 1
+        if paid_valid[row]:
+            p_total += paid[row]
+            p_count += 1
+    var band = col("q").is_between(lit(Int64(20)), lit(Int64(39)))
+    var flag = when(band.copy()).then(lit(Int64(1))).otherwise(lit(Int64(0)))
+    for layout in range(3):
+        var frame = (
+            raw.copy() if layout
+            == 0 else offset_layout(raw) if layout
+            == 1 else chunk_layout(raw)
+        )
+        for threshold in [Int64(0), Int64(1000)]:
+            var taken = Int64(banded) > threshold
+            var bucket = (
+                when(flag.copy().sum() > lit(threshold))
+                .then(
+                    when(band.copy())
+                    .then(col("p").cast(DataType.FLOAT64))
+                    .end()
+                    .mean()
+                )
+                .otherwise(
+                    when(band.copy())
+                    .then(col("q").cast(DataType.FLOAT64))
+                    .end()
+                    .mean()
+                )
+            )
+            # Only rows with q < 30 hold w below 30,000: the strict Int16
+            # cast overflows on every other row, which the predicate drops.
+            var narrow = (
+                when(flag.copy().sum() > lit(threshold))
+                .then(
+                    when(col("q") < lit(Int64(30)))
+                    .then(col("w").cast(DataType.INT16))
+                    .end()
+                    .max()
+                )
+                .otherwise(
+                    when(col("q") < lit(Int64(30)))
+                    .then(col("w").cast(DataType.INT16))
+                    .end()
+                    .min()
+                )
+            )
+            var actual = (
+                frame.lazy()
+                .select_exprs([bucket.alias("bucket"), narrow.alias("narrow")])
+                .collect()
+            )
+            var expected = (p_total / Float64(p_count)) if taken else (
+                q_total / Float64(q_count)
+            )
+            assert_true(
+                abs(actual.item(0, "bucket").float64() - expected) < 1e-9
+            )
+            assert_true(actual.column("narrow").dtype() == DataType.INT16)
+            assert_equal(
+                Int(actual.column("narrow")._data[Column[Int16]]._get(0)),
+                29000 if taken else 0,
+            )
