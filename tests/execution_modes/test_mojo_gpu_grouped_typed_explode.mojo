@@ -1,6 +1,14 @@
 """Literal typed grouped→EXPLODE oracles, including downstream consumers."""
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, DataType, Series, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Series,
+    StringColumn,
+    col,
+    lit,
+)
 from dataframe.dtype import CategoricalDictionary
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
@@ -25,6 +33,14 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
         var keys = _key(
             domain, [255, 1, 255, 1, 0], [True, True, True, True, False]
         )
+        if domain == STRING:
+            keys = Series(
+                "k",
+                StringColumn(
+                    ["é", "a\x00b", "é", "a\x00b", ""],
+                    [True, True, True, True, False],
+                ),
+            )
         var source = DataFrame(
             [keys, Series("v", Column[Int64]([10, 20, 30, 40, 50]))]
         )
@@ -40,6 +56,12 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
             result.column("items").int64().to_list(), [10, 30, 20, 40, 50]
         )
         assert_equal(result.column("k").dtype(), source.column("k").dtype())
+        assert_true(
+            result.column("k").equals(source.column("k").take([0, 2, 1, 3, 4]))
+        )
+        if domain == STRING:
+            var matched = _collect(expanded.filter(col("k") == lit("a\x00b")))
+            assert_equal(matched.column("items").int64().to_list(), [20, 40])
         var grouped = _collect(
             expanded.group_by("k", maintain_order=True).agg(
                 col("items").sum().alias("answer")
@@ -91,6 +113,14 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
             output.column("items").int64().to_list(), [10, 30, 20, 40, 50]
         )
         assert_equal(output.column("k").dtype(), frame.column("k").dtype())
+        if coded:
+            assert_true(not Bool(output.column("k")._dictionary_codes()))
+            assert_true(not Bool(output.column("k")._field_metadata))
+        else:
+            assert_true(
+                output.column("k").dtype().dictionary().ptr()
+                == category.dtype().dictionary().ptr()
+            )
         var grouped = _collect(
             expanded.group_by("k", maintain_order=True).agg(
                 col("items").sum().alias("answer")
