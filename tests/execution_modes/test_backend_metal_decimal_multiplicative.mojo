@@ -271,8 +271,11 @@ def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_an
         _ = product.collect(engine="cpu")
     with assert_raises(contains="decimal multiplication overflow"):
         _ = product.collect(accelerator=runtime)
-    with assert_raises(contains="checked decimal arithmetic"):
-        _ = product.head(1).collect(accelerator=runtime)
+    # The optimizer pushes this head before the row-local product.
+    same(
+        product.head(1).collect(accelerator=runtime),
+        product.head(1).collect(engine="cpu"),
+    )
     var masked = frame.lazy().select(
         when(col("p"))
         .then(col("a") * col("b"))
