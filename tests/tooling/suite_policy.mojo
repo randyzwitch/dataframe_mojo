@@ -3094,6 +3094,7 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_nested_boundaries.mojo",
                 "tests/planner_correctness/test_projection_union_pushdown.mojo",
                 "tests/planner_correctness/test_concurrent_inputs.mojo",
+                "tests/planner_correctness/test_join_tree_flattening.mojo",
                 "tests/planner_correctness/test_probe_key_reduction.mojo",
                 "tests/planner_correctness/test_relational.mojo",
                 "tests/planner_correctness/test_shared_aggregated_inputs.mojo",
