@@ -61,6 +61,24 @@ def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo::test_mojo_gpu_temporal_producer_head_order_group_faults_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo::test_mojo_gpu_temporal_producer_integer_prefix_sibling_order_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo::test_mojo_gpu_temporal_producer_scalar_any_streaming_batch_geometry",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_integer_candidate_scan_preserves_deferred_cut_controls",
             "mojo_gpu",
         )
@@ -2925,6 +2943,8 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_temporal_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo",
                 "tests/execution_modes/test_iana_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_iana_mutations.mojo",
                 "tests/execution_modes/test_mojo_gpu_iana_fields.mojo",
@@ -3330,6 +3350,15 @@ def production_policy() -> SuitePolicy:
     )
     policy.groups.append(
         ContractGroup(
+            "execution.iana_producers",
+            [
+                "tests/execution_modes/test_temporal_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
             "execution.iana",
             [
                 "tests/execution_modes/test_iana_metadata.mojo",
@@ -3361,6 +3390,8 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_temporal_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo",
                 "tests/execution_modes/test_iana_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_iana_mutations.mojo",
                 "tests/execution_modes/test_mojo_gpu_iana_fields.mojo",
