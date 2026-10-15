@@ -117,9 +117,15 @@ struct Scope(Copyable):
             ]()
             try:
                 if not state[].context:
-                    state[].context = DeviceContext(state[].device, api="metal")
+                    state[].context = _ContextCell(
+                        rebind[DeviceContext if METAL_TARGET else Int](
+                            DeviceContext(state[].device, api="metal")
+                        )
+                    )
                     state[].context_ready.store(1)
-                var result = state[].context.value().copy()
+                var result = rebind[DeviceContext](
+                    state[].context.value()
+                ).copy()
                 state[].context_lock.store(0)
                 return result^
             except error:
