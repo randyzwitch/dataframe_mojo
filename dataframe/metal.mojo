@@ -240,8 +240,9 @@ struct MetalRuntime(AcceleratorBackend):
             budget=self._budget,
         )
         if float_route:
+            var selected_float_route = float_route.take()
             return execute_float_stream(
-                float_route.value(),
+                selected_float_route,
                 self._device,
                 self._budget,
                 self._execution_settings.batch_size,

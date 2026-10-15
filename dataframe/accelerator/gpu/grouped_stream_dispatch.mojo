@@ -10,7 +10,7 @@ from .grouped_float_stream_query import execute_candidate as execute_basic
 
 
 def execute(
-    route: StreamRoute,
+    mut route: StreamRoute,
     device: Int,
     budget: Int,
     batch_size: Int,
@@ -52,6 +52,7 @@ def execute(
             fields.append(Series(name, Column[Int64]([Int64(0)])))
         return (result^, DataFrame(fields^))
     if route.family == BASIC:
+        var ranges = route.take_ranges()
         return execute_basic(
             route.query,
             device,
@@ -63,7 +64,7 @@ def execute(
             original_source=True,
             streaming=True,
             observation_only=observation_only,
-            captured_ranges=route.ranges,
+            captured_ranges=ranges,
             captured_flush_groups=route.flush_groups,
             captured_peak=route.capture_peak,
             started=started,

@@ -30,7 +30,7 @@ def execute_candidate(
     original_source: Bool = False,
     streaming: Bool = True,
     observation_only: Bool = False,
-    captured_ranges: List[UInt32] = List[UInt32](),
+    mut captured_ranges: List[UInt32],
     captured_flush_groups: Int = -1,
     captured_peak: Int = 0,
     started: Int = 0,
@@ -54,8 +54,7 @@ def execute_candidate(
     )
     # Bind the ordinary collected GPU path before any device submission.
     var collected = _preflight(
-        plan.source.source.clear()
-        .lazy()
+        plan.source.source.lazy()
         .group_by(plan.names, maintain_order=True)
         .agg(query._nodes[len(query._nodes) - 1].exprs),
         source_rows=plan.rows,
@@ -72,19 +71,23 @@ def execute_candidate(
         # Reuse the admitted main GPU implementation in the same Scope.
         # This preserves its behavior without asserting CPU-exact collected
         # floating association. Probe/capture/source costs remain visible.
+        # The sample and source observation have synchronized. End their
+        # transport/receipt lifetimes before the generic matrix is allocated,
+        # preserving main's tight budget instead of retaining both matrices.
+        # Reupload the immutable source through main's GPU executor; its
+        # traffic and the probe peak remain charged in this same Scope.
+        _ = source^
+        captured_ranges = List[UInt32]()
+        _ = captured_owner^
         var executed = execute_plan(
             collected,
             scope,
-            Optional(source.copy()),
+            None,
             profiling,
-            export_values=False,
+            export_values=not observation_only,
         )
         var resident = executed[0].copy()
         _ = executed^
-        # The generic executor synchronized its resident-input consumers.
-        # Release raw transport before final host export, including budgets
-        # with many small physical source chunks/range receipt entries.
-        _ = source^
         var result = plan.schema.clear()
         var host_bytes = 0
         if observation_only:
@@ -101,7 +104,6 @@ def execute_candidate(
             "mojo_gpu_collected_float_groups",
             observation_only,
         )
-        _ = captured_owner^
         return (result^, report^)
     # Feed copies are now needed. Reserve before constructing any of them.
     var feed_bytes = checked_mul(

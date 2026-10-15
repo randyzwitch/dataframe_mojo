@@ -27,6 +27,11 @@ struct StreamRoute(Copyable):
     var rows: Int
     var capture_peak: Int
 
+    def take_ranges(mut self) -> List[UInt32]:
+        var ranges = self.ranges^
+        self.ranges = List[UInt32]()
+        return ranges^
+
 
 def terminal_family(query: LazyFrame) raises -> Int:
     var original = query.copy()
