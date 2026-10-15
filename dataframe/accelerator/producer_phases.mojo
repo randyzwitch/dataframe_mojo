@@ -229,6 +229,13 @@ def _source_layout(column: Series) raises -> String:
     )
 
 
+def _append_names(mut result: String, names: List[String]):
+    # Borrow each plane directly; preserve its field order and trailing marker.
+    for name in names:
+        result += _field(name)
+    result += ";"
+
+
 def _controls(node: PlanNode) -> String:
     var result = String("")
     if node._executions:
@@ -236,7 +243,7 @@ def _controls(node: PlanNode) -> String:
             Int(Pointer(to=node._executions.value()[]))
         )
     if node.asof_tolerance:
-        var tolerance = node.asof_tolerance.value()
+        ref tolerance = node.asof_tolerance.value()
         result += (
             ";tolerance="
             + _field(tolerance.dtype().name())
@@ -280,10 +287,9 @@ def _phase_geometry(node: PlanNode) -> String:
         + String(node.coalesce)
         + _field(node.source_failure)
     )
-    for names in [node.names, node.names2, node.right_keys]:
-        for name in names:
-            result += _field(name)
-        result += ";"
+    _append_names(result, node.names)
+    _append_names(result, node.names2)
+    _append_names(result, node.right_keys)
     for flag in node.flags:
         result += String(flag) + ","
     result += _controls(node)
@@ -321,10 +327,9 @@ def _prefix_signature(query: LazyFrame, index: Int) raises -> String:
         + _field(node.source_failure)
         + _field(node.text)
     )
-    for names in [node.names, node.names2, node.right_keys]:
-        for name in names:
-            result += _field(name)
-        result += ";"
+    _append_names(result, node.names)
+    _append_names(result, node.names2)
+    _append_names(result, node.right_keys)
     for flag in node.flags:
         result += String(flag) + ","
     for expression in node.exprs:
