@@ -39,6 +39,20 @@ def _report(scope: Scope, input: Table, result: Table, before: Tuple[Int, Int, I
     return report.with_column(Series("algorithm", Column[String](["mojo_gpu_partition_bins_ranked_faults"])))
 
 
+def _finish_lookup(mut reservation: _Reservation, expected_bytes: Int) raises:
+    # This exact owner is used after result/report construction. Mojo's ASAP
+    # destruction therefore cannot release its budget during key construction,
+    # layout, operand evaluation, binning, or resident output append.
+    if reservation.bytes != expected_bytes:
+        raise Error("Partition CUT lookup reservation ownership changed")
+    var live = reservation.scope.info()[0]
+    if live < expected_bytes:
+        raise Error("Partition CUT lookup reservation was not retained live")
+    reservation.release(expected_bytes)
+    if reservation.scope.info()[0] != live - expected_bytes:
+        raise Error("Partition CUT lookup reservation release changed live bytes")
+
+
 def preflight(query: LazyFrame) raises -> Capture:
     if not is_marker(query) or len(query._nodes) != 2:
         raise Error("Partition CUT requires an isolated resident state marker")
@@ -288,7 +302,10 @@ def execute_plan(
     if saved.numeric_state:
         var output = execute_numeric(operand, layout, scope, saved.operand_dtype, category)
         var result = _append(input, output, scope)
-        return (result.copy(), _report(scope, input, result, before, started, False))
+        var report = _report(scope, input, result, before, started, False)
+        _finish_lookup(lookup_reservation, lookup_owner_bytes)
+        _ = lookup_reservation^
+        return (result.copy(), report^)
     var output = execute_default(
         operand,
         layout,
@@ -305,7 +322,7 @@ def execute_plan(
         custom_domain=custom,
     )
     var result = _append(input, output, scope)
-    return (
-        result.copy(),
-        _report(scope, input, result, before, started, saved.qcut),
-    )
+    var report = _report(scope, input, result, before, started, saved.qcut)
+    _finish_lookup(lookup_reservation, lookup_owner_bytes)
+    _ = lookup_reservation^
+    return (result.copy(), report^)

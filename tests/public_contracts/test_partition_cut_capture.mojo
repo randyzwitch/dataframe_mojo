@@ -98,3 +98,32 @@ def test_partition_nested_scope_cache_entry_snapshots() raises:
     assert_equal(markers, 3)
     assert_equal(entering, 1)
     assert_equal(numeric, 1)
+
+
+def test_partition_lookup_reservation_retained_live_witness() raises:
+    from dataframe.accelerator.gpu.residency import Scope
+    from dataframe.accelerator.gpu.ranked_rows import _Reservation
+    from dataframe.accelerator.gpu.partition_runtime import _finish_lookup
+
+    # No context can be initialized here, even on a machine without Metal.
+    var scope = Scope(999999, budget=31)
+    var other = _Reservation(scope, 7)
+    var lookup = _Reservation(scope, 24)
+    assert_equal(scope.info()[0], 31)
+    with assert_raises(contains="exceeds memory budget before submission"):
+        _ = scope.check(1)
+    # Reading the exact owner after the simulated work is the lifetime witness;
+    # a lexical local alone would allow Mojo's ASAP destruction before work.
+    _finish_lookup(lookup, 24)
+    assert_equal(lookup.bytes, 0)
+    assert_equal(scope.info()[0], 7)
+    assert_equal(scope.info()[1], 31)
+    _ = lookup^
+    _finish_lookup(other, 7)
+    _ = other^
+    assert_equal(scope.info()[0], 0)
+    assert_false(scope.initialized())
+    var empty = _Reservation(scope, 0)
+    _finish_lookup(empty, 0)
+    _ = empty^
+    assert_equal(scope.info()[0], 0)

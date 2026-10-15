@@ -14,6 +14,7 @@ from tests.execution_modes.test_mojo_gpu_partition_cuts import (
 from tests.public_contracts.test_partition_cut_capture import (
     test_partition_cut_capture_keeps_original_controls_and_eager_state as capture,
     test_partition_nested_scope_cache_entry_snapshots as cache,
+    test_partition_lookup_reservation_retained_live_witness as lookup_owner,
 )
 
 
@@ -36,7 +37,8 @@ def main() raises:
     try:
         capture()
         cache()
-        print("PASS public partition original certificates and cache snapshots", flush=True)
+        lookup_owner()
+        print("PASS public partition original certificates, cache snapshots, and retained lookup owner", flush=True)
     except error:
         failures += 1
         print("FAIL public partition metadata", String(error), flush=True)
