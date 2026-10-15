@@ -37,6 +37,7 @@ from . import asof_runtime as asof
 from .residency import Scope, Table
 from .resident_fields import ResidentFrame
 from . import source_fields
+from .producer_phases_runtime import MetadataReservation
 from . import explode
 
 
@@ -75,6 +76,13 @@ def preflight(
             var plan = rows._preflight(
                 task.query, terminal_boundary=task.terminal
             )
+            if plan.ordered_mode == 6 and (
+                not plan.producer_region
+                or plan.producer_region.value()[].source_task != task.source
+            ):
+                raise Error(
+                    "Observed temporal producer planned input lineage differs"
+                )
             if task.source >= 0:
                 if plan.ordered_mode == 2:
                     raise Error(
@@ -181,6 +189,7 @@ def execute(
     var started = Int(perf_counter_ns())
     var dag = preflight(query, capabilities)
     var scope = Scope(device_id, budget)
+    var producer_metadata = MetadataReservation(scope, dag)
     var base_domain = Optional[ArcPointer[TextDomain]]()
     if text_context:
         base_domain = ArcPointer(
@@ -567,6 +576,7 @@ def execute(
             ),
         )
     )
+    _ = producer_metadata^
     return (result^, report^)
 
 

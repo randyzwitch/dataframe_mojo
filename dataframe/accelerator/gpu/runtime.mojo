@@ -559,7 +559,9 @@ def _preflight(
                     plan.zone_words, Int(plan.code[4 * node + 2])
                 )
             if op == Int(ROW_IANA_MUTATION):
-                if plan.ordered_mode != 5 or plan.code[4 * node + 2] < 0:
+                if (
+                    plan.ordered_mode != 5 and plan.ordered_mode != 6
+                ) or plan.code[4 * node + 2] < 0:
                     raise Error(
                         "Mojo GPU IANA mutation requires an occurrence-certified phase"
                     )
@@ -747,7 +749,7 @@ def _quantile_indices(plan: RowPlan) -> Bool:
 
 def _iana_scalar_slots(plan: RowPlan) raises -> Int:
     var slots = 0
-    if plan.ordered_mode == 5:
+    if plan.ordered_mode == 5 or plan.ordered_mode == 6:
         for at in range(len(plan.steps)):
             slots = max(
                 slots,
@@ -886,11 +888,11 @@ def estimate_resources(
     # Program host tail and device tail are in program_bytes above. Keep the
     # captured host zone owner too; empty execution still creates two host tails.
     var captured_zone_bytes = _checked_mul(
-        plan.zone_words.capacity() if plan.ordered_mode
-        == 5 else len(plan.zone_words),
+        plan.zone_words.capacity() if plan.ordered_mode == 5
+        or plan.ordered_mode == 6 else len(plan.zone_words),
         8,
     )
-    if plan.ordered_mode == 5:
+    if plan.ordered_mode == 5 or plan.ordered_mode == 6:
         var scalar_workspace = iana_scalar_scopes.resources(
             rows, _iana_scalar_slots(plan)
         )
@@ -913,6 +915,7 @@ def estimate_resources(
             or plan.ordered_mode == 3
             or plan.ordered_mode == 4
             or plan.ordered_mode == 5
+            or plan.ordered_mode == 6
         ):
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
@@ -1001,7 +1004,7 @@ def estimate_resources(
                 + 3 * Int(has_quantiles)
                 + Int(has_float_sums),
             )
-    if rows and plan.ordered_mode == 5:
+    if rows and (plan.ordered_mode == 5 or plan.ordered_mode == 6):
         for at in range(len(plan.steps)):
             launches = _checked_add(
                 launches,
@@ -1017,7 +1020,11 @@ def estimate_resources(
     if rows and len(plan.ordered_ranks[]):
         var observations = 2 if plan.ordered_mode == 1 else len(
             plan.steps
-        ) + Int(plan.ordered_mode == 3 or plan.ordered_mode == 4)
+        ) + Int(
+            plan.ordered_mode == 3
+            or plan.ordered_mode == 4
+            or plan.ordered_mode == 6
+        )
         launches = _checked_add(
             launches,
             observations
@@ -1025,7 +1032,8 @@ def estimate_resources(
                 2 if plan.ordered_mode == 2
                 or plan.ordered_mode == 3
                 or plan.ordered_mode == 4
-                or plan.ordered_mode == 5 else 1
+                or plan.ordered_mode == 5
+                or plan.ordered_mode == 6 else 1
             ),
         )
         waits = _checked_add(waits, observations)
@@ -1160,11 +1168,17 @@ def execute_plan(
         resident_input.value().rows if resident_input else plan.source.height()
     )
     var ordered_scalar = plan.ordered_mode == 1
-    var iana_certified = plan.ordered_mode == 5
-    var ordered_terminal = plan.ordered_mode == 2 or iana_certified
+    var observed_producer = plan.ordered_mode == 6
+    var iana_certified = plan.ordered_mode == 5 or observed_producer
+    var ordered_terminal = plan.ordered_mode == 2 or plan.ordered_mode == 5
     var ordered_private = plan.ordered_mode == 3
     var ordered_decimal = plan.ordered_mode == 4
-    var ordered_rows = ordered_terminal or ordered_private or ordered_decimal
+    var ordered_rows = (
+        ordered_terminal
+        or ordered_private
+        or ordered_decimal
+        or observed_producer
+    )
     var ordered = ordered_scalar or ordered_rows
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
@@ -1205,6 +1219,18 @@ def execute_plan(
         raise Error(
             "Mojo GPU ordered decimal requires an observed row producer"
         )
+    if observed_producer and (
+        not terminal_boundary
+        or plan.limit >= 0
+        or plan.reductions
+        or not plan.producer_region
+        or len(plan.steps) < 1
+    ):
+        raise Error("Mojo GPU observed temporal producer proof is missing")
+    if observed_producer and Bool(resident_input) != (
+        plan.producer_region.value()[].source_task >= 0
+    ):
+        raise Error("Mojo GPU observed temporal producer input lineage differs")
     if ordered_scalar and (
         rows != 1
         or plan.reductions
@@ -1432,7 +1458,7 @@ def execute_plan(
                             raise Error(
                                 "Mojo GPU ordered scalar requires already observed successful inputs"
                             )
-                    if ordered_private or ordered_decimal:
+                    if ordered_private or ordered_decimal or observed_producer:
                         # Input cells are ordinary flags from an already
                         # observed producer. Prove every staged source cell is
                         # zero before any kernel can interpret ranked tokens.
