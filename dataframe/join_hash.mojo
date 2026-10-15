@@ -848,6 +848,7 @@ struct _HashProbeJob(Job):
     # The build keys' bits (`PreparedHashIndex.filter`), empty for none.
     var filter: ArcPointer[List[UInt64]]
     var filter_base: Int64
+    var bloom: ArcPointer[List[UInt64]]
 
     def __init__(
         out self,
@@ -863,6 +864,7 @@ struct _HashProbeJob(Job):
         membership: Int = -1,
         filter: ArcPointer[List[UInt64]] = ArcPointer(List[UInt64]()),
         filter_base: Int64 = 0,
+        bloom: ArcPointer[List[UInt64]] = ArcPointer(List[UInt64]()),
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
@@ -888,6 +890,7 @@ struct _HashProbeJob(Job):
         )
         self.filter = filter.copy()
         self.filter_base = filter_base
+        self.bloom = bloom.copy()
 
     def run_membership(mut self) raises:
         """Semi (membership == 1) or anti (0): each left row at most once,
@@ -902,6 +905,13 @@ struct _HashProbeJob(Job):
                         var all_valid = len(probe._bits[]) == 0
                         var bits = Int(self.filter[].unsafe_ptr())
                         var words = len(self.filter[])
+                        var bloom = Int(self.bloom[].unsafe_ptr())
+                        var bloom_words = len(self.bloom[])
+                        # Keys tested and passed: a filter passing over half
+                        # its first trial's keys stops being tested (DuckDB
+                        # switches its join Bloom filter off the same way).
+                        var tested = 0
+                        var passed = 0
                         for i in range(self.start, self.end):
                             var matched = False
                             comptime if D == DType.int64:
@@ -919,7 +929,19 @@ struct _HashProbeJob(Job):
                                 var key = _int_word[D](probe._get(i))
                                 var hash = _mix(key)
                                 var bucket = Int(hash >> 56) >> self.fold
-                                matched = (
+                                var absent = False
+                                comptime if D == DType.int64:
+                                    if bloom_words > 0:
+                                        absent = _bloom_clear(
+                                            bloom, bloom_words, hash
+                                        )
+                                        tested += 1
+                                        passed += Int(not absent)
+                                        if tested == _BLOOM_TRIAL and (
+                                            2 * passed > tested
+                                        ):
+                                            bloom_words = 0
+                                matched = not absent and (
                                     _int64_probe_slot(
                                         self.buckets[][bucket], hash, key
                                     )
@@ -997,6 +1019,13 @@ struct _HashProbeJob(Job):
                         var buckets = self.buckets[].unsafe_ptr()
                         var bits = Int(self.filter[].unsafe_ptr())
                         var words = len(self.filter[])
+                        var bloom = Int(self.bloom[].unsafe_ptr())
+                        var bloom_words = len(self.bloom[])
+                        # Keys tested and passed: a filter passing over half
+                        # its first trial's keys stops being tested (DuckDB
+                        # switches its join Bloom filter off the same way).
+                        var tested = 0
+                        var passed = 0
                         for i in range(self.start, self.end):
                             if not (left_all_valid or left._valid(i)):
                                 if self.include_unmatched:
@@ -1016,6 +1045,22 @@ struct _HashProbeJob(Job):
                                     continue
                             var key = _int_word[D](keys.unsafe_offset(i)[])
                             var hash = _mix(key)
+                            comptime if D == DType.int64:
+                                if bloom_words > 0:
+                                    var absent = _bloom_clear(
+                                        bloom, bloom_words, hash
+                                    )
+                                    tested += 1
+                                    passed += Int(not absent)
+                                    if tested == _BLOOM_TRIAL and (
+                                        2 * passed > tested
+                                    ):
+                                        bloom_words = 0
+                                    if absent:
+                                        if self.include_unmatched:
+                                            self.left_rows.append(i)
+                                            self.right_rows.append(-1)
+                                        continue
                             var bucket = Int(hash >> 56) >> self.fold
                             ref index = buckets.unsafe_offset(bucket)[]
                             var hit = _tagged_probe(index, hash, key)
@@ -1233,6 +1278,10 @@ struct PreparedHashIndex(Copyable):
     # DuckDB pushes one into a join's probe side).
     var filter: ArcPointer[List[UInt64]]
     var filter_base: Int64
+    # Where the key's span is too wide for those bits: a blocked Bloom
+    # filter of its values' hashes (DuckDB's join Bloom filter), a power of
+    # two of words; empty for none.
+    var bloom: ArcPointer[List[UInt64]]
 
     @always_inline
     def progression_row(self, value: Int64, right_count: Int) -> Int:
@@ -1399,6 +1448,51 @@ def _key_bits(key: Series) raises -> Optional[Tuple[Int64, List[UInt64]]]:
     return (least, words^)
 
 
+def _key_bloom(key: Series) raises -> List[UInt64]:
+    """A blocked Bloom filter of an Int64 build key's valid values: 16 to
+    32 bits a key in a power of two of words, two bits a key in the word
+    its hash picks (`_bloom_clear`); empty when that does not fit in half
+    a core's L2 cache, where fewer bits a key would pass too many absent
+    keys to pay for the build (H2O join q5's 10M keys, 11% slower)."""
+    var flat = key.rechunk() if key.is_chunked() else key.copy()
+    ref column = flat._data[Column[Int64]]
+    var values = column._ptr()
+    var n = len(column)
+    var all_valid = column.null_count() == 0
+    var words = 1
+    while 4 * words < n:
+        words *= 2
+    if 8 * words > _l2_cache_bytes() // 2:
+        return List[UInt64]()
+    var filter = List[UInt64](length=words, fill=0)
+    var bits = filter.unsafe_ptr()
+    var mask = UInt64(words - 1)
+    for i in range(n):
+        if all_valid or column._valid(i):
+            var hash = _mix(_int_word[DType.int64](values[unsafe_offset=i]))
+            bits[unsafe_offset=Int((hash >> 32) & mask)] |= (
+                UInt64(1) << ((hash >> 20) & 63)
+            ) | (UInt64(1) << ((hash >> 26) & 63))
+    return filter^
+
+
+# Probes tested before a worker judges its Bloom filter's selectivity.
+comptime _BLOOM_TRIAL = 2048
+
+
+@always_inline
+def _bloom_clear(bloom: Int, words: Int, hash: UInt64) -> Bool:
+    """Whether a key of this hash is certainly not a build key
+    (`_key_bloom`, at address `bloom`)."""
+    var word = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=bloom)[
+        unsafe_offset=Int((hash >> 32) & UInt64(words - 1))
+    ]
+    var wanted = (UInt64(1) << ((hash >> 20) & 63)) | (
+        UInt64(1) << ((hash >> 26) & 63)
+    )
+    return word & wanted != wanted
+
+
 @always_inline
 def _key_bit_clear(bits: Int, words: Int, base: Int64, key: Int64) -> Bool:
     """Whether `key` is certainly not a build key (`_key_bits`, at address
@@ -1476,6 +1570,7 @@ def prepare_progression_index(
         ArcPointer(List[Int32]()),
         ArcPointer(List[UInt64]()),
         0,
+        ArcPointer(List[UInt64]()),
     )
 
 
@@ -1513,6 +1608,7 @@ def prepare_hash_index(
             ArcPointer(List[Int32]()),
             ArcPointer(List[UInt64]()),
             0,
+            ArcPointer(List[UInt64]()),
         )
     if (
         allow_progression
@@ -1533,6 +1629,7 @@ def prepare_hash_index(
                 ArcPointer(made[1].copy()),
                 ArcPointer(List[UInt64]()),
                 0,
+                ArcPointer(List[UInt64]()),
             )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     # Enough buckets that each one's slot table fits a core's L2 cache:
@@ -1591,6 +1688,7 @@ def prepare_hash_index(
         fold -= 1
     var filter = List[UInt64]()
     var filter_base = Int64(0)
+    var bloom = List[UInt64]()
     if (
         len(right) == 1
         and right[0].dtype().physical() == DataType.INT64
@@ -1600,6 +1698,8 @@ def prepare_hash_index(
         if bits:
             filter_base = bits.value()[0]
             filter = bits.value()[1].copy()
+        else:
+            bloom = _key_bloom(right[0])
     return PreparedHashIndex(
         right^,
         ArcPointer(indexes^),
@@ -1610,6 +1710,7 @@ def prepare_hash_index(
         ArcPointer(List[Int32]()),
         ArcPointer(filter^),
         filter_base,
+        ArcPointer(bloom^),
     )
 
 
@@ -1672,6 +1773,7 @@ def prepared_hash_semi_anti_rows(
                 membership=1 if keep_matches else 0,
                 filter=prepared.filter,
                 filter_base=prepared.filter_base,
+                bloom=prepared.bloom,
             )
         )
     run_jobs(jobs)
@@ -1893,6 +1995,7 @@ def prepared_hash_join_rows(
                 omit_identity,
                 filter=prepared.filter,
                 filter_base=prepared.filter_base,
+                bloom=prepared.bloom,
             )
         )
     run_jobs(jobs)

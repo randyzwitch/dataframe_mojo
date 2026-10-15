@@ -1,4 +1,5 @@
 """Prepared hash, bounded membership and physical build routes retain typed rows."""
+from std.collections import Dict
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
@@ -521,3 +522,69 @@ def test_build_key_bits_reject_only_absent_keys_in_joins_semi_and_anti() raises:
         [build.copy()], allow_progression=False, probe_rows=10
     )
     assert_equal(len(small.filter[]), 0)
+
+
+def bloom_case(probe_values: List[Int64], probe_valid: List[Bool]) raises:
+    # Build keys over a span far past the cache's bits: a Bloom filter.
+    var build_values = List[Int64]()
+    var build_valid = List[Bool]()
+    for i in range(3000):
+        build_values.append(Int64(i) * 1_000_003 - 7)
+        build_valid.append(i % 89 != 4)
+    build_values.append(Int64(5) * 1_000_003 - 7)
+    build_valid.append(True)
+    var build = Series(
+        "k", Column[Int64](build_values.copy(), build_valid.copy())
+    )
+    var probe = Series(
+        "k", Column[Int64](probe_values.copy(), probe_valid.copy())
+    )
+    var prepared = prepare_hash_index(
+        [build.copy()], allow_progression=False, probe_rows=len(probe)
+    )
+    assert_equal(len(prepared.filter[]), 0)
+    assert_true(len(prepared.bloom[]) > 0, "no Bloom filter was made")
+    var counts = Dict[Int64, Int]()
+    for j in range(len(build_values)):
+        if build_valid[j]:
+            counts[build_values[j]] = counts.get(build_values[j], 0) + 1
+    var semi = List[Int]()
+    var anti = List[Int]()
+    var expected = 0
+    for i in range(len(probe_values)):
+        var count = counts.get(probe_values[i], 0) if probe_valid[i] else 0
+        expected += count
+        if count > 0:
+            semi.append(i)
+        else:
+            anti.append(i)
+    var rows = prepared_hash_join_rows([probe.copy()], prepared, False)
+    assert_equal(len(rows[1]), expected)
+    for k in range(len(rows[1])):
+        assert_equal(build_values[rows[1][k]], probe_values[rows[0][k]])
+        assert_true(build_valid[rows[1][k]])
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], prepared, True), semi
+    )
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], prepared, False), anti
+    )
+
+
+def test_wide_build_keys_take_a_bloom_filter_that_rejects_only_absent_keys() raises:
+    # Mostly absent probe keys (the filter stays on) and mostly present
+    # ones (it passes over half its trial and is switched off): either way
+    # every match, semi and anti row is the scalar scan's.
+    var sparse = List[Int64]()
+    var sparse_valid = List[Bool]()
+    var dense = List[Int64]()
+    var dense_valid = List[Bool]()
+    for i in range(30_000):
+        sparse.append(
+            Int64(i % 3000) * 1_000_003 - 7 if i % 23 == 0 else Int64(i * 31)
+        )
+        sparse_valid.append(i % 157 != 3)
+        dense.append(Int64((i * 7) % 3000) * 1_000_003 - 7)
+        dense_valid.append(i % 157 != 3)
+    bloom_case(sparse, sparse_valid)
+    bloom_case(dense, dense_valid)
