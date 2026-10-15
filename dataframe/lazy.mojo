@@ -38,8 +38,6 @@ from .io.csv_reader import _CsvBatches, _DecodeJob
 from .io.csv_types import _map_file
 from .io.parquet import _ParquetBatches
 from .pipeline import (
-    _BOUND_FLOAT,
-    _BOUND_INT,
     _BOUND_NONE,
     _TopBound,
     _int_bounds,
@@ -117,7 +115,6 @@ from .expr import (
 from .aggregate_table import reduction_supported
 from .frame import (
     DataFrame,
-    GroupBy,
     _bind_all,
     _row_local,
     _stream_reductions,

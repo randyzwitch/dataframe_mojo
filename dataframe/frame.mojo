@@ -14,10 +14,10 @@ from .window import partitions as window_partitions
 from .dtype import DataType
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
-from std.memory import ArcPointer, Pointer, unsafe_memcpy
+from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn, both_true, true_count
-from .column import Column, _append_validity, _pack_bits
-from .string_column import StringColumn, StringBuilder
+from .column import Column, _pack_bits
+from .string_column import StringColumn
 from .series import Series, sort_indices, smallest_indices
 from .fused_compare import (
     SelectionTree,
@@ -274,9 +274,6 @@ def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
             k += 1
         columns.append(Series(prefix, StructColumn(fields^, bits^)))
     return DataFrame(columns^, height=frame.height())
-
-
-from .reductions import FloatSumState
 
 
 @fieldwise_init
@@ -4658,7 +4655,6 @@ struct _CSRFillJob(Job):
     """Fill the final CSR groups for one disjoint contiguous id range."""
 
     var ids: Int
-    var starts: Int
     var order: Int
     var output: Int
     var first: Int
@@ -4669,7 +4665,6 @@ struct _CSRFillJob(Job):
     def __init__(
         out self,
         ids: Int,
-        starts: Int,
         order: Int,
         output: Int,
         first: Int,
@@ -4678,7 +4673,6 @@ struct _CSRFillJob(Job):
         var cursor: List[Int],
     ):
         self.ids = ids
-        self.starts = starts
         self.order = order
         self.output = output
         self.first = first
@@ -4768,7 +4762,6 @@ def _parallel_group_rows(
         fills.append(
             _CSRFillJob(
                 Int(Pointer(to=ids)),
-                Int(Pointer(to=starts)),
                 Int(Pointer(to=order)),
                 Int(Pointer(to=flat)),
                 bucket_starts[bucket],
@@ -5144,152 +5137,6 @@ def _joint_key_ids(
         else:
             right_ids.append(keys.ids[i])
     return (left_ids^, right_ids^, keys.count())
-
-
-comptime _CONCAT_COLUMN = 0
-comptime _CONCAT_STRING_BYTES = 1
-comptime _CONCAT_STRING_OFFSETS = 2
-comptime _CONCAT_STRING_BITS = 3
-
-
-struct _ConcatJob(Job):
-    """Build one fixed column or one independent string-buffer part."""
-
-    var frames: ArcPointer[List[DataFrame]]
-    var column: Int
-    var part: Int
-    var result: Series
-    var bytes: List[UInt8]
-    var offsets: List[Int64]
-    var bits: List[UInt8]
-
-    def __init__(
-        out self, frames: ArcPointer[List[DataFrame]], column: Int, part: Int
-    ):
-        self.frames = frames.copy()
-        self.column = column
-        self.part = part
-        self.result = frames[][0]._columns[column].copy()
-        self.bytes = List[UInt8]()
-        self.offsets = List[Int64]()
-        self.bits = List[UInt8]()
-
-    def run(mut self) raises:
-        if self.part == _CONCAT_COLUMN:
-            _concat_column(self.frames[], self.column, self.result)
-        elif self.part == _CONCAT_STRING_BYTES:
-            self.bytes = _concat_string_bytes(self.frames[], self.column)
-        elif self.part == _CONCAT_STRING_OFFSETS:
-            self.offsets = _concat_string_offsets(self.frames[], self.column)
-        else:
-            self.bits = _concat_string_bits(self.frames[], self.column)
-
-    def into_column(deinit self) -> Series:
-        return self.result^
-
-    def into_bytes(deinit self) -> List[UInt8]:
-        return self.bytes^
-
-    def into_offsets(deinit self) -> List[Int64]:
-        return self.offsets^
-
-    def into_bits(deinit self) -> List[UInt8]:
-        return self.bits^
-
-
-def _concat_string_bytes(frames: List[DataFrame], column: Int) -> List[UInt8]:
-    var total = 0
-    for f in range(len(frames)):
-        total += frames[f]._columns[column]._text_bytes()
-    var bytes = List[UInt8](capacity=total)
-    for f in range(len(frames)):
-        ref source = frames[f]._columns[column]._data[StringColumn]
-        if len(source) == 0:
-            continue
-        var first = source._start(0)
-        var count = source._value_bytes()
-        bytes.extend(
-            Span[UInt8, ImmutAnyOrigin](
-                unsafe_ptr=source.unsafe_bytes().unsafe_offset(first),
-                length=count,
-            )
-        )
-    return bytes^
-
-
-def _concat_string_offsets(frames: List[DataFrame], column: Int) -> List[Int64]:
-    var rows = 0
-    for f in range(len(frames)):
-        rows += frames[f].height()
-    var offsets = List[Int64](capacity=rows + 1)
-    offsets.append(0)
-    var bytes = 0
-    for f in range(len(frames)):
-        ref source = frames[f]._columns[column]._data[StringColumn]
-        var count = len(source)
-        if count == 0:
-            continue
-        var first = source._start(0)
-        var target = len(offsets)
-        offsets.resize(target + count, 0)
-        var incoming = source.unsafe_offsets().unsafe_offset(
-            source.validity_offset() + 1
-        )
-        var destination = offsets.unsafe_ptr().unsafe_offset(target)
-        var shift = Int64(bytes - first)
-        var i = 0
-        var shifts = SIMD[DType.int64, 4](shift)
-        while i + 4 <= count:
-            destination.unsafe_store[width=4](
-                i, incoming.unsafe_load[width=4](i) + shifts
-            )
-            i += 4
-        while i < count:
-            offsets[target + i] = incoming.unsafe_load(i) + shift
-            i += 1
-        bytes += source._value_bytes()
-    return offsets^
-
-
-def _concat_string_bits(frames: List[DataFrame], column: Int) -> List[UInt8]:
-    var rows = 0
-    for f in range(len(frames)):
-        rows += frames[f].height()
-    var bits = List[UInt8](capacity=(rows + 7) // 8)
-    var offset = 0
-    for f in range(len(frames)):
-        ref source = frames[f]._columns[column]._data[StringColumn]
-        var count = len(source)
-        _append_validity(
-            bits,
-            offset,
-            source._bits[],
-            source.validity_offset(),
-            count,
-        )
-        offset += count
-    return bits^
-
-
-def _concat_column(
-    frames: List[DataFrame], column: Int, mut into: Series
-) raises:
-    """Append one column of every frame after the first, into `into`.
-
-    The final height and text size are both known from the inputs, so the
-    output is sized once here. Letting it grow geometrically instead copied
-    the whole column again on every doubling: reassembling 1M rows of 8
-    columns from 32 ranges of a parallel CSV read took 21 ms that way and
-    7 ms this way.
-    """
-    var rows = 0
-    var text_bytes = 0
-    for f in range(len(frames)):
-        rows += frames[f].height()
-        text_bytes += frames[f]._columns[column]._text_bytes()
-    into._reserve_rows(rows, text_bytes)
-    for f in range(1, len(frames)):
-        into._append_series(frames[f]._columns[column])
 
 
 def _shared_dictionaries(
@@ -5797,12 +5644,6 @@ struct GroupBy(Copyable):
             var prefix = _key_prefix(key.name())
             names[prefix if prefix != "" else key.name()] = True
         return names^
-
-    def _key_columns(self, groups: RowKeys) raises -> List[Series]:
-        var columns = List[Series](capacity=len(self._keys))
-        for key in self._keys:
-            columns.append(key.take(groups.representatives))
-        return columns^
 
     def agg(
         self, expression: Expr, *, batch_size: Int = 1024

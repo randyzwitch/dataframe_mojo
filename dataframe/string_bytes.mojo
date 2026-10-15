@@ -11,7 +11,7 @@ from std.bit import byte_swap
 from std.memory import ArcPointer, Pointer
 
 from .string_column import StringColumn
-from .string_view import StringView, StringViewStorage
+from .string_view import StringView
 
 
 @always_inline

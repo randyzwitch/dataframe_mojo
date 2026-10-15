@@ -11,18 +11,11 @@ from .string_column import StringCodes, StringColumn
 from .string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
-from .parallel import (
-    Job,
-    Pool,
-    configured_workers,
-    partitions,
-    run_jobs,
-    worker_count,
-)
+from .parallel import Job, Pool, configured_workers, run_jobs, worker_count
 from std.atomic import Atomic
 from std.memory import ArcPointer
 from .cast import cast_series
-from .expr import Expr, col, lit
+from .expr import Expr, col
 from .frame import DataFrame
 from .trace import trace_path
 from .comparison_sort import KeyOrder, comparison_arg_sort
@@ -1299,44 +1292,6 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             self._data[StringColumn].take_or_null(indices, String("")),
         )
 
-    def _less(
-        self, a: Int, b: Int, descending: Bool, nulls_last: Bool
-    ) raises -> Bool:
-        if self._dtype.is_nested():
-            raise Error("cannot sort by a " + self._dtype.name() + " column")
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
-            if self._data.isa[Column[Scalar[D]]]():
-                ref column = self._data[Column[Scalar[D]]]
-                var a_null = column.is_null(a)
-                var b_null = column.is_null(b)
-                if a_null or b_null:
-                    return a_null != b_null and (
-                        b_null if nulls_last else a_null
-                    )
-                var x = column.value(a)
-                var y = column.value(b)
-                # NaNs follow finite/infinite values in either direction.
-                if x != x or y != y:
-                    return x == x and y != y
-                return y < x if descending else x < y
-        if self._data.isa[BoolColumn]():
-            var a_null = self._data[BoolColumn].is_null(a)
-            var b_null = self._data[BoolColumn].is_null(b)
-            if a_null or b_null:
-                return a_null != b_null and (b_null if nulls_last else a_null)
-            var x = self._data[BoolColumn].value(a)
-            var y = self._data[BoolColumn].value(b)
-            return Int(y) < Int(x) if descending else Int(x) < Int(y)
-        ref column = self._data[StringColumn]
-        var a_null = column.is_null(a)
-        var b_null = column.is_null(b)
-        if a_null or b_null:
-            return a_null != b_null and (b_null if nulls_last else a_null)
-        var x = column._get(a)
-        var y = column._get(b)
-        return y < x if descending else x < y
-
     def argsort(
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
@@ -1410,46 +1365,6 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             elif descending:
                 ranks[i] = distinct - 1 - ranks[i]
         return ranks^
-
-    def _argsort_reference(
-        self, descending: Bool = False, nulls_last: Bool = True
-    ) raises -> List[Int]:
-        """Comparator mergesort kept as a test oracle and benchmark baseline."""
-        if self.is_chunked():
-            return self.rechunk()._argsort_reference(descending, nulls_last)
-        var indices = List[Int](capacity=len(self))
-        for i in range(len(self)):
-            indices.append(i)
-        var scratch = indices.copy()
-        var width = 1
-        while width < len(self):
-            var start = 0
-            while start < len(self):
-                var mid = min(start + width, len(self))
-                var end = min(start + 2 * width, len(self))
-                var left = start
-                var right = mid
-                for dest in range(start, end):
-                    if left < mid and (
-                        right >= end
-                        or not self._less(
-                            indices[right],
-                            indices[left],
-                            descending,
-                            nulls_last,
-                        )
-                    ):
-                        scratch[dest] = indices[left]
-                        left += 1
-                    else:
-                        scratch[dest] = indices[right]
-                        right += 1
-                start = end
-            var old = indices^
-            indices = scratch^
-            scratch = old^
-            width *= 2
-        return indices^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
         if self.is_chunked():
@@ -1727,17 +1642,6 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             )
 
 
-def _equal_columns[
-    T: Copyable & Deinitable & Equatable
-](a: Column[T], b: Column[T]) -> Bool:
-    for i in range(len(a)):
-        if a._valid(i) != b._valid(i):
-            return False
-        if a._valid(i) and not (a._get(i) == b._get(i)):
-            return False
-    return True
-
-
 @fieldwise_init
 struct _RankPair[T: Copyable & Deinitable & Comparable](
     Copyable, Deinitable, Movable
@@ -1883,31 +1787,19 @@ struct _KeyBucketSortJob(Job):
 
     var ranks: ArcPointer[List[List[Int]]]
     var rows: List[Int]
-    var radix: Bool
 
     def __init__(
         out self,
         ranks: ArcPointer[List[List[Int]]],
         var rows: List[Int],
-        radix: Bool = False,
     ):
         self.ranks = ranks.copy()
         self.rows = rows^
-        self.radix = radix
 
     def run(mut self) raises:
         var shared = self.ranks.copy()
         ref ranks = shared[]
-        if self.radix:
-            self.rows = _radix_sort_bucket(ranks, self.rows^)
-            return
-
-        def less(a: Int, b: Int) {imm ranks} -> Bool:
-            return _rank_less(ranks, a, b)
-
-        var rows = self.rows^
-        sort(rows, less)
-        self.rows = rows^
+        self.rows = _radix_sort_bucket(ranks, self.rows^)
 
 
 # Threadripper 3970X, 32 workers, Mojo 1.2; full sweep in
@@ -1927,7 +1819,7 @@ comptime _BUCKET_MAX_WORKER_SHARES = 16
 
 
 def _low_card_first_sort(
-    ranks: List[List[Int]], radix: Bool = False, workers: Int = 0
+    ranks: List[List[Int]], workers: Int = 0
 ) raises -> List[Int]:
     """Sort independent first-key buckets without global merge rounds."""
     var n = len(ranks[0])
@@ -1978,7 +1870,7 @@ def _low_card_first_sort(
     while len(buckets) > 0:
         var rows = buckets.pop(0)
         if len(rows) > 0:
-            jobs.append(_KeyBucketSortJob(shared, rows^, radix))
+            jobs.append(_KeyBucketSortJob(shared, rows^))
     var pool = Pool(min(parallelism, len(jobs)))
     pool.run(jobs)
     pool.release()
@@ -2009,7 +1901,7 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
             or n <= _BUCKET_WIDE_RANK_BYTES // 8 // (len(ranks) - 1)
         )
     ):
-        var bucket_order = _low_card_first_sort(ranks, True, workers)
+        var bucket_order = _low_card_first_sort(ranks, workers)
         if len(bucket_order) == n:
             trace_path("sort.bucket")
             return bucket_order^

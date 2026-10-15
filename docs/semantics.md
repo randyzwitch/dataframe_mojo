@@ -213,8 +213,7 @@ direction, NaN, and null placement; a bottom-up mergesort then compares rank
 tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
 first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
 the first `k` rows of `sort(by)`; both select with a bounded heap in
-O(n log k) instead of sorting every row. The previous per-comparison comparator
-is kept as `Series._argsort_reference` for tests.
+O(n log k) instead of sorting every row.
 
 ## Joins
 

@@ -4,11 +4,10 @@ Temporal values are Int64 storage tagged with a DataType; these kernels take
 the logical types from the binder, so their inputs may carry either tag.
 """
 from .column import Column
-from .string_column import StringColumn, StringBuilder
+from .string_column import StringColumn
 from .dtype import DataType
 from .expr import (
     Node,
-    ADD,
     SUB,
     MUL,
     FLOORDIV,
@@ -18,7 +17,6 @@ from .expr import (
     DT_HOUR,
     DT_MINUTE,
     DT_SECOND,
-    DT_NANOSECOND,
     DT_WEEKDAY,
     DT_ORDINAL_DAY,
     DT_DATE,
@@ -344,10 +342,6 @@ struct TotalUnits(Copyable):
                 quotient + 1 if value < 0 and value % ticks != 0 else quotient
             )
         return value * self.multiply
-
-
-def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
-    return TotalUnits(dtype, unit).apply(value)
 
 
 def dt_op(

@@ -22,7 +22,7 @@ hash space it touches: keys spread across most slots mean many distinct
 values. The sample is a few thousand rows, so deciding costs far less than
 the hash pass it guards, and nothing is wasted when the answer is no.
 """
-from std.memory import ArcPointer, Pointer, bitcast
+from std.memory import Pointer, bitcast
 from std.sys import size_of
 from std.sys.intrinsics import prefetch
 from std.collections import Dict
