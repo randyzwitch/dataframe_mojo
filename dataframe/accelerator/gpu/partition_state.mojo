@@ -15,12 +15,20 @@ struct Context(Movable):
         self.entries[scope + ":" + state] = cache in self.layouts
 
     def dispatch(
-        mut self, scope: String, keys: String, state: String,
-        allow_contiguous: Bool, lanes: Int,
+        mut self,
+        scope: String,
+        keys: String,
+        state: String,
+        allow_contiguous: Bool,
+        lanes: Int,
     ) raises -> Bool:
         var cache = scope + ":" + keys
         var entry = scope + ":" + state
-        var cached = self.entries[entry] if entry in self.entries else cache in self.layouts
+        var cached = (
+            self.entries[entry] if entry
+            in self.entries else cache
+            in self.layouts
+        )
         if allow_contiguous and lanes > 1:
             self.layouts[cache] = True
             cached = True

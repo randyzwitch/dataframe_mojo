@@ -33,10 +33,29 @@ from .partition_state import Context as StateContext
 from .partition_numeric import execute as execute_numeric
 
 
-def _report(scope: Scope, input: Table, result: Table, before: Tuple[Int, Int, Int, Int], started: Int, qcut: Bool) raises -> DataFrame:
-    var report = _base_report(scope, input, result, before, started, scope.info()[1])
-    report = report.with_column(Series("operator", Column[String](["PARTITION QCUT" if qcut else "PARTITION CUT"])))
-    return report.with_column(Series("algorithm", Column[String](["mojo_gpu_partition_bins_ranked_faults"])))
+def _report(
+    scope: Scope,
+    input: Table,
+    result: Table,
+    before: Tuple[Int, Int, Int, Int],
+    started: Int,
+    qcut: Bool,
+) raises -> DataFrame:
+    var report = _base_report(
+        scope, input, result, before, started, scope.info()[1]
+    )
+    report = report.with_column(
+        Series(
+            "operator",
+            Column[String](["PARTITION QCUT" if qcut else "PARTITION CUT"]),
+        )
+    )
+    return report.with_column(
+        Series(
+            "algorithm",
+            Column[String](["mojo_gpu_partition_bins_ranked_faults"]),
+        )
+    )
 
 
 def _finish_lookup(mut reservation: _Reservation, expected_bytes: Int) raises:
@@ -50,7 +69,9 @@ def _finish_lookup(mut reservation: _Reservation, expected_bytes: Int) raises:
         raise Error("Partition CUT lookup reservation was not retained live")
     reservation.release(expected_bytes)
     if reservation.scope.info()[0] != live - expected_bytes:
-        raise Error("Partition CUT lookup reservation release changed live bytes")
+        raise Error(
+            "Partition CUT lookup reservation release changed live bytes"
+        )
 
 
 def preflight(query: LazyFrame) raises -> Capture:
@@ -62,7 +83,8 @@ def preflight(query: LazyFrame) raises -> Capture:
         operation.left != 0
         or len(operation.flags) != 2
         or operation.flags[1] != saved.numeric_state
-        or len(operation.exprs) != (0 if operation.flags[0] else 2 if saved.include_breaks else 1)
+        or len(operation.exprs)
+        != (0 if operation.flags[0] else 2 if saved.include_breaks else 1)
         or not operation.names2[2]
         or (saved.include_breaks and not operation.names2[3])
     ):
@@ -71,8 +93,12 @@ def preflight(query: LazyFrame) raises -> Capture:
     # operand proof now, before any context initialization or submission.
     var source = DataFrame(operation.partition_columns.copy())
     _ = prepare(
-        saved.operand, source, 0, saved.operand_signature,
-        source_proved=True, numeric_state=saved.numeric_state,
+        saved.operand,
+        source,
+        0,
+        saved.operand_signature,
+        source_proved=True,
+        numeric_state=saved.numeric_state,
     )
     return saved^
 
@@ -186,9 +212,15 @@ def execute_plan(
     var state = state_context.value().copy()
     if operation.flags[0]:
         state[].snapshot(operation.names2[6], saved.key_set, category)
-        return (input.copy(), _report(scope, input, input, before, started, saved.qcut))
+        return (
+            input.copy(),
+            _report(scope, input, input, before, started, saved.qcut),
+        )
     var cached = state[].dispatch(
-        operation.names2[6], saved.key_set, category, not saved.nested,
+        operation.names2[6],
+        saved.key_set,
+        category,
+        not saved.nested,
         min(configured_workers(), input.rows // 2048),
     )
     var custom = Optional[ArcPointer[TextDomain]]()
@@ -201,9 +233,14 @@ def execute_plan(
         custom = text_domain.copy()
         codes = _label_codes(saved, custom.value())
     if not input.rows and saved.numeric_state:
-        var output = Table.empty(DataFrame([Series.full_null(category, saved.operand_dtype, 0)]))
+        var output = Table.empty(
+            DataFrame([Series.full_null(category, saved.operand_dtype, 0)])
+        )
         var result = _append(input, output, scope)
-        return (result.copy(), _report(scope, input, result, before, started, False))
+        return (
+            result.copy(),
+            _report(scope, input, result, before, started, False),
+        )
     if not input.rows:
         # CPU evaluates the virtual empty partition's controls even head(0).
         # No numeric input values are evaluated or downloaded.
@@ -250,27 +287,50 @@ def execute_plan(
     # metadata; layout.build separately charges its flattened host/device copy.
     var lookup_owner_bytes = 0
     for key in operation.window_keys:
-        if key.dtype == DataType.STRING or (key.dtype.is_categorical() and key.string_hash):
+        if key.dtype == DataType.STRING or (
+            key.dtype.is_categorical() and key.string_hash
+        ):
             var field = input.schema._index(key.name)
             if not input.text[field]:
-                raise Error("Partition CUT String key domain certificate is missing")
-            lookup_owner_bytes = checked_add(lookup_owner_bytes, checked_mul(len(input.text[field].value().domain[].dtype.dictionary()[]), 8))
+                raise Error(
+                    "Partition CUT String key domain certificate is missing"
+                )
+            lookup_owner_bytes = checked_add(
+                lookup_owner_bytes,
+                checked_mul(
+                    len(
+                        input.text[field].value().domain[].dtype.dictionary()[]
+                    ),
+                    8,
+                ),
+            )
         elif key.dtype.is_categorical():
-            lookup_owner_bytes = checked_add(lookup_owner_bytes, checked_mul(len(key.dtype.dictionary()[]), 8))
+            lookup_owner_bytes = checked_add(
+                lookup_owner_bytes,
+                checked_mul(len(key.dtype.dictionary()[]), 8),
+            )
     var lookup_reservation = _Reservation(scope, lookup_owner_bytes)
     var keys = List[KeyInput](capacity=len(operation.window_keys))
     for original in operation.window_keys:
         var key = original.copy()
         var field = input.schema._index(key.name)
-        if key.dtype == DataType.STRING or (key.dtype.is_categorical() and key.string_hash):
+        if key.dtype == DataType.STRING or (
+            key.dtype.is_categorical() and key.string_hash
+        ):
             if not input.text[field]:
-                raise Error("Partition CUT String key domain certificate is missing")
-            ref dictionary = input.text[field].value().domain[].dtype.dictionary()[]
+                raise Error(
+                    "Partition CUT String key domain certificate is missing"
+                )
+            ref dictionary = (
+                input.text[field].value().domain[].dtype.dictionary()[]
+            )
             var hashes = List[UInt64](capacity=len(dictionary))
             for code in range(len(dictionary)):
                 var raw = dictionary.get(code).as_bytes()
                 var bytes = Span[UInt8, ImmutAnyOrigin](
-                    unsafe_ptr=raw.unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+                    unsafe_ptr=raw.unsafe_ptr()
+                    .unsafe_mut_cast[False]()
+                    .unsafe_origin_cast[ImmutAnyOrigin](),
                     length=len(raw),
                 )
                 hashes.append(_hash_bytes(bytes))
@@ -281,7 +341,14 @@ def execute_plan(
             for at in range(len(key.dtype.dictionary()[])):
                 identity.append(UInt64(at))
             key.values = ArcPointer(identity^)
-        keys.append(KeyInput(key.name, key, original_codes=original_codes, category_high=original_codes))
+        keys.append(
+            KeyInput(
+                key.name,
+                key,
+                original_codes=original_codes,
+                category_high=original_codes,
+            )
+        )
     var layout = build(
         input,
         keys,
@@ -300,7 +367,9 @@ def execute_plan(
     )
     var operand = evaluate(plan, input, scope)
     if saved.numeric_state:
-        var output = execute_numeric(operand, layout, scope, saved.operand_dtype, category)
+        var output = execute_numeric(
+            operand, layout, scope, saved.operand_dtype, category
+        )
         var result = _append(input, output, scope)
         var report = _report(scope, input, result, before, started, False)
         _finish_lookup(lookup_reservation, lookup_owner_bytes)

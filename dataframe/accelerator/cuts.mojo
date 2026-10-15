@@ -53,7 +53,10 @@ from .metadata import schema_frame
 from .selectors import _live_nodes
 from .aggregates import _in_memory_sources
 from .qcuts import QCUT_TAG, stage_custom as stage_custom_qcut
-from .partition_cuts import TAG as PARTITION_CUT_TAG, stage as stage_partition_cut
+from .partition_cuts import (
+    TAG as PARTITION_CUT_TAG,
+    stage as stage_partition_cut,
+)
 
 comptime CUT_TAG = "metal_explicit_cut_operand"
 comptime CUT_ANCHOR_TAG = "metal_explicit_cut_scalar_anchor"
@@ -515,7 +518,9 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
             # CPU prepares OVER states eagerly, skipping their descendants
             # in the outer state walk. Retain original nodes for certificates;
             # never globally observe a partition operand as an ordinary row.
-            var inside_over = List[Bool](length=len(expression._nodes), fill=False)
+            var inside_over = List[Bool](
+                length=len(expression._nodes), fill=False
+            )
             for at in range(len(expression._nodes)):
                 if expression._nodes[at].op != OVER:
                     continue
@@ -542,7 +547,9 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                     continue
                 if node.op == OVER:
                     ref bins = expression._nodes[node.left]
-                    var include_breaks = bins.op in [CUT, QCUT] and (bins.integer & 2) != 0
+                    var include_breaks = (
+                        bins.op in [CUT, QCUT] and (bins.integer & 2) != 0
+                    )
                     if include_breaks and (
                         n != len(expression._nodes) - 1
                         or operation.kind != SELECT
@@ -560,8 +567,15 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                         temporary.append(breakpoint)
                     var first_marker = len(result._nodes)
                     var replacement = stage_partition_cut(
-                        result, aligned, schema, bound, n, category,
-                        breakpoint, index, True,
+                        result,
+                        aligned,
+                        schema,
+                        bound,
+                        n,
+                        category,
+                        breakpoint,
+                        index,
+                        True,
                     )
                     aligned = len(result._nodes) - 1
                     for marker in range(first_marker, len(result._nodes)):

@@ -45,7 +45,9 @@ struct KeyInput(Copyable):
         self.column = column
         self.original = original.copy()
         if category_high and not original_codes:
-            raise Error("OVER categorical HIGH certificate requires original codes")
+            raise Error(
+                "OVER categorical HIGH certificate requires original codes"
+            )
         self.original_codes = original_codes
         self.category_high = category_high
 

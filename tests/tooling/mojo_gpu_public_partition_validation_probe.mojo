@@ -18,13 +18,21 @@ from tests.public_contracts.test_partition_cut_capture import (
 
 
 def _native_report() raises:
-    var frame = DataFrame([
-        Series("x", Column[Float64]([0, 10, 2, 14])),
-        Series("k", Column[Int32]([0, 1, 0, 1])),
-    ])
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float64]([0, 10, 2, 14])),
+            Series("k", Column[Int32]([0, 1, 0, 1])),
+        ]
+    )
     var probabilities: List[Float64] = [0.5]
-    var measured = frame.lazy().select(col("x").qcut(probabilities).over("k")).profile(
-        accelerator=MetalRuntime(), optimize=False, streaming=False,
+    var measured = (
+        frame.lazy()
+        .select(col("x").qcut(probabilities).over("k"))
+        .profile(
+            accelerator=MetalRuntime(),
+            optimize=False,
+            streaming=False,
+        )
     )
     assert_native_report(measured[1], nonempty=True)
     assert_equal(measured[0].item(0, "x").string(), "(-inf, 1]")
@@ -36,7 +44,10 @@ def main() raises:
     try:
         capture()
         cache()
-        print("PASS public partition original certificates and cache snapshots", flush=True)
+        print(
+            "PASS public partition original certificates and cache snapshots",
+            flush=True,
+        )
     except error:
         failures += 1
         print("FAIL public partition metadata", String(error), flush=True)
@@ -48,16 +59,24 @@ def main() raises:
         print("FAIL public partition outputs", String(error), flush=True)
     try:
         faults()
-        print("PASS public partition eager/run operand-control priorities", flush=True)
+        print(
+            "PASS public partition eager/run operand-control priorities",
+            flush=True,
+        )
     except error:
         failures += 1
         print("FAIL public partition faults", String(error), flush=True)
     try:
         categories()
-        print("PASS public partition original category owners and decoded scope", flush=True)
+        print(
+            "PASS public partition original category owners and decoded scope",
+            flush=True,
+        )
     except error:
         failures += 1
-        print("FAIL public partition category owners", String(error), flush=True)
+        print(
+            "FAIL public partition category owners", String(error), flush=True
+        )
     try:
         nested()
         print("PASS public partition nested numeric scopes", flush=True)
@@ -66,20 +85,38 @@ def main() raises:
         print("FAIL public partition nested scopes", String(error), flush=True)
     try:
         contracts()
-        print("PASS public partition WHEN/head/sibling literal error contracts", flush=True)
+        print(
+            "PASS public partition WHEN/head/sibling literal error contracts",
+            flush=True,
+        )
     except error:
         failures += 1
-        print("FAIL public partition WHEN/head/sibling contracts", String(error), flush=True)
+        print(
+            "FAIL public partition WHEN/head/sibling contracts",
+            String(error),
+            flush=True,
+        )
     try:
         zero_words()
-        print("PASS public partition literal signed-zero edge words", flush=True)
+        print(
+            "PASS public partition literal signed-zero edge words", flush=True
+        )
     except error:
         failures += 1
-        print("FAIL public partition signed-zero words", String(error), flush=True)
+        print(
+            "FAIL public partition signed-zero words", String(error), flush=True
+        )
     try:
         _native_report()
-        print("PASS public partition actual Mojo GPU submissions and report", flush=True)
+        print(
+            "PASS public partition actual Mojo GPU submissions and report",
+            flush=True,
+        )
     except error:
         failures += 1
-        print("FAIL public partition native execution report", String(error), flush=True)
+        print(
+            "FAIL public partition native execution report",
+            String(error),
+            flush=True,
+        )
     assert_equal(failures, 0)

@@ -421,7 +421,10 @@ def lower_dictionary_operations(
         dynamic[index] = incoming or (
             len(operation.names2) > 1
             and (
-                (operation.names2[0] == QCUT_TAG and operation.names2[1] == QCUT_DEFAULT)
+                (
+                    operation.names2[0] == QCUT_TAG
+                    and operation.names2[1] == QCUT_DEFAULT
+                )
                 or operation.names2[0] == PARTITION_CUT_TAG
             )
         )

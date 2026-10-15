@@ -32,7 +32,9 @@ from dataframe.accelerator.joins import (
 from . import runtime as rows
 from . import qcut_runtime as qcuts
 from dataframe.accelerator.qcuts import is_qcut_marker
-from dataframe.accelerator.partition_cuts import is_marker as is_partition_cut_marker
+from dataframe.accelerator.partition_cuts import (
+    is_marker as is_partition_cut_marker,
+)
 from . import partition_runtime as partition_cuts
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
@@ -460,7 +462,9 @@ def execute(
             var source_rows = resident.value().rows if resident else -1
             if is_partition_cut_marker(task.query):
                 if not resident:
-                    raise Error("Partition CUT original resident producer is missing")
+                    raise Error(
+                        "Partition CUT original resident producer is missing"
+                    )
                 executed = partition_cuts.execute_plan(
                     task.query,
                     resident.value(),

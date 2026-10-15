@@ -5,7 +5,16 @@ It is deliberately separate from admission: the execution scope must also
 prove eager OVER state order, shared WindowLayouts, and resident key codes.
 """
 from std.memory import bitcast
-from dataframe import DataFrame, DataType, Expr, Series, col, lit, when, as_struct
+from dataframe import (
+    DataFrame,
+    DataType,
+    Expr,
+    Series,
+    col,
+    lit,
+    when,
+    as_struct,
+)
 from dataframe.binding import BoundExpr, bind
 from dataframe.expr import CUT, QCUT, OVER, COL, SEP, subtree, split_names
 from dataframe.parse import parse_float64, parse_int64
@@ -34,7 +43,6 @@ struct Capture(Copyable):
     var operand_dtype: DataType
 
 
-
 def substitute(
     expression: Expr,
     root: Int,
@@ -52,7 +60,9 @@ def substitute(
         var node = expression._nodes[at].copy()
         if replacements[at]:
             if node.op != OVER:
-                raise Error("Partition replacement is not an original OVER state")
+                raise Error(
+                    "Partition replacement is not an original OVER state"
+                )
             positions[at] = len(nodes)
             nodes.append(col(replacements[at])._nodes[0].copy())
             continue
@@ -69,6 +79,7 @@ def substitute(
         nodes.append(node^)
     var rewritten = Expr(nodes^, "")
     return subtree(rewritten, positions[root])
+
 
 def capture(
     original: BoundExpr, source: DataFrame, over_node: Int
@@ -214,7 +225,9 @@ def marker_capture(query: LazyFrame) raises -> Capture:
     ref bins = original._nodes[over.left]
     var root = over.left if saved.numeric_state else bins.left
     var entering = len(operation.flags) == 2 and operation.flags[0]
-    var rewritten = substitute(original, root, operation.names, strip_over=entering)
+    var rewritten = substitute(
+        original, root, operation.names, strip_over=entering
+    )
     var rewritten_bound = bind(rewritten, source._columns)
     var stored_bound = bind(operation.partition_exprs[1], source._columns)
     if signature(rewritten_bound) != signature(stored_bound):
@@ -222,7 +235,6 @@ def marker_capture(query: LazyFrame) raises -> Capture:
     saved.operand = rewritten^
     saved.operand_signature = operand_certificate(saved.operand, source)
     return saved^
-
 
 
 def _marker(
@@ -248,8 +260,14 @@ def _marker(
             flags=[enter, saved.numeric_state],
             text="metal_window_materialization",
             names2=[
-                TAG, VERSION, category, breakpoint, String(saved.over_node),
-                saved.original, String(scope_id), "1",
+                TAG,
+                VERSION,
+                category,
+                breakpoint,
+                String(saved.over_node),
+                saved.original,
+                String(scope_id),
+                "1",
             ],
             window_keys=saved.keys,
             partition_exprs=[original.expr.copy(), lowered.copy()],
@@ -281,9 +299,23 @@ def stage(
         # states. Record that entry snapshot before any inner scope creates
         # another layout for the same key set.
         var identity = List[String](length=len(original.expr._nodes), fill="")
-        var stripped = substitute(original.expr, root, identity, strip_over=True)
-        _marker(query, aligned, schema, original, saved, stripped, identity,
-                List[Expr](), category, breakpoint, scope_id, True)
+        var stripped = substitute(
+            original.expr, root, identity, strip_over=True
+        )
+        _marker(
+            query,
+            aligned,
+            schema,
+            original,
+            saved,
+            stripped,
+            identity,
+            List[Expr](),
+            category,
+            breakpoint,
+            scope_id,
+            True,
+        )
         aligned = len(query._nodes) - 1
         var top = List[Int]()
         var pending: List[Int] = [root]
@@ -308,8 +340,17 @@ def stage(
             var name = category + "_nested_" + String(at)
             while name in schema.columns():
                 name += "_"
-            var nested = stage(query, aligned, schema, original, at, name,
-                               name + "_breakpoint", scope_id, cached_layout)
+            var nested = stage(
+                query,
+                aligned,
+                schema,
+                original,
+                at,
+                name,
+                name + "_breakpoint",
+                scope_id,
+                cached_layout,
+            )
             aligned = len(query._nodes) - 1
             replacements[at] = name
             var columns = schema._columns.copy()
@@ -330,22 +371,47 @@ def stage(
     else:
         value = lit("") if not len(saved.labels) else lit(saved.labels[0])
         for at in range(1, len(saved.labels)):
-            value = when(col(dependencies[0]).is_not_null()).then(value).otherwise(lit(saved.labels[at]))
+            value = (
+                when(col(dependencies[0]).is_not_null())
+                .then(value)
+                .otherwise(lit(saved.labels[at]))
+            )
     # Harmless schema placeholders retain all original sources through pruning;
     # the dedicated runtime never interprets these row values.
     for dependency in dependencies:
-        value = when(col(dependency).is_not_null()).then(value.copy()).otherwise(value)
+        value = (
+            when(col(dependency).is_not_null())
+            .then(value.copy())
+            .otherwise(value)
+        )
     var expressions: List[Expr] = [value.alias(category)]
     if saved.include_breaks:
         expressions.append(
-            when(col(dependencies[0]).is_not_null()).then(lit(Float64(0)))
-            .otherwise(lit(Float64(0))).alias(breakpoint)
+            when(col(dependencies[0]).is_not_null())
+            .then(lit(Float64(0)))
+            .otherwise(lit(Float64(0)))
+            .alias(breakpoint)
         )
-    _marker(query, aligned, schema, original, saved, lowered, replacements,
-            expressions, category, breakpoint, scope_id, False)
+    _marker(
+        query,
+        aligned,
+        schema,
+        original,
+        saved,
+        lowered,
+        replacements,
+        expressions,
+        category,
+        breakpoint,
+        scope_id,
+        False,
+    )
     if saved.include_breaks:
         return as_struct(
-            [col(breakpoint).alias("breakpoint"), col(category).alias("category")],
+            [
+                col(breakpoint).alias("breakpoint"),
+                col(category).alias("category"),
+            ],
             "",
         )
     return col(category)

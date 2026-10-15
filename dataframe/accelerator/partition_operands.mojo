@@ -126,8 +126,12 @@ def prepare(
     var lifted = lift_literals(original, source)
     # CPU _bins performs this infallible numeric conversion after _full. It
     # receives a positive occurrence rank too; no checked rank0 CAST is needed.
-    var converted = lifted.copy() if numeric_state else bind(lifted.expr.cast(DataType.FLOAT64), source._columns)
-    var output_dtype = original.dtypes[len(original.dtypes) - 1] if numeric_state else DataType.FLOAT64
+    var converted = lifted.copy() if numeric_state else bind(
+        lifted.expr.cast(DataType.FLOAT64), source._columns
+    )
+    var output_dtype = original.dtypes[
+        len(original.dtypes) - 1
+    ] if numeric_state else DataType.FLOAT64
     var cloned = ordered_rows.occurrences(converted, 128)
     var rebound = bind(cloned[0].expr, source._columns)
     if signature(rebound) != signature(cloned[0]):

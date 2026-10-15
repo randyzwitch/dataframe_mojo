@@ -70,17 +70,29 @@ def test_partition_nested_scope_cache_entry_snapshots() raises:
 
     var context = Context()
     context.snapshot("projection0", "outer", "outer_state")
-    assert_equal(context.dispatch("projection0", "outer", "inner_state", True, 4), True)
+    assert_equal(
+        context.dispatch("projection0", "outer", "inner_state", True, 4), True
+    )
     # The outer scope selected fallback ids before its inner same-key scope
     # created a contiguous layout. It cannot observe that later cache change.
-    assert_equal(context.dispatch("projection0", "outer", "outer_state", False, 4), False)
-    assert_equal(context.dispatch("projection0", "outer", "later_state", False, 4), True)
-    assert_equal(context.dispatch("projection1", "outer", "new_scope", False, 4), False)
-    assert_equal(context.dispatch("projection0", "small", "single_lane", True, 1), False)
-    var source = DataFrame([
-        Series("x", Column[Int64]([0, 2])),
-        Series("k", Column[Int32]([0, 0])),
-    ])
+    assert_equal(
+        context.dispatch("projection0", "outer", "outer_state", False, 4), False
+    )
+    assert_equal(
+        context.dispatch("projection0", "outer", "later_state", False, 4), True
+    )
+    assert_equal(
+        context.dispatch("projection1", "outer", "new_scope", False, 4), False
+    )
+    assert_equal(
+        context.dispatch("projection0", "small", "single_lane", True, 1), False
+    )
+    var source = DataFrame(
+        [
+            Series("x", Column[Int64]([0, 2])),
+            Series("k", Column[Int32]([0, 0])),
+        ]
+    )
     var state = (col("x") + lit(Int64(1))).over("k").qcut([0.5]).over("k")
     var original = bind(state, source._columns)
     var saved = capture(original, source, len(state._nodes) - 1)
