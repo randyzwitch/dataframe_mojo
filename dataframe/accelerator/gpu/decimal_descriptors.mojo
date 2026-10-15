@@ -136,5 +136,5 @@ def prepare(
                         or op == MUL
                         or op == DIV else DECIMAL_COMPARE
                     )
-                    if op == MUL:
+                    if op == ADD or op == SUB or op == MUL:
                         literals[node] = UInt64(target.precision())

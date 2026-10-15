@@ -501,16 +501,8 @@ def _program(
             or capabilities.decimal_multiplicative
             and (op == MUL or op == DIV)
         )
-        # Products and Float64 quotients use their exact bound result type.
-        # Addition/subtraction width admission is changed separately.
-        if left_type.is_decimal() and (op == ADD or op == SUB):
-            var result = bound.dtypes[i]
-            if not result.is_decimal() or result.decimal_width() != 128:
-                capabilities.reject(
-                    "logical",
-                    "decimal arithmetic at its exact result type requires"
-                    " CPU execution",
-                )
+        # Decimal arithmetic descriptors preserve the exact bound result
+        # precision, scale and physical output width (Float64 for DIV).
         if (
             temporal
             and left_type.is_datetime()
@@ -1210,6 +1202,21 @@ def lower_rows(
         ordered_terminal &= needs_order
         if ordered_terminal:
             ordered_mode = 2
+        var ordered_decimal = node.text == "metal_decimal_materialization"
+        if ordered_decimal:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or (node.kind != SELECT and node.kind != WITH_COLUMNS)
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != "metal_decimal_materialization"
+            ):
+                capabilities.reject(
+                    "ordered decimal", "invalid observed producer"
+                )
+            ordered_mode = 4
+        var decimal_expression = 0
         var ordered_private = implode_ordered.tagged(node)
         if ordered_private:
             if (
@@ -1232,9 +1239,18 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if ordered_decimal:
+                if not ordered_rows.eligible(bound) or node.names2[
+                    1 + decimal_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "ordered decimal",
+                        "producer AST or logical metadata changed",
+                    )
+                decimal_expression += 1
             if ordered_private:
                 implode_ordered.validate(node, bound)
-            if ordered_terminal or ordered_private:
+            if ordered_terminal or ordered_private or ordered_decimal:
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
                 )
@@ -1327,7 +1343,7 @@ def lower_rows(
                         "temporal",
                         "prototype requires a direct scan and terminal projections without head (SELECT only)",
                     )
-                if ordered_terminal or ordered_private:
+                if ordered_terminal or ordered_private or ordered_decimal:
                     temporal_expressions.validate_pairs(bound)
                 else:
                     temporal_expressions.validate(bound)
@@ -2360,11 +2376,16 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
-            if ordered_terminal or ordered_private:
+            if ordered_terminal or ordered_private or ordered_decimal:
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
                 ordered_ranks.extend(expression_ranks.copy())
-            if ordered_scalar or ordered_terminal or ordered_private:
+            if (
+                ordered_scalar
+                or ordered_terminal
+                or ordered_private
+                or ordered_decimal
+            ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
                 while len(ordered_ranks) < len(literals):
@@ -2654,7 +2675,7 @@ def lower_rows(
             "ordered implode",
             "requires one fresh private output and preserved inputs",
         )
-    if ordered_mode == 2 or ordered_mode == 3:
+    if ordered_mode == 2 or ordered_mode == 3 or ordered_mode == 4:
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(
                 "ordered rows", "invalid occurrence descriptor geometry"

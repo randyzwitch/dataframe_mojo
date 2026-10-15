@@ -370,7 +370,12 @@ def _row_program[
                         )
                     else:
                         result = decimal.add_subtract(
-                            lhs, rhs, left_scale, right_scale, operation == SUB
+                            lhs,
+                            rhs,
+                            left_scale,
+                            right_scale,
+                            operation == SUB,
+                            UInt32(literals[unsafe_offset=absolute]),
                         )
                     value = result.value.low
                     high = result.value.high

@@ -261,7 +261,7 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                         var previous_low = other_low
                         other_low = -other_high
                         other_high = -previous_low
-                    var maximum = pow10(38) - 1
+                    var maximum = pow10(bound.dtypes[i].precision()) - 1
                     if (
                         low >= -maximum
                         and high <= maximum

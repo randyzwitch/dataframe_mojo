@@ -213,6 +213,7 @@ def add_subtract(
     left_scale: UInt32,
     right_scale: UInt32,
     subtract: Bool,
+    precision: UInt32 = 38,
 ) -> Arithmetic:
     var common = max(left_scale, right_scale)
     var a = scale_checked(left, common - left_scale)
@@ -224,7 +225,10 @@ def add_subtract(
         a.value, b.value
     )
     return Arithmetic(
-        value, UInt32(2) if precision_overflow(value) else UInt32(0)
+        value,
+        UInt32(2) if wide_ge(
+            magnitude(value), wide_pow10(precision)
+        ) else UInt32(0),
     )
 
 

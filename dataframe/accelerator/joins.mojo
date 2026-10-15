@@ -26,7 +26,62 @@ from dataframe.lazy import (
     EXPLODE,
 )
 from dataframe.series import Series
-from dataframe.expr import is_reduction
+from dataframe.expr import is_reduction, ADD, SUB, MUL, DIV, NEG, ABS
+from dataframe.binding import bind, ROWS
+from .integer_ranges import proven_integer_nodes
+from . import ordered_rows, implode_ordered
+
+comptime DECIMAL_MATERIALIZATION = "metal_decimal_materialization"
+
+
+def _decimal_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
+        return False
+    var schema = schema_frame(query, operation.left)
+    var checked = False
+    for expression in operation.exprs:
+        var bound = bind(expression, schema._columns)
+        if bound.shape() != ROWS or not ordered_rows.eligible(bound):
+            return False
+        var proven = proven_integer_nodes(bound)
+        for at in range(len(bound.expr._nodes)):
+            var op = bound.expr._nodes[at].op
+            checked |= (
+                bound.dtypes[at].is_decimal()
+                and (
+                    op == ADD
+                    or op == SUB
+                    or op == MUL
+                    or op == DIV
+                    or op == NEG
+                    or op == ABS
+                )
+                and not proven[at]
+            )
+    return checked
+
+
+def has_decimal_consumers(query: LazyFrame) raises -> Bool:
+    # A region boundary observes each expression before any later row
+    # selection, join, ordering or stateful consumer can suppress its fault.
+    for index in range(len(query._nodes)):
+        if _decimal_producer(query, index):
+            return True
+    return False
+
+
+def _mark_decimal_producers(mut query: LazyFrame) raises:
+    for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_producer(query, index):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = DECIMAL_MATERIALIZATION
+            query._nodes[index].names2 = [DECIMAL_MATERIALIZATION]
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
+
 
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
@@ -502,6 +557,7 @@ def _task(
         or query._nodes[root].text == "metal_window_materialization"
         or query._nodes[root].text == "metal_distribution_materialization"
         or query._nodes[root].text == "metal_implode_materialization"
+        or query._nodes[root].text == DECIMAL_MATERIALIZATION
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
@@ -543,12 +599,16 @@ def _task(
         and query._nodes[cursor].kind != EXPLODE
         and (cursor == root or query._nodes[cursor].kind != SLICE)
         and (
+            cursor == root or query._nodes[root].text != DECIMAL_MATERIALIZATION
+        )
+        and (
             cursor == root
             or (
                 query._nodes[cursor].text != "metal_window_materialization"
                 and query._nodes[cursor].text
                 != "metal_distribution_materialization"
                 and query._nodes[cursor].text != "metal_implode_materialization"
+                and query._nodes[cursor].text != DECIMAL_MATERIALIZATION
             )
         )
         and (
@@ -570,6 +630,11 @@ def _task(
         frame = tasks[source].schema.copy()
     elif (
         query._nodes[cursor].kind == JOIN
+        or (
+            cursor != root
+            and query._nodes[root].text == DECIMAL_MATERIALIZATION
+            and query._nodes[cursor].kind != SCAN_FRAME
+        )
         or query._nodes[cursor].kind == ASOF
         or query._nodes[cursor].kind == EXPLODE
         or query._nodes[cursor].kind == SLICE
@@ -580,6 +645,7 @@ def _task(
                 or query._nodes[cursor].text
                 == "metal_distribution_materialization"
                 or query._nodes[cursor].text == "metal_implode_materialization"
+                or query._nodes[cursor].text == DECIMAL_MATERIALIZATION
             )
         )
         or (
@@ -676,7 +742,14 @@ def lower_join_dag(
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
     var projected = query.copy()
+    var optimize = (
+        not query._accelerator_settings
+        or query._accelerator_settings.value().optimize
+    )
+    if optimize and has_decimal_consumers(query):
+        projected._push_slices()
     prune_projections(projected)
+    _mark_decimal_producers(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected, len(projected._nodes) - 1, True, capabilities, tasks

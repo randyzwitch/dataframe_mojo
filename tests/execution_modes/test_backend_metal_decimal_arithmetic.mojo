@@ -3,6 +3,7 @@ from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, DataType, col, lit, when
+from dataframe.lazy import LazyFrame
 from dataframe.decimal import pow10
 from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
@@ -53,12 +54,13 @@ def test_decimal_unary_cpu_storage_widths_and_arithmetic_descriptors() raises:
             _ = minimum32.lazy().select(expression).collect(engine="cpu")
         with assert_raises(contains="overflow"):
             _ = minimum64.lazy().select(expression).collect(engine="cpu")
-    # The device adds in 128 bits: a sum of 128-bit decimals is its type.
-    # A sum of 64-bit decimals is 64 bits (DuckDB) and runs on the CPU.
-    with assert_raises(contains="exact result type"):
-        _ = lower_rows(
+    var narrow = Program(
+        lower_rows(
             safe_fixture().lazy().select(col("a") + col("b")), _capabilities()
         )
+    )
+    assert_equal(narrow.code[8], Int64(219))
+    assert_equal(narrow.literals[2], UInt64(18))
     var wide = DataFrame(
         [decimal_series("a", 128, 1, 99), decimal_series("b", 128, 2, 99)]
     )
@@ -66,6 +68,7 @@ def test_decimal_unary_cpu_storage_widths_and_arithmetic_descriptors() raises:
     var descriptors = Program(lower_rows(query, _capabilities()))
     assert_equal(descriptors.code[8], Int64(219))
     assert_equal(descriptors.code[11], Int64(1 | 2 << 6 | 5 << 12))
+    assert_equal(descriptors.literals[2], UInt64(38))
     var caps = _capabilities()
     caps.decimal_arithmetic = False
     with assert_raises(contains="logical"):
@@ -176,8 +179,10 @@ def test_native_metal_decimal_arithmetic_checked_errors_conditionals_budget_and_
             _ = query.collect(engine="cpu")
         with assert_raises(contains="decimal precision"):
             _ = query.collect(accelerator=runtime)
-        with assert_raises(contains="checked decimal arithmetic"):
-            _ = query.head(1).collect(accelerator=runtime)
+        same(
+            query.head(1).collect(accelerator=runtime),
+            query.head(1).collect(engine="cpu"),
+        )
         var masked = frame.lazy().select(
             when(col("p"))
             .then(expression)
@@ -226,3 +231,74 @@ def test_native_metal_decimal_arithmetic_checked_errors_conditionals_budget_and_
     with assert_raises(contains="budget"):
         _ = valid.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
     same(valid.collect(accelerator=runtime), valid.collect(engine="cpu"))
+
+
+def test_native_metal_decimal_add_subtract_literal_result_types_and_boundaries() raises:
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int32]([125, -125, 0])).with_dtype(
+                DataType.decimal(3, 2, 32)
+            ),
+            Series("b", Column[Int32]([75, 75, 0])).with_dtype(
+                DataType.decimal(3, 1, 32)
+            ),
+            Series("k", Column[Int32]([0, 0, 1])),
+        ]
+    )
+    var query = frame.lazy().select_exprs(arithmetic())
+    var expected = DataFrame(
+        [
+            Series("add", Column[Int32]([875, 625, 0])).with_dtype(
+                DataType.decimal(5, 2, 32)
+            ),
+            Series("sub", Column[Int32]([-625, -875, 0])).with_dtype(
+                DataType.decimal(5, 2, 32)
+            ),
+        ]
+    )
+    same(query.collect(engine="cpu"), expected)
+    same(query.collect(accelerator=runtime), expected)
+    var grouped = (
+        frame.lazy()
+        .group_by("k", maintain_order=True)
+        .agg((col("a") + col("b")).sum().alias("v"))
+    )
+    var grouped_expected = DataFrame(
+        [
+            Series("k", Column[Int32]([0, 1])),
+            Series("v", Column[Int128]([1500, 0])).with_dtype(
+                DataType.decimal(38, 2)
+            ),
+        ]
+    )
+    same(grouped.collect(engine="cpu"), grouped_expected)
+    same(grouped.collect(accelerator=runtime), grouped_expected)
+    # with_dtype admits physical values beyond the declared precision.
+    # This checked producer must fail before a later ordering/head prunes it.
+    var invalid = DataFrame(
+        [
+            Series("a", Column[Int32]([1, 10000])).with_dtype(
+                DataType.decimal(3, 0, 32)
+            ),
+            Series("b", Column[Int32]([0, 1])).with_dtype(
+                DataType.decimal(3, 0, 32)
+            ),
+        ]
+    )
+    var producer = invalid.lazy().with_columns((col("a") + col("b")).alias("v"))
+    for failing in List[LazyFrame](
+        [producer.sort("v").head(1), producer.sort("v").head(0)]
+    ):
+        with assert_raises(contains="decimal precision"):
+            _ = failing.collect(engine="cpu")
+        with assert_raises(contains="decimal precision"):
+            _ = failing.collect(accelerator=runtime)
+    # Optimized head precedes a row-local projection on both engines.
+    var head = producer.head(1).select("v")
+    var head_expected = DataFrame(
+        [Series("v", Column[Int32]([1])).with_dtype(DataType.decimal(4, 0, 32))]
+    )
+    same(head.collect(engine="cpu"), head_expected)
+    same(head.collect(accelerator=runtime), head_expected)
