@@ -9,7 +9,7 @@ batch reassembly in `_append_column`, first takes a private copy unless the
 column already owns its buffers outright.
 """
 from std.bit import pop_count
-from std.memory import ArcPointer, Pointer, unsafe_memcpy
+from std.memory import ArcPointer, Pointer, pack_bits, unsafe_memcpy
 from std.sys import Endian
 
 
@@ -331,31 +331,30 @@ def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
 
 
 def _pack_bits(valid: List[Bool]) -> List[UInt8]:
-    """Pack each group of eight Boolean values into one LSB-first byte."""
-    var bits = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
-    var i = 0
-    var byte_index = 0
-    while i + 8 <= len(valid):
-        bits[byte_index] = (
-            UInt8(valid[i])
-            | (UInt8(valid[i + 1]) << 1)
-            | (UInt8(valid[i + 2]) << 2)
-            | (UInt8(valid[i + 3]) << 3)
-            | (UInt8(valid[i + 4]) << 4)
-            | (UInt8(valid[i + 5]) << 5)
-            | (UInt8(valid[i + 6]) << 6)
-            | (UInt8(valid[i + 7]) << 7)
+    """Pack each group of eight Boolean values into one LSB-first byte,
+    eight lanes through one move-mask, where reading each value and
+    shifting it in took most of a result column's build (every operator's
+    output validity passes through here)."""
+    var n = len(valid)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var source = valid.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var target = bits.unsafe_ptr()
+    var zero = SIMD[DType.uint8, 8](0)
+    var full = n // 8
+    for k in range(full):
+        var lanes = source.unsafe_offset(8 * k).unsafe_load[width=8]()
+        target.unsafe_offset(k).unsafe_store(
+            pack_bits[DType.uint8](lanes.ne(zero))
         )
-        i += 8
-        byte_index += 1
-    if i < len(valid):
+    var i = 8 * full
+    if i < n:
         var byte = UInt8(0)
         var shift = UInt8(0)
-        while i < len(valid):
+        while i < n:
             byte |= UInt8(valid[i]) << shift
             i += 1
             shift += 1
-        bits[byte_index] = byte
+        target.unsafe_offset(full).unsafe_store(byte)
     return bits^
 
 
