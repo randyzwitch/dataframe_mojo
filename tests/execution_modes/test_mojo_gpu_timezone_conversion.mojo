@@ -1,10 +1,34 @@
 """Zone metadata conversion keeps exact ticks and uses the GPU row executor."""
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Expr, Series, col
+from dataframe import Column, DataFrame, DataType, Expr, Series, LazyFrame, col
 from dataframe.metal import MetalRuntime
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.gpu.runtime import capabilities
 from tests.support.coverage_compare import assert_frame
+
+
+def _check_local_literals(
+    query: LazyFrame,
+    dtype: DataType,
+    ticks: List[Int64],
+    valid: List[Bool] = List[Bool](),
+) raises:
+    var mask = valid.copy() if len(valid) else List[Bool](
+        length=len(ticks), fill=True
+    )
+    var expected = DataFrame(
+        [Series("t", Column[Int64](ticks.copy(), mask^)).with_dtype(dtype)]
+    )
+    assert_frame(query.collect(engine="cpu", optimize=False), expected)
+    assert_frame(
+        query.collect(accelerator=MetalRuntime(), optimize=False), expected
+    )
+    # Admission still depends on the private mutation capability and an
+    # original terminal scope; disabling it must fail before device access.
+    var disabled = capabilities()
+    disabled.iana_zone_mutations = False
+    with assert_raises(contains="time zone"):
+        _ = lower_rows(query, disabled, ordered_source=True)
 
 
 def _assert_ticks(actual: DataFrame, source: Series, dtype: DataType) raises:
@@ -164,21 +188,43 @@ def test_mojo_gpu_timezone_conversion_validates_zones_and_retains_local_operatio
         named_caps.iana_zone_temporal_fields = False
         with assert_raises(contains="time zone field extraction"):
             _ = lower_rows(query, named_caps)
+    # Independent Gregorian/zoneinfo literals: NY midnight, calendar +1d
+    # across DST, and a fixed +05:45 midnight. Null payloads stay unobserved.
     var fields: List[Expr] = [
         zoned.dt().truncate("1d"),
         zoned.dt().offset_by("1d"),
         col("t").dt().convert_time_zone("+05:45").dt().truncate("1d"),
     ]
-    for expression in fields:
-        var query = frame.lazy().select(expression)
-        _ = query.collect(engine="cpu")
-        with assert_raises(contains="time zone field extraction"):
-            _ = query.collect(accelerator=unavailable)
-    for target in ["", "UTC", "+05:45"]:
-        var query = frame.lazy().select(zoned.dt().replace_time_zone(target))
-        _ = query.collect(engine="cpu")
-        with assert_raises(contains="naive or UTC"):
-            _ = query.collect(accelerator=unavailable)
+    var literals: List[List[Int64]] = [
+        [-68400000000, 1615698000000000, 1636257600000000, 0],
+        [86400000000, 1615791600000000, 1636353000000000, 0],
+        [-20700000000, 1615659300000000, 1636222500000000, 0],
+    ]
+    for index in range(len(fields)):
+        _check_local_literals(
+            frame.lazy().select(fields[index]),
+            DataType.datetime(
+                "us", "+05:45" if index == 2 else "America/New_York"
+            ),
+            literals[index],
+            [True, True, True, False],
+        )
+    var targets: List[String] = ["", "UTC", "+05:45"]
+    for index in range(len(targets)):
+        var wall: List[Int64] = [
+            -18000000000,
+            1615690800000000,
+            1636248600000000,
+            0,
+        ]
+        if index == 2:
+            wall = [-38700000000, 1615670100000000, 1636227900000000, 0]
+        _check_local_literals(
+            frame.lazy().select(zoned.dt().replace_time_zone(targets[index])),
+            DataType.datetime("us", targets[index]),
+            wall,
+            [True, True, True, False],
+        )
     for target in ["../invalid", "Dataframe/No_Such_Zone"]:
         var query = frame.lazy().select(col("t").dt().convert_time_zone(target))
         with assert_raises(contains="time zone"):

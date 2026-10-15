@@ -5,7 +5,13 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
-from . import temporal_expressions, ordered_rows, implode_ordered
+from . import (
+    temporal_expressions,
+    ordered_rows,
+    implode_ordered,
+    iana_mutations,
+    iana_certificate,
+)
 from .code_domains import TextField
 from .text_key_domains import append_partition_values
 from .gpu.temporal_descriptors import (
@@ -15,10 +21,11 @@ from .gpu.temporal_descriptors import (
     cast_literal,
 )
 from .timezone_tables import serialize as serialize_zone
-from .memory import checked_add
+from .memory import checked_add, checked_mul
 from dataframe.parse import parse_int64
 from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
 from std.memory import ArcPointer, bitcast
+from std.sys import size_of
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
@@ -244,6 +251,10 @@ struct RowPlan(Movable):
     var output_text: List[TextField]
     var code_domain: Optional[DataType]
     var source_domain: Optional[DataType]
+    var iana_mask_bases: List[Int]
+    var iana_descriptors: List[Int]
+    var iana_diagnostics: List[String]
+    var iana_construction_peak_bytes: Int
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -291,6 +302,7 @@ def _program(
     mut literals: List[Float64],
     mut node_dtypes: List[DataType],
     capabilities: RowCapabilities,
+    iana_certified: Bool = False,
 ) raises:
     if count < 1 or count > capabilities.max_nodes:
         capabilities.reject(
@@ -421,6 +433,11 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        var iana_mutation = (
+            capabilities.iana_zone_mutations
+            and iana_certified
+            and iana_mutations.mutation(bound, i)
+        )
         var temporal_binary = (
             capabilities.temporal_binary_arithmetic
             and temporal_expressions.binary(bound, i)
@@ -431,9 +448,13 @@ def _program(
         )
         # Conversion changes validated zone metadata and preserves UTC ticks.
         # Local-time operations still require their own zone-aware support.
-        if op == DT_REPLACE_TZ and (
-            left_type.time_zone() not in List[String](["", "UTC"])
-            or bound.dtypes[i].time_zone() not in List[String](["", "UTC"])
+        if (
+            not iana_mutation
+            and op == DT_REPLACE_TZ
+            and (
+                left_type.time_zone() not in List[String](["", "UTC"])
+                or bound.dtypes[i].time_zone() not in List[String](["", "UTC"])
+            )
         ):
             capabilities.reject(
                 "temporal",
@@ -513,6 +534,7 @@ def _program(
             )
             and not fixed_fields
             and not iana_fields
+            and not iana_mutation
         ):
             capabilities.reject(
                 "temporal", "time zone field extraction requires CPU execution"
@@ -775,7 +797,7 @@ def _program(
             )
         var lowered_op = op
         var calendar_ticks = Int64(0)
-        if op == DT_OFFSET_BY:
+        if op == DT_OFFSET_BY and not iana_mutation:
             var interval = parse_every(node.text)
             if (
                 capabilities.utc_temporal_conversions
@@ -811,7 +833,7 @@ def _program(
                 lowered_op = ROW_CALENDAR_OFFSET
                 calendar_ticks = right
                 right = interval[0]
-        if op == DT_TRUNCATE:
+        if op == DT_TRUNCATE and not iana_mutation:
             var interval = parse_every(node.text)
             if (
                 capabilities.utc_temporal_conversions
@@ -861,6 +883,9 @@ def _program(
             temporal_payload = cast_literal(
                 left_type, bound.dtypes[i], node.integer != 0
             )
+        if iana_mutation:
+            lowered_op = Int(iana_mutations.ROW_IANA_MUTATION)
+            right = -1
         code.append(Int64(lowered_op))
         code.append(Int64(node.left))
         code.append(right)
@@ -1034,6 +1059,8 @@ def lower_rows(
     if dtype == DataType.BOOL:
         # Internal physical representation only; public columns remain Bool.
         dtype = DataType.FLOAT32
+    var capsule = iana_mutations.Capsule()
+    var iana_mask_bases = List[Int]()
     var code = List[Int64]()
     var literals = List[Float64]()
     var node_dtypes = List[DataType]()
@@ -1194,14 +1221,21 @@ def lower_rows(
             and len(node.exprs) > 0
         )
         var needs_order = False
+        var iana_terminal = False
         if ordered_terminal:
             for expression in node.exprs:
                 var original_bound = bind(expression, schema)
-                ordered_terminal &= ordered_rows.eligible(original_bound)
+                ordered_terminal &= ordered_rows.eligible(
+                    original_bound, capabilities.iana_zone_mutations
+                )
                 needs_order |= ordered_rows.needed(original_bound)
+                iana_terminal |= (
+                    capabilities.iana_zone_mutations
+                    and iana_mutations.contains(original_bound)
+                )
         ordered_terminal &= needs_order
         if ordered_terminal:
-            ordered_mode = 2
+            ordered_mode = 5 if iana_terminal else 2
         var ordered_decimal = (
             node.text == "metal_decimal_materialization"
             or node.text == "metal_integer_materialization"
@@ -1383,6 +1417,7 @@ def lower_rows(
                 for part in bound.expr._nodes:
                     if (
                         part.op == DT_TRUNCATE
+                        and not (ordered_terminal and iana_terminal)
                         and bound.dtypes[part.left].is_datetime()
                     ):
                         var interval = parse_every(part.text)
@@ -1427,6 +1462,7 @@ def lower_rows(
                 if (
                     bound.expr._nodes[part_index].op == DT_OFFSET_BY
                     and capabilities.temporal_offsets
+                    and not (ordered_terminal and iana_terminal)
                 ):
                     var interval = parse_every(
                         bound.expr._nodes[part_index].text
@@ -2407,7 +2443,32 @@ def lower_rows(
                 literals,
                 node_dtypes,
                 capabilities,
+                ordered_terminal and iana_terminal,
             )
+            if ordered_terminal and iana_terminal:
+                while len(iana_mask_bases) < len(steps):
+                    iana_mask_bases.append(-1)
+                var mask_words = iana_certificate.mask_words(
+                    bound, capabilities.max_nodes
+                )
+                # occurrences(bound) is idempotent for the already-cloned tree.
+                for at in range(count):
+                    if (
+                        code[4 * (start + at)]
+                        == iana_mutations.ROW_IANA_MUTATION
+                    ):
+                        code[4 * (start + at) + 2] = Int64(
+                            capsule.append(bound, at)
+                        )
+                iana_mask_bases.append(len(capsule.words))
+                capsule.construction_peak_bytes = max(
+                    capsule.construction_peak_bytes,
+                    checked_add(
+                        checked_mul(capsule.words.capacity(), 8),
+                        checked_mul(mask_words.capacity(), 16),
+                    ),
+                )
+                capsule.words.extend(mask_words^)
             if ordered_terminal or ordered_private or ordered_decimal:
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
@@ -2707,7 +2768,12 @@ def lower_rows(
             "ordered implode",
             "requires one fresh private output and preserved inputs",
         )
-    if ordered_mode == 2 or ordered_mode == 3 or ordered_mode == 4:
+    if (
+        ordered_mode == 2
+        or ordered_mode == 3
+        or ordered_mode == 4
+        or ordered_mode == 5
+    ):
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(
                 "ordered rows", "invalid occurrence descriptor geometry"
@@ -2717,34 +2783,86 @@ def lower_rows(
                 capabilities.reject(
                     "ordered rows", "requires direct terminal row projections"
                 )
-    var zone_names = List[String]()
-    var zone_bases = List[Int64]()
+    for step_index in range(len(steps)):
+        ref step = steps[step_index]
+        for occurrence in range(step.start, step.start + step.nodes):
+            if code[4 * occurrence] == iana_mutations.ROW_IANA_MUTATION:
+                var descriptor = Int(code[4 * occurrence + 2])
+                if (
+                    ordered_mode != 5
+                    or descriptor not in capsule.descriptors
+                    or step_index >= len(iana_mask_bases)
+                    or iana_mask_bases[step_index] < 0
+                ):
+                    capabilities.reject(
+                        "temporal",
+                        "IANA mutation requires an occurrence-certified phase",
+                    )
+                iana_mutations.validate_descriptor(capsule.words, descriptor)
+        if ordered_mode == 5:
+            if step_index >= len(iana_mask_bases):
+                capabilities.reject(
+                    "temporal", "IANA mask certificate is missing"
+                )
+            iana_certificate.validate(
+                capsule.words, iana_mask_bases[step_index], step.nodes
+            )
+    var capsule_peak = 0
     var zone_words = List[UInt64]()
-    for step in steps:
-        for node in range(step.start, step.start + step.nodes):
-            var op = code[4 * node]
-            if (
-                op < DT_YEAR
-                or op > DT_TIME
-                or not (code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
-            ):
-                continue
-            var source = step.start + Int(code[4 * node + 1])
-            var name = node_dtypes[source].time_zone()
-            var found = -1
-            for at in range(len(zone_names)):
-                if zone_names[at] == name:
-                    found = at
-                    break
-            if found < 0:
-                var zone = TimeZone.load(name)
-                var packed = serialize_zone(zone)
-                _ = checked_add(len(zone_words), len(packed))
-                found = len(zone_names)
-                zone_names.append(name)
-                zone_bases.append(Int64(len(zone_words)))
-                zone_words.extend(packed^)
-            code[4 * node + 2] = zone_bases[found]
+    if len(capsule.descriptors):
+        for step in steps:
+            for node in range(step.start, step.start + step.nodes):
+                var op = code[4 * node]
+                if (
+                    op >= DT_YEAR
+                    and op <= DT_TIME
+                    and (code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+                ):
+                    var source = step.start + Int(code[4 * node + 1])
+                    var zone = capsule.zone(node_dtypes[source].time_zone())
+                    code[4 * node + 2] = Int64(capsule.bases[zone])
+        capsule.validate()
+        capsule_peak = max(
+            capsule.construction_peak_bytes,
+            checked_add(
+                checked_mul(capsule.words.capacity(), 16),
+                checked_add(
+                    checked_mul(capsule.descriptors.capacity(), 16),
+                    checked_mul(
+                        capsule.diagnostics.capacity(), 2 * size_of[String]()
+                    ),
+                ),
+            ),
+        )
+        zone_words = capsule.words.copy()
+    else:
+        var zone_names = List[String]()
+        var zone_bases = List[Int64]()
+        for step in steps:
+            for node in range(step.start, step.start + step.nodes):
+                var op = code[4 * node]
+                if (
+                    op < DT_YEAR
+                    or op > DT_TIME
+                    or not (code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+                ):
+                    continue
+                var source = step.start + Int(code[4 * node + 1])
+                var name = node_dtypes[source].time_zone()
+                var found = -1
+                for at in range(len(zone_names)):
+                    if zone_names[at] == name:
+                        found = at
+                        break
+                if found < 0:
+                    var zone = TimeZone.load(name)
+                    var packed = serialize_zone(zone)
+                    _ = checked_add(len(zone_words), len(packed))
+                    found = len(zone_names)
+                    zone_names.append(name)
+                    zone_bases.append(Int64(len(zone_words)))
+                    zone_words.extend(packed^)
+                code[4 * node + 2] = zone_bases[found]
     return RowPlan(
         frame^,
         dtype,
@@ -2769,4 +2887,8 @@ def lower_rows(
         query._nodes[root].text_fields.copy(),
         query._nodes[root].code_domain,
         query._nodes[cursor].code_domain,
+        iana_mask_bases^,
+        capsule.descriptors.copy(),
+        capsule.diagnostics.copy(),
+        capsule_peak,
     )

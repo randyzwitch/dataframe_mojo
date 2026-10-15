@@ -7,6 +7,9 @@ from dataframe.accelerator.rows import lower_rows, ROW_FIXED_ZONE_FIELDS
 from dataframe.accelerator.gpu.runtime import capabilities
 from dataframe.accelerator.gpu.timezone_fields import local_ticks
 from tests.support.coverage_compare import assert_frame
+from tests.execution_modes.test_mojo_gpu_timezone_conversion import (
+    _check_local_literals,
+)
 
 
 def _fields() -> List[Expr]:
@@ -296,23 +299,26 @@ def test_mojo_gpu_fixed_zone_fields_capability_descriptor_and_unsupported_local_
             == "-23:59" else Int64(20700) if zone
             == "+05:45" else Int64(0),
         )
-        var unavailable = MetalRuntime(device_id=999999)
-        for expression in [
-            col("t").dt().truncate("1d"),
-            col("t").dt().offset_by("1d"),
-        ]:
-            with assert_raises(contains="time zone field extraction"):
-                _ = (
-                    frame.lazy()
-                    .select(expression)
-                    .collect(accelerator=unavailable)
-                )
-        with assert_raises(contains="naive or UTC"):
-            _ = (
-                frame.lazy()
-                .select(col("t").dt().replace_time_zone("UTC"))
-                .collect(accelerator=unavailable)
-            )
+        var local_offset = Int64(-86340) if zone == "-23:59" else (
+            Int64(20700) if zone == "+05:45" else Int64(0)
+        )
+        # Epoch in each fixed zone: truncate the local day, add one calendar
+        # day, or retain the local wall reading while replacing the zone.
+        _check_local_literals(
+            frame.lazy().select(col("t").dt().truncate("1d")),
+            DataType.datetime("us", zone),
+            [Int64(-60000000) if zone == "-23:59" else -local_offset * 1000000],
+        )
+        _check_local_literals(
+            frame.lazy().select(col("t").dt().offset_by("1d")),
+            DataType.datetime("us", zone),
+            [Int64(86400000000)],
+        )
+        _check_local_literals(
+            frame.lazy().select(col("t").dt().replace_time_zone("UTC")),
+            DataType.datetime("us", "UTC"),
+            [local_offset * 1000000],
+        )
     var iana = DataFrame(
         [
             Series("t", Column[Int64]([0])).with_dtype(
@@ -327,16 +333,18 @@ def test_mojo_gpu_fixed_zone_fields_capability_descriptor_and_unsupported_local_
     named_caps.iana_zone_temporal_fields = False
     with assert_raises(contains="time zone field extraction"):
         _ = lower_rows(named_query, named_caps)
-    var unavailable = MetalRuntime(device_id=999999)
-    for expression in [
-        col("t").dt().truncate("1d"),
-        col("t").dt().offset_by("1d"),
-    ]:
-        with assert_raises(contains="time zone field extraction"):
-            _ = iana.lazy().select(expression).collect(accelerator=unavailable)
-    with assert_raises(contains="naive or UTC"):
-        _ = (
-            iana.lazy()
-            .select(col("t").dt().replace_time_zone("UTC"))
-            .collect(accelerator=unavailable)
-        )
+    _check_local_literals(
+        iana.lazy().select(col("t").dt().truncate("1d")),
+        DataType.datetime("us", "America/New_York"),
+        [Int64(-68400000000)],
+    )
+    _check_local_literals(
+        iana.lazy().select(col("t").dt().offset_by("1d")),
+        DataType.datetime("us", "America/New_York"),
+        [Int64(86400000000)],
+    )
+    _check_local_literals(
+        iana.lazy().select(col("t").dt().replace_time_zone("UTC")),
+        DataType.datetime("us", "UTC"),
+        [Int64(-18000000000)],
+    )
