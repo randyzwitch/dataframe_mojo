@@ -668,3 +668,32 @@ def test_date_export_does_not_narrow_hidden_null_payloads() raises:
         if "date outside the Arrow date32 range" in String(error):
             raise Error("date export must ignore hidden null payloads")
         raise error
+
+
+def test_validity_lists_pack_to_the_same_bits_at_every_length() raises:
+    # Lengths around whole bytes and eight-lane groups, with patterns
+    # that set and clear each lane position: every row's validity and the
+    # null count read back as the list gave them.
+    for n in [0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 127, 129, 300]:
+        for pattern in range(4):
+            var values = List[Int64]()
+            var valid = List[Bool]()
+            var nulls = 0
+            for i in range(n):
+                values.append(Int64(i))
+                var keep = (
+                    i % 3
+                    != 1 if pattern
+                    == 0 else (i * 7) % 11
+                    < 5 if pattern
+                    == 1 else i % 8
+                    == pattern if pattern
+                    == 2 else i
+                    != n - 1
+                )
+                valid.append(keep)
+                nulls += Int(not keep)
+            var column = Column[Int64](values^, valid.copy())
+            assert_equal(column.null_count(), nulls)
+            for i in range(n):
+                assert_equal(column.is_valid(i), valid[i])
