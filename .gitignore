@@ -9,3 +9,14 @@ dist/
 
 # One-off benchmark research is kept in the GitHub wiki.
 /experiments/
+
+# Editor and OS files
+*.code-workspace
+.DS_Store
+
+# Claude Code agent worktrees and local settings
+.claude/
+
+# Profiler output (perf, Instruments)
+perf.data*
+*.trace
