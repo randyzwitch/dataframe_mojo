@@ -205,7 +205,7 @@ def marker_capture(query: LazyFrame) raises -> Capture:
     ref operation = query._nodes[len(query._nodes) - 1]
     if len(operation.partition_exprs) != 2:
         raise Error("Partition CUT original expression certificate is missing")
-    var original = operation.partition_exprs[0]
+    ref original = operation.partition_exprs[0]
     var source = DataFrame(operation.partition_columns.copy())
     var bound = bind(original, source._columns)
     if signature(bound) != operation.names2[5]:
