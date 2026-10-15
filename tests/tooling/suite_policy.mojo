@@ -2891,6 +2891,7 @@ def production_policy() -> SuitePolicy:
             "reduce.grouped",
             [
                 "tests/kernel_equivalence/test_aggregate_table.mojo",
+                "tests/kernel_equivalence/test_aggregate_selection.mojo",
                 "tests/public_contracts/test_distribution_shapes.mojo",
                 "tests/public_contracts/test_expression_boundaries.mojo",
                 "tests/public_contracts/test_grouped_types.mojo",
