@@ -181,7 +181,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable, Deinitable):
+struct PlanNode(Copyable, Deinitable, Movable):
     var kind: Int
     var left: Int
     var right: Int
@@ -212,6 +212,32 @@ struct PlanNode(Copyable, Deinitable):
     # Original grouped key domains survive whole-query code normalization.
     var grouped_keys: Optional[ArcPointer[KeyQuery]]
     var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
+
+    def __init__(out self, *, deinit move: Self):
+        # Resolve the recursive PlanNode/KeyQuery/LazyFrame move witness
+        # explicitly while transferring each existing owner exactly once.
+        self.kind = move.kind
+        self.left = move.left
+        self.right = move.right
+        self.exprs = move.exprs^
+        self.names = move.names^
+        self.names2 = move.names2^
+        self.flags = move.flags^
+        self.text = move.text^
+        self.offset = move.offset
+        self.length = move.length
+        self.maintain_order = move.maintain_order
+        self.how = move.how
+        self.right_keys = move.right_keys^
+        self.coalesce = move.coalesce
+        self._executions = move._executions^
+        self.asof_tolerance = move.asof_tolerance^
+        self.window_keys = move.window_keys^
+        self.source_failure = move.source_failure^
+        self.code_domain = move.code_domain^
+        self.text_fields = move.text_fields^
+        self.grouped_keys = move.grouped_keys^
+        self.grouped_byte_domain = move.grouped_byte_domain^
 
     def _record_execution(self):
         if self._executions:
@@ -1382,7 +1408,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable, Deinitable):
+struct LazyFrame(Copyable, Deinitable, Movable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
