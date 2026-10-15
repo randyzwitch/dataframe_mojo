@@ -1396,6 +1396,9 @@ struct AggregateSink(Movable):
     var numbering: Bool
     var row_ids: List[Int]
     var representatives: List[Int]
+    # A group row's worth of words that rows a filter dropped update
+    # (`sink`'s `keep`): read by nothing.
+    var discard: List[UInt64]
 
     def __init__(out self, layout: AggregateLayout, workers: Int):
         self.slots = layout.slots.copy()
@@ -1427,6 +1430,7 @@ struct AggregateSink(Movable):
             self.dictionaries.append(_DictionaryKeys())
         self.held = List[Series]()
         self.numbering = False
+        self.discard = List[UInt64](length=self.parts.stride + 8, fill=0)
         self.row_ids = List[Int]()
         self.representatives = List[Int]()
 
@@ -1476,10 +1480,18 @@ struct AggregateSink(Movable):
         self.cycle = 0
 
     def sink(
-        mut self, keys: List[Series], inputs: List[Series], first: Int
+        mut self,
+        keys: List[Series],
+        inputs: List[Series],
+        first: Int,
+        keep: List[Bool] = List[Bool](),
     ) raises:
         """A morsel's rows into the table: `keys` and `inputs` (a row count
-        reads none) as unchunked columns of its rows, `first` the source
+        reads none) as unchunked columns of its rows. When `keep` is given
+        (one flag a row), only its rows join groups: the others (a filter's
+        dropped rows, read in place rather than compacted away, as DuckDB
+        reads a vector through its selection) update a discarded group
+        row, so no group appears for them. `first` the source
         row of its first."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
@@ -1543,17 +1555,26 @@ struct AggregateSink(Movable):
                         UInt64(1) << UInt64(c),
                     )
                 w = second + 1
+            var kept = len(keep) > 0
+            var keep_at = keep.unsafe_ptr().unsafe_offset(lo) if kept else (
+                keep.unsafe_ptr()
+            )
+            var discard = Int(self.discard.unsafe_ptr())
             if not self.grow:
                 for k in range(count):
+                    if kept and not keep_at[unsafe_offset=k]:
+                        continue
                     self.hll.add(hash_ptr[unsafe_offset=k])
             if 3 * (self.live + count) >= 2 * self.capacity:
                 self._full(count)
             self.cycle += count
             if self.skip:
-                self.made += count
-                self.live += count
-                self.skipped += count
+                var appended = 0
                 for k in range(count):
+                    if kept and not keep_at[unsafe_offset=k]:
+                        group_at[unsafe_offset=k] = discard
+                        continue
+                    appended += 1
                     group_at[unsafe_offset=k] = self.parts.append(
                         hash_ptr[unsafe_offset=k],
                         nulls[unsafe_offset=k],
@@ -1561,10 +1582,16 @@ struct AggregateSink(Movable):
                         k,
                         first + lo + k,
                     )
+                self.made += appended
+                self.live += appended
+                self.skipped += appended
             else:
                 var mask = self.capacity - 1
                 var table = _words_at(Int(self.entries.unsafe_ptr()))
                 for k in range(count):
+                    if kept and not keep_at[unsafe_offset=k]:
+                        group_at[unsafe_offset=k] = discard
+                        continue
                     var hash = hash_ptr[unsafe_offset=k]
                     var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
                     var slot = Int(hash) & mask

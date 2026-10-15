@@ -2473,6 +2473,19 @@ struct _PipelineJob(Job):
             if morsel.height() == 0:
                 continue
             if len(self.layout) > 0:
+                if len(self.sinks) == 0:
+                    self.sinks.append(
+                        AggregateSink(self.layout[0], self.workers)
+                    )
+                var in_place = _in_place_table_rows(
+                    morsel, self.keys, self.expressions
+                )
+                if in_place:
+                    trace_path("pipeline.table_in_place")
+                    ref rows = in_place.value()
+                    self.sinks[0].sink(rows[0], rows[1], k << 32, rows[2])
+                    self.rows += rows[3]
+                    continue
                 # The aggregate table: the morsel's keys and reduction
                 # inputs into this worker's sink, no matter how many groups
                 # (its tables adapt), with strings compared in place.
@@ -2605,6 +2618,129 @@ struct _PipelineJob(Job):
             else:
                 self.parts.append(morsel.materialized())
                 self.sequences.append(morsel.sequence)
+
+
+def _scatter(
+    compact: Series, rows: List[Int], n: Int
+) raises -> Optional[Series]:
+    """A numeric or decimal column of the kept rows placed back at their
+    positions `rows` among `n` (the others hold zero, for rows nothing
+    reads); None for other storage."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if compact._data.isa[Column[Scalar[D]]]():
+            return _scatter_typed[D](compact, rows, n)
+    if compact._data.isa[Column[Int128]]():
+        return _scatter_typed[DType.int128](compact, rows, n)
+    return None
+
+
+def _scatter_typed[
+    D: DType
+](compact: Series, rows: List[Int], n: Int) raises -> Series:
+    ref column = compact._data[Column[Scalar[D]]]
+    var values = List[Scalar[D]](length=n, fill=0)
+    var out = values.unsafe_ptr()
+    var source = column._ptr()
+    var at = rows.unsafe_ptr()
+    for j in range(len(rows)):
+        out[unsafe_offset=at[unsafe_offset=j]] = source[unsafe_offset=j]
+    if column.null_count() == 0:
+        return Series(compact.name(), Column[Scalar[D]](values^)).with_dtype(
+            compact.dtype()
+        )
+    var valid = List[Bool](length=n, fill=True)
+    for j in range(len(rows)):
+        valid[at[unsafe_offset=j]] = column._valid(j)
+    return Series(
+        compact.name(), Column[Scalar[D]](values^, valid^)
+    ).with_dtype(compact.dtype())
+
+
+def _in_place_table_rows(
+    mut morsel: Morsel, keys: List[String], expressions: List[Expr]
+) raises -> Optional[Tuple[List[Series], List[Series], List[Bool], Int]]:
+    """A filtered morsel's aggregate-table rows without compacting it: its
+    key and plain input columns as they are, with a flag a row for the rows
+    the filter keeps; each computed input evaluated over every row, or,
+    when that raises, on the kept rows alone and placed back at their
+    positions, so only a kept row's error is raised. For a selection that
+    keeps at least
+    half the morsel, where compacting every column cost more than reading
+    the dropped rows (PDS-H q1 keeps 98.6%: a third of its time went to
+    compacting, including two string keys' views and codes). None when the
+    selection is sparse or a column was already compacted."""
+    var n = morsel.frame.height()
+    if not morsel.selected or morsel.by_rows or 2 * morsel.count < n:
+        return None
+    var key_columns = List[Series](capacity=len(keys))
+    for name in keys:
+        var at = morsel._index(name)
+        if morsel.compact[at]:
+            return None
+        key_columns.append(_unchunked(morsel.frame._columns[at]))
+    # Plain inputs are taken before any computed input compacts a column.
+    var inputs = List[Series]()
+    var computed = List[Int]()
+    var sources = List[Expr]()
+    for expression in expressions:
+        for i in range(len(expression._nodes)):
+            ref node = expression._nodes[i]
+            if not is_reduction(node.op):
+                continue
+            if node.left < 0:
+                inputs.append(key_columns[0].copy())
+                continue
+            ref input = expression._nodes[node.left]
+            if input.op == COL and input.text in morsel.frame.columns():
+                var at = morsel._index(input.text)
+                if morsel.compact[at]:
+                    return None
+                inputs.append(_unchunked(morsel.frame._columns[at]))
+                continue
+            computed.append(len(inputs))
+            sources.append(subtree(expression, node.left))
+            inputs.append(key_columns[0].copy())
+    for c in range(len(computed)):
+        var reads = _reads([sources[c].copy()])
+        if not reads:
+            return None
+        var whole = List[Series]()
+        for name in reads.value():
+            var at = morsel._index(name)
+            if morsel.compact[at]:
+                return None
+            whole.append(morsel.frame._columns[at].copy())
+        # Over every row, dropped ones included; an error is retried on
+        # the kept rows alone, so only a kept row's error is raised.
+        var evaluated: Series
+        try:
+            evaluated = (
+                DataFrame(whole^, height=n)
+                .select_exprs([sources[c].alias("__input")])
+                ._columns[0]
+                .copy()
+            )
+        except:
+            var rows = true_rows(morsel.mask)
+            var kept = morsel._compact_frame(reads.value())
+            var placed = _scatter(
+                _unchunked(
+                    kept.select_exprs([sources[c].alias("__input")])._columns[0]
+                ),
+                rows,
+                n,
+            )
+            if not placed:
+                return None
+            evaluated = placed.take()
+        inputs[computed[c]] = _unchunked(evaluated)
+    ref mask = morsel.mask
+    var keep = List[Bool](unsafe_uninit_length=n)
+    var out = keep.unsafe_ptr()
+    for i in range(n):
+        out[unsafe_offset=i] = mask._valid(i) and mask._get(i)
+    return (key_columns^, inputs^, keep^, morsel.count)
 
 
 def _unchunked(column: Series) raises -> Series:
