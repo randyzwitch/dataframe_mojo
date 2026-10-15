@@ -625,14 +625,20 @@ struct _PlaceJob(Job):
         var reps = Pointer[Int, MutAnyOrigin](
             unsafe_from_address=self.representatives
         )
+        # Local ids follow first occurrence, so an id is new exactly when it
+        # equals the count seen so far.
+        var fresh = 0
         for i in range(len(self.local)):
             var local = self.local[i]
             # -1 marks a null key that must not match; it carries through.
             if local >= 0:
                 var row = o.unsafe_offset(self.lo + i)[]
                 out.unsafe_offset(row)[] = local + self.base
-                # One row per id, for callers that need a key value back.
-                reps.unsafe_offset(self.base + local)[] = row
+                if local == fresh:
+                    # Each id's first row in the bucket, which the stable
+                    # scatter makes its first row in the input.
+                    reps.unsafe_offset(self.base + local)[] = row
+                    fresh += 1
 
 
 def encode_partitioned(
@@ -649,7 +655,7 @@ def encode_partitioned(
     Unlike `encode_rows`, the numbering is unspecified rather than
     first-occurrence, so this suits callers that only need equal keys to
     share an id -- a join's row order comes from iterating rows, not from
-    the ids. `representatives` still names one row per id.
+    the ids. `representatives` names each id's first row.
     """
     var rows = len(keys[0])
     var partitioner = Partitioner(keys, workers)
