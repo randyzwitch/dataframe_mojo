@@ -2971,6 +2971,37 @@ struct LazyFrame(Copyable):
                                 len(plan._nodes) - 1
                             )
                         return plan._execute(index, False, True, batch_size)
+                if node.how == JOIN_INNER and node.coalesce:
+                    # DuckDB's build side (`BuildProbeSideOptimizer`): the
+                    # side of fewer rows times columns builds. The right
+                    # side has run; when the left one, estimated, is the
+                    # smaller, the join runs here on both, building on the
+                    # left and restoring its row order (`DataFrame.join`),
+                    # and the stream goes on from its result, rather than
+                    # hash every built row to probe a few: PDS-H q2 hashed
+                    # and rechunked 159K wide supplier rows for its 747
+                    # parts. The left's bound is read first, so a left that
+                    # cannot be smaller is never sampled.
+                    var right_cost = built.height() * max(built.width(), 1)
+                    var columns = len(self._columns_of(node.left))
+                    var most = self._height_bound(node.left)
+                    if most < 0 or most * columns < right_cost:
+                        var rows = self._estimated_rows(node.left)
+                        if rows >= 0 and rows * columns < right_cost:
+                            trace_path("stream.smaller_left_build")
+                            var left_frame = self._execute(
+                                node.left, False, True, batch_size
+                            )
+                            var joined = self._join_frames(
+                                cursor, left_frame^, built^, False
+                            )
+                            var plan = self.copy()
+                            plan._frames.append(joined^)
+                            plan._schemas.append(Optional[CsvSchema]())
+                            plan._nodes[cursor] = _plan_node(
+                                SCAN_FRAME, offset=len(plan._frames) - 1
+                            )
+                            return plan._execute(index, False, True, batch_size)
                 if (
                     (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
                     and built.height() >= 524288
