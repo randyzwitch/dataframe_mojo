@@ -790,7 +790,10 @@ def _decimal_dense[
     comptime if op == MUL and divisor > 0:
         var narrow = _decimal_mul_narrow[divisor](a, b, n)
         if narrow:
-            return narrow.take()
+            var values = narrow.take()
+            for i in range(len(values)):
+                values[i] = check_limit(values[i], limit, dtype)
+            return values^
     var values = List[Int128](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var xs = a._ptr()
@@ -1088,11 +1091,14 @@ def _decimal_binary[
         if not valid[i]:
             continue
         var x = a._get(ai)
-        if left_factor != 1:
-            x = _decimal_mul(x, left_factor)
+        # Exact products use the original scales, without alignment.
+        comptime if op != MUL:
+            if left_factor != 1:
+                x = _decimal_mul(x, left_factor)
         var y = b._get(bi)
-        if right_factor != 1:
-            y = _decimal_mul(y, right_factor)
+        comptime if op != MUL:
+            if right_factor != 1:
+                y = _decimal_mul(y, right_factor)
         comptime if is_comparison(op):
             if op == GT:
                 predicates[i] = x > y
