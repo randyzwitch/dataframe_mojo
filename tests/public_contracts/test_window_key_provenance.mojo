@@ -1,6 +1,7 @@
 """CPU partition provenance survives OVER splitting and dictionary recoding."""
 from std.testing import assert_equal, assert_true, assert_false
 from std.memory import Pointer
+from std.sys import size_of
 from dataframe import (
     Column,
     DataFrame,
@@ -14,6 +15,7 @@ from dataframe import (
 from dataframe.dtype import CategoricalDictionary
 from dataframe.lazy import AGG, LazyFrame
 from dataframe.accelerator.window_keys import WindowKey
+from dataframe.accelerator.code_domains import CategoryOwner, CategoryField
 from dataframe.accelerator.windows import lower_partition_aggregates
 from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
 
@@ -60,8 +62,18 @@ def test_window_key_provenance_original_codes_and_explicit_column_reads() raises
     assert_equal(len(original[0].values[]), 0)
     var codes = DictionaryCodes(staged)
     # Four UInt32 codes plus one validity byte for each dictionary column,
-    # then two retained five-entry UInt64 provenance tables.
-    assert_equal(codes.staging_bytes(staged), codes.bytes + 34 + 80)
+    # then two retained five-entry UInt64 provenance tables. Only the one
+    # categorical scan column retains an original-code category owner and
+    # field; its unchunked input contributes one Column[UInt32] chunk header.
+    assert_equal(
+        codes.staging_bytes(staged),
+        codes.bytes
+        + 34
+        + 80
+        + size_of[CategoryOwner]()
+        + size_of[CategoryField]()
+        + size_of[Column[UInt32]](),
+    )
     var encoded = encode_query(staged, codes)
     var keys = _keys(encoded)
     var copied = encoded.copy()
