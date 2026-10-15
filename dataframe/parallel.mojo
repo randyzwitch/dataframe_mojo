@@ -755,6 +755,9 @@ def _helper_entry[J: Job](address: Int) abi("C") -> Int:
 # so the same threads run every stage and none goes cold between them.
 
 comptime _POSTINGS = 64
+# A posting's state bit set by `retire`: no helper may join it again, nor
+# hand back a slot it took (bit 31 of the running count's word).
+comptime _CLOSED = Int64(1) << 31
 # How long a crew thread looks for work before parking. A thread that sleeps
 # wakes on a core the CPU governor (schedutil) has clocked down, and ran a
 # group-by's jobs 1.5x slower than a thread started fresh (PDS-H q1); one
@@ -850,16 +853,29 @@ struct _Crew(Movable):
         for p in range(_POSTINGS):
             var state = self._state(p).load()
             while (state >> 32) > 0:
-                if _reserve_helpers(1) == 0:
-                    starved = True
-                    break
-                # One fewer wanted, one more running, in one step.
-                if self._state(p).compare_exchange(
+                # One fewer wanted, one more running, in one step; then the
+                # budget slot. Joined first, the thread is counted running,
+                # so `retire` waits for it either way: reserving first, a
+                # thread could hold a slot for a posting retired before it
+                # joined, past the call's return.
+                if not self._state(p).compare_exchange(
                     state, state - (Int64(1) << 32) + 1
                 ):
+                    state = self._state(p).load()
+                    continue
+                if _reserve_helpers(1) > 0:
                     return p
-                _release_helpers(1)
-                state = self._state(p).load()
+                # The budget is spent: leave, handing the slot back to a
+                # thread the budget frees later, unless the posting closed.
+                while True:
+                    var now = self._state(p).load()
+                    var back = now - 1
+                    if now & _CLOSED == 0:
+                        back += Int64(1) << 32
+                    if self._state(p).compare_exchange(now, back):
+                        break
+                starved = True
+                break
         return -2 if starved else -1
 
     def _wanted(mut self) -> Bool:
@@ -887,9 +903,11 @@ struct _Crew(Movable):
         ref list = Pointer[_Claims, MutAnyOrigin](unsafe_from_address=claims)[]
         while True:
             var state = self._state(p).load()
-            if self._state(p).compare_exchange(state, state & 0xFFFFFFFF):
+            if self._state(p).compare_exchange(
+                state, (state & 0xFFFFFFFF) | _CLOSED
+            ):
                 break
-        while self._state(p).load() != 0 or list.done.load() < Int64(
+        while self._state(p).load() & ~_CLOSED != 0 or list.done.load() < Int64(
             list.count
         ):
             _ = external_call["sched_yield", Int32]()
