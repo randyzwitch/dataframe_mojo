@@ -124,6 +124,66 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo::test_mojo_gpu_grouped_implode_mixed_keys_children_reductions_layouts_and_residency",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo::test_mojo_gpu_grouped_implode_empty_nulls_projection_errors_head_and_exact_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo::test_mojo_gpu_grouped_implode_metadata_admission_and_parallel_schedule_guards",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo::test_mojo_gpu_grouped_implode_large_checked_cpu_bucket_and_heavy_fault_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo::test_mojo_gpu_grouped_feed_batch_input_update_and_integer_finish_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo::test_mojo_gpu_grouped_feed_checked_ast_original_projection_order_and_masks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo::test_mojo_gpu_grouped_feed_success_high_words_empty_profile_budget_and_provenance",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo::test_mojo_gpu_grouped_original_key_domains_duplicates_bytes_metadata_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo::test_mojo_gpu_grouped_original_key_hash_worker_bucket_heavy_fault_priority",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo::test_mojo_gpu_grouped_key_staging_budget_empty_checked_feeds_and_metadata_admission",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_mojo_gpu_observed_integer_producer_success_and_nested_groups",
             "metal",
         )
@@ -2838,6 +2898,8 @@ def production_policy() -> SuitePolicy:
                 "tests/public_contracts/test_accelerator_execution_settings.mojo",
                 "tests/public_contracts/test_identity_column_metadata.mojo",
                 "tests/public_contracts/test_implode_field_metadata.mojo",
+                "tests/public_contracts/test_grouped_feed_error_order.mojo",
+                "tests/public_contracts/test_grouped_key_domains.mojo",
                 "tests/public_contracts/test_list_logical_counts.mojo",
                 "tests/public_contracts/test_list_get_metadata.mojo",
                 "tests/public_contracts/test_ordered_rows_metadata.mojo",
@@ -2864,6 +2926,9 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
                 "tests/execution_modes/test_mojo_gpu_explode.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
@@ -3288,6 +3353,9 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
                 "tests/execution_modes/test_mojo_gpu_explode.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_lists.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",

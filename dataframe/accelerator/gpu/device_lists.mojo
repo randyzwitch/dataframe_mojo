@@ -379,12 +379,13 @@ struct GroupOwner(Movable):
             or groups < 0
             or groups > Int(Int32.MAX)
             or len(index) != rows
-            or len(starts) != groups + 1
-            or len(order) != groups
+            or len(starts) < groups + 1
+            or len(order) < groups
         ):
             raise Error("Resident group layout geometry is invalid")
+        # Group builders retain full N-capacity backing owners even when G<N.
         var bytes = checked_mul(
-            checked_add(rows, checked_add(2 * groups, 1)), 4
+            checked_add(len(index), checked_add(len(starts), len(order))), 4
         )
         scope._retain(bytes)
         self.scope = scope.copy()
