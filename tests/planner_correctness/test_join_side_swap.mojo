@@ -1,10 +1,11 @@
 """An inner join whose executed right side holds more rows than its left can
-is run with the sides swapped when an unordered aggregation into the
-aggregate table consumes it: the left is hashed and the right streams through
-it. The swap must not change the result, the join's column names (the left
-key's own name), its key type, or which rows join; it is declined where row
-order matters to the consumer (an ordered group-by, a distinct count) and
-where a shared non-key name would be suffixed."""
+is run with the sides swapped when an unordered aggregation whose results do
+not depend on row order consumes it (the aggregate table's states, or a
+distinct count, whose batches are collected for one eager group-by): the
+left is hashed and the right streams through it. The swap must not change
+the result, the join's column names (the left key's own name), its key type,
+or which rows join; it is declined where row order matters to the consumer
+(an ordered group-by) and where a shared non-key name would be suffixed."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import (
@@ -192,7 +193,7 @@ def test_swapped_join_keeps_the_left_key_name_and_type() raises:
     _ = workers^
 
 
-def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written() raises:
+def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written_and_distinct_counts_swap() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     # An ordered group-by: same groups, first-occurrence order kept.
@@ -206,7 +207,9 @@ def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written(
     assert_equal(swapped(observed.text()), False)
     _ = observed^
     assert_by_name_and_group(ordered)
-    # A distinct count: its streamed states grow with how rows arrive.
+    # A distinct count depends on each group's values only: the join
+    # swaps, and the streamed batches are collected for one eager group-by
+    # rather than merged as per-batch sets.
     observed = StrategyTrace()
     var distinct = (
         joined()
@@ -214,7 +217,7 @@ def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written(
         .agg([col("v").n_unique().alias("values")])
         .collect()
     )
-    assert_equal(swapped(observed.text()), False)
+    assert_equal(swapped(observed.text()), True)
     _ = observed^
     var values = List[List[Int64]](length=7, fill=List[Int64]())
     for row in range(FACT_ROWS):

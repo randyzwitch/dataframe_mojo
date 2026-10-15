@@ -682,13 +682,25 @@ def _judge_held(
     keys: List[String],
     held_rows: Int,
     split_groups: Int,
+    distinct_inputs: List[String] = List[String](),
 ) raises -> Bool:
     """Whether the held batches show many groups (`_many_groups`) with
     keys short enough to collect (`_key_text_bytes`). The held states'
     group counts bound the union's from above: when even that bound is
-    few groups, no sample is encoded."""
+    few groups, no sample is encoded. A distinct count's state is a set
+    of values per group, which merging repeats the distinct aggregation
+    over: its (key, value) pairs count as groups (PDS-H q16 probing 800K
+    partsupp rows in batches showed few part groups but nearly a pair a
+    row, and spent 29 ms merging its batches' sets)."""
     if _key_text_bytes(held[0].slice(0, 1024), keys) > 64 * 1024:
         return False
+    for name in distinct_inputs:
+        var pair = keys.copy()
+        if name not in pair:
+            pair.append(name)
+        var sampled = _held_groups(held, pair, 2 * split_groups)
+        if _many_groups(sampled[0], sampled[1], held_rows, split_groups):
+            return True
     # One batch's state showing many groups on its own settles it.
     for h in range(len(states)):
         if len(states[h]) == 1 and _many_groups(
@@ -1001,6 +1013,28 @@ struct _StreamJob(Job):
         self.projection = List[String]()
         self.bound = _TopBound()
 
+    def _shows_many(self) raises -> Bool:
+        """Whether this batch's own rows show a many-group stream, so it
+        keeps only its frame. A distinct count's state is its (key,
+        value) pairs, judged on them at any batch length (PDS-H q16's
+        swapped join gave 9.7K-row batches, each building sets of nearly
+        a pair a row that the stream then dropped); otherwise a batch of
+        8 * split_groups rows or more judges its groups."""
+        var distinct = _distinct_inputs(self.expressions)
+        if distinct and len(distinct.value()) > 0:
+            for name in distinct.value():
+                var pair = self.keys.copy()
+                if name not in pair:
+                    pair.append(name)
+                if _batch_shows_many_groups(
+                    self.frame, pair, self.split_groups
+                ):
+                    return True
+            return False
+        return self.frame.height() >= 8 * self.split_groups and (
+            _batch_shows_many_groups(self.frame, self.keys, self.split_groups)
+        )
+
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
         self.reduced = List[_StreamReduction]()
@@ -1053,13 +1087,7 @@ struct _StreamJob(Job):
             k += 1
         if self.keep_frame and len(self.projection):
             self.frame = self.frame.select(self.projection)
-        if self.collect_only or (
-            self.keep_frame
-            and self.frame.height() >= 8 * self.split_groups
-            and _batch_shows_many_groups(
-                self.frame, self.keys, self.split_groups
-            )
-        ):
+        if self.collect_only or (self.keep_frame and self._shows_many()):
             self.rows = self.frame.height()
             if self.collect_only and len(self.projection):
                 self.frame = self.frame.select(self.projection)
@@ -1091,14 +1119,20 @@ def _same_names(a: List[String], b: List[String]) -> Bool:
     return True
 
 
-def _table_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
-    """Whether a grouped reduction's operations are ones the aggregate
-    table keeps inline (their input types decide the rest)."""
+def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
+    """Whether a grouped reduction's results are the same whatever order
+    its rows arrive in: the aggregate table's states, and distinct counts,
+    medians and quantiles, which depend on each group's values only. Its
+    input join may then build on either side (DuckDB's build side
+    optimizer and Polars' join pick the smaller one whatever the
+    aggregate)."""
     if len(keys) == 0 or len(expressions) == 0:
         return False
     for expression in expressions:
         for node in expression._nodes:
-            if is_reduction(node.op) and not reduction_supported(node.op):
+            if not is_reduction(node.op) or reduction_supported(node.op):
+                continue
+            if node.op not in [N_UNIQUE, MEDIAN, QUANTILE, ANY, ALL]:
                 return False
     return True
 
@@ -2811,7 +2845,7 @@ struct LazyFrame(Copyable):
                     if (
                         node.how == JOIN_INNER
                         and not ordered
-                        and _table_reductions(keys, expressions)
+                        and _order_free_reductions(keys, expressions)
                         and self._direct_key(node.left, node.names)
                     ):
                         var large = self._execute(
@@ -2902,7 +2936,7 @@ struct LazyFrame(Copyable):
                     and not ordered
                     and bound >= 0
                     and built.height() > bound
-                    and _table_reductions(keys, expressions)
+                    and _order_free_reductions(keys, expressions)
                 ):
                     # The built right side holds more rows than the left
                     # can: hash the left instead and stream the right
@@ -3438,6 +3472,14 @@ struct LazyFrame(Copyable):
         # keeps a later year. Until then the batches' frames are kept
         # beside their states, to be collected or dropped.
         var undecided = len(expressions) > 0 and len(keys) > 0
+        # The columns distinct counts read, judged with the keys: a batch's
+        # state holds each group's set of values, so its size is the
+        # distinct (key, value) pairs, not the groups. One that reads an
+        # expression collects (its values are assumed many).
+        var distinct_inputs = _distinct_inputs(expressions)
+        if undecided and not distinct_inputs:
+            collecting = True
+            undecided = False
         var held = List[DataFrame]()
         # Each held batch's state, when its job built one (a batch under
         # 8 * split_groups rows: a few ms at most, in parallel, and used
@@ -3719,7 +3761,12 @@ struct LazyFrame(Copyable):
                         # PDS-H q16 (one in four) 35%; PDS-H q13 (one
                         # in ten) pays 7% either way.
                         if _judge_held(
-                            held, held_states, keys, held_rows, split_groups
+                            held,
+                            held_states,
+                            keys,
+                            held_rows,
+                            split_groups,
+                            distinct_inputs.value(),
                         ):
                             # Many groups: collect every batch held so
                             # far and from here on; the states built
@@ -3819,7 +3866,12 @@ struct LazyFrame(Copyable):
                 # into hash parts cost more than one eager group-by.
                 undecided = False
                 if _judge_held(
-                    held, held_states, keys, held_rows, split_groups
+                    held,
+                    held_states,
+                    keys,
+                    held_rows,
+                    split_groups,
+                    distinct_inputs.value(),
                 ):
                     collecting = True
                     for frame in held:
@@ -6958,6 +7010,22 @@ def _late_key_build(
             if not reads or name in reads.value() or e._name == name:
                 return -1
     return holder
+
+
+def _distinct_inputs(expressions: List[Expr]) -> Optional[List[String]]:
+    """The columns `n_unique` reductions read, or None when one reads an
+    expression rather than a column."""
+    var names = List[String]()
+    for expression in expressions:
+        ref nodes = expression._nodes
+        for node in nodes:
+            if node.op != N_UNIQUE:
+                continue
+            if node.left < 0 or nodes[node.left].op != COL:
+                return None
+            if nodes[node.left].text not in names:
+                names.append(nodes[node.left].text)
+    return names^
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:
