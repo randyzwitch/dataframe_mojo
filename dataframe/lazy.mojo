@@ -4014,7 +4014,6 @@ struct LazyFrame(Copyable):
         both share the crew's thread budget (as Polars runs a union's
         inputs at once). A worker the budget cannot cover leaves both on
         the caller, one after the other."""
-        ref node = self._nodes[index]
         var both = self._both_inputs(index, empty, streaming, batch_size)
         var input = both[0].copy()
         var right = both[1].copy()

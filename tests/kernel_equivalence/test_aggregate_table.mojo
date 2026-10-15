@@ -163,6 +163,70 @@ def test_tables_that_fill_many_times_merge_every_group_once() raises:
     _ = workers^
 
 
+def test_few_valued_keys_forming_many_groups_reach_the_table() raises:
+    # A brand, a type and a size, each with few values, whose product is
+    # under the few-groups bound but which form thousands of groups among
+    # the rows (PDS-H q16's keys): the table takes them, as it does in a
+    # pipeline, rather than per-range states that number each range's
+    # strings again.
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var rows = 120_000
+    var brands = List[String]()
+    var types = List[String]()
+    var sizes = List[Int64]()
+    var values = List[Int64]()
+    for row in range(rows):
+        brands.append("Brand#" + String(row % 25))
+        types.append("STANDARD POLISHED TIN " + String((row // 25) % 150))
+        sizes.append(Int64((row // 3750) % 8))
+        values.append(Int64(row % 1000))
+    var frame = DataFrame(
+        [
+            Series("brand", Column[String](brands^)),
+            Series("type", Column[String](types^)),
+            Series("size", Column[Int64](sizes^)),
+            Series("v", Column[Int64](values^)),
+        ]
+    )
+    var observed = StrategyTrace()
+    var grouped = frame.group_by(["brand", "type", "size"]).agg(
+        [col("v").sum().alias("total"), col("v").len().alias("rows")]
+    )
+    assert_true(
+        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "few-valued keys forming many groups did not reach the table",
+    )
+    _ = observed^
+    _ = trace^
+    var totals = Dict[String, Int]()
+    var counts = Dict[String, Int]()
+    for row in range(rows):
+        var key = (
+            "Brand#"
+            + String(row % 25)
+            + "|STANDARD POLISHED TIN "
+            + String((row // 25) % 150)
+            + "|"
+            + String((row // 3750) % 8)
+        )
+        totals[key] = totals.get(key, 0) + row % 1000
+        counts[key] = counts.get(key, 0) + 1
+    assert_equal(grouped.height(), len(totals))
+    for r in range(grouped.height()):
+        var key = (
+            grouped.item(r, "brand").string()
+            + "|"
+            + grouped.item(r, "type").string()
+            + "|"
+            + String(grouped.item(r, "size").int64())
+        )
+        assert_true(key in totals, "unexpected group " + key)
+        assert_equal(grouped.item(r, "total").int64(), Int64(totals[key]))
+        assert_equal(grouped.item(r, "rows").int64(), Int64(counts[key]))
+    _ = workers^
+
+
 def decimal_value(row: Int) -> Int64:
     return Int64((row * 104729) % 200_001 - 100_000)
 
