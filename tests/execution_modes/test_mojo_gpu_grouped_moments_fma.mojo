@@ -58,7 +58,9 @@ def test_mojo_gpu_grouped_implode_var_std_siblings_local_fma_literal() raises:
             )
 
 
-def _higher_moment_source(fixture_index: Int, nullable: Bool) raises -> DataFrame:
+def _higher_moment_source(
+    fixture_index: Int, nullable: Bool
+) raises -> DataFrame:
     var values: List[Float64] = [-1e16, 3, 2, 2, 1e16, -1e16]
     if fixture_index != 0:
         var positive = bitcast[DType.float64](UInt64(0x7FF8000000000123))
@@ -116,9 +118,7 @@ def _higher_moment_words(fixture_index: Int) -> List[UInt64]:
 
 def test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads() raises:
     var setting = WorkerSetting(1)
-    var names: List[String] = [
-        "s_b", "s_u", "k_f_b", "k_p_b", "k_f_u", "k_p_u"
-    ]
+    var names: List[String] = ["s_b", "s_u", "k_f_b", "k_p_b", "k_f_u", "k_p_u"]
     for fixture_index in range(3):
         var expected = _higher_moment_words(fixture_index)
         for layout in range(4):
@@ -135,8 +135,10 @@ def test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan
             )
             for gpu in [False, True]:
                 var actual = query.collect(
-                    accelerator=MetalRuntime(), engine="accel",
-                    streaming=False, optimize=False,
+                    accelerator=MetalRuntime(),
+                    engine="accel",
+                    streaming=False,
+                    optimize=False,
                 ) if gpu else query.collect(
                     engine="cpu", streaming=False, optimize=False
                 )
@@ -144,12 +146,18 @@ def test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan
                 assert_equal(actual.width(), 8)
                 assert_equal(actual.item(0, "k").int32(), Int32(0))
                 var items = actual.column("items").list_column()
-                assert_equal(items._offsets[], [Int64(0), Int64(frame.height())])
+                assert_equal(
+                    items._offsets[], [Int64(0), Int64(frame.height())]
+                )
                 for at in range(len(names)):
-                    assert_equal(actual.column(names[at]).dtype(), DataType.FLOAT64)
+                    assert_equal(
+                        actual.column(names[at]).dtype(), DataType.FLOAT64
+                    )
                     assert_true(not actual.item(0, names[at]).is_null())
                     assert_equal(
-                        bitcast[DType.uint64](actual.item(0, names[at]).float64()),
+                        bitcast[DType.uint64](
+                            actual.item(0, names[at]).float64()
+                        ),
                         expected[at],
                     )
     _ = setting^
