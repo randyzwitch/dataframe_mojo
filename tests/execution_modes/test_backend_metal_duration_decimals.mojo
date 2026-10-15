@@ -218,17 +218,13 @@ def test_native_metal_duration_decimal_observed_prefix_errors_null_payloads_and_
     # CPU validates each observed operand before adding it. Cancellation must
     # not hide a physical Int128 payload outside the result's precision.
     for negative in [False, True]:
+        var payload: List[Int128] = [-maximum, Int128.MAX, -maximum]
+        if negative:
+            payload = [maximum, Int128.MIN, maximum]
         var malformed = source.with_column(
-            Series(
-                "x",
-                Column[Int128](
-                    [maximum, Int128.MIN, maximum] if negative else [
-                        -maximum,
-                        Int128.MAX,
-                        -maximum,
-                    ]
-                ),
-            ).with_dtype(DataType.decimal(38, 0))
+            Series("x", Column[Int128](payload^)).with_dtype(
+                DataType.decimal(38, 0)
+            )
         )
         fails(
             malformed.lazy().select(col("x").rolling_sum_by("t", "1d")),

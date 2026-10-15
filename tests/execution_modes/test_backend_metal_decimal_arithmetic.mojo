@@ -296,7 +296,7 @@ def test_native_metal_decimal_add_subtract_literal_result_types_and_boundaries()
         with assert_raises(contains="decimal precision"):
             _ = failing.collect(accelerator=runtime)
     # Optimized head precedes a row-local projection on both engines.
-    var head = producer.head(1).select("v")
+    var head = producer.head(1).select(["v"])
     var head_expected = DataFrame(
         [Series("v", Column[Int32]([1])).with_dtype(DataType.decimal(4, 0, 32))]
     )
