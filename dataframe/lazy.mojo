@@ -207,6 +207,10 @@ struct PlanNode(Copyable):
     # Private text-code provenance; never inferred from UInt32 storage.
     var code_domain: Optional[DataType]
     var text_fields: List[TextField]
+    # Original partition state/operand proof is outside rewritten row ASTs.
+    # Columns contain schema-only Series; no source values are retained here.
+    var partition_exprs: List[Expr]
+    var partition_columns: List[Series]
 
     def _record_execution(self):
         if self._executions:
@@ -233,6 +237,8 @@ def _plan_node(
     source_failure: String = "",
     code_domain: Optional[DataType] = None,
     text_fields: List[TextField] = List[TextField](),
+    partition_exprs: List[Expr] = List[Expr](),
+    partition_columns: List[Series] = List[Series](),
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -255,6 +261,8 @@ def _plan_node(
         source_failure,
         code_domain,
         text_fields.copy(),
+        partition_exprs.copy(),
+        partition_columns.copy(),
     )
 
 

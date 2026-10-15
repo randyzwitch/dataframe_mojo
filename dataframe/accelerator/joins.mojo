@@ -8,6 +8,7 @@ from .metadata import prune_projections, schema_frame
 from .selectors import _live_nodes
 from .qcuts import is_qcut_marker, controls as qcut_controls
 from .cuts import has_cut_materializations
+from .partition_cuts import is_marker as is_partition_cut_marker, marker_capture
 from .capabilities import RowCapabilities
 from .rows import lower_rows
 from .explodes import schema as explode_schema
@@ -813,11 +814,14 @@ def _task(
     )
     region._nodes[0].code_domain = query._nodes[cursor].code_domain
     region._nodes[0].text_fields = query._nodes[cursor].text_fields.copy()
-    if is_qcut_marker(region):
+    if is_qcut_marker(region) or is_partition_cut_marker(region):
         # This private control phase has its own resident kernels/resources.
         # Bind its harmless placeholder only for metadata; never compile or
         # execute that placeholder as a generic row interpreter program.
-        _ = qcut_controls(region)
+        if is_partition_cut_marker(region):
+            _ = marker_capture(region)
+        else:
+            _ = qcut_controls(region)
         if source < 0:
             raise Error("QCUT marker requires an observed resident producer")
         var schema = schema_frame(region, len(region._nodes) - 1).clear()

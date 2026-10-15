@@ -10,6 +10,7 @@ from dataframe import DataFrame, DataType, Series
 from dataframe.accelerator.code_domains import TextField
 from .residency import (
     Scope,
+    TextDomain,
     Table,
     Matrix,
     CELL_BYTES,
@@ -19,7 +20,7 @@ from .residency import (
 )
 from .ranked_rows import RankedRows, _Reservation
 from .partition_layout import PartitionOwner
-from .partition_labels import build as build_labels
+from .partition_labels import build as build_labels, Labels
 from .ordered_faults import category, rank
 from . import partition_faults as faults, partition_qcuts as bins, qcuts
 
@@ -102,6 +103,8 @@ def execute_default(
     operand_stage: Int = 0,
     category_name: String = "category",
     breakpoint_name: String = "breakpoint",
+    custom_codes: List[UInt32] = List[UInt32](),
+    custom_domain: Optional[ArcPointer[TextDomain]] = None,
 ) raises -> Table:
     if not operand_proved:
         raise Error(
@@ -135,6 +138,19 @@ def execute_default(
         and (not breakpoint_name or breakpoint_name == category_name)
     ):
         raise Error("Partition bin output names must be distinct and nonempty")
+    if Bool(custom_domain) != Bool(len(custom_codes)):
+        raise Error("Partition custom label codes require their text domain")
+    if custom_domain and (
+        not custom_domain.value()[].scope.same_query(scope)
+        or len(custom_codes) != len(specifications) + 1
+    ):
+        raise Error("Partition custom label domain or count changed")
+    if custom_domain:
+        for code in custom_codes:
+            if UInt64(code) >= UInt64(
+                len(custom_domain.value()[].dtype.dictionary()[])
+            ):
+                raise Error("Partition custom label code is outside its domain")
     var rows = operand.rows
     var groups = layout[].groups
     var count = len(specifications)
@@ -259,7 +275,18 @@ def execute_default(
             raise Error("Partition bin observer returned an invalid fault kind")
         for group in range(groups):
             used.append(host_controls[group * 2])
-        var labels = build_labels(scope, host_edges, used, count, left_closed)
+        var labels: Labels
+        if custom_domain:
+            # Fixed-stride allocation matches default-label resource bounds;
+            # custom classification addresses the original K+1 label indices.
+            var label_map = List[UInt32](length=mapping, fill=0)
+            for at in range(len(custom_codes)):
+                label_map[at] = custom_codes[at]
+            labels = Labels(
+                scope, custom_domain.value(), label_map^, scope.info()[1]
+            )
+        else:
+            labels = build_labels(scope, host_edges, used, count, left_closed)
         # Formatting scratch has finished. Its immutable domain and host code
         # map remain owned through upload/classification and adoption.
         var held_domain = labels.domain.copy()
@@ -286,7 +313,7 @@ def execute_default(
                 UInt32(count),
                 UInt32(left_closed),
                 UInt32(include_breaks),
-                UInt32(1),
+                UInt32(not custom_domain),
                 grid_dim=(rows + 255) // 256,
                 block_dim=256,
             )

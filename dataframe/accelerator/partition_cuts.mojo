@@ -5,10 +5,11 @@ It is deliberately separate from admission: the execution scope must also
 prove eager OVER state order, shared WindowLayouts, and resident key codes.
 """
 from std.memory import bitcast
-from dataframe import DataFrame, DataType, Expr
+from dataframe import DataFrame, DataType, Expr, col, lit, when, as_struct
 from dataframe.binding import BoundExpr, bind
 from dataframe.expr import CUT, QCUT, OVER, COL, SEP, subtree, split_names
-from dataframe.parse import parse_float64
+from dataframe.parse import parse_float64, parse_int64
+from dataframe.lazy import LazyFrame, WITH_COLUMNS, _plan_node
 from .implode_ordered import signature
 from .partition_operands import certificate as operand_certificate
 from .window_keys import WindowKey
@@ -114,3 +115,127 @@ def validate(saved: Capture, expression: Expr, source: DataFrame) raises:
             or current.keys[at].string_hash != saved.keys[at].string_hash
         ):
             raise Error("Partition CUT original logical key metadata changed")
+
+
+comptime TAG = "metal_partition_cut_operand"
+comptime VERSION = "partition_state_v1"
+
+
+def is_marker(query: LazyFrame) -> Bool:
+    if not len(query._nodes):
+        return False
+    ref node = query._nodes[len(query._nodes) - 1]
+    return (
+        node.kind == WITH_COLUMNS
+        and node.text == "metal_window_materialization"
+        and len(node.names2) == 8
+        and node.names2[0] == TAG
+        and node.names2[1] == VERSION
+    )
+
+
+def marker_capture(query: LazyFrame) raises -> Capture:
+    if not is_marker(query):
+        raise Error("Partition CUT private state marker is missing")
+    ref operation = query._nodes[len(query._nodes) - 1]
+    if len(operation.partition_exprs) != 1:
+        raise Error("Partition CUT original expression certificate is missing")
+    var original = operation.partition_exprs[0]
+    var source = DataFrame(operation.partition_columns.copy())
+    var bound = bind(original, source._columns)
+    if signature(bound) != operation.names2[5]:
+        raise Error("Partition CUT original expression certificate changed")
+    var saved = capture(bound, source, Int(parse_int64(operation.names2[4])))
+    if len(operation.window_keys) != len(saved.keys):
+        raise Error("Partition CUT original key certificate changed")
+    for at in range(len(saved.keys)):
+        if (
+            operation.window_keys[at].name != saved.keys[at].name
+            or operation.window_keys[at].dtype != saved.keys[at].dtype
+            or operation.window_keys[at].string_hash
+            != saved.keys[at].string_hash
+        ):
+            raise Error("Partition CUT original key certificate changed")
+    return saved^
+
+
+def stage(
+    mut query: LazyFrame,
+    left: Int,
+    source: DataFrame,
+    original: BoundExpr,
+    over_node: Int,
+    category: String,
+    breakpoint: String,
+    scope_id: Int,
+    cached_layout: Bool,
+) raises -> Expr:
+    var saved = capture(original, source, over_node)
+    var anchor = ""
+    var operand = bind(saved.operand, source._columns)
+    for input in operand.sources:
+        if input >= 0:
+            anchor = source._columns[input].name()
+            break
+    var label = lit("") if not len(saved.labels) else lit(saved.labels[0])
+    # Keep every custom literal in the harmless schema AST for normal text
+    # dictionary collection and later query-domain recoding.
+    for at in range(1, len(saved.labels)):
+        label = (
+            when(col(anchor).is_not_null())
+            .then(label)
+            .otherwise(lit(saved.labels[at]))
+        )
+    # Projection pruning must retain every original operand/key source even
+    # though the harmless placeholder itself never executes on device.
+    var dependencies = List[String]()
+    for node in saved.operand._nodes:
+        if node.op == COL and node.text not in dependencies:
+            dependencies.append(node.text)
+    for key in saved.keys:
+        if key.name not in dependencies:
+            dependencies.append(key.name)
+    for dependency in dependencies:
+        label = (
+            when(col(dependency).is_not_null())
+            .then(label.copy())
+            .otherwise(label)
+        )
+    var expressions: List[Expr] = [label.alias(category)]
+    if saved.include_breaks:
+        expressions.append(
+            when(col(anchor).is_not_null())
+            .then(lit(Float64(0)))
+            .otherwise(lit(Float64(0)))
+            .alias(breakpoint)
+        )
+    query._nodes.append(
+        _plan_node(
+            WITH_COLUMNS,
+            left,
+            exprs=expressions,
+            text="metal_window_materialization",
+            names2=[
+                TAG,
+                VERSION,
+                category,
+                breakpoint,
+                String(over_node),
+                saved.original,
+                String(scope_id),
+                String(Int(cached_layout)),
+            ],
+            window_keys=saved.keys,
+            partition_exprs=[original.expr.copy()],
+            partition_columns=source.clear()._columns,
+        )
+    )
+    if saved.include_breaks:
+        return as_struct(
+            [
+                col(breakpoint).alias("breakpoint"),
+                col(category).alias("category"),
+            ],
+            "",
+        )
+    return col(category)

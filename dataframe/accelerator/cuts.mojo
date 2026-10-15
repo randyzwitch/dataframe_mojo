@@ -53,6 +53,7 @@ from .metadata import schema_frame
 from .selectors import _live_nodes
 from .aggregates import _in_memory_sources
 from .qcuts import QCUT_TAG, stage_custom as stage_custom_qcut
+from .partition_cuts import TAG as PARTITION_CUT_TAG, stage as stage_partition_cut
 
 comptime CUT_TAG = "metal_explicit_cut_operand"
 comptime CUT_ANCHOR_TAG = "metal_explicit_cut_scalar_anchor"
@@ -79,6 +80,7 @@ def has_cut_materializations(query: LazyFrame) -> Bool:
             and (
                 operation.names2[0] == CUT_TAG
                 or operation.names2[0] == QCUT_TAG
+                or operation.names2[0] == PARTITION_CUT_TAG
             )
         ):
             return True
@@ -493,9 +495,12 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
             ref bound = bounds[expression_index]
             var expression = bound.expr.copy()
             for node in expression._nodes:
-                if node.op == OVER:
+                if node.op == OVER and (
+                    node.left < 0
+                    or expression._nodes[node.left].op not in [CUT, QCUT]
+                ):
                     raise Error(
-                        "Metal unsupported [cut]: partitioned cut is pending"
+                        "Metal unsupported [cut]: partition scope requires a direct bin state"
                     )
                 if node.op == STRUCT_PACK or node.op == STRUCT_FIELD:
                     raise Error(
@@ -514,13 +519,62 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                 outputs.append(col(scalar[1]).alias(expression._name))
                 serial = scalar[2]
                 continue
+            # CPU prepares OVER states eagerly, skipping their descendants
+            # in the outer state walk. Retain original nodes for certificates;
+            # never globally observe a partition operand as an ordinary row.
+            var inside_over = List[Bool](length=len(expression._nodes), fill=False)
+            for at in range(len(expression._nodes)):
+                if expression._nodes[at].op != OVER:
+                    continue
+                var pending: List[Int] = [expression._nodes[at].left]
+                while len(pending):
+                    var child = pending.pop()
+                    if child < 0 or inside_over[child]:
+                        continue
+                    inside_over[child] = True
+                    ref original_child = expression._nodes[child]
+                    if original_child.left >= 0:
+                        pending.append(original_child.left)
+                    if original_child.right >= 0:
+                        pending.append(original_child.right)
+                    if original_child.extra >= 0:
+                        pending.append(original_child.extra)
             var positions = List[Int](length=len(expression._nodes), fill=-1)
             var rewritten = List[Node]()
             var packed = False
             var packed_value = Optional[Expr]()
             for n in range(len(expression._nodes)):
                 var node = expression._nodes[n].copy()
-                if node.op == CUT or node.op == QCUT:
+                if inside_over[n]:
+                    continue
+                if node.op == OVER:
+                    ref bins = expression._nodes[node.left]
+                    if (bins.integer & 2) and (
+                        n != len(expression._nodes) - 1
+                        or operation.kind != SELECT
+                        or index != len(query._nodes) - 1
+                    ):
+                        raise Error(
+                            "Metal unsupported [cut]: include_breaks requires terminal projection"
+                        )
+                    var category = _name(used, serial)
+                    serial += 1
+                    var breakpoint = _name(used, serial)
+                    serial += 1
+                    temporary.append(category)
+                    if bins.integer & 2:
+                        temporary.append(breakpoint)
+                    var replacement = stage_partition_cut(
+                        result, aligned, schema, bound, n, category,
+                        breakpoint, index, True,
+                    )
+                    aligned = len(result._nodes) - 1
+                    if bins.integer & 2:
+                        packed_value = replacement^
+                        packed = True
+                    else:
+                        positions[n] = _append(rewritten, replacement)
+                elif node.op == CUT or node.op == QCUT:
                     if (node.integer & 2) and (
                         n != len(expression._nodes) - 1
                         or operation.kind != SELECT
