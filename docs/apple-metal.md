@@ -127,6 +127,13 @@ input order and supported checked-expression fault order. General composed
 List consumers and uncertified parallel reduction associations remain outside
 this route.
 
+Partitioned `cut(...).over(...)` and `qcut(...).over(...)` keep numeric operands
+resident, preserve original key domains and eager operand/control error order,
+and support immutable custom or default labels. Certified nested numeric OVER
+scopes preserve layout-cache order. `include_breaks=True` requires a terminal
+projection; intermediate Struct consumers and other nested stateful expressions
+remain unsupported.
+
 ## Residency, errors and memory
 
 Computed query regions retain immutable Mojo-owned device tables. A consumer
