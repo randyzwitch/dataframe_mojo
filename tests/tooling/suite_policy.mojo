@@ -62,6 +62,30 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_explode.mojo::test_mojo_gpu_explode_source_layouts_hidden_spans_high_words_and_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_explode.mojo::test_mojo_gpu_explode_resident_row_join_group_and_complete_cardinality_observation",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_explode.mojo::test_mojo_gpu_explode_empty_metadata_guards_exact_budget_observer_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_explode.mojo::test_mojo_gpu_explode_ieee_words_and_child_metadata_survive_projection",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_empty_joins.mojo::test_mojo_gpu_both_empty_join_styles_schema_zero_budget_without_device",
             "metal",
         )
@@ -961,14 +985,6 @@ def production_policy() -> SuitePolicy:
         )
     )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reshape.mojo::test_explode_null_list_never_exposes_hidden_child_span",
-            "A null list with a nonempty stored child span currently explodes the hidden children instead of producing one null row.",
-            "null-list explode must produce exactly one row",
-            0,
-        )
-    )
     policy.failures.append(
         ExpectedFailure(
             "tests/public_contracts/test_window_types.mojo::test_uint64_cumulative_sums_preserve_values_above_signed_range",
@@ -1956,6 +1972,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_arithmetic.mojo::test_native_metal_decimal_add_subtract_literal_result_types_and_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_multiplicative.mojo::test_native_metal_decimal_exact_product_literals_layouts_and_precision",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_multiplicative.mojo::test_native_metal_decimal_product_width_and_quotient_literal_bits",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_decimal_arithmetic.mojo::test_native_metal_decimal_arithmetic_proven_consumers_aggregates_and_windows",
             "metal",
         )
@@ -2726,6 +2760,7 @@ def production_policy() -> SuitePolicy:
                 "tests/public_contracts/test_accelerator_execution_settings.mojo",
                 "tests/public_contracts/test_identity_column_metadata.mojo",
                 "tests/public_contracts/test_implode_field_metadata.mojo",
+                "tests/public_contracts/test_list_logical_counts.mojo",
                 "tests/public_contracts/test_list_get_metadata.mojo",
                 "tests/public_contracts/test_ordered_rows_metadata.mojo",
                 "tests/public_contracts/test_ordered_rows_transport_calibration.mojo",
@@ -2750,6 +2785,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
+                "tests/execution_modes/test_mojo_gpu_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
@@ -2877,6 +2913,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "expr.nested",
             [
+                "tests/public_contracts/test_list_logical_counts.mojo",
                 "tests/public_contracts/test_nested.mojo",
                 "tests/public_contracts/test_reshape.mojo",
             ],
@@ -3167,6 +3204,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
+                "tests/execution_modes/test_mojo_gpu_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",

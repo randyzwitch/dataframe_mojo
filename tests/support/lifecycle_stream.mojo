@@ -1,7 +1,7 @@
 """A counted foreign Arrow producer for the production stream/import lifecycle."""
 from std.memory import Pointer
 from dataframe import ArrowArray, ArrowSchema
-from dataframe.parquet import _ArrowArrayStream
+from dataframe.io.parquet import _ArrowArrayStream
 
 comptime ArrayRelease = def(Pointer[ArrowArray, MutAnyOrigin]) thin abi(
     "C"

@@ -790,7 +790,10 @@ def _decimal_dense[
     comptime if op == MUL and divisor > 0:
         var narrow = _decimal_mul_narrow[divisor](a, b, n)
         if narrow:
-            return narrow.take()
+            var values = narrow.take()
+            for i in range(len(values)):
+                values[i] = check_limit(values[i], limit, dtype)
+            return values^
     var values = List[Int128](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var xs = a._ptr()
@@ -894,10 +897,10 @@ def _decimal_dense64[
 ) raises -> Optional[Series]:
     """Decimal ADD, SUB or MUL with a result of at most 18 digits, from
     64-bit operands without nulls, in 64-bit arithmetic as DuckDB does.
-    The result is checked against its precision only where its type was
-    capped at 18 digits (DuckDB's `check_overflow`); the check folds into
-    one flag, and on overflow the 128-bit path reruns to name the row.
-    None when aligning a sum's operands could itself overflow 64 bits."""
+    Results are checked against their bound precision; raw physical
+    operands may exceed their declared digits after with_dtype. The check
+    folds into one flag, and on overflow the 128-bit path reruns to name
+    the row. None when aligned operands could overflow 64-bit arithmetic."""
     var n = _length(len(a), len(b))
     var xs = a._ptr()
     var ys = b._ptr()
@@ -908,21 +911,16 @@ def _decimal_dense64[
     var limit = Int64(precision_limit(dtype.precision()))
     var overflow = False
     comptime if op == MUL:
-        if left.precision() + right.precision() <= 18:
-            # The digits add up to at most 18: nothing to check.
-            for i in range(n):
-                out[unsafe_offset=i] = (
-                    xs[unsafe_offset=0 if left_one else i]
-                    * ys[unsafe_offset=0 if right_one else i]
-                )
-        else:
-            var wide_limit = Int128(limit)
-            for i in range(n):
-                var product = Int128(
-                    xs[unsafe_offset=0 if left_one else i]
-                ) * Int128(ys[unsafe_offset=0 if right_one else i])
-                overflow |= product >= wide_limit or product <= -wide_limit
-                out[unsafe_offset=i] = Int64(product)
+        # Logical decimal metadata can be attached to physical values that
+        # exceed its digit count. Check the actual widened product before
+        # narrowing, just as the nullable Int128 path does.
+        var wide_limit = Int128(limit)
+        for i in range(n):
+            var product = Int128(
+                xs[unsafe_offset=0 if left_one else i]
+            ) * Int128(ys[unsafe_offset=0 if right_one else i])
+            overflow |= product >= wide_limit or product <= -wide_limit
+            out[unsafe_offset=i] = Int64(product)
     else:
         var scale = dtype.scale()
         # Digits of the operands once aligned to the result's scale.
@@ -937,13 +935,18 @@ def _decimal_dense64[
             return None
         var lf = Int64(pow10(scale - left.scale()))
         var rf = Int64(pow10(scale - right.scale()))
-        var checked = aligned + 1 > dtype.precision()
+        # with_dtype may retag any physical value, beyond its declared
+        # digits. Prove the actual aligned magnitudes before 64-bit math;
+        # otherwise use the checked Int128 path (including its error order).
+        var left_most = _largest_magnitude(a) * Int128(lf)
+        var right_most = _largest_magnitude(b) * Int128(rf)
+        if left_most > Int128(Int64.MAX) - right_most:
+            return None
         for i in range(n):
             var x = xs[unsafe_offset=0 if left_one else i] * lf
             var y = ys[unsafe_offset=0 if right_one else i] * rf
             var value = x + y if op == ADD else x - y
-            if checked:
-                overflow |= value >= limit or value <= -limit
+            overflow |= value >= limit or value <= -limit
             out[unsafe_offset=i] = value
     if overflow:
         return None
@@ -1088,11 +1091,14 @@ def _decimal_binary[
         if not valid[i]:
             continue
         var x = a._get(ai)
-        if left_factor != 1:
-            x = _decimal_mul(x, left_factor)
+        # Exact products use the original scales, without alignment.
+        comptime if op != MUL:
+            if left_factor != 1:
+                x = _decimal_mul(x, left_factor)
         var y = b._get(bi)
-        if right_factor != 1:
-            y = _decimal_mul(y, right_factor)
+        comptime if op != MUL:
+            if right_factor != 1:
+                y = _decimal_mul(y, right_factor)
         comptime if is_comparison(op):
             if op == GT:
                 predicates[i] = x > y

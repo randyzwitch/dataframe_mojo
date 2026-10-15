@@ -187,6 +187,23 @@ def _aggregate_window(
             ] if dtype == 12 else UInt64(0)
             if dtype != 12 and not unsigned_type(dtype) and word >> 63:
                 upper = UInt64.MAX
+            # Duration CPU sums validate every observed decimal operand
+            # before addition; a preceding opposite value cannot mask an
+            # out-of-precision physical payload through cancellation.
+            if (
+                duration
+                and dtype == 12
+                and not decimal.cast(
+                    decimal.Wide(word, upper),
+                    0,
+                    0,
+                    precision,
+                    128,
+                    False,
+                    False,
+                ).valid
+            ):
+                failure |= 2
             var next = state + word
             high += upper + UInt64(next < state)
             state = next

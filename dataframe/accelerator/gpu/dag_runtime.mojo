@@ -15,6 +15,8 @@ from .text_domains import union_domain, source_maps, MapPlan, ColumnMap
 from .text_programs import recode_region
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.lazy import LazyFrame
+from dataframe.execution_report import ExecutionReport
+from dataframe.accelerator.explodes import schema as explode_schema
 from dataframe.accelerator.cuts import control_failure as cut_control_failure
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.joins import (
@@ -22,6 +24,8 @@ from dataframe.accelerator.joins import (
     DAG_JOIN,
     DAG_ASOF,
     DAG_ROWS,
+    DAG_SOURCE_FIELDS,
+    DAG_EXPLODE,
     lower_join_dag,
 )
 from . import runtime as rows
@@ -31,6 +35,9 @@ from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
 from .residency import Scope, Table
+from .resident_fields import ResidentFrame
+from . import source_fields
+from . import explode
 
 
 def preflight(
@@ -52,6 +59,14 @@ def preflight(
                 task,
                 dag.tasks[task.source].schema,
                 dag.tasks[task.right].schema,
+            )
+        elif task.kind == DAG_SOURCE_FIELDS:
+            source_fields.preflight(task.query._frames[0])
+        elif task.kind == DAG_EXPLODE:
+            _ = explode_schema(
+                dag.tasks[task.source].schema,
+                task.query._nodes[len(task.query._nodes) - 1].names,
+                semantic,
             )
         elif task.kind == DAG_ROWS:
             if is_qcut_marker(task.query):
@@ -106,6 +121,53 @@ def _int_column(
     )
 
 
+def _storage_report(
+    root: Int,
+    operator: String,
+    algorithm: String,
+    input_rows: Int,
+    output_rows: Int,
+    scope: Scope,
+    started: Int,
+    input_bytes: Int,
+    output_bytes: Int,
+) raises -> DataFrame:
+    var report = ExecutionReport()
+    report.record(
+        root,
+        operator,
+        "metal",
+        input_rows,
+        output_rows,
+        algorithm=algorithm,
+        wall_ns=Int(perf_counter_ns()) - started,
+    )
+    var result = report.frame()
+    for entry in List[Tuple[String, Int]](
+        [
+            ("kernel_launches", 0),
+            ("synchronizations", 0),
+            ("upload_bytes", 0),
+            ("download_bytes", 0),
+            ("peak_requested_bytes", scope.info()[1]),
+            ("host_result_bytes", 0),
+            ("resident_input_bytes", input_bytes),
+            ("resident_output_bytes", output_bytes),
+        ]
+    ):
+        result = _int_column(result, entry[0], entry[1])
+    result = result.with_column(
+        Series("runtime_implementation", Column[String](["mojo"]))
+    )
+    result = result.with_column(
+        Series(
+            "query_wall_ms",
+            Column[Float64]([Float64(Int(perf_counter_ns()) - started) / 1e6]),
+        )
+    )
+    return result^
+
+
 def execute(
     query: LazyFrame,
     device_id: Int,
@@ -131,8 +193,12 @@ def execute(
         if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
             uses[task.right] += 1
     var values = List[Optional[Table]](capacity=len(dag.tasks))
+    # A nested source is a persistent descriptor + child owner, never a
+    # fictional primitive matrix slot or an intermediate CPU List column.
+    var nested = List[Optional[ResidentFrame]](capacity=len(dag.tasks))
     var report = DataFrame(List[Series]())
     var result = DataFrame(List[Series]())
+    var query_host_result_bytes = 0
     for index in range(len(dag.tasks)):
         var task = dag.tasks[index].copy()
         if (
@@ -145,15 +211,64 @@ def execute(
             if task.query._nodes[0].source_failure:
                 raise Error(task.query._nodes[0].source_failure)
             values.append(None)
+            nested.append(None)
             if index == dag.root:
                 result = task.schema.copy() if observation_only else task.query._frames[
                     0
                 ].copy()
             continue
-        if task.kind == DAG_ROWS and task.query._nodes[0].source_failure:
+        if (
+            task.kind == DAG_ROWS or task.kind == DAG_SOURCE_FIELDS
+        ) and task.query._nodes[0].source_failure:
             raise Error(task.query._nodes[0].source_failure)
         var live_before = scope.info()[0]
         var traffic_before = scope.transfers()
+        var region_started = Int(perf_counter_ns())
+        if task.kind == DAG_SOURCE_FIELDS:
+            task.query._nodes[0]._record_execution()
+            var fields = source_fields.stage(task.query._frames[0], scope)
+            var owned = scope.info()[0] - live_before
+            var region = _storage_report(
+                task.root,
+                "SOURCE FIELDS",
+                "mojo_gpu_source_fields",
+                fields.rows,
+                fields.rows,
+                scope,
+                region_started,
+                0,
+                owned,
+            )
+            var after = scope.transfers()
+            region = _int_column(
+                region, "upload_bytes", after[0] - traffic_before[0]
+            )
+            region = _int_column(
+                region, "download_bytes", after[1] - traffic_before[1]
+            )
+            region = _int_column(
+                region, "kernel_launches", after[2] - traffic_before[2]
+            )
+            region = _int_column(
+                region, "synchronizations", after[3] - traffic_before[3]
+            )
+            region = _int_column(region, "node", task.root)
+            region = _int_column(
+                region, "retained_intermediate_bytes", live_before
+            )
+            region = _int_column(region, "intermediate_output_bytes", owned)
+            region = region.with_column(
+                Series(
+                    "materialization_boundary",
+                    Column[String](["Mojo GPU resident fields"]),
+                )
+            )
+            report = region^ if report.width() == 0 else report.vstack(
+                region.select(report.columns())
+            )
+            values.append(None)
+            nested.append(fields^)
+            continue
         var executed: Tuple[Table, DataFrame]
         var target_domain = Optional[ArcPointer[TextDomain]]()
         var join_maps = Optional[MapPlan]()
@@ -224,7 +339,27 @@ def execute(
                     )
                 )
                 join_maps = MapPlan(target_domain.value(), columns)
-        if task.kind == DAG_JOIN:
+        if task.kind == DAG_EXPLODE:
+            if not nested[task.source]:
+                raise Error("Resident EXPLODE source owner has been released")
+            var output = explode.execute(
+                nested[task.source].value(),
+                task.query._nodes[len(task.query._nodes) - 1].names,
+                scope,
+            )
+            var region = _storage_report(
+                task.root,
+                "EXPLODE",
+                "mojo_gpu_primitive_explode",
+                nested[task.source].value().rows,
+                output.rows,
+                scope,
+                region_started,
+                live_before,
+                output.retained_bytes(),
+            )
+            executed = (output^, region^)
+        elif task.kind == DAG_JOIN:
             if task.equal_rows:
                 # Marked distribution zip children are complete observed
                 # producers. Unequal lengths fail before join allocation.
@@ -358,6 +493,15 @@ def execute(
                         (result.height() + 7) // 8,
                     ),
                 )
+        query_host_result_bytes = (
+            host_result_bytes if index == dag.root else query_host_result_bytes
+        )
+        if task.kind == DAG_EXPLODE:
+            # Its storage report precedes the common final readback. Include
+            # that region's compact host matrix and typed export envelope.
+            region = _int_column(
+                region, "peak_requested_bytes", scope.info()[1]
+            )
         var traffic_after = scope.transfers()
         region = _int_column(
             region, "upload_bytes", traffic_after[0] - traffic_before[0]
@@ -393,15 +537,21 @@ def execute(
             region.select(report.columns())
         )
         values.append(executed[0].copy())
+        nested.append(None)
         if task.source >= 0:
             uses[task.source] -= 1
             if uses[task.source] == 0:
                 values[task.source] = None
+                nested[task.source] = None
         if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
             uses[task.right] -= 1
             if uses[task.right] == 0:
                 values[task.right] = None
+                nested[task.right] = None
     report = _int_column(report, "query_peak_requested_bytes", scope.info()[1])
+    report = _int_column(
+        report, "query_host_result_bytes", query_host_result_bytes
+    )
     report = _int_column(report, "query_upload_bytes", scope.transfers()[0])
     report = _int_column(report, "query_download_bytes", scope.transfers()[1])
     report = _int_column(report, "query_kernel_launches", scope.transfers()[2])

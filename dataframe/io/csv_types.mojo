@@ -2,8 +2,8 @@
 from std.collections import Dict
 from std.ffi import external_call
 from std.memory import Pointer
-from .dtype import DataType
-from .frame import DataFrame
+from ..dtype import DataType
+from ..frame import DataFrame
 
 
 comptime CSV_INT64 = DataType.INT64

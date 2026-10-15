@@ -234,7 +234,7 @@ beyond libc. It is loaded at run time, so nothing else in the package needs
 it. `pixi run -e native build-dfparquet` builds it into `build/dfparquet/`
 (a C++20 compiler, cmake and ninja are needed); `DATAFRAME_PARQUET_LIBRARY`
 points `read_parquet` at a library elsewhere. See `native/dfparquet/` and
-`dataframe/parquet.mojo` for the boundary a Mojo-native reader would replace.
+`dataframe/io/parquet.mojo` for the boundary a Mojo-native reader would replace.
 
 The reader consumes bounded file buffers and retains tokenizer state across
 them. Its scalar structural scanner is the correctness reference for later SIMD

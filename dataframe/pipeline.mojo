@@ -2738,7 +2738,26 @@ def _in_place_table_rows(
     ref mask = morsel.mask
     var keep = List[Bool](unsafe_uninit_length=n)
     var out = keep.unsafe_ptr()
-    for i in range(n):
+    var done = 0
+    if mask._offset % 8 == 0:
+        # A byte of the mask (its values ANDed with its validity) at a
+        # time, spread to eight flags with one compare, where reading each
+        # row's two bits took a tenth of PDS-H q1.
+        var values = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
+        var all_valid = len(mask._bits[]) == 0
+        var valid = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)
+        var lanes = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+        var flags = out.unsafe_bitcast[UInt8]()
+        for j in range(n // 8):
+            var byte = values[unsafe_offset=j]
+            if not all_valid:
+                byte &= valid[unsafe_offset=j]
+            var spread = (SIMD[DType.uint8, 8](byte) & lanes).ne(
+                SIMD[DType.uint8, 8](0)
+            )
+            flags.unsafe_offset(8 * j).unsafe_store(spread.cast[DType.uint8]())
+        done = 8 * (n // 8)
+    for i in range(done, n):
         out[unsafe_offset=i] = mask._valid(i) and mask._get(i)
     return (key_columns^, inputs^, keep^, morsel.count)
 

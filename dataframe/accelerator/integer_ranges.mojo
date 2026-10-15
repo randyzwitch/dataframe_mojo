@@ -261,7 +261,7 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                         var previous_low = other_low
                         other_low = -other_high
                         other_high = -previous_low
-                    var maximum = pow10(38) - 1
+                    var maximum = pow10(bound.dtypes[i].precision()) - 1
                     if (
                         low >= -maximum
                         and high <= maximum
@@ -277,23 +277,15 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                             proved = True
         if (
             bound.dtypes[i].is_decimal()
-            and (node.op == MUL or node.op == DIV)
+            and node.op == MUL
             and a.known
             and b.known
         ):
-            var left = bound.dtypes[node.left]
-            var right = bound.dtypes[node.right]
-            var common = max(left.scale(), right.scale())
-            var rescale_safe = _decimal_scale_safe(
-                left, common
-            ) and _decimal_scale_safe(right, common)
             var largest_a = max(abs(a.low), abs(a.high))
             var largest_b = max(abs(b.low), abs(b.high))
-            var maximum = pow10(38) - 1
-            if (
-                node.op == MUL
-                and rescale_safe
-                and (largest_b == 0 or largest_a <= Int128.MAX // largest_b)
+            var maximum = pow10(bound.dtypes[i].precision()) - 1
+            if node.op == MUL and (
+                largest_b == 0 or largest_a <= Int128.MAX // largest_b
             ):
                 var low = min(
                     min(a.low * b.low, a.low * b.high),
@@ -303,20 +295,9 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                     max(a.low * b.low, a.low * b.high),
                     max(a.high * b.low, a.high * b.high),
                 )
-                var factor = pow10(min(left.scale(), right.scale()))
-                low = divide_half_even(low, factor)
-                high = divide_half_even(high, factor)
                 if low >= -maximum and high <= maximum:
                     result = IntegerRange(low, high, True)
                     proved = True
-            if node.op == DIV and rescale_safe:
-                var shift = common + right.scale() - left.scale()
-                if shift <= 38 and largest_b <= Int128.MAX // 10:
-                    var factor = pow10(shift)
-                    if largest_a <= maximum // factor:
-                        var extent = largest_a * factor
-                        result = IntegerRange(-extent, extent, True)
-                        proved = True
         if is_comparison(node.op) and node.left >= 0 and node.right >= 0:
             var left_type = bound.dtypes[node.left]
             var right_type = bound.dtypes[node.right]

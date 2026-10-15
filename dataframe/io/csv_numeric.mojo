@@ -8,7 +8,7 @@ from std.memory import bitcast
 from std.bit import count_leading_zeros
 from std.builtin.globals import global_constant
 
-from dataframe.csv_decimal import parse_csv_decimal
+from dataframe.io.csv_decimal import parse_csv_decimal
 from std.collections.string._parsing_numbers.constants import (
     SMALLEST_POWER_OF_5,
     get_power_of_5,

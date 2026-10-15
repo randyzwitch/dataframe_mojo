@@ -55,7 +55,9 @@ def evaluate(
         value = result.value
         extra.low = UInt64(result.error)
     elif op == 9:
-        var result = d.multiply(a, b, left_scale, right_scale)
+        var result = d.multiply(
+            a, b, left_scale, right_scale, option if option else UInt32(38)
+        )
         value = result.value
         extra.low = UInt64(result.error)
     elif op == 10:

@@ -20,7 +20,7 @@ from dataframe import (
     StructColumn,
 )
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.arrow import _read_c_string
+from dataframe.io.arrow import _read_c_string
 from tests.support.lifecycle_stream import ArrayRelease, array_release, at
 from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page
 from tests.support.selection_types_reference import (

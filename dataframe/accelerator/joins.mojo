@@ -8,6 +8,7 @@ from .metadata import prune_projections, schema_frame
 from .qcuts import is_qcut_marker, controls as qcut_controls
 from .capabilities import RowCapabilities
 from .rows import lower_rows
+from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import (
@@ -22,13 +23,77 @@ from dataframe.lazy import (
     AGG,
     JOIN,
     ASOF,
+    EXPLODE,
 )
 from dataframe.series import Series
-from dataframe.expr import is_reduction
+from dataframe.expr import is_reduction, ADD, SUB, MUL, DIV, NEG, ABS
+from dataframe.binding import bind, ROWS
+from .integer_ranges import proven_integer_nodes
+from . import ordered_rows, implode_ordered
+
+comptime DECIMAL_MATERIALIZATION = "metal_decimal_materialization"
+
+
+def _decimal_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
+        return False
+    var possible = False
+    for expression in operation.exprs:
+        for node in expression._nodes:
+            possible |= node.op in [ADD, SUB, MUL, DIV, NEG, ABS]
+    if not possible:
+        return False
+    var schema = schema_frame(query, operation.left)
+    var checked = False
+    for expression in operation.exprs:
+        var bound = bind(expression, schema._columns)
+        if bound.shape() != ROWS or not ordered_rows.eligible(bound):
+            return False
+        var proven = proven_integer_nodes(bound)
+        for at in range(len(bound.expr._nodes)):
+            var op = bound.expr._nodes[at].op
+            checked |= (
+                bound.dtypes[at].is_decimal()
+                and (
+                    op == ADD
+                    or op == SUB
+                    or op == MUL
+                    or op == DIV
+                    or op == NEG
+                    or op == ABS
+                )
+                and not proven[at]
+            )
+    return checked
+
+
+def has_decimal_consumers(query: LazyFrame) raises -> Bool:
+    # A region boundary observes each expression before any later row
+    # selection, join, ordering or stateful consumer can suppress its fault.
+    for index in range(len(query._nodes)):
+        if _decimal_producer(query, index):
+            return True
+    return False
+
+
+def _mark_decimal_producers(mut query: LazyFrame) raises:
+    for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_producer(query, index):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = DECIMAL_MATERIALIZATION
+            query._nodes[index].names2 = [DECIMAL_MATERIALIZATION]
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
+
 
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
 comptime DAG_ASOF = 2
+comptime DAG_SOURCE_FIELDS = 3
+comptime DAG_EXPLODE = 4
 
 
 def _scalar_reduction(query: LazyFrame, index: Int) -> Bool:
@@ -118,10 +183,15 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
             and node.kind != DROP
             and node.kind != SORT
             and node.kind != AGG
+            and node.kind != EXPLODE
         ):
             capabilities.reject(
                 "plan",
                 "join regions require in-memory scans and supported row steps",
+            )
+        if node.kind == EXPLODE and not capabilities.primitive_list_explode:
+            capabilities.reject(
+                "explode", "primitive List expansion is unavailable"
             )
         if node.kind == SLICE and node.length < -1:
             raise Error("Slice length must be nonnegative")
@@ -395,9 +465,90 @@ def _asof_task(
 
 def _cached_rows(tasks: List[DagTask], root: Int) -> Int:
     for i in range(len(tasks)):
-        if tasks[i].kind == DAG_ROWS and tasks[i].root == root:
+        if (
+            tasks[i].kind == DAG_ROWS or tasks[i].kind == DAG_EXPLODE
+        ) and tasks[i].root == root:
             return i
     return -1
+
+
+def _explode_task(
+    query: LazyFrame,
+    root: Int,
+    capabilities: RowCapabilities,
+    mut tasks: List[DagTask],
+) raises -> Int:
+    ref operation = query._nodes[root]
+    ref scan = query._nodes[operation.left]
+    if scan.kind != SCAN_FRAME:
+        capabilities.reject(
+            "explode",
+            "initial scoped List producer requires a direct in-memory source",
+        )
+    if scan.code_domain or len(scan.text_fields):
+        capabilities.reject(
+            "explode",
+            "private encoded source domains are not primitive List sources",
+        )
+    var source = query._frames[scan.offset].copy()
+    if len(scan.names):
+        source = source.select(scan.names)
+    var schema = explode_schema(source, operation.names, capabilities)
+    var source_id = -1
+    for index in range(len(tasks)):
+        if (
+            tasks[index].kind == DAG_SOURCE_FIELDS
+            and tasks[index].root == operation.left
+        ):
+            source_id = index
+            break
+    if source_id < 0:
+        var input = LazyFrame(source)
+        input._nodes[0] = scan.copy()
+        input._nodes[0].offset = 0
+        input._nodes[0].names = List[String]()
+        source_id = len(tasks)
+        tasks.append(
+            DagTask(
+                DAG_SOURCE_FIELDS,
+                operation.left,
+                input^,
+                -1,
+                -1,
+                source.clear(),
+                True,
+                -1,
+                -1,
+                List[Int64](),
+                List[JoinField](),
+                False,
+            )
+        )
+    var metadata = LazyFrame(source.clear())
+    var marker = operation.copy()
+    marker.left = 0
+    marker.right = -1
+    metadata._nodes.append(marker^)
+    var id = len(tasks)
+    # Expansion observes the complete producer and all logical counts before
+    # any later projection, filter or head can suppress a cardinality failure.
+    tasks.append(
+        DagTask(
+            DAG_EXPLODE,
+            root,
+            metadata^,
+            source_id,
+            -1,
+            schema^,
+            True,
+            -1,
+            -1,
+            List[Int64](),
+            List[JoinField](),
+            False,
+        )
+    )
+    return id
 
 
 def _task(
@@ -412,12 +563,15 @@ def _task(
         or query._nodes[root].text == "metal_window_materialization"
         or query._nodes[root].text == "metal_distribution_materialization"
         or query._nodes[root].text == "metal_implode_materialization"
+        or query._nodes[root].text == DECIMAL_MATERIALIZATION
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
         if terminal:
             tasks[cached].terminal = True
         return cached
+    if query._nodes[root].kind == EXPLODE:
+        return _explode_task(query, root, capabilities, tasks)
     if query._nodes[root].kind == JOIN:
         return _join_task(query, root, boundary, -1, capabilities, tasks)
     if query._nodes[root].kind == ASOF:
@@ -448,7 +602,11 @@ def _task(
         and _cached_rows(tasks, cursor) < 0
         and query._nodes[cursor].kind != JOIN
         and query._nodes[cursor].kind != ASOF
+        and query._nodes[cursor].kind != EXPLODE
         and (cursor == root or query._nodes[cursor].kind != SLICE)
+        and (
+            cursor == root or query._nodes[root].text != DECIMAL_MATERIALIZATION
+        )
         and (
             cursor == root
             or (
@@ -456,6 +614,7 @@ def _task(
                 and query._nodes[cursor].text
                 != "metal_distribution_materialization"
                 and query._nodes[cursor].text != "metal_implode_materialization"
+                and query._nodes[cursor].text != DECIMAL_MATERIALIZATION
             )
         )
         and (
@@ -477,7 +636,13 @@ def _task(
         frame = tasks[source].schema.copy()
     elif (
         query._nodes[cursor].kind == JOIN
+        or (
+            cursor != root
+            and query._nodes[root].text == DECIMAL_MATERIALIZATION
+            and query._nodes[cursor].kind != SCAN_FRAME
+        )
         or query._nodes[cursor].kind == ASOF
+        or query._nodes[cursor].kind == EXPLODE
         or query._nodes[cursor].kind == SLICE
         or (
             cursor != root
@@ -486,6 +651,7 @@ def _task(
                 or query._nodes[cursor].text
                 == "metal_distribution_materialization"
                 or query._nodes[cursor].text == "metal_implode_materialization"
+                or query._nodes[cursor].text == DECIMAL_MATERIALIZATION
             )
         )
         or (
@@ -582,7 +748,14 @@ def lower_join_dag(
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
     var projected = query.copy()
+    var optimize = (
+        not query._accelerator_settings
+        or query._accelerator_settings.value().optimize
+    )
+    if optimize and has_decimal_consumers(query):
+        projected._push_slices()
     prune_projections(projected)
+    _mark_decimal_producers(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected, len(projected._nodes) - 1, True, capabilities, tasks
