@@ -935,13 +935,18 @@ def _decimal_dense64[
             return None
         var lf = Int64(pow10(scale - left.scale()))
         var rf = Int64(pow10(scale - right.scale()))
-        var checked = aligned + 1 > dtype.precision()
+        # with_dtype may retag any physical value, beyond its declared
+        # digits. Prove the actual aligned magnitudes before 64-bit math;
+        # otherwise use the checked Int128 path (including its error order).
+        var left_most = _largest_magnitude(a) * Int128(lf)
+        var right_most = _largest_magnitude(b) * Int128(rf)
+        if left_most > Int128(Int64.MAX) - right_most:
+            return None
         for i in range(n):
             var x = xs[unsafe_offset=0 if left_one else i] * lf
             var y = ys[unsafe_offset=0 if right_one else i] * rf
             var value = x + y if op == ADD else x - y
-            if checked:
-                overflow |= value >= limit or value <= -limit
+            overflow |= value >= limit or value <= -limit
             out[unsafe_offset=i] = value
     if overflow:
         return None
