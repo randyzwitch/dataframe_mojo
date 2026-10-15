@@ -20,6 +20,7 @@ struct KeyInput(Copyable):
     var column: String
     var original: WindowKey
     var original_codes: Bool
+    var category_high: Bool
 
     def __init__(
         out self,
@@ -27,6 +28,7 @@ struct KeyInput(Copyable):
         original: WindowKey,
         *,
         original_codes: Bool = False,
+        category_high: Bool = False,
     ) raises:
         if original_codes and (
             not original.dtype.is_categorical() or original.string_hash
@@ -42,7 +44,10 @@ struct KeyInput(Copyable):
             )
         self.column = column
         self.original = original.copy()
+        if category_high and not original_codes:
+            raise Error("OVER categorical HIGH certificate requires original codes")
         self.original_codes = original_codes
+        self.category_high = category_high
 
 
 def _lookup_bounds(
@@ -55,6 +60,7 @@ def _lookup_bounds(
     keys: UInt32,
     rows: UInt32,
     stride: UInt32,
+    cells: UInt64,
 ):
     var row = global_idx.x
     var invalid = UInt32(0)
@@ -64,11 +70,15 @@ def _lookup_bounds(
             if not (literals[unsafe_offset=node] & (UInt64(1) << UInt64(63))):
                 continue
             var at = Int(code[unsafe_offset=node * 4 + 1]) * Int(stride) + row
-            if (
-                validity[unsafe_offset=at]
-                and words[unsafe_offset=at] >= limits[unsafe_offset=key]
-            ):
-                invalid = 1
+            if validity[unsafe_offset=at]:
+                var value = words[unsafe_offset=at]
+                if literals[unsafe_offset=node] & (UInt64(1) << 61):
+                    var high = words[unsafe_offset=Int(cells) + at]
+                    if high == 0:
+                        invalid = 1
+                    value = high - 1
+                if value >= limits[unsafe_offset=key]:
+                    invalid = 1
     var failures = prefix_sum[block_size=256](invalid)
     if thread_idx.x == 255:
         var count = (Int(rows) + 255) // 256
@@ -247,7 +257,7 @@ def build(
         if key.original_codes and (
             not original.is_categorical()
             or key.original.string_hash
-            or Bool(source.text[field])
+            or (Bool(source.text[field]) and not key.category_high)
         ):
             raise Error(
                 "OVER original-code key is not an unrecoded private carrier"
@@ -260,6 +270,13 @@ def build(
             raise Error(
                 "OVER categorical keys require original unrecoded codes"
             )
+        if key.category_high:
+            if (
+                not source.categories[field]
+                or source.categories[field].value().string_codes
+                or source.categories[field].value().owner[].dtype != original
+            ):
+                raise Error("OVER categorical HIGH owner certificate changed")
         var lookup = (
             original == DataType.STRING
             or original.is_categorical()
@@ -326,6 +343,9 @@ def build(
             literal = UInt64(len(values)) | (UInt64(1) << UInt64(63))
             if key.original_codes:
                 literal |= UInt64(1) << UInt64(62)
+            if key.category_high:
+                literal |= UInt64(1) << UInt64(61)
+                code[len(code) - 1] = 2
             values.extend(key.original.values[].copy())
         literals.append(literal)
     if not len(values):
@@ -449,6 +469,7 @@ def build(
             UInt32(key_count),
             UInt32(rows),
             UInt32(matrix[].capacity),
+            UInt64(source_cells),
             grid_dim=block_count,
             block_dim=256,
         )

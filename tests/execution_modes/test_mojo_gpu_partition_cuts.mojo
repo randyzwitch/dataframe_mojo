@@ -76,3 +76,34 @@ def test_public_partition_cut_qcut_eager_fault_order() raises:
                 _ = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
         _ = setting^
     print("PASS public partition CUT/QCUT eager state/run fault order")
+
+
+def test_public_partition_cuts_original_categorical_keys() raises:
+    from dataframe.dtype import CategoricalDictionary, DataType
+
+    _ = require_metal()
+    var dictionary = CategoricalDictionary()
+    dictionary.append("same")
+    dictionary.append("same")
+    var dtype = DataType.categorical(dictionary^)
+    var frame = DataFrame([
+        Series("x", Column[Float64]([0, 10, 2, 14])),
+        Series("k", Column[UInt32]([0, 1, 0, 1])).with_dtype(dtype),
+    ])
+    var probabilities: List[Float64] = [0.5]
+    var query = frame.lazy().select(col("x").qcut(probabilities).over("k"))
+    _check(query)
+    var actual = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    assert_equal(actual.item(0, "x").string(), "(-inf, 1]")
+    assert_equal(actual.item(1, "x").string(), "(-inf, 12]")
+    # A COL occurrence anywhere in this bound expression makes CPU evaluate
+    # prepare the categorical key as decoded String before every OVER state.
+    var decoded_query = frame.lazy().select(
+        when(col("k").is_not_null()).then(col("x").qcut(probabilities).over("k"))
+        .otherwise(lit("missing")).alias("x")
+    )
+    _check(decoded_query)
+    var decoded = decoded_query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    assert_equal(decoded.item(0, "x").string(), "(-inf, 6]")
+    assert_equal(decoded.item(1, "x").string(), "(6, inf]")
+    print("PASS public partition original categorical codes and decoded key scope")

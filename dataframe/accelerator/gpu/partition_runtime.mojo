@@ -89,6 +89,10 @@ def _append(input: Table, output: Table, scope: Scope) raises -> Table:
         var result = Table.empty(schema^)
         result.text = input.text.copy()
         result.text.extend(output.text.copy())
+        result.categories = input.categories.copy()
+        result.categories.extend(output.categories.copy())
+        result.category_leases = input.category_leases.copy()
+        result.category_leases.extend(output.category_leases.copy())
         return result^
     var cells = checked_mul(rows, width)
     # Charge both immutable owners and the complete append/copy descriptors
@@ -135,6 +139,10 @@ def _append(input: Table, output: Table, scope: Scope) raises -> Table:
     )
     result.text = input.text.copy()
     result.text.extend(output.text.copy())
+    result.categories = input.categories.copy()
+    result.categories.extend(output.categories.copy())
+    result.category_leases = input.category_leases.copy()
+    result.category_leases.extend(output.category_leases.copy())
     return result^
 
 
@@ -204,15 +212,29 @@ def execute_plan(
             _report(scope, input, result, before, started, saved.qcut),
         )
     var keys = List[KeyInput](capacity=len(operation.window_keys))
-    for key in operation.window_keys:
-        keys.append(
-            KeyInput(
-                key.name,
-                key,
-                original_codes=key.dtype.is_categorical()
-                and not key.string_hash,
-            )
-        )
+    for original in operation.window_keys:
+        var key = original.copy()
+        var field = input.schema._index(key.name)
+        if key.string_hash or key.dtype == DataType.STRING:
+            if not input.text[field]:
+                raise Error("Partition CUT String key domain certificate is missing")
+            ref dictionary = input.text[field].value().domain[].dtype.dictionary()[]
+            var hashes = List[UInt64](capacity=len(dictionary))
+            for code in range(len(dictionary)):
+                var raw = dictionary.get(code).as_bytes()
+                var bytes = Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=raw.unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+                    length=len(raw),
+                )
+                hashes.append(_hash_bytes(bytes))
+            key.values = ArcPointer(hashes^)
+        var original_codes = key.dtype.is_categorical() and not key.string_hash
+        if original_codes:
+            var identity = List[UInt64](capacity=len(key.dtype.dictionary()[]))
+            for at in range(len(key.dtype.dictionary()[])):
+                identity.append(UInt64(at))
+            key.values = ArcPointer(identity^)
+        keys.append(KeyInput(key.name, key, original_codes=original_codes, category_high=original_codes))
     var layout = build(
         input,
         keys,
