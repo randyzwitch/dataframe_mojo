@@ -63,6 +63,62 @@ def production_policy() -> SuitePolicy:
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_integer_candidate_scan_preserves_deferred_cut_controls",
             "mojo_gpu",
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_collected_density_preserves_generic_gpu_behavior_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_finite_order_types_and_profile",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_nan_literal_payloads",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_empty_without_device_and_route_guards",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_cpu_optimized_source_morsels_and_single_actual_job",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_all_null_and_large_min_count",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_extrema_exact_zero_nan_inf_and_null_bits",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_eligibility_preserves_generic_main_routes",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_null_negative_keys_independent_partition_flush_and_layout",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_large_source_original_pipeline_boundary",
+            "metal",
         )
     )
     policy.capabilities = ["metal", "mojo_gpu"]
@@ -2833,6 +2889,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo",
                 "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo",
                 "tests/execution_modes/test_mojo_gpu_file_sources.mojo",
+                "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo",
             ],
         )
@@ -3257,6 +3314,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo",
                 "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo",
                 "tests/execution_modes/test_mojo_gpu_file_sources.mojo",
+                "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo",
                 "tests/execution_modes/test_backend_metal.mojo",
                 "tests/execution_modes/test_backend_metal_cost.mojo",
                 "tests/execution_modes/test_backend_metal_dictionaries.mojo",
