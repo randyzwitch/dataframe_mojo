@@ -1082,6 +1082,15 @@ struct _StreamJob(Job):
                 self.frame = self.frame.clear()
 
 
+def _same_names(a: List[String], b: List[String]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
 def _table_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's operations are ones the aggregate
     table keeps inline (their input types decide the rest)."""
@@ -2494,9 +2503,9 @@ struct LazyFrame(Copyable):
     ) raises -> Optional[DataFrame]:
         """Semi-join reduction (magic sets) for aggregates built on: when
         a stream's inner or semi joins build on aggregates grouped by the
-        join key, the probe side below the lowest of them runs first, and
-        its distinct keys filter each aggregate's input through a semi
-        join. A group whose key the probe side lacks joins nothing, and a
+        join keys (one or several), the probe side below the lowest of them
+        runs first, and its distinct key tuples filter each aggregate's
+        input through a semi join. A group whose key the probe side lacks joins nothing, and a
         filter on a group key drops whole groups, so every result is
         unchanged. DuckDB decorrelates EXISTS this way, over the outer
         rows' distinct keys (its delim joins); PDS-H q21 counted the
@@ -2507,7 +2516,7 @@ struct LazyFrame(Copyable):
         stream has no such join or no filter narrows its probe side."""
         var joins = List[Int]()
         var aggregates = List[Int]()
-        var key = String()
+        var key = List[String]()
         var probe = top
         var lowest = -1
         var steps = List[Int]()
@@ -2524,23 +2533,28 @@ struct LazyFrame(Copyable):
                 break
             if (
                 (step.how == JOIN_INNER or step.how == JOIN_SEMI)
-                and len(step.names) == 1
-                and (not key.byte_length() or step.names[0] == key)
+                and len(step.names) > 0
+                and (len(key) == 0 or _same_names(step.names, key))
             ):
+                # One aggregate grouped on every right key (PDS-H q20's
+                # shipped quantities per part and supplier).
                 var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                for name in step.right_keys:
+                    if self._grouped_on(step.right, name) != aggregate:
+                        aggregate = -1
                 if aggregate >= 0:
                     # The row-local steps between this join and the one
-                    # above keep the key, so the keys reaching the higher
+                    # above keep the keys, so the keys reaching the higher
                     # join are a subset of those reaching this one (joins
                     # only drop or repeat left rows, keeping their columns).
                     var kept = True
-                    if key.byte_length():
+                    for name in key:
                         for at in steps:
-                            kept = kept and self._keeps_column(at, key)
+                            kept = kept and self._keeps_column(at, name)
                     if kept:
                         joins.append(probe)
                         aggregates.append(aggregate)
-                        key = step.names[0]
+                        key = step.names.copy()
                         lowest = probe
                         steps = List[Int]()
             probe = step.left
@@ -2555,48 +2569,56 @@ struct LazyFrame(Copyable):
             return None
         trace_path("stream.probe_key_reduction")
         var probed = self._execute(below, False, True, batch_size)
-        var keys = probed.select([key]).unique([key])
+        var keys = probed.select(key).unique(key)
         var plan = self.copy()
         plan._frames.append(probed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
         plan._nodes[lowest].left = len(plan._nodes) - 1
         var key_frame = len(plan._frames)
-        var count = keys.height()
-        # Each source column's span, found once: PDS-H q21's two aggregates
-        # read one lineitem column.
+        # Each probe key's distinct values, and each source column's span,
+        # found once: PDS-H q21's two aggregates read one lineitem column.
+        var distinct = List[Int]()
+        for name in key:
+            distinct.append(
+                keys.height() if len(key)
+                == 1 else keys.select([name]).unique([name]).height()
+            )
         var spans = Dict[String, Int]()
         plan._frames.append(keys^)
         plan._schemas.append(Optional[CsvSchema]())
         for k in range(len(joins)):
             var aggregate = aggregates[k]
             var input = plan._nodes[aggregate].left
-            var group_key = plan._nodes[joins[k]].right_keys[0]
-            # The filter pays when it drops most of the groups: the probe
-            # keys are at most half of the values the aggregate's key
-            # column spans (the half rule the pipeline's key ranges keep).
-            # TPC-DS q35's 97K probing customers kept 94% of a year's
-            # store sales, for 16 ms of probes.
-            var source = plan._key_source(input, group_key)
-            if not source or not _range_key(source.value().dtype()):
-                continue
-            var named = group_key + "/" + String(len(source.value()))
-            if named not in spans:
-                var bounds = _int_bounds(source.value())
-                spans[named] = (
-                    Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
-                ) if bounds else 0
-            if 2 * count > spans[named]:
+            var group_keys = plan._nodes[joins[k]].right_keys.copy()
+            # The filter pays when it drops most of the groups: some key's
+            # probe values are at most half of the values the aggregate's
+            # key column spans (the half rule the pipeline's key ranges
+            # keep). TPC-DS q35's 97K probing customers kept 94% of a
+            # year's store sales, for 16 ms of probes.
+            var pays = False
+            for i in range(len(group_keys)):
+                var source = plan._key_source(input, group_keys[i])
+                if not source or not _range_key(source.value().dtype()):
+                    continue
+                var named = group_keys[i] + "/" + String(len(source.value()))
+                if named not in spans:
+                    var bounds = _int_bounds(source.value())
+                    spans[named] = (
+                        Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
+                    ) if bounds else 0
+                pays = pays or 2 * distinct[i] <= spans[named]
+            if not pays:
                 continue
             plan._nodes.append(_plan_node(SCAN_FRAME, offset=key_frame))
             var semi = _plan_node(
                 JOIN,
                 input,
                 len(plan._nodes) - 1,
-                names=[plan._nodes[joins[k]].right_keys[0]],
+                names=group_keys^,
                 text="semi",
                 how=JOIN_SEMI,
-                right_keys=[key],
+                right_keys=key.copy(),
             )
             semi.names2 = ["_right"]
             plan._nodes.append(semi^)
