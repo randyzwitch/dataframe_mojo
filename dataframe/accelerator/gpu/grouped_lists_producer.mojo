@@ -145,6 +145,7 @@ def produce(
     reconstructs keys or groups on CPU, never creates a new Scope, and cannot
     grant an original-source ordering certificate to an arbitrary resident AST.
     """
+    var retained_typed = typed.copy()
     _validate_source(plan, source, scope, typed)
     source.observe_errors()
     var layout = build_groups(source, plan.names, scope)
@@ -399,5 +400,5 @@ def produce(
     _ = scalars^
     _ = final_tables^
     _ = final_lists^
-    _ = typed^
+    _ = retained_typed^
     return result^

@@ -860,9 +860,11 @@ struct MetalRuntime(AcceleratorBackend):
                         "Metal dictionary staging exceeds payload budget"
                     )
                 budget -= staging_bytes
-            var dynamic_text = has_default_qcuts(
-                staged_query
-            ) or has_category_transport(staged_query) or has_grouped_key_owners(staged_query)
+            var dynamic_text = (
+                has_default_qcuts(staged_query)
+                or has_category_transport(staged_query)
+                or has_grouped_key_owners(staged_query)
+            )
             var encoded = encode_query(
                 staged_query, dictionary, dynamic_text=dynamic_text
             )
@@ -1152,7 +1154,11 @@ struct MetalRuntime(AcceleratorBackend):
                 var lowered = lower_dictionary_operations(metadata)
                 var staged_query = lowered[0].copy()
                 var dictionary = DictionaryCodes(staged_query)
-                var encoded = encode_query(staged_query, dictionary, dynamic_text=has_grouped_key_owners(staged_query))
+                var encoded = encode_query(
+                    staged_query,
+                    dictionary,
+                    dynamic_text=has_grouped_key_owners(staged_query),
+                )
                 return "Metal ordered dictionary staging; " + self._describe(
                     encoded, False
                 )

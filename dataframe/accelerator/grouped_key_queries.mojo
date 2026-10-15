@@ -25,6 +25,18 @@ struct KeyQuery(Movable):
     var staging_bytes: Int
     var key_outputs: List[Int]
 
+    def __init__(out self, *, deinit move: Self):
+        # Spell the move explicitly to break LazyFrame/PlanNode/KeyQuery's
+        # generated trait inference cycle. The immutable source buffers and
+        # Arc owners remain shared; only query metadata is copied.
+        self.query = move.query.copy()
+        self.schema = move.schema^
+        self.domains = move.domains^
+        self.names = move.names^
+        self.rows = move.rows
+        self.staging_bytes = move.staging_bytes
+        self.key_outputs = move.key_outputs^
+
 
 def _shape(query: LazyFrame) raises -> Tuple[LazyFrame, Int, Int]:
     var original = query.copy()

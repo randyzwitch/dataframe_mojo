@@ -43,7 +43,7 @@ def validate_field(field: ResidentField, scope: Scope, rows: Int) raises:
         return
     ref value = field.table.value()
     var typed = (
-        value.grouped_keys[0] if len(value.grouped_keys)
+        value.grouped_keys[0].copy() if len(value.grouped_keys)
         == 1 else Optional[GroupedKeyField]()
     )
     if typed:

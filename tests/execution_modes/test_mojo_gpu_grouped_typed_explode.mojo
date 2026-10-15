@@ -42,7 +42,7 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
                 ),
             )
         var source = DataFrame(
-            [keys, Series("v", Column[Int64]([10, 20, 30, 40, 50]))]
+            [keys.copy(), Series("v", Column[Int64]([10, 20, 30, 40, 50]))]
         )
         var expanded = (
             source.lazy()
@@ -100,7 +100,7 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
     for coded in [False, True]:
         var keys = _coded(category) if coded else category.copy()
         var frame = DataFrame(
-            [keys, Series("v", Column[Int64]([10, 20, 30, 40, 50]))]
+            [keys.copy(), Series("v", Column[Int64]([10, 20, 30, 40, 50]))]
         )
         var expanded = (
             frame.lazy()
@@ -127,14 +127,18 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
             )
         )
         assert_equal(grouped.height(), 2 if coded else 3)
+        var expected_grouped: List[Int64] = [100, 50] if coded else [40, 60, 50]
         assert_equal(
-            grouped.column("answer").int64().to_list(),
-            [100, 50] if coded else [40, 60, 50],
+            grouped.column("answer").int64().to_list(), expected_grouped
         )
         var over = _collect(
             expanded.with_columns(col("items").sum().over("k").alias("total"))
         )
-        assert_equal(
-            over.column("total").int64().to_list(),
-            [100, 100, 100, 100, 50] if coded else [40, 40, 60, 60, 50],
-        )
+        var expected_over: List[Int64] = [
+            100,
+            100,
+            100,
+            100,
+            50,
+        ] if coded else [40, 40, 60, 60, 50]
+        assert_equal(over.column("total").int64().to_list(), expected_over)

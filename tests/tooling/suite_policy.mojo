@@ -3698,4 +3698,16 @@ def production_policy() -> SuitePolicy:
             ],
         )
     )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_literal_raw_domains_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity",
+            "metal",
+        )
+    )
     return policy^

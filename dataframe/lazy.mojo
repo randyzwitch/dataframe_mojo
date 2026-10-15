@@ -1408,6 +1408,19 @@ struct LazyFrame(Copyable):
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
 
+    def __init__(out self, *, deinit move: Self):
+        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
+        # whose original query is a LazyFrame. This avoids recursive generated
+        # move inference while preserving all eight existing owner fields.
+        self._nodes = move._nodes^
+        self._frames = move._frames^
+        self._schemas = move._schemas^
+        self._report = move._report^
+        self._origin_rows = move._origin_rows^
+        self._accelerator_settings = move._accelerator_settings^
+        self._schema_memo = move._schema_memo^
+        self._prefetched = move._prefetched^
+
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
         self._schemas = [Optional[CsvSchema]()]
