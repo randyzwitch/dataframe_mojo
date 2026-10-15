@@ -8,6 +8,9 @@ from max.gpu import global_idx
 from dataframe.expr import (
     DT_YEAR,
     DT_TIME,
+    DT_REPLACE_TZ,
+    DT_OFFSET_BY,
+    DT_TRUNCATE,
     COL,
     LIT_INT,
     LIT_FLOAT,
@@ -55,7 +58,8 @@ from dataframe.expr import (
 )
 from std.memory import Pointer, unsafe_stack_allocation
 from . import floating, temporal, decimal, integers, iana_fields
-from . import temporal_arithmetic
+from . import temporal_arithmetic, iana_mutations
+from dataframe.accelerator.iana_mutations import ROW_IANA_MUTATION
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from .decimal_descriptors import (
     DECIMAL_FLOAT,
@@ -64,7 +68,12 @@ from .decimal_descriptors import (
     DECIMAL_BINARY,
     DECIMAL_UNARY,
 )
-from dataframe.accelerator.rows import ROW_SLICE, ROW_IANA_ZONE_FIELDS
+from dataframe.accelerator.rows import (
+    ROW_SLICE,
+    ROW_IANA_ZONE_FIELDS,
+    ROW_CALENDAR_OFFSET,
+    ROW_CALENDAR_TRUNCATE,
+)
 
 
 @always_inline
@@ -156,7 +165,7 @@ def _temporal_inputs[ordered: Bool](left: UInt32, right: UInt32) -> UInt32:
 
 
 def _row_program[
-    ordered: Bool
+    ordered: Bool, certificate: Bool = False
 ](
     words: Pointer[UInt64, MutAnyOrigin],
     validity: Pointer[UInt8, MutAnyOrigin],
@@ -165,20 +174,34 @@ def _row_program[
     literals: Pointer[UInt64, ImmutAnyOrigin],
     types: Pointer[Int64, ImmutAnyOrigin],
     fault_ranks: Pointer[UInt32, ImmutAnyOrigin],
+    replay: Pointer[UInt64, MutAnyOrigin],
+    scalar_cache: Pointer[UInt8, ImmutAnyOrigin],
+    active_scratch: Pointer[UInt8, MutAnyOrigin],
     start: UInt32,
     nodes: UInt32,
     target: UInt32,
     rows: UInt32,
     stride: UInt32,
     slots: UInt32 = 0,
+    certificate_base: UInt32 = 0,
+    replay_rank: UInt32 = UInt32.MAX,
+    replay_row: UInt32 = UInt32.MAX,
+    probe_target: UInt32 = UInt32.MAX,
+    batch_rows: UInt32 = 8192,
 ):
     var row = global_idx.x
+    comptime if certificate:
+        if replay_rank != UInt32.MAX:
+            if row != 0:
+                return
+            row = Int(replay_row)
     if row >= Int(rows):
         return
     var values = unsafe_stack_allocation[128, DType.uint64]()
     var highs = unsafe_stack_allocation[128, DType.uint64]()
     var valid = unsafe_stack_allocation[128, DType.uint8]()
     var failed = unsafe_stack_allocation[128, DType.uint32]()
+    var certified_error = UInt32(0)
     for node in range(Int(nodes)):
         var absolute = Int(start) + node
         var op = code[unsafe_offset=4 * absolute]
@@ -193,6 +216,58 @@ def _row_program[
         var own_rank = UInt32(0)
         comptime if ordered:
             own_rank = fault_ranks[unsafe_offset=absolute]
+        var active = True
+        var cpu_fused = False
+        var cpu_kernel_ignores_mask = False
+        comptime if certificate:
+            var masks = Int(certificate_base)
+            var scope_count = Int(literals[unsafe_offset=masks + 1])
+            var policy = literals[
+                unsafe_offset=masks + 2 + 3 * scope_count + Int(nodes) + node
+            ]
+            cpu_fused = (policy & 1) != 0
+            cpu_kernel_ignores_mask = (
+                literals[
+                    unsafe_offset=masks
+                    + 2
+                    + 3 * scope_count
+                    + 2 * Int(nodes)
+                    + node
+                ]
+                != 0
+            )
+            var scalar_slot = policy >> 1
+            var scope = Int(
+                literals[unsafe_offset=masks + 2 + 3 * scope_count + node]
+            )
+            while scope:
+                var at = masks + 2 + 3 * scope
+                var predicate = Int(literals[unsafe_offset=at])
+                var selected = (
+                    valid[unsafe_offset=predicate] != 0
+                    and values[unsafe_offset=predicate] != 0
+                )
+                active = active and selected == (
+                    literals[unsafe_offset=at + 2] != 0
+                )
+                scope = Int(literals[unsafe_offset=at + 1])
+            # The target's incoming row mask is captured before its own ANY
+            # policy is applied. Earlier scalar occurrences use prior slots;
+            # later slots are never read during this prefix probe.
+            if UInt32(node) == probe_target:
+                active_scratch[unsafe_offset=row] = UInt8(active)
+                return
+            if scalar_slot:
+                var batches = Int(rows) // Int(batch_rows) + Int(
+                    Int(rows) % Int(batch_rows) != 0
+                )
+                active = (
+                    scalar_cache[
+                        unsafe_offset=(Int(scalar_slot) - 1) * batches
+                        + row // Int(batch_rows)
+                    ]
+                    != 0
+                )
         if op == COL:
             var at = c * Int(stride) + row
             value = words[unsafe_offset=at]
@@ -222,19 +297,23 @@ def _row_program[
                 b if valid[unsafe_offset=a]
                 and (values[unsafe_offset=a] != 0) else c
             )
-            value = values[unsafe_offset=chosen]
-            high = highs[unsafe_offset=chosen]
-            present = valid[unsafe_offset=chosen] != 0
-            error = _combine[ordered](
-                failed[unsafe_offset=a], failed[unsafe_offset=chosen]
-            )
-            var source_type = types[unsafe_offset=Int(start) + chosen]
-            if dtype == 12 and source_type != 12:
-                high = UInt64.MAX if value >> 63 else UInt64(0)
-            if (dtype == 1 or dtype == 11) and source_type != dtype:
-                value = floating.word(value, source_type)
-                if dtype == 1:
-                    value = UInt64(floating.to_float32(value))
+            if chosen < 0:
+                present = False
+                error = failed[unsafe_offset=a]
+            else:
+                value = values[unsafe_offset=chosen]
+                high = highs[unsafe_offset=chosen]
+                present = valid[unsafe_offset=chosen] != 0
+                error = _combine[ordered](
+                    failed[unsafe_offset=a], failed[unsafe_offset=chosen]
+                )
+                var source_type = types[unsafe_offset=Int(start) + chosen]
+                if dtype == 12 and source_type != 12:
+                    high = UInt64.MAX if value >> 63 else UInt64(0)
+                if (dtype == 1 or dtype == 11) and source_type != dtype:
+                    value = floating.word(value, source_type)
+                    if dtype == 1:
+                        value = UInt64(floating.to_float32(value))
         elif op == IS_NULL or op == IS_NOT_NULL:
             value = UInt64((valid[unsafe_offset=a] != 0) == (op == IS_NOT_NULL))
             error = failed[unsafe_offset=a]
@@ -493,6 +572,30 @@ def _row_program[
                 value = UInt64(floating.absolute(input) < floating.INF)
             else:
                 value = UInt64(floating.is_inf(input))
+        elif op == ROW_IANA_MUTATION:
+            present = valid[unsafe_offset=a] != 0
+            error = failed[unsafe_offset=a]
+            var replacement = (
+                Int(literals[unsafe_offset=b + 1]) == DT_REPLACE_TZ
+            )
+            if present and (active or replacement):
+                var result = iana_mutations.evaluate(
+                    literals, b, values[unsafe_offset=a]
+                )
+                value = result[0]
+                present = result[1]
+                error = _combine[ordered](
+                    error,
+                    _new_fault[ordered](
+                        UInt32(64 | result[2]) if result[2] else UInt32(0),
+                        own_rank,
+                    ),
+                )
+                comptime if certificate:
+                    if own_rank == replay_rank and UInt32(row) == replay_row:
+                        replay[unsafe_offset=0] = result[3]
+                        replay[unsafe_offset=1] = UInt64(own_rank)
+                        replay[unsafe_offset=2] = UInt64(result[2])
         elif temporal.supported(op):
             present = valid[unsafe_offset=a] != 0
             error = failed[unsafe_offset=a]
@@ -710,12 +813,45 @@ def _row_program[
                         value = UInt64(less or equal)
                     elif op == NE:
                         value = UInt64(not equal)
+        comptime if certificate:
+            var ignores_mask = (
+                cpu_fused
+                or cpu_kernel_ignores_mask
+                or op == WHEN
+                or op == COL
+                or op == LIT_INT
+                or op == LIT_FLOAT
+                or op == LIT_BOOL
+                or op == LIT_NULL
+                or op == INT_IS_IN
+                or (
+                    temporal.supported(op)
+                    and op != DT_OFFSET_BY
+                    and op != DT_TRUNCATE
+                    and op != ROW_CALENDAR_OFFSET
+                    and op != ROW_CALENDAR_TRUNCATE
+                )
+            )
+            var replacement = op == DT_REPLACE_TZ or (
+                op == ROW_IANA_MUTATION
+                and Int(literals[unsafe_offset=b + 1]) == DT_REPLACE_TZ
+            )
+            if not active and not ignores_mask and not replacement:
+                present = False
+                error = 0
+            if active or replacement or cpu_kernel_ignores_mask:
+                certified_error = ordered_faults.merge(certified_error, error)
         values[unsafe_offset=node] = value if present else UInt64(0)
         highs[unsafe_offset=node] = high if present and dtype == 12 else UInt64(
             0
         )
         valid[unsafe_offset=node] = UInt8(present)
         failed[unsafe_offset=node] = error
+    comptime if certificate:
+        # Diagnostic replay observes immutable inputs/cache and publishes only
+        # its three control words, never the normal projection destination.
+        if replay_rank != UInt32.MAX:
+            return
     var root = Int(nodes) - 1
     var destination = Int(target) * Int(stride) + row
     words[unsafe_offset=destination] = values[unsafe_offset=root]
@@ -724,7 +860,10 @@ def _row_program[
             unsafe_offset=root
         ]
     validity[unsafe_offset=destination] = valid[unsafe_offset=root]
-    errors[unsafe_offset=destination] = failed[unsafe_offset=root]
+    comptime if certificate:
+        errors[unsafe_offset=destination] = certified_error
+    else:
+        errors[unsafe_offset=destination] = failed[unsafe_offset=root]
 
 
 def row_program(
@@ -749,6 +888,9 @@ def row_program(
         literals,
         types,
         code.unsafe_bitcast[UInt32](),
+        words,
+        validity,
+        validity,
         start,
         nodes,
         target,
@@ -781,10 +923,63 @@ def row_program_ordered(
         literals,
         types,
         fault_ranks,
+        words,
+        validity,
+        validity,
         start,
         nodes,
         target,
         rows,
         stride,
         slots,
+    )
+
+
+# Private certification and bounded failure replay share the identical source,
+# code, literals, ranks and row offsets. Only three control words are written.
+def row_program_iana(
+    words: Pointer[UInt64, MutAnyOrigin],
+    validity: Pointer[UInt8, MutAnyOrigin],
+    errors: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    fault_ranks: Pointer[UInt32, ImmutAnyOrigin],
+    replay: Pointer[UInt64, MutAnyOrigin],
+    scalar_cache: Pointer[UInt8, ImmutAnyOrigin],
+    active_scratch: Pointer[UInt8, MutAnyOrigin],
+    start: UInt32,
+    nodes: UInt32,
+    target: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    slots: UInt32,
+    certificate_base: UInt32,
+    replay_rank: UInt32 = UInt32.MAX,
+    replay_row: UInt32 = UInt32.MAX,
+    probe_target: UInt32 = UInt32.MAX,
+    batch_rows: UInt32 = 8192,
+):
+    _row_program[True, True](
+        words,
+        validity,
+        errors,
+        code,
+        literals,
+        types,
+        fault_ranks,
+        replay,
+        scalar_cache,
+        active_scratch,
+        start,
+        nodes,
+        target,
+        rows,
+        stride,
+        slots,
+        certificate_base,
+        replay_rank,
+        replay_row,
+        probe_target,
+        batch_rows,
     )

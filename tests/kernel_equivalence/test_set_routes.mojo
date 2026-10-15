@@ -1,8 +1,9 @@
 """Whole-row parallel deduplication preserves every scalar equality class."""
 from std.math import isnan
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, DataType, Series
+from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.parallel import worker_count
+from dataframe.partition import low_cardinality
 from tests.support.lifecycle_jobs import WorkerSetting
 
 
@@ -145,4 +146,72 @@ def test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_na
                 assert_equal(seen[code], expected[code])
                 count += Int(expected[code])
             assert_equal(actual.height(), count)
+    _ = setting^
+
+
+def test_parallel_subset_unique_keeps_input_order_and_exact_key_counts() raises:
+    # A high-cardinality subset on several workers encodes one hash bucket
+    # at a time. Every keep mode, n_unique and is_duplicated must still
+    # match a scalar reference, with surviving rows in input order. Rows
+    # r and r + 150,000 repeat a key; one key column has nulls.
+    var setting = WorkerSetting(4)
+    var n = 196609
+    assert_true(worker_count(n) > 1)
+    var a = List[Int64]()
+    var av = List[Bool]()
+    var b = List[String]()
+    var ids = List[Int64]()
+    var keys = List[String]()
+    for row in range(n):
+        var r = row % 150000
+        var null = r % 1009 == 0
+        a.append(Int64(r * 7 % 150001))
+        av.append(not null)
+        b.append(String(r % 5))
+        ids.append(Int64(row))
+        keys.append(
+            ("null" if null else String(r * 7 % 150001)) + "|" + String(r % 5)
+        )
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int64](a^, av^)),
+            Series("b", Column[String](b^)),
+            Series("row", Column[Int64](ids^)),
+        ]
+    )
+    var counts = Dict[String, Int]()
+    for key in keys:
+        counts[key] = counts.get(key, 0) + 1
+    var first = List[Int]()
+    var last = List[Int]()
+    var single = List[Int]()
+    var seen = Dict[String, Int]()
+    for row in range(n):
+        if keys[row] not in seen:
+            first.append(row)
+        seen[keys[row]] = seen.get(keys[row], 0) + 1
+        if seen[keys[row]] == counts[keys[row]]:
+            last.append(row)
+        if counts[keys[row]] == 1:
+            single.append(row)
+    var subset: List[String] = ["a", "b"]
+    assert_true(not low_cardinality([frame.column("a"), frame.column("b")]))
+    var modes: List[String] = ["first", "last", "none"]
+    var wanted: List[List[Int]] = [first^, last^, single^]
+    for m in range(len(modes)):
+        ref expected = wanted[m]
+        for maintain_order in [False, True]:
+            var actual = frame.unique(
+                subset.copy(), keep=modes[m], maintain_order=maintain_order
+            )
+            assert_equal(actual.height(), len(expected))
+            ref rows = actual.column("row")._data[Column[Int64]]
+            for i in range(len(expected)):
+                assert_equal(Int(rows._get(i)), expected[i])
+    assert_equal(frame.n_unique(subset.copy()), len(counts))
+    var duplicated = frame.is_duplicated(subset.copy())
+    for row in range(n):
+        assert_equal(
+            duplicated._data[BoolColumn]._get(row), counts[keys[row]] > 1
+        )
     _ = setting^

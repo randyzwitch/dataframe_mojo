@@ -41,8 +41,7 @@ pixi run -e native build-dfparquet # native dependency for interchange tests
 pixi run test           # maintained dataframe contract suite
 pixi run example
 pixi run build
-pixi run bench          # CPU benchmark suite; see the [benchmark guide](https://github.com/randyzwitch/dataframe_mojo/wiki/benchmarks)
-pixi run bench-csv
+pixi run bench-csv      # CSV reader benchmark; docs/benchmarks.md covers the rest
 ./build/sales
 
 ```

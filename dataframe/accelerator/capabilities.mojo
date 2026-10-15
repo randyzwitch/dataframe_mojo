@@ -66,6 +66,7 @@ struct RowCapabilities(Copyable):
     var temporal_binary_arithmetic: Bool
     var temporal_physical_casts: Bool
     var utc_temporal_conversions: Bool
+    var iana_zone_mutations: Bool
     var iana_zone_temporal_fields: Bool
     var fixed_zone_temporal_fields: Bool
     var calendar_offsets: Bool
@@ -141,6 +142,7 @@ struct RowCapabilities(Copyable):
         temporal_binary_arithmetic: Bool = False,
         temporal_physical_casts: Bool = False,
         utc_temporal_conversions: Bool = False,
+        iana_zone_mutations: Bool = False,
         iana_zone_temporal_fields: Bool = False,
         fixed_zone_temporal_fields: Bool = False,
         calendar_offsets: Bool = False,
@@ -212,6 +214,7 @@ struct RowCapabilities(Copyable):
         self.temporal_binary_arithmetic = temporal_binary_arithmetic
         self.temporal_physical_casts = temporal_physical_casts
         self.utc_temporal_conversions = utc_temporal_conversions
+        self.iana_zone_mutations = iana_zone_mutations
         self.iana_zone_temporal_fields = iana_zone_temporal_fields
         self.fixed_zone_temporal_fields = fixed_zone_temporal_fields
         self.calendar_offsets = calendar_offsets

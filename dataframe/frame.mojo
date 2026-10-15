@@ -3034,10 +3034,23 @@ struct DataFrame(Copyable, Sized, Writable):
             keys.append(self._columns[self._index(name)].copy())
         return _expand_struct_keys(keys)
 
+    def _subset_row_keys(self, subset: List[String]) raises -> RowKeys:
+        """Ids for subset's distinct rows, with each id's representative its
+        first row. The numbering is first-occurrence on one worker; across
+        workers a high-cardinality key encodes one hash bucket at a time, as
+        Polars partitions a group-by, so ids are in no particular order."""
+        var keys = self._subset_keys(subset)
+        var workers = worker_count(self._height)
+        if workers > 1 and not low_cardinality(keys):
+            # The bucket scatter is stable, so a bucket's first row for a key
+            # is the key's first row in the frame.
+            return encode_partitioned(keys, workers, nulls_equal=True)
+        return encode_rows(keys, nulls_equal=True)
+
     def _key_counts(
         self, subset: List[String]
     ) raises -> Tuple[List[Int], List[Int]]:
-        var keys = encode_rows(self._subset_keys(subset), nulls_equal=True)
+        var keys = self._subset_row_keys(subset)
         var counts = List[Int](length=keys.count(), fill=0)
         for id in keys.ids:
             counts[id] += 1
@@ -3081,15 +3094,28 @@ struct DataFrame(Copyable, Sized, Writable):
             # dictionary; TPC-DS q35 takes three such uniques).
             return self.group_by(self.columns()).agg(List[Expr]())
         if keep == "any" or keep == "first":
-            # Each key's first row: `encode_rows` names it as the id's
-            # representative, and ids follow first occurrence, so the
-            # representatives are already in input order. No counts or
-            # second pass over the ids (TPC-DS q35: three 80K-307K-row
-            # uniques).
-            var encoded = encode_rows(
-                self._subset_keys(subset), nulls_equal=True
-            )
-            return self.take(encoded.representatives)
+            # Each key's first row is its id's representative. One worker
+            # numbers ids by first occurrence, so those rows are already in
+            # input order; bucketed ids are not, and the rows are put back
+            # in input order by marking them. No counts or second pass over
+            # the ids (TPC-DS q35: three 80K-307K-row uniques).
+            var encoded = self._subset_row_keys(subset)
+            ref firsts = encoded.representatives
+            var ordered = True
+            for g in range(1, len(firsts)):
+                if firsts[g] < firsts[g - 1]:
+                    ordered = False
+                    break
+            if ordered:
+                return self.take(firsts)
+            var chosen = List[Bool](length=self._height, fill=False)
+            for row in firsts:
+                chosen[row] = True
+            var rows = List[Int](capacity=len(firsts))
+            for i in range(self._height):
+                if chosen[i]:
+                    rows.append(i)
+            return self.take(rows)
         var keyed = self._key_counts(subset)
         ref ids = keyed[0]
         ref counts = keyed[1]

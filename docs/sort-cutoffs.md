@@ -1,5 +1,7 @@
 # Low-cardinality sort calibration (#271)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
+
 Measured on 2026-09-26 with Mojo 1.2.0.dev2026092105 (e9569894), Linux
 x86-64, Threadripper 3970X (32 physical cores, 64 logical CPUs), 32 workers.
 Each paired process warms once and records five repetitions. Two rounds
@@ -50,16 +52,8 @@ must account for work in the largest serial bucket.
 
 ## Reproduce
 
-```bash
-pixi run python3 scripts/bench_sort_cutoffs.py --build
-pixi run python3 scripts/bench_sort_cutoffs.py --run rows
-pixi run python3 scripts/bench_sort_cutoffs.py --run cardinality
-pixi run python3 scripts/bench_sort_cutoffs.py --run skew
-pixi run python3 scripts/bench_sort_cutoffs.py --run edge
-pixi run python3 scripts/bench_sort_cutoffs.py --run wide
-pixi run python3 scripts/bench_sort_cutoffs.py --build --variants baseline,candidate
-pixi run python3 scripts/bench_sort_cutoffs.py --run validation --variants baseline,candidate
-```
+The benchmark and its driver were retired; check out revision `8a50a95`,
+where this section lists the commands.
 
 The pinned baseline is `b2013a55ae9c19ce447e2a37f692e7a394eeaa9a`.
 The 12/47-bit fixtures use bits above the generator's low 16 bits; the
@@ -112,9 +106,5 @@ negative ranks, ties and skew, as well as the existing serial/parallel sort
 agreement tests. Every benchmark repetition also validates its complete
 stable permutation outside timing.
 
-To export the committed data after reproducing the Linux suites and copying
-the Mac validation CSV to `build/sort-cutoffs/mac-validation-8.csv`:
-
-```bash
-pixi run python3 scripts/bench_sort_cutoffs.py --report docs/sort-cutoffs.csv
-```
+The retired driver also exported the committed CSV from the Linux and Mac
+runs.
