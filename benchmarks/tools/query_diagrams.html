@@ -133,7 +133,7 @@ $('suite').onchange=()=>{populate('q1');render();}; $('query').onchange=render; 
 $('zoom-in').onclick=()=>{zoom=Math.min(8,zoom*1.3);resize();}; $('zoom-out').onclick=()=>{zoom=Math.max(.2,zoom/1.3);resize();}; $('fit').onclick=()=>{zoom=1;resize();};
 $('download').onclick=()=>download(currentSource,'text/plain','.mmd'); $('svg').onclick=()=>download(svgText,'image/svg+xml','.svg');
 window.addEventListener('resize',resize);
-$('provenance').textContent='Plan snapshot · revision '+payload.revision.slice(0,12)+(payload.dirty?' · working tree had changes':'')+' · smoke/base inputs · source SHA-256 '+payload.fingerprint+'. No timed benchmark measurements are run to create this page. Regenerate with: pixi run -e oracle python scripts/query_diagrams.py';
+$('provenance').textContent='Plan snapshot · revision '+payload.revision.slice(0,12)+(payload.dirty?' · working tree had changes':'')+' · smoke/base inputs · source SHA-256 '+payload.fingerprint+'. No timed benchmark measurements are run to create this page. Regenerate with: pixi run -e oracle python benchmarks/tools/query_diagrams.py';
 render();
 </script>
 </html>

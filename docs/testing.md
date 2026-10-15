@@ -75,7 +75,7 @@ Native calibration and execution checks additionally require a provisioned devic
 ## Benchmarks
 
 Headline performance comes from the external suites run by
-`scripts/bench_suites.py`; [benchmarks.md](benchmarks.md) states the rules
+`benchmarks/tools/bench_suites.py`; [benchmarks.md](benchmarks.md) states the rules
 and describes the suites, their data variants and the answer checks. The
 in-repo `benchmarks/bench_*.mojo` programs below measure one mechanism at a
 time and are development tools, not evidence of general performance.
@@ -95,7 +95,7 @@ record the machine and the losing side of a crossover.
 
 The join matrix (`bench_join_matrix`) and its Polars and DuckDB drivers are
 retired. The H2O join suite, PDS-H and TPC-DS now compare joins with both
-engines through `scripts/bench_suites.py`; check out revision `8a50a95` to
+engines through `benchmarks/tools/bench_suites.py`; check out revision `8a50a95` to
 rerun the old matrix.
 
 [worker-calibration.md](worker-calibration.md) records 4/8/16-worker sweeps

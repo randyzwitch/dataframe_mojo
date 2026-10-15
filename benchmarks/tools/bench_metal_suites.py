@@ -21,8 +21,8 @@ import subprocess
 import sys
 import tokenize
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_suites as suites
 import bench_policy
 

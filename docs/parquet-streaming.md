@@ -48,8 +48,8 @@ corrupted later group. Series preserve the row-group chunk boundaries.
 
 ```bash
 pixi run -e native build-dfparquet
-pixi run python3 scripts/bench_parquet_stream.py --build
-BENCH_WAIT_FOR_COMPILERS=1 pixi run -e oracle python3 scripts/bench_parquet_stream.py --run
+pixi run python3 benchmarks/tools/bench_parquet_stream.py --build
+BENCH_WAIT_FOR_COMPILERS=1 pixi run -e oracle python3 benchmarks/tools/bench_parquet_stream.py --run
 pixi run test --contracts io.parquet
 pixi run -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.so
 ```
