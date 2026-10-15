@@ -77,6 +77,33 @@ def _coded_string_dtype(source: Series) -> Optional[DataType]:
     return dtype^
 
 
+def has_category_transport(query: LazyFrame) raises -> Bool:
+    """Original categorical/code owners require certified HIGH transport.
+
+    Inspect only reachable immutable sources and logical metadata. Plain
+    UInt32 carriers are not evidence; retained resident certificates are.
+    """
+    var live = _live_nodes(query)
+    for index in range(len(query._nodes)):
+        if not live[index]:
+            continue
+        ref node = query._nodes[index]
+        for field in node.text_fields:
+            if field.category:
+                return True
+        if node.kind == SCAN_FRAME:
+            for column in query._frames[node.offset]._columns:
+                if column.dtype().is_categorical() or _coded_string_dtype(
+                    column
+                ):
+                    return True
+        var logical = schema_frame(query, index)
+        for column in logical._columns:
+            if column.dtype().is_categorical() or _coded_string_dtype(column):
+                return True
+    return False
+
+
 def dictionary_dtype(dtype: DataType) -> Bool:
     return dtype == DataType.STRING or dtype.is_categorical()
 

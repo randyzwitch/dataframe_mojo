@@ -2595,7 +2595,12 @@ def execute_plan(
     fields.append(Series("synchronizations", Column[Int64]([Int64(waits)])))
     fields.append(Series("upload_bytes", Column[Int64]([Int64(uploaded)])))
     fields.append(Series("download_bytes", Column[Int64]([Int64(downloaded)])))
-    fields.append(Series("peak_requested_bytes", Column[Int64]([Int64(peak)])))
+    fields.append(
+        Series(
+            "peak_requested_bytes",
+            Column[Int64]([Int64(max(peak, scope.info()[1]))]),
+        )
+    )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
     fields.append(Series("host_result_bytes", Column[Int64]([Int64(0)])))
     fields.append(

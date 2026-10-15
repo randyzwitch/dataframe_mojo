@@ -68,6 +68,24 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_categorical_activation_requires_reachable_logical_or_code_owners",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_mojo_gpu_category_activation_preserves_original_public_code_owners",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_mojo_gpu_categorical_self_key_over_decodes_only_captured_string_keys",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo::test_mojo_gpu_categorical_original_rows_filter_sort_group_and_over",
             "metal",
         )
@@ -3261,6 +3279,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo",
                 "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",

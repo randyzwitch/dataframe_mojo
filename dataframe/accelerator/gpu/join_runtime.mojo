@@ -649,7 +649,10 @@ def execute_plan(
         )
         fields.append(Series("synchronizations", Column[Int64]([Int64(waits)])))
         fields.append(
-            Series("peak_requested_bytes", Column[Int64]([Int64(peak)]))
+            Series(
+                "peak_requested_bytes",
+                Column[Int64]([Int64(max(peak, scope.info()[1]))]),
+            )
         )
         fields.append(
             Series("runtime_implementation", Column[String](["mojo"]))

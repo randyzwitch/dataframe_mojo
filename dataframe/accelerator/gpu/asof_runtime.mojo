@@ -119,7 +119,12 @@ def _report(
             "synchronizations", Column[Int64]([Int64(traffic[3] - before[3])])
         )
     )
-    fields.append(Series("peak_requested_bytes", Column[Int64]([Int64(peak)])))
+    fields.append(
+        Series(
+            "peak_requested_bytes",
+            Column[Int64]([Int64(max(peak, scope.info()[1]))]),
+        )
+    )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
     fields.append(
         Series("upload_bytes", Column[Int64]([Int64(traffic[0] - before[0])]))

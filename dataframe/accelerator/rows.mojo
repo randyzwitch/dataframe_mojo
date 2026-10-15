@@ -2535,6 +2535,10 @@ def lower_rows(
                 for original_key in node.window_keys:
                     if original_key.name != schema[key].name():
                         continue
+                    # The original whole-expression binding may decode just
+                    # this CAT key before preparing its OVER partition.
+                    if original_key.string_hash:
+                        categorical_identity = False
                     if (
                         original_key.dtype == DataType.STRING
                         or original_key.dtype._is_bytes()
