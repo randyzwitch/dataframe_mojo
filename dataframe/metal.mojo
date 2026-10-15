@@ -92,7 +92,9 @@ from .accelerator.joins import (
     has_scalar_consumers,
     has_decimal_consumers,
     has_checked_integer_consumers,
+    prepare_temporal_prefix,
 )
+from .accelerator import producer_phases
 from .accelerator.explodes import has_explode
 from .lazy import AcceleratorBackend, LazyFrame
 from .column import Column
@@ -130,6 +132,7 @@ def _describe_mojo_gpu(
         has_join(query)
         or has_decimal_consumers(query)
         or has_checked_integer_consumers(query)
+        or producer_phases.has_certified(query)
         or has_explode(query)
         or has_scalar_consumers(query)
         or has_cut_materializations(query)
@@ -260,6 +263,15 @@ struct MetalRuntime(AcceleratorBackend):
                 observation_only=self._observation_only,
                 started=float_started,
             )
+        if original_entry and producer_phases.has_candidates(query):
+            var prefix = prepare_temporal_prefix(
+                query, self._execution_settings.optimize
+            )
+            var certified = producer_phases.prepare_original(
+                prefix, False, True
+            )
+            if producer_phases.has_certified(certified):
+                return self._run(certified, profiling, original_entry=False)
         var start = Int(perf_counter_ns())
         if len(file_source_nodes(query)):
             var staged = prepare_file_sources(
@@ -960,6 +972,7 @@ struct MetalRuntime(AcceleratorBackend):
             has_join(query)
             or has_decimal_consumers(query)
             or has_checked_integer_consumers(query)
+            or producer_phases.has_certified(query)
             or has_scalar_consumers(query)
             or has_cut_materializations(query)
             or has_implode_materializations(query)
@@ -1001,6 +1014,15 @@ struct MetalRuntime(AcceleratorBackend):
             )
             if float_route:
                 return "Metal ordered grouped floating states; captured CPU single-job morsels; device sample selects inserted epochs or generic collected GPU reductions"
+            if original_entry and producer_phases.has_candidates(query):
+                var prefix = prepare_temporal_prefix(
+                    query, self._execution_settings.optimize
+                )
+                var certified = producer_phases.prepare_original(
+                    prefix, False, True
+                )
+                if producer_phases.has_certified(certified):
+                    return self._describe(certified, False)
             if len(file_source_nodes(query)):
                 var staged = stage_file_sources(
                     query,
