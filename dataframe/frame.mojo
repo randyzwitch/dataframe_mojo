@@ -125,7 +125,14 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
-from .categorical import decode, recode, sort_ranks, unify, union_of
+from .categorical import (
+    decode,
+    recode,
+    sort_ranks,
+    string_sort_ranks,
+    unify,
+    union_of,
+)
 from .packed_sort import (
     chunked_top_rows,
     packed_arg_sort,
@@ -1068,6 +1075,21 @@ struct DataFrame(Copyable, Sized, Writable):
             var keys = List[Series](capacity=len(by))
             for name in by:
                 keys.append(self.column(name))
+            # String keys whose values repeat sort by their ranks: each
+            # distinct value is compared once, and the ranks pack with the
+            # other keys where the strings would not.
+            var ranked = keys.copy()
+            var ranked_any = False
+            for k in range(len(ranked)):
+                var ranks = string_sort_ranks(ranked[k])
+                if ranks:
+                    ranked[k] = ranks.take()
+                    ranked_any = True
+            if ranked_any:
+                var packed = packed_arg_sort(ranked, descending, nulls_last)
+                if packed:
+                    trace_path("sort.string_ranks")
+                    return packed.take()
             var packed = packed_arg_sort(keys, descending, nulls_last)
             if packed:
                 trace_path("sort.packed")
@@ -2084,6 +2106,35 @@ struct DataFrame(Copyable, Sized, Writable):
                 direct_right = True
                 swap(right_rows, pairs[0])
                 swap(left_rows, pairs[1])
+        if how == JOIN_FULL and right.height() <= Int(Int32.MAX):
+            # A full join is a left join plus the right rows nothing
+            # matched (DuckDB's FULL OUTER probe, then its scan of the
+            # unmatched build rows): the left join's direct route, then
+            # those rows in order, as the dictionary route below orders
+            # them, without encoding every key of both inputs.
+            var left_sources = List[Series](capacity=len(left_keys))
+            var right_sources = List[Series](capacity=len(right_keys))
+            for k in range(len(left_keys)):
+                left_sources.append(self._columns[left_keys[k]].copy())
+                right_sources.append(right._columns[right_keys[k]].copy())
+            if not low_cardinality(right_sources):
+                trace_path("join.full_direct")
+                var pairs = direct_hash_join_rows(
+                    left_sources, right_sources, True, omit_identity=False
+                )
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
+                var matched = List[Bool](length=right.height(), fill=False)
+                var at = right_rows.unsafe_ptr()
+                for k in range(len(right_rows)):
+                    var j = at[unsafe_offset=k]
+                    if j >= 0:
+                        matched[j] = True
+                for j in range(right.height()):
+                    if not matched[j]:
+                        left_rows.append(-1)
+                        right_rows.append(j)
+                direct_right = True
         if not direct_right:
             trace_path("join.dictionary")
             var ids = _joint_key_ids(self, right, left_keys, right_keys)
@@ -2402,13 +2453,21 @@ struct DataFrame(Copyable, Sized, Writable):
                         " row-valued expressions; their length differs"
                     )
                 modes.append(expression.expr._name)
+        # Window partitions laid out once per key set for all expressions,
+        # as in with_columns.
+        var layouts = WindowLayouts()
         for expression in bound:
             var result = evaluate(
-                expression, self._columns, self._height, batch_size=batch_size
+                expression,
+                self._columns,
+                self._height,
+                batch_size=batch_size,
+                layouts=Int(Pointer(to=layouts)),
             )
             if expression.shape() != ROWS and has_rows:
                 result = result._broadcast(height)
             columns.append(result^)
+        _ = layouts^
         var frame = Self(columns^, height=height)
         if len(modes) > 0:
             # An empty input has no modes: zero rows, not one null row.
@@ -2562,13 +2621,17 @@ struct DataFrame(Copyable, Sized, Writable):
         var mask = self._predicate_mask(bound, batch_size)
         return self._kept(keep).filter(mask)
 
-    def _selection(self, predicate: Expr, batch_size: Int) raises -> BoolColumn:
+    def _selection(
+        self, predicate: Expr, batch_size: Int, source_rows: Int = 0
+    ) raises -> BoolColumn:
         """The rows `predicate` keeps, as a mask over this frame, chosen the
         way `filter` chooses its path: a run answered by a column stored in
         ascending order, a top-k per partition, selective conjuncts (the
         cheap parts first, strings only on the rows they kept, fused
         comparisons), or the predicate's own mask. A pipeline's morsel
-        narrows its selection with this and copies nothing."""
+        narrows its selection with this and copies nothing; it passes its
+        source's height as `source_rows`, so the route is the one the
+        whole source would take, however finely it is cut."""
         if (
             len(predicate._nodes) == 1
             and predicate._nodes[0].op == LIT_BOOL
@@ -2601,7 +2664,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 for k in range(1, len(rest)):
                     remaining = remaining & rest[k]
                 var inner = self.slice(low, length)._selection(
-                    remaining, batch_size
+                    remaining, batch_size, source_rows
                 )
                 return _placed_mask(inner, low, self._height)
         var top = top_k_mask(bound, self._columns, self._height)
@@ -2611,7 +2674,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var parts = conjuncts(predicates[0])
         if (
             len(parts) > 1
-            and self._height >= SELECTIVE_FILTER_ROWS
+            and max(self._height, source_rows) >= SELECTIVE_FILTER_ROWS
             and _row_local(parts)
         ):
             trace_path("filter.selective_and")
@@ -5744,16 +5807,16 @@ struct GroupBy(Copyable):
         # Keys are unchanged throughout this aggregation. Reuse the sampled
         # preference across hash, range and partitioned strategy selection.
         var whole = low_cardinality(self._keys) if workers > 1 else False
-        # Few groups (the sample above, or keys with few values each) keep
-        # the routes that reduce each range into a small private state, in
-        # first-occurrence order; more go through the aggregate table,
-        # whose per-thread tables adapt to however many there are.
-        if (
-            workers > 1
-            and not whole
-            and not small_key_product(self._keys)
-            and self._table_supported(expressions)
-        ):
+        # Few groups (the sample above) keep the routes that reduce each
+        # range into a small private state, in first-occurrence order; more
+        # go through the aggregate table, whose per-thread tables adapt to
+        # however many there are. Keys with few values each may still form
+        # many groups, so they take the table too, as in a pipeline: PDS-H
+        # q16's brand, type and size (under 30K combinations) form 18K
+        # groups among 118K rows, 14 ms in per-range states that number
+        # each range's strings again and 4.4 ms in the table; H2O q2's two
+        # 100-value keys are 17% faster there.
+        if workers > 1 and not whole and self._table_supported(expressions):
             var table = self._agg_table(expressions, workers)
             if table:
                 return _pack_struct_keys(table.value())

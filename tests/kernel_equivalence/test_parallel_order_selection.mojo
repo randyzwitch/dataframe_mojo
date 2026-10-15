@@ -6,6 +6,11 @@ from dataframe import Column, DataFrame, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.bool_column import BoolColumn
 from dataframe.top_k import top_k_mask, _pattern
+from dataframe.aggregate_table import TOP_ROWS_INLINE
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 from dataframe.parallel import worker_count, configured_workers, Pool
 from dataframe.comparison_sort import (
     _co_rank,
@@ -123,7 +128,10 @@ def test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_sca
     assert_true(workers > 1)
     for route in range(3):
         var groups = 4 if route == 0 else 4096 if route == 1 else 32768
-        var k = 1 if route == 0 else 20 if route == 1 else 7
+        # More pairs than a group row holds inline, so the partition
+        # routes run rather than the aggregate table's.
+        var k = 17 if route == 0 else 20 if route == 1 else 17
+        assert_true(k > TOP_ROWS_INLINE)
         # Fixture visits every non-null key and the null key. These exact
         # inequalities are the production allocator's dispatch conditions.
         var count = groups + 1
@@ -139,6 +147,39 @@ def test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_sca
                 check_topk(
                     source, groups, Int64(k + Int(strict)), strict, descending
                 )
+    _ = setting^
+
+
+def test_partition_top_k_through_the_aggregate_table_matches_scalar_memberships() raises:
+    # Up to TOP_ROWS_INLINE pairs a group: each worker's table keeps every
+    # group's best (value, row) pairs in the group's row, merged at the
+    # finish (DuckDB's arg_max(row, value, k)). Few groups and many, a
+    # null key, NaN and null values, ties kept by row, chunked values.
+    var setting = WorkerSetting(4)
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var n = 196609
+    for shape in range(4):
+        var groups = 4 if shape == 0 else 4096 if shape == 1 else 32768
+        var k = (
+            1 if shape
+            == 0 else TOP_ROWS_INLINE if shape
+            == 1 else (7 if shape == 2 else 2)
+        )
+        if shape == 3:
+            groups = 150000
+        var source = topk_frame(n, groups)
+        for descending in [False, True]:
+            for strict in [False, True]:
+                var observed = StrategyTrace()
+                check_topk(
+                    source, groups, Int64(k + Int(strict)), strict, descending
+                )
+                assert_true(
+                    "dataframe-path: filter.top_k_table\n" in observed.text(),
+                    "the top-k filter did not run through the table",
+                )
+                _ = observed^
+    _ = trace^
     _ = setting^
 
 

@@ -269,8 +269,22 @@ ordinary scalars broadcast, while differing distribution lengths raise.
 
 ## Validation
 
-Run the integrated query contracts and independent IEEE oracle on an Apple
-Silicon Mac with the pinned environment:
+Metal is validated on an Apple silicon Mac before a pull request, not in CI.
+GitHub's hosted macOS runners are virtual machines whose GPU gives Metal
+buffers no GPU address, which MAX's device context needs, so the Mojo GPU
+provider cannot run there (288 of 354 contracts failed, 278 of them on
+"Failed to get GPU address from Metal buffer"). One script runs everything
+the retired `native-metal` job did, and fails if no device is found:
+
+```sh
+scripts/test_metal_local.sh
+```
+
+It builds the provider for a CPU-only target, probes the device
+(`tests/tooling/metal_available.mojo` prints why it decides), builds the
+Parquet reader, runs the `execution.backends` contracts with the `metal`
+capability, then the integrated query contracts and independent oracles.
+Those last steps can also run alone, with the pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu

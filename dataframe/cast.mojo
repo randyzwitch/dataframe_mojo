@@ -13,11 +13,13 @@ from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .parse import parse_bool, parse_float64, parse_integer
 from .decimal import (
+    check_limit,
     check_precision,
     divide_half_even,
     format_decimal,
     parse_decimal,
     pow10,
+    precision_limit,
 )
 from .series import Series
 from .parallel import Job, configured_workers, run_jobs
@@ -143,6 +145,92 @@ def _read_source(
                     values.floats[i] = x.cast[DType.float64]()
                 else:
                     values.ints[i] = x.cast[DType.int128]()
+
+
+def _integers_to_decimal(
+    input: Series, target: DataType, strict: Bool, offset: Int
+) raises -> Optional[Series]:
+    """An integer column as a decimal, in one typed pass (DuckDB's
+    `TryCastToDecimal` loop per source type): each value times the scale's
+    power of ten, both it and the precision's limit computed once, written
+    at the target's width, with the source's validity. A value past the
+    precision raises when `strict`, as the row path does, and is null
+    otherwise. None for storage this does not read."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if input._data.isa[Column[Scalar[D]]]():
+                ref column = input._data[Column[Scalar[D]]]
+                var width = target.decimal_width()
+                if width == 32:
+                    return _scaled_integers[D, DType.int32](
+                        column, input, target, strict, offset
+                    )
+                if width == 64:
+                    return _scaled_integers[D, DType.int64](
+                        column, input, target, strict, offset
+                    )
+                return _scaled_integers[D, DType.int128](
+                    column, input, target, strict, offset
+                )
+    return None
+
+
+def _scaled_integers[
+    D: DType, W: DType
+](
+    column: Column[Scalar[D]],
+    input: Series,
+    target: DataType,
+    strict: Bool,
+    offset: Int,
+) raises -> Series:
+    var n = len(column)
+    var factor = pow10(target.scale())
+    var limit = precision_limit(target.precision())
+    var values = List[Scalar[W]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var source = column._ptr()
+    var nulls = column.null_count() > 0
+    var overflowed = List[Int]()
+    for i in range(n):
+        if nulls and not column._valid(i):
+            out[unsafe_offset=i] = 0
+            continue
+        var value = source[unsafe_offset=i].cast[DType.int128]() * factor
+        if value <= -limit or value >= limit:
+            if strict:
+                try:
+                    _ = check_limit(value, limit, target)
+                except e:
+                    raise Error(
+                        "cast from "
+                        + input.dtype().name()
+                        + " to "
+                        + target.name()
+                        + " failed at row "
+                        + String(offset + i)
+                        + " for value \x27"
+                        + _text(input, i)
+                        + "\x27: "
+                        + String(e)
+                    )
+            overflowed.append(i)
+            out[unsafe_offset=i] = 0
+            continue
+        out[unsafe_offset=i] = value.cast[W]()
+    if not nulls and len(overflowed) == 0:
+        return Series(input.name(), Column[Scalar[W]](values^)).with_dtype(
+            target
+        )
+    var bits = _copy_validity(
+        column._bits[], column._offset, n
+    ) if nulls else List[UInt8](length=(n + 7) // 8, fill=255)
+    for i in overflowed:
+        bits[i >> 3] &= ~(UInt8(1) << UInt8(i & 7))
+    return Series(
+        input.name(), Column[Scalar[W]](values=values^, bits=bits^)
+    ).with_dtype(target)
 
 
 def _integer_at(input: Series, i: Int) raises -> Int128:
@@ -563,6 +651,10 @@ def cast_series(
         var exact = _cast_exact(input, target)
         if exact:
             return exact.take()
+    if target.is_decimal() and source.is_integer() and len(mask) == 0:
+        var scaled = _integers_to_decimal(input, target, strict, offset)
+        if scaled:
+            return scaled.take()
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
     if target.is_decimal():

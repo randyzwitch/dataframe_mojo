@@ -7,7 +7,7 @@ Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
 from std.bit import count_trailing_zeros
-from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
 
@@ -547,26 +547,10 @@ def _tagged_probe(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
 
 @always_inline
 def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
-    """Bit `l` set where lane `l` is true."""
-    comptime weights = SIMD[DType.uint16, 16](
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-    )
-    return (lanes.cast[DType.uint16]() * weights).reduce_add()
+    """Bit `l` set where lane `l` is true: one move-mask instruction
+    (`pmovmskb` on x86), where a weighted sum of the lanes took a dozen
+    vector instructions twice a probe (PDS-H q5's 6M lineitem probes)."""
+    return pack_bits[DType.uint16](lanes)
 
 
 struct _TagCursor:
@@ -861,6 +845,9 @@ struct _HashProbeJob(Job):
     var membership: Int
     var left_rows: List[Int]
     var right_rows: List[Int]
+    # The build keys' bits (`PreparedHashIndex.filter`), empty for none.
+    var filter: ArcPointer[List[UInt64]]
+    var filter_base: Int64
 
     def __init__(
         out self,
@@ -874,6 +861,8 @@ struct _HashProbeJob(Job):
         include_unmatched: Bool,
         omit_identity: Bool,
         membership: Int = -1,
+        filter: ArcPointer[List[UInt64]] = ArcPointer(List[UInt64]()),
+        filter_base: Int64 = 0,
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
@@ -897,6 +886,8 @@ struct _HashProbeJob(Job):
         self.right_rows = List[Int](
             capacity=0 if membership >= 0 else end - start
         )
+        self.filter = filter.copy()
+        self.filter_base = filter_base
 
     def run_membership(mut self) raises:
         """Semi (membership == 1) or anti (0): each left row at most once,
@@ -909,8 +900,21 @@ struct _HashProbeJob(Job):
                     if self.left_keys[0]._data.isa[Column[Scalar[D]]]():
                         ref probe = self.left_keys[0]._data[Column[Scalar[D]]]
                         var all_valid = len(probe._bits[]) == 0
+                        var bits = Int(self.filter[].unsafe_ptr())
+                        var words = len(self.filter[])
                         for i in range(self.start, self.end):
                             var matched = False
+                            comptime if D == DType.int64:
+                                if words > 0 and _key_bit_clear(
+                                    bits,
+                                    words,
+                                    self.filter_base,
+                                    rebind[Int64](probe._get(i)),
+                                ):
+                                    # No match (a null key has none either).
+                                    if not keep:
+                                        self.left_rows.append(i)
+                                    continue
                             if all_valid or probe._valid(i):
                                 var key = _int_word[D](probe._get(i))
                                 var hash = _mix(key)
@@ -991,12 +995,25 @@ struct _HashProbeJob(Job):
                         # or bounds check per row (#378).
                         var keys = left._ptr()
                         var buckets = self.buckets[].unsafe_ptr()
+                        var bits = Int(self.filter[].unsafe_ptr())
+                        var words = len(self.filter[])
                         for i in range(self.start, self.end):
                             if not (left_all_valid or left._valid(i)):
                                 if self.include_unmatched:
                                     self.left_rows.append(i)
                                     self.right_rows.append(-1)
                                 continue
+                            comptime if D == DType.int64:
+                                if words > 0 and _key_bit_clear(
+                                    bits,
+                                    words,
+                                    self.filter_base,
+                                    rebind[Int64](keys.unsafe_offset(i)[]),
+                                ):
+                                    if self.include_unmatched:
+                                        self.left_rows.append(i)
+                                        self.right_rows.append(-1)
+                                    continue
                             var key = _int_word[D](keys.unsafe_offset(i)[])
                             var hash = _mix(key)
                             var bucket = Int(hash >> 56) >> self.fold
@@ -1204,12 +1221,29 @@ struct PreparedHashIndex(Copyable):
     var progression: Bool
     var base: Int64
     var stride: UInt64
+    # DuckDB's perfect hash join: unique integer build keys within a span
+    # of `_PERFECT_SPAN` values, each key's build row at `key - base`
+    # (-1 for none). Empty for a progression or a hash table; with it,
+    # `progression` is set so probes take the same direct loop.
+    var slots: ArcPointer[List[Int32]]
+    # A hash table's integer build keys as bits over their span, from
+    # `filter_base` (empty when the span's bits would not stay in cache): a
+    # probe key whose bit is clear has no match, found with one bit test
+    # instead of a hash and a slot search (an exact Bloom filter, as
+    # DuckDB pushes one into a join's probe side).
+    var filter: ArcPointer[List[UInt64]]
+    var filter_base: Int64
 
     @always_inline
     def progression_row(self, value: Int64, right_count: Int) -> Int:
         """The build row holding value, or -1 (see int64_progression)."""
         if value < self.base:
             return -1
+        if len(self.slots[]) > 0:
+            var offset = UInt64(value) - UInt64(self.base)
+            if offset >= UInt64(len(self.slots[])):
+                return -1
+            return Int(self.slots[].unsafe_ptr()[unsafe_offset=Int(offset)])
         var distance = UInt64(value) - UInt64(self.base)
         if self.stride != 1:
             if distance % self.stride != 0:
@@ -1307,6 +1341,111 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
     return (True, base, max(stride, UInt64(1)))
 
 
+def _l2_cache_bytes() -> Int:
+    """A core's L2 cache size, from Linux's sysfs; 1 MiB where that is not
+    readable."""
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cache/index2/size", "r") as f:
+            var text = f.read()
+            var value = 0
+            var scale = 1
+            for b in text.as_bytes():
+                var byte = Int(b)
+                if byte >= 48 and byte <= 57:
+                    value = 10 * value + byte - 48
+                elif byte == 75:
+                    scale = 1024
+                elif byte == 77:
+                    scale = 1024 * 1024
+            if value > 0:
+                return value * scale
+    except:
+        pass
+    return 1 << 20
+
+
+# DuckDB's perfect hash join span (`CanDoPerfectHashJoin`).
+comptime _PERFECT_SPAN = 1_048_576
+
+
+def _key_bits(key: Series) raises -> Optional[Tuple[Int64, List[UInt64]]]:
+    """An Int64 build key's valid values as bits over their span, from the
+    least: None when the span's bits would not stay within half a core's
+    L2 cache, the bound the perfect hash join's slots keep."""
+    var flat = key.rechunk() if key.is_chunked() else key.copy()
+    ref column = flat._data[Column[Int64]]
+    var values = column._ptr()
+    var n = len(column)
+    var all_valid = column.null_count() == 0
+    var least = Int64.MAX
+    var most = Int64.MIN
+    for i in range(n):
+        if all_valid or column._valid(i):
+            var v = values[unsafe_offset=i]
+            least = min(least, v)
+            most = max(most, v)
+    if least > most:
+        return None
+    if UInt64(most) - UInt64(least) >= UInt64(4 * _l2_cache_bytes()):
+        return None
+    var words = List[UInt64](
+        length=Int((UInt64(most) - UInt64(least)) // 64) + 1, fill=0
+    )
+    var bits = words.unsafe_ptr()
+    for i in range(n):
+        if all_valid or column._valid(i):
+            var at = UInt64(values[unsafe_offset=i]) - UInt64(least)
+            bits[unsafe_offset=Int(at >> 6)] |= UInt64(1) << (at & 63)
+    return (least, words^)
+
+
+@always_inline
+def _key_bit_clear(bits: Int, words: Int, base: Int64, key: Int64) -> Bool:
+    """Whether `key` is certainly not a build key (`_key_bits`, at address
+    `bits`)."""
+    var at = UInt64(key) - UInt64(base)
+    if at >= UInt64(words) * 64:
+        return True
+    var word = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=bits)[
+        unsafe_offset=Int(at >> 6)
+    ]
+    return (word >> (at & 63)) & 1 == 0
+
+
+def _perfect_slots(key: Series) -> Optional[Tuple[Int64, List[Int32]]]:
+    """A build key's rows by `key - least`, when its values are integers,
+    never null, unique, and span at most `_PERFECT_SPAN` in slots that stay
+    in cache; None otherwise."""
+    if key.null_count() > 0 or len(key) == 0 or len(key) > Int(Int32.MAX):
+        return None
+    ref column = key._data[Column[Int64]]
+    var values = column._ptr()
+    var n = len(column)
+    var least = Int64.MAX
+    var most = Int64.MIN
+    for i in range(n):
+        var v = values[unsafe_offset=i]
+        least = min(least, v)
+        most = max(most, v)
+    if most - least >= Int64(_PERFECT_SPAN):
+        return None
+    # The slots must stay in cache while every probe row reads one at
+    # random: no larger than the hash table they replace (about 16 bytes
+    # a build row), or within half a core's L2 cache. A few hundred keys
+    # spread over a wide span would otherwise miss on nearly every probe.
+    var slot_bytes = 4 * (Int(most - least) + 1)
+    if slot_bytes > max(16 * n, _l2_cache_bytes() // 2):
+        return None
+    var slots = List[Int32](length=Int(most - least) + 1, fill=-1)
+    var table = slots.unsafe_ptr()
+    for i in range(n):
+        var at = Int(values[unsafe_offset=i] - least)
+        if table[unsafe_offset=at] >= 0:
+            return None
+        table[unsafe_offset=at] = Int32(i)
+    return (least, slots^)
+
+
 def prepare_progression_index(
     right_keys: List[Series],
 ) raises -> Optional[PreparedHashIndex]:
@@ -1334,12 +1473,23 @@ def prepare_progression_index(
         True,
         progression[1],
         progression[2],
+        ArcPointer(List[Int32]()),
+        ArcPointer(List[UInt64]()),
+        0,
     )
 
 
 def prepare_hash_index(
-    right_keys: List[Series], allow_progression: Bool = True
+    right_keys: List[Series],
+    allow_progression: Bool = True,
+    probe_rows: Int = -1,
 ) raises -> PreparedHashIndex:
+    """The build side's index. `probe_rows`, when known, bounds the rows
+    that will probe it: an integer key's bits (`filter`) are made only when
+    the build has no more rows, as DuckDB builds a probe-side filter only
+    from a build no larger than the probe (`CanUseBloomFilter`); a larger
+    build pays more to set its bits than few probes save (PDS-H q16's 800K
+    partsupp keys for 29.5K parts)."""
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")
     var right = List[Series](capacity=len(right_keys))
@@ -1360,7 +1510,30 @@ def prepare_hash_index(
             True,
             progression[1],
             progression[2],
+            ArcPointer(List[Int32]()),
+            ArcPointer(List[UInt64]()),
+            0,
         )
+    if (
+        allow_progression
+        and len(right) == 1
+        and right[0].dtype().physical() == DataType.INT64
+    ):
+        var perfect = _perfect_slots(right[0])
+        if perfect:
+            trace_path("join.perfect_hash")
+            var made = perfect.take()
+            return PreparedHashIndex(
+                right^,
+                ArcPointer(List[_HashBucket]()),
+                8,
+                True,
+                made[0],
+                1,
+                ArcPointer(made[1].copy()),
+                ArcPointer(List[UInt64]()),
+                0,
+            )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     # Enough buckets that each one's slot table fits a core's L2 cache:
     # a bucket is built by one thread inserting at random positions, and a
@@ -1416,7 +1589,28 @@ def prepare_hash_index(
     while count < right_parts.buckets():
         count *= 2
         fold -= 1
-    return PreparedHashIndex(right^, ArcPointer(indexes^), fold, False, 0, 1)
+    var filter = List[UInt64]()
+    var filter_base = Int64(0)
+    if (
+        len(right) == 1
+        and right[0].dtype().physical() == DataType.INT64
+        and len(right[0]) <= probe_rows
+    ):
+        var bits = _key_bits(right[0])
+        if bits:
+            filter_base = bits.value()[0]
+            filter = bits.value()[1].copy()
+    return PreparedHashIndex(
+        right^,
+        ArcPointer(indexes^),
+        fold,
+        False,
+        0,
+        1,
+        ArcPointer(List[Int32]()),
+        ArcPointer(filter^),
+        filter_base,
+    )
 
 
 def direct_hash_semi_anti_rows(
@@ -1430,7 +1624,9 @@ def direct_hash_semi_anti_rows(
     """
     return prepared_hash_semi_anti_rows(
         left_keys,
-        prepare_hash_index(right_keys, allow_progression=False),
+        prepare_hash_index(
+            right_keys, allow_progression=False, probe_rows=len(left_keys[0])
+        ),
         keep_matches,
     )
 
@@ -1474,6 +1670,8 @@ def prepared_hash_semi_anti_rows(
                 False,
                 False,
                 membership=1 if keep_matches else 0,
+                filter=prepared.filter,
+                filter_base=prepared.filter_base,
             )
         )
     run_jobs(jobs)
@@ -1567,10 +1765,61 @@ def direct_hash_join_rows(
     """
     return prepared_hash_join_rows(
         left_keys,
-        prepare_hash_index(right_keys, allow_progression=False),
+        prepare_hash_index(
+            right_keys, allow_progression=False, probe_rows=len(left_keys[0])
+        ),
         include_unmatched,
         omit_identity,
     )
+
+
+struct _DirectProbeJob(Job):
+    """Probe rows [start, stop) of an Int64 key against a progression or
+    perfect hash index (`PreparedHashIndex.progression_row`)."""
+
+    var key: Series
+    var prepared: PreparedHashIndex
+    var start: Int
+    var stop: Int
+    var include_unmatched: Bool
+    var left_rows: List[Int]
+    var right_rows: List[Int]
+    # Rows that found a build row.
+    var matched: Int
+
+    def __init__(
+        out self,
+        key: Series,
+        prepared: PreparedHashIndex,
+        start: Int,
+        stop: Int,
+        include_unmatched: Bool,
+    ):
+        self.key = key.copy()
+        self.prepared = prepared.copy()
+        self.start = start
+        self.stop = stop
+        self.include_unmatched = include_unmatched
+        self.left_rows = List[Int]()
+        self.right_rows = List[Int]()
+        self.matched = 0
+
+    def run(mut self) raises:
+        ref values = self.key._data[Column[Int64]]
+        var right_count = len(self.prepared.right[0])
+        self.left_rows = List[Int](capacity=self.stop - self.start)
+        self.right_rows = List[Int](capacity=self.stop - self.start)
+        for i in range(self.start, self.stop):
+            var first = -1
+            if values._valid(i):
+                first = self.prepared.progression_row(
+                    values._get(i), right_count
+                )
+            if first >= 0:
+                self.matched += 1
+            if first >= 0 or self.include_unmatched:
+                self.left_rows.append(i)
+                self.right_rows.append(first)
 
 
 def prepared_hash_join_rows(
@@ -1586,18 +1835,46 @@ def prepared_hash_join_rows(
         trace_path("join.hash_index")
     if prepared.progression:
         var key = left_keys[0].rechunk()
-        ref values = key._data[Column[Int64]]
-        var left_rows = List[Int](capacity=len(values))
-        var right_rows = List[Int](capacity=len(values))
-        var right_count = len(prepared.right[0])
-        for i in range(len(values)):
-            var first = -1
-            if values._valid(i):
-                first = prepared.progression_row(values._get(i), right_count)
-            if first >= 0 or include_unmatched:
-                left_rows.append(i)
-                right_rows.append(first)
-        return (left_rows^, right_rows^, False)
+        var n = len(key)
+        var lanes = workers if workers > 0 else worker_count(n)
+        var bounds = partitions(n, lanes, 1)
+        var jobs = List[_DirectProbeJob](capacity=lanes)
+        for worker in range(lanes):
+            jobs.append(
+                _DirectProbeJob(
+                    key,
+                    prepared,
+                    bounds[worker],
+                    bounds[worker + 1],
+                    include_unmatched,
+                )
+            )
+        if len(jobs) == 1:
+            jobs[0].run()
+        else:
+            run_jobs(jobs)
+        var total = 0
+        var matched = True
+        for k in range(len(jobs)):
+            total += len(jobs[k].left_rows)
+            matched = matched and jobs[k].matched == len(jobs[k].left_rows)
+        # Every probe row matched once (the build keys are unique), in
+        # order: as the hash route does, the left rows are then implicit.
+        var identity = omit_identity and matched and total == n
+        if len(jobs) == 1:
+            var left_only = List[Int]()
+            var right_only = List[Int]()
+            if not identity:
+                swap(left_only, jobs[0].left_rows)
+            swap(right_only, jobs[0].right_rows)
+            return (left_only^, right_only^, identity)
+        var left_rows = List[Int](capacity=0 if identity else total)
+        var right_rows = List[Int](capacity=total)
+        for k in range(len(jobs)):
+            if not identity:
+                left_rows.extend(Span(jobs[k].left_rows))
+            right_rows.extend(Span(jobs[k].right_rows))
+        return (left_rows^, right_rows^, identity)
     var index = prepared.probe(left_keys, workers)
     var lanes = index.workers
     var bounds = partitions(len(index.left[0]), lanes, 1)
@@ -1614,6 +1891,8 @@ def prepared_hash_join_rows(
                 bounds[worker + 1],
                 include_unmatched,
                 omit_identity,
+                filter=prepared.filter,
+                filter_base=prepared.filter_base,
             )
         )
     run_jobs(jobs)

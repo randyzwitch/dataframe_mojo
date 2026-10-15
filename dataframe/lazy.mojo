@@ -42,6 +42,8 @@ from .pipeline import (
     _BOUND_INT,
     _BOUND_NONE,
     _TopBound,
+    _int_bounds,
+    _range_key,
     STEP_DROP,
     STEP_FILTER,
     STEP_JOIN,
@@ -91,6 +93,15 @@ from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
     AND,
     COL,
+    EQ,
+    NE,
+    NOT,
+    WHEN,
+    LIT_BOOL,
+    LIT_FLOAT,
+    LIT_INT,
+    LIT_STRING,
+    UNTYPED,
     Node,
     OR,
     OVER,
@@ -107,6 +118,7 @@ from .aggregate_table import reduction_supported
 from .frame import (
     DataFrame,
     GroupBy,
+    _bind_all,
     _row_local,
     _stream_reductions,
     table_supported,
@@ -122,6 +134,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
 from .execution import direct_reductions
+from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
 from .accelerator.code_domains import TextField
@@ -137,6 +150,7 @@ from .join_type import (
     join_type,
 )
 from .join_hash import (
+    _PERFECT_SPAN,
     PreparedHashIndex,
     int64_progression,
     prepare_hash_index,
@@ -264,6 +278,216 @@ def _output_names(exprs: List[Expr]) -> List[String]:
     for e in exprs:
         names.append(e._name)
     return names^
+
+
+def _produced_at(exprs: List[Expr], name: String) -> Int:
+    """The last of `exprs` named `name` (the one a projection keeps), or
+    -1."""
+    var at = -1
+    for k in range(len(exprs)):
+        if exprs[k]._name == name:
+            at = k
+    return at
+
+
+def _reads_input(exprs: List[Expr]) -> Bool:
+    """Whether some expression reads an input column: a selection of
+    literals alone yields one row whatever its input holds."""
+    for e in exprs:
+        for node in e._nodes:
+            if node.op == SELECTOR:
+                return False
+            if node.op == COL:
+                return True
+    return False
+
+
+def _plain_or_constant(expr: Expr) -> Bool:
+    """A bare column (under any name) or a literal whose type does not
+    depend on what it is compared with."""
+    if len(expr._nodes) != 1:
+        return False
+    ref node = expr._nodes[0]
+    if node.op == COL or node.op == LIT_STRING or node.op == LIT_BOOL:
+        return True
+    if node.op == LIT_INT or node.op == LIT_FLOAT:
+        return node.text != UNTYPED
+    return False
+
+
+def _same_literal(a: Node, b: Node) -> Int:
+    """1 when two literal nodes hold equal values, 0 when unequal, -1
+    when that is unknown (not both literals of one type, or a null)."""
+    if a.op != b.op:
+        return -1
+    if a.op == LIT_STRING:
+        return 1 if a.text == b.text else 0
+    if a.op == LIT_BOOL:
+        return 1 if a.integer == b.integer else 0
+    if (
+        a.op == LIT_INT
+        and a.text != UNTYPED
+        and a.text == b.text
+        and a.text2 == b.text2
+    ):
+        return 1 if a.integer == b.integer else 0
+    return -1
+
+
+def _fold_constants(expr: Expr) -> Expr:
+    """`expr` with its constant boolean parts evaluated: an equality of
+    two literals (a projection's constant substituted into a filter,
+    `_through_projection`), and AND, OR and NOT over known values, under
+    SQL's three-valued logic (false AND null is false, true OR null is
+    true). DuckDB's planner folds constants the same way before filters
+    move."""
+    ref nodes = expr._nodes
+    var n = len(nodes)
+    # -1 unknown, 0 false, 1 true.
+    var value = List[Int](length=n, fill=-1)
+    var folded = False
+    for i in range(n):
+        ref node = nodes[i]
+        var a = value[node.left] if node.left >= 0 else -1
+        var b = value[node.right] if node.right >= 0 else -1
+        if node.op == LIT_BOOL:
+            value[i] = 1 if node.integer != 0 else 0
+            continue
+        if (node.op == EQ or node.op == NE) and node.left >= 0:
+            var same = _same_literal(nodes[node.left], nodes[node.right])
+            if same >= 0:
+                value[i] = same if node.op == EQ else 1 - same
+        elif node.op == AND:
+            if a == 0 or b == 0:
+                value[i] = 0
+            elif a == 1 and b == 1:
+                value[i] = 1
+            elif a == 1 or b == 1:
+                folded = True
+        elif node.op == OR:
+            if a == 1 or b == 1:
+                value[i] = 1
+            elif a == 0 and b == 0:
+                value[i] = 0
+            elif a == 0 or b == 0:
+                folded = True
+        elif node.op == NOT and a >= 0:
+            value[i] = 1 - a
+        folded = folded or value[i] >= 0
+    if not folded:
+        return expr.copy()
+    var out = List[Node]()
+    _ = _emit_folded(nodes, value, n - 1, out)
+    return Expr(out^, expr._name)
+
+
+def _emit_folded(
+    nodes: List[Node], value: List[Int], i: Int, mut out: List[Node]
+) -> Int:
+    """Append node `i` of a folded expression to `out` after its inputs,
+    a known value as a literal and an AND (OR) with a true (false) input
+    as its other input; its index in `out`."""
+    if value[i] >= 0:
+        out.append(
+            Node(
+                LIT_BOOL,
+                -1,
+                -1,
+                "",
+                Int64(value[i]),
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+        return len(out) - 1
+    ref node = nodes[i]
+    if node.op == AND or node.op == OR:
+        var identity = 1 if node.op == AND else 0
+        if value[node.left] == identity:
+            return _emit_folded(nodes, value, node.right, out)
+        if value[node.right] == identity:
+            return _emit_folded(nodes, value, node.left, out)
+    var copy = node.copy()
+    if copy.left >= 0:
+        copy.left = _emit_folded(nodes, value, node.left, out)
+    if copy.right >= 0:
+        copy.right = _emit_folded(nodes, value, node.right, out)
+    if node.op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_folded(nodes, value, node.extra, out)
+    out.append(copy^)
+    return len(out) - 1
+
+
+def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
+    """A filter's, select's or with_columns' result on a zero-row `input`
+    from the types its expressions bind to, as DuckDB and Polars resolve
+    a plan's types without running it; None when that is not certain to
+    match running it (a select of scalars has a row; anything that does
+    not bind cleanly), which the caller then does."""
+    try:
+        if node.kind == FILTER:
+            if len(node.exprs) != 1:
+                return None
+            for item in node.exprs[0]._nodes:
+                if item.op == SELECTOR:
+                    return None
+            var bound = bind(node.exprs[0], input._columns)
+            if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
+                return None
+            return input.copy()
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return None
+        var bound = _bind_all(node.exprs, input._columns)
+        var produced = List[Series](capacity=len(bound))
+        for b in bound:
+            if node.kind == SELECT and b.shape() != ROWS:
+                return None
+            var dtype = b.dtypes[len(b.dtypes) - 1]
+            if dtype.is_nested() or dtype.is_categorical():
+                return None
+            produced.append(Series.full_null(b.expr._name, dtype, 0))
+        if node.kind == SELECT:
+            if len(produced) == 0:
+                return None
+            return DataFrame(produced^, height=0)
+        var columns = input._columns.copy()
+        for column in produced:
+            var at = -1
+            for k in range(len(columns)):
+                if columns[k].name() == column.name():
+                    at = k
+                    break
+            if at < 0:
+                columns.append(column.copy())
+            else:
+                columns[at] = column.copy()
+        return DataFrame(columns^, height=0)
+    except:
+        return None
+
+
+def _pinned(node: PlanNode) -> Bool:
+    """A filter that reads a shared subplan and stays above it
+    (`_filter_shared_subplans`)."""
+    return node.kind == FILTER and len(node.flags) > 0 and node.flags[0]
+
+
+def _through_projection(predicate: Expr, exprs: List[Expr]) -> Expr:
+    """`predicate` over a projection's outputs, rewritten over its
+    input: each column it reads that the projection produces becomes the
+    input column or the constant producing it (`_plain_or_constant`)."""
+    var result = predicate.copy()
+    for i in range(len(result._nodes)):
+        if result._nodes[i].op != COL:
+            continue
+        var at = _produced_at(exprs, result._nodes[i].text)
+        if at < 0:
+            continue
+        result._nodes[i] = exprs[at]._nodes[0].copy()
+    return result^
 
 
 def _boolean_parts(expr: Expr, op: Int) -> List[Expr]:
@@ -458,13 +682,25 @@ def _judge_held(
     keys: List[String],
     held_rows: Int,
     split_groups: Int,
+    distinct_inputs: List[String] = List[String](),
 ) raises -> Bool:
     """Whether the held batches show many groups (`_many_groups`) with
     keys short enough to collect (`_key_text_bytes`). The held states'
     group counts bound the union's from above: when even that bound is
-    few groups, no sample is encoded."""
+    few groups, no sample is encoded. A distinct count's state is a set
+    of values per group, which merging repeats the distinct aggregation
+    over: its (key, value) pairs count as groups (PDS-H q16 probing 800K
+    partsupp rows in batches showed few part groups but nearly a pair a
+    row, and spent 29 ms merging its batches' sets)."""
     if _key_text_bytes(held[0].slice(0, 1024), keys) > 64 * 1024:
         return False
+    for name in distinct_inputs:
+        var pair = keys.copy()
+        if name not in pair:
+            pair.append(name)
+        var sampled = _held_groups(held, pair, 2 * split_groups)
+        if _many_groups(sampled[0], sampled[1], held_rows, split_groups):
+            return True
     # One batch's state showing many groups on its own settles it.
     for h in range(len(states)):
         if len(states[h]) == 1 and _many_groups(
@@ -777,6 +1013,28 @@ struct _StreamJob(Job):
         self.projection = List[String]()
         self.bound = _TopBound()
 
+    def _shows_many(self) raises -> Bool:
+        """Whether this batch's own rows show a many-group stream, so it
+        keeps only its frame. A distinct count's state is its (key,
+        value) pairs, judged on them at any batch length (PDS-H q16's
+        swapped join gave 9.7K-row batches, each building sets of nearly
+        a pair a row that the stream then dropped); otherwise a batch of
+        8 * split_groups rows or more judges its groups."""
+        var distinct = _distinct_inputs(self.expressions)
+        if distinct and len(distinct.value()) > 0:
+            for name in distinct.value():
+                var pair = self.keys.copy()
+                if name not in pair:
+                    pair.append(name)
+                if _batch_shows_many_groups(
+                    self.frame, pair, self.split_groups
+                ):
+                    return True
+            return False
+        return self.frame.height() >= 8 * self.split_groups and (
+            _batch_shows_many_groups(self.frame, self.keys, self.split_groups)
+        )
+
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
         self.reduced = List[_StreamReduction]()
@@ -829,13 +1087,7 @@ struct _StreamJob(Job):
             k += 1
         if self.keep_frame and len(self.projection):
             self.frame = self.frame.select(self.projection)
-        if self.collect_only or (
-            self.keep_frame
-            and self.frame.height() >= 8 * self.split_groups
-            and _batch_shows_many_groups(
-                self.frame, self.keys, self.split_groups
-            )
-        ):
+        if self.collect_only or (self.keep_frame and self._shows_many()):
             self.rows = self.frame.height()
             if self.collect_only and len(self.projection):
                 self.frame = self.frame.select(self.projection)
@@ -858,14 +1110,29 @@ struct _StreamJob(Job):
                 self.frame = self.frame.clear()
 
 
-def _table_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
-    """Whether a grouped reduction's operations are ones the aggregate
-    table keeps inline (their input types decide the rest)."""
+def _same_names(a: List[String], b: List[String]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
+    """Whether a grouped reduction's results are the same whatever order
+    its rows arrive in: the aggregate table's states, and distinct counts,
+    medians and quantiles, which depend on each group's values only. Its
+    input join may then build on either side (DuckDB's build side
+    optimizer and Polars' join pick the smaller one whatever the
+    aggregate)."""
     if len(keys) == 0 or len(expressions) == 0:
         return False
     for expression in expressions:
         for node in expression._nodes:
-            if is_reduction(node.op) and not reduction_supported(node.op):
+            if not is_reduction(node.op) or reduction_supported(node.op):
+                continue
+            if node.op not in [N_UNIQUE, MEDIAN, QUANTILE, ANY, ALL]:
                 return False
     return True
 
@@ -1076,6 +1343,37 @@ trait AcceleratorBackend(Copyable):
         return self.execute(plan)
 
 
+struct _SubplanJob(Job):
+    """One subplan (a union's or a join's input, a stream's breaker input),
+    executed from its own copy of the plan."""
+
+    var plan: LazyFrame
+    var index: Int
+    var streaming: Bool
+    var batch_size: Int
+    var result: DataFrame
+
+    def __init__(
+        out self,
+        var plan: LazyFrame,
+        index: Int,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises:
+        self.plan = plan^
+        # Its own memo: nested prefetches on other threads never share one.
+        self.plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        self.index = index
+        self.streaming = streaming
+        self.batch_size = batch_size
+        self.result = DataFrame(List[Series]())
+
+    def run(mut self) raises:
+        self.result = self.plan._execute(
+            self.index, False, self.streaming, self.batch_size
+        )
+
+
 struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
@@ -1096,6 +1394,11 @@ struct LazyFrame(Copyable):
     # and DuckDB's logical operators keep their schemas; cleared by every
     # rewrite (`_reorder`), None outside those passes.
     var _schema_memo: Optional[ArcPointer[Dict[Int, DataFrame]]]
+    # Results computed ahead of the node that reads them, by node: a
+    # stream's breaker inputs run at once before its joins build
+    # (`_prefetch_breakers`), and `_execute` takes each result out once.
+    # Shared by the copies a run makes; None outside `collect`.
+    var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1105,6 +1408,7 @@ struct LazyFrame(Copyable):
         self._origin_rows = Dict[Int, Int]()
         self._accelerator_settings = None
         self._schema_memo = None
+        self._prefetched = None
 
     def __init__(
         out self,
@@ -1119,6 +1423,7 @@ struct LazyFrame(Copyable):
         self._origin_rows = Dict[Int, Int]()
         self._accelerator_settings = None
         self._schema_memo = None
+        self._prefetched = None
 
     def _with_accelerator_settings(
         self, optimize: Bool, streaming: Bool, batch_size: Int
@@ -1892,6 +2197,7 @@ struct LazyFrame(Copyable):
             plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
+        plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
     def profile(
@@ -2038,6 +2344,43 @@ struct LazyFrame(Copyable):
             cursor = node.left
         return False
 
+    def _direct_key(self, index: Int, names: List[String]) raises -> Bool:
+        """Whether the one join key `names` of node `index` comes from an
+        in-memory table whose whole key column is unique, never null and
+        spans at most `_PERFECT_SPAN` values: any rows of it then index
+        directly (`_perfect_slots`), so a stream probing them pays one load
+        a row. Told from the table, before anything runs."""
+        if len(names) != 1:
+            return False
+        var found = self._provider_scan(index, names[0])
+        if found[0] < 0:
+            return False
+        var key = self._frames[self._nodes[found[0]].offset].column(found[1])
+        if key.dtype().physical() != DataType.INT64 or key.null_count() > 0:
+            return False
+        # More rows than the span allows cannot all differ: no pass needed.
+        if len(key) > _PERFECT_SPAN:
+            return False
+        var flat = key.rechunk() if key.is_chunked() else key.copy()
+        ref column = flat._data[Column[Int64]]
+        var n = len(column)
+        if n == 0:
+            return False
+        var least = Int64.MAX
+        var most = Int64.MIN
+        for i in range(n):
+            least = min(least, column._get(i))
+            most = max(most, column._get(i))
+        if most - least >= Int64(_PERFECT_SPAN):
+            return False
+        var seen = List[Bool](length=Int(most - least) + 1, fill=False)
+        for i in range(n):
+            var at = Int(column._get(i) - least)
+            if seen[at]:
+                return False
+            seen[at] = True
+        return True
+
     def _swap_join_sides(
         self, at: Int, built: DataFrame, batch_size: Int
     ) raises -> Optional[LazyFrame]:
@@ -2123,6 +2466,263 @@ struct LazyFrame(Copyable):
             return height
         return -1
 
+    def _keeps_column(self, index: Int, name: String) -> Bool:
+        """Whether row-local node `index` passes column `name` on
+        unchanged: a filter, a drop that keeps it, a with_columns that
+        does not overwrite it, or a select that keeps it as itself."""
+        ref node = self._nodes[index]
+        if node.kind == FILTER:
+            return True
+        if node.kind == DROP:
+            return name not in node.names
+        if node.kind == WITH_COLUMNS:
+            for e in node.exprs:
+                if e._name == name:
+                    return False
+            return True
+        if node.kind == SELECT:
+            for e in node.exprs:
+                if (
+                    len(e._nodes) == 1
+                    and e._nodes[0].op == COL
+                    and e._nodes[0].text == name
+                    and (not e._name.byte_length() or e._name == name)
+                ):
+                    return True
+            return False
+        return False
+
+    def _grouped_on(self, index: Int, key: String) -> Int:
+        """The aggregate under node `index`, through row-local steps that
+        keep column `key`, when `key` is one of its group keys; else -1."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == AGG:
+                return at if key in node.names else -1
+            if not (_stream_rows(node) or node.kind == DROP):
+                return -1
+            if not self._keeps_column(at, key):
+                return -1
+            at = node.left
+        return -1
+
+    def _key_source(self, index: Int, key: String) raises -> Optional[Series]:
+        """The table column that supplies column `key` at node `index`,
+        through row-local steps that keep it, aggregates grouped on it and
+        the probe side of joins; None when it is made along the way."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == SCAN_FRAME:
+                ref frame = self._frames[node.offset]
+                if key in frame.columns():
+                    return frame.column(key)
+                return None
+            if node.kind == AGG:
+                if key not in node.names:
+                    return None
+            elif node.kind == JOIN:
+                if node.how == JOIN_CROSS:
+                    return None
+            elif not (_stream_rows(node) or node.kind == DROP):
+                return None
+            elif not self._keeps_column(at, key):
+                return None
+            at = node.left
+        return None
+
+    def _reduce_by_probe_keys(
+        self, top: Int, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Semi-join reduction (magic sets) for aggregates built on: when
+        a stream's inner or semi joins build on aggregates grouped by the
+        join keys (one or several), the probe side below the lowest of them
+        runs first, and its distinct key tuples filter each aggregate's
+        input through a semi join. A group whose key the probe side lacks joins nothing, and a
+        filter on a group key drops whole groups, so every result is
+        unchanged. DuckDB decorrelates EXISTS this way, over the outer
+        rows' distinct keys (its delim joins); PDS-H q21 counted the
+        suppliers of all 1.5M orders to join with the 76K lines its
+        supplier and order filters keep. Applied to an aggregate when the
+        keys are no more than its input's rows, as DuckDB builds a join
+        filter only from a side no larger than the probe. None when the
+        stream has no such join or no filter narrows its probe side."""
+        var joins = List[Int]()
+        var aggregates = List[Int]()
+        var key = List[String]()
+        var probe = top
+        var lowest = -1
+        var steps = List[Int]()
+        while probe >= 0:
+            ref step = self._nodes[probe]
+            if _stream_rows(step) or step.kind == DROP:
+                steps.append(probe)
+                probe = step.left
+                continue
+            if step.kind != JOIN or not (
+                step.how
+                in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI, JOIN_CROSS]
+            ):
+                break
+            if (
+                (step.how == JOIN_INNER or step.how == JOIN_SEMI)
+                and len(step.names) > 0
+                and (len(key) == 0 or _same_names(step.names, key))
+            ):
+                # One aggregate grouped on every right key (PDS-H q20's
+                # shipped quantities per part and supplier).
+                var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                for name in step.right_keys:
+                    if self._grouped_on(step.right, name) != aggregate:
+                        aggregate = -1
+                if aggregate >= 0:
+                    # The row-local steps between this join and the one
+                    # above keep the keys, so the keys reaching the higher
+                    # join are a subset of those reaching this one (joins
+                    # only drop or repeat left rows, keeping their columns).
+                    var kept = True
+                    for name in key:
+                        for at in steps:
+                            kept = kept and self._keeps_column(at, name)
+                    if kept:
+                        joins.append(probe)
+                        aggregates.append(aggregate)
+                        key = step.names.copy()
+                        lowest = probe
+                        steps = List[Int]()
+            probe = step.left
+        if lowest < 0:
+            return None
+        var below = self._nodes[lowest].left
+        # Its keys can be few only if something filters the probe side:
+        # TPC-DS q35's customers joined to addresses and demographics kept
+        # 97% of them, and running that side first cost more than the
+        # filter saved.
+        if not self._has_kind(below, FILTER):
+            return None
+        trace_path("stream.probe_key_reduction")
+        var probed = self._execute(below, False, True, batch_size)
+        var keys = probed.select(key).unique(key)
+        var plan = self.copy()
+        plan._frames.append(probed^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        plan._nodes[lowest].left = len(plan._nodes) - 1
+        var key_frame = len(plan._frames)
+        # Each probe key's distinct values, and each source column's span,
+        # found once: PDS-H q21's two aggregates read one lineitem column.
+        var distinct = List[Int]()
+        for name in key:
+            distinct.append(
+                keys.height() if len(key)
+                == 1 else keys.select([name]).unique([name]).height()
+            )
+        var spans = Dict[String, Int]()
+        plan._frames.append(keys^)
+        plan._schemas.append(Optional[CsvSchema]())
+        for k in range(len(joins)):
+            var aggregate = aggregates[k]
+            var input = plan._nodes[aggregate].left
+            var group_keys = plan._nodes[joins[k]].right_keys.copy()
+            # The filter pays when it drops most of the groups: some key's
+            # probe values are at most half of the values the aggregate's
+            # key column spans (the half rule the pipeline's key ranges
+            # keep). TPC-DS q35's 97K probing customers kept 94% of a
+            # year's store sales, for 16 ms of probes.
+            var pays = False
+            for i in range(len(group_keys)):
+                var source = plan._key_source(input, group_keys[i])
+                if not source or not _range_key(source.value().dtype()):
+                    continue
+                var named = group_keys[i] + "/" + String(len(source.value()))
+                if named not in spans:
+                    var bounds = _int_bounds(source.value())
+                    spans[named] = (
+                        Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
+                    ) if bounds else 0
+                pays = pays or 2 * distinct[i] <= spans[named]
+            if not pays:
+                continue
+            plan._nodes.append(_plan_node(SCAN_FRAME, offset=key_frame))
+            var semi = _plan_node(
+                JOIN,
+                input,
+                len(plan._nodes) - 1,
+                names=group_keys^,
+                text="semi",
+                how=JOIN_SEMI,
+                right_keys=key.copy(),
+            )
+            semi.names2 = ["_right"]
+            plan._nodes.append(semi^)
+            plan._nodes[aggregate].left = len(plan._nodes) - 1
+        return plan._execute(index, False, True, batch_size)
+
+    def _ends_in_breaker(self, index: Int) -> Bool:
+        """Whether node `index` is a pipeline breaker (an aggregate, a
+        unique or a sort), or row-local steps over one: it is computed in
+        full before any of its rows stream on."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == AGG or node.kind == UNIQUE or node.kind == SORT:
+                return True
+            if node.kind == DROP or _stream_rows(node):
+                at = node.left
+                continue
+            return False
+        return False
+
+    def _prefetch_breakers(self, top: Int, batch_size: Int) raises:
+        """Compute at once, ahead of the stream below `top`, the inputs it
+        will execute in full whatever it decides: its joins' build sides
+        and its source, where each ends in a pipeline breaker. TPC-DS q78
+        aggregated web and catalog sales to build on, then store sales to
+        probe with, one after another on a crew that the aggregates'
+        serial phases left partly idle. Polars and DuckDB run such
+        independent pipelines at once. The stream's decisions do not
+        change: each result waits in `_prefetched` for the `_execute` call
+        that would have computed it."""
+        var ahead = self._prefetched.value()
+        var wanted = List[Int]()
+        var probe = top
+        while probe >= 0:
+            ref step = self._nodes[probe]
+            if _stream_rows(step):
+                probe = step.left
+            elif step.kind == JOIN and step.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
+            ]:
+                if (
+                    self._ends_in_breaker(step.right)
+                    and step.right not in ahead[]
+                ):
+                    wanted.append(step.right)
+                probe = step.left
+            else:
+                break
+        if (
+            probe >= 0
+            and probe != top
+            and self._ends_in_breaker(probe)
+            and probe not in ahead[]
+        ):
+            wanted.append(probe)
+        if len(wanted) < 2:
+            return
+        trace_path("stream.prefetch_breakers")
+        var jobs = List[_SubplanJob](capacity=len(wanted))
+        for i in wanted:
+            jobs.append(_SubplanJob(self.copy(), i, True, batch_size))
+        run_jobs(jobs)
+        for k in range(len(wanted)):
+            ahead[][wanted[k]] = jobs[k].result.copy()
+
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -2199,6 +2799,11 @@ struct LazyFrame(Copyable):
         var operation_nodes = List[Int]()
         var joins = List[DataFrame]()
         var indexes = List[Optional[PreparedHashIndex]]()
+        var reduced = self._reduce_by_probe_keys(cursor, index, batch_size)
+        if reduced:
+            return reduced^
+        if self._prefetched and not self._report:
+            self._prefetch_breakers(cursor, batch_size)
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
@@ -2230,6 +2835,44 @@ struct LazyFrame(Copyable):
                     and right_rows >= 524288
                     and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
                 ):
+                    # Under an unordered aggregation into the aggregate
+                    # table the join's row order is free: build on the
+                    # small left and stream the large right through it in
+                    # the pipeline, as DuckDB's build side optimizer does
+                    # whatever side a join was written on, rather than run
+                    # the join outside the pipeline (TPC-DS q43 probed its
+                    # 366 dates with 2.9M sales rows eagerly).
+                    if (
+                        node.how == JOIN_INNER
+                        and not ordered
+                        and _order_free_reductions(keys, expressions)
+                        and self._direct_key(node.left, node.names)
+                    ):
+                        var large = self._execute(
+                            node.right, False, True, batch_size
+                        )
+                        var swapped = self._swap_join_sides(
+                            cursor, large, batch_size
+                        )
+                        if swapped:
+                            var plan = swapped.take()
+                            for k in range(len(operations)):
+                                if operations[k].kind != JOIN:
+                                    continue
+                                plan._frames.append(
+                                    joins[operations[k].offset].copy()
+                                )
+                                plan._schemas.append(Optional[CsvSchema]())
+                                plan._nodes.append(
+                                    _plan_node(
+                                        SCAN_FRAME,
+                                        offset=len(plan._frames) - 1,
+                                    )
+                                )
+                                plan._nodes[operation_nodes[k]].right = (
+                                    len(plan._nodes) - 1
+                                )
+                            return plan._execute(index, False, True, batch_size)
                     # The bound only says the left side may be small; the
                     # eager join then decides with the real heights (a
                     # filter often keeps far fewer rows than it scans).
@@ -2293,7 +2936,7 @@ struct LazyFrame(Copyable):
                     and not ordered
                     and bound >= 0
                     and built.height() > bound
-                    and _table_reductions(keys, expressions)
+                    and _order_free_reductions(keys, expressions)
                 ):
                     # The built right side holds more rows than the left
                     # can: hash the left instead and stream the right
@@ -2389,7 +3032,7 @@ struct LazyFrame(Copyable):
                         supported = supported and not key.dtype().is_nested()
                         sources.append(key.copy())
                     if supported:
-                        prepared = prepare_hash_index(sources)
+                        prepared = prepare_hash_index(sources, probe_rows=bound)
                         if prepared:
                             algorithm = "hash_index"
                 self._record(
@@ -2469,9 +3112,17 @@ struct LazyFrame(Copyable):
                 late_names.append(name)
                 late_builds.append(b)
         # Row-local steps and a reduction over an in-memory frame run as a
-        # thread-owned pipeline (#538), grouped or not, unless the
-        # reduction counts distinct values (per-group sets, which the
-        # eager partitioned group-by handles on every worker, #336).
+        # thread-owned pipeline (#538), grouped or not. A reduction that
+        # counts distinct values (per-group sets, which the eager
+        # partitioned group-by handles on every worker, #336) runs its
+        # joins in the pipeline too when grouped (probes run in morsels on
+        # every worker), into the collecting sink, whose finish is that
+        # eager group-by. Without a join the eager route, which reads the
+        # columns in place, was faster (ClickBench q10, q11): PDS-H
+        # q21's semi-join reduced supplier counts filtered and probed 6M
+        # lineitem rows in batches on the streaming route (105 ms busy
+        # filtering, against 10 in morsels).
+        var distinct = _counts_distinct(expressions)
         # Joins run in the pipeline as probe steps; a grouped sink that
         # must keep first-occurrence order does not take them, since a
         # morsel's output rows carry no unique position in the join's
@@ -2480,7 +3131,7 @@ struct LazyFrame(Copyable):
             self._nodes[cursor].kind == SCAN_FRAME
             and (top < 0 and limit < 0 and skip == 0 or top > 0)
             and _pipeline_steps(operations, indexes)
-            and not _counts_distinct(expressions)
+            and (not distinct or len(keys) > 0 and len(joins) > 0)
             and (len(joins) == 0 or len(keys) == 0 or not ordered)
             # Ungrouped states merge in worker order, not morsel order.
             # Positional reductions therefore retain ordered streaming.
@@ -2503,7 +3154,13 @@ struct LazyFrame(Copyable):
         # sink): no sample, mode or key-type rule decides for it. The
         # types are those of an empty frame through every operation.
         var table = False
-        if piped and len(keys) > 0 and len(expressions) > 0 and not ordered:
+        if (
+            piped
+            and len(keys) > 0
+            and len(expressions) > 0
+            and not ordered
+            and not distinct
+        ):
             var empty = self._frames[self._nodes[cursor].offset].clear()
             var empty_joins = ArcPointer(joins.copy())
             var empty_indexes = ArcPointer(indexes.copy())
@@ -2598,6 +3255,9 @@ struct LazyFrame(Copyable):
                 # Collected strings gather slower than the eager route's
                 # per-chunk filter (ClickBench q12: 85 ms against 48).
                 piped = False
+        if distinct:
+            # Distinct counts are collected for the eager group-by.
+            insert = False
         # Under the aggregate table, coded keys pay as they did in the
         # insert tables: when the builds holding the keys bound the groups
         # to a few (the insert rule's bound), coding each build once costs
@@ -2812,6 +3472,14 @@ struct LazyFrame(Copyable):
         # keeps a later year. Until then the batches' frames are kept
         # beside their states, to be collected or dropped.
         var undecided = len(expressions) > 0 and len(keys) > 0
+        # The columns distinct counts read, judged with the keys: a batch's
+        # state holds each group's set of values, so its size is the
+        # distinct (key, value) pairs, not the groups. One that reads an
+        # expression collects (its values are assumed many).
+        var distinct_inputs = _distinct_inputs(expressions)
+        if undecided and not distinct_inputs:
+            collecting = True
+            undecided = False
         var held = List[DataFrame]()
         # Each held batch's state, when its job built one (a batch under
         # 8 * split_groups rows: a few ms at most, in parallel, and used
@@ -3093,7 +3761,12 @@ struct LazyFrame(Copyable):
                         # PDS-H q16 (one in four) 35%; PDS-H q13 (one
                         # in ten) pays 7% either way.
                         if _judge_held(
-                            held, held_states, keys, held_rows, split_groups
+                            held,
+                            held_states,
+                            keys,
+                            held_rows,
+                            split_groups,
+                            distinct_inputs.value(),
                         ):
                             # Many groups: collect every batch held so
                             # far and from here on; the states built
@@ -3193,7 +3866,12 @@ struct LazyFrame(Copyable):
                 # into hash parts cost more than one eager group-by.
                 undecided = False
                 if _judge_held(
-                    held, held_states, keys, held_rows, split_groups
+                    held,
+                    held_states,
+                    keys,
+                    held_rows,
+                    split_groups,
+                    distinct_inputs.value(),
                 ):
                     collecting = True
                     for frame in held:
@@ -3293,6 +3971,10 @@ struct LazyFrame(Copyable):
         streaming: Bool = False,
         batch_size: Int = 65536,
     ) raises -> DataFrame:
+        if self._prefetched and not empty:
+            var ahead = self._prefetched.value()
+            if index in ahead[]:
+                return ahead[].pop(index)
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
@@ -3344,6 +4026,90 @@ struct LazyFrame(Copyable):
                 wall_ns=took,
             )
         return result^
+
+    def _join_frames(
+        self,
+        index: Int,
+        var input: DataFrame,
+        var right: DataFrame,
+        empty: Bool,
+    ) raises -> DataFrame:
+        """Join node `index`'s executed inputs."""
+        ref node = self._nodes[index]
+        if node.how == JOIN_CROSS:
+            return input.join(right, how=node.text, suffix=node.names2[0])
+        # Consumers that ignore row order let the join skip restoring
+        # left-major order after probing.
+        # A schema has no row order to keep.
+        var free = empty or self._order_free_above(
+            index, self._live_parents(len(self._nodes) - 1), True
+        )
+        return input._join_impl(
+            right,
+            left_on=node.names,
+            right_on=node.right_keys,
+            # Parsed here, as `DataFrame.join` would: an unknown type
+            # raises.
+            how=join_type(node.text),
+            suffix=node.names2[0],
+            coalesce=node.coalesce,
+            keep_order=not free,
+        )
+
+    def _both_inputs(
+        self, index: Int, empty: Bool, streaming: Bool, batch_size: Int
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """A two-input node's inputs, executed at once as jobs on their own
+        copies of the plan outside the empty-schema run and when no
+        execution report is kept (both share the crew's thread budget),
+        else one after the other."""
+        ref node = self._nodes[index]
+        if not empty and not self._report:
+            var jobs = List[_SubplanJob](capacity=2)
+            jobs.append(
+                _SubplanJob(self.copy(), node.left, streaming, batch_size)
+            )
+            jobs.append(
+                _SubplanJob(self.copy(), node.right, streaming, batch_size)
+            )
+            run_jobs(jobs)
+            return (jobs[0].result.copy(), jobs[1].result.copy())
+        var left = self._execute(node.left, empty, streaming, batch_size)
+        var right = self._execute(node.right, empty, streaming, batch_size)
+        return (left^, right^)
+
+    def _concat(
+        self, index: Int, empty: Bool, streaming: Bool, batch_size: Int
+    ) raises -> DataFrame:
+        """A union's two inputs, each executed, then stacked. The inputs are
+        independent, so outside the empty-schema run, and when no
+        execution report is kept, each runs as a job on its own copy of
+        the plan: a worker runs one while the caller runs the other, and
+        both share the crew's thread budget (as Polars runs a union's
+        inputs at once). A worker the budget cannot cover leaves both on
+        the caller, one after the other."""
+        var both = self._both_inputs(index, empty, streaming, batch_size)
+        var input = both[0].copy()
+        var right = both[1].copy()
+        var names = input.columns()
+        var other = right.columns()
+        if len(other) != len(names):
+            raise Error(
+                "concat: inputs have "
+                + String(len(names))
+                + " and "
+                + String(len(other))
+                + " columns"
+            )
+        for name in names:
+            if name not in other:
+                raise Error("concat: right input has no column " + name)
+        # The right input's columns in the left's order; `concat`
+        # checks the types.
+        var parts = List[DataFrame]()
+        parts.append(input^)
+        parts.append(right.select(names))
+        return concat(parts)
 
     def _execute_node(
         self,
@@ -3449,7 +4215,25 @@ struct LazyFrame(Copyable):
                     columns=source.names,
                     predicate=Optional(node.exprs[0].copy()),
                 )
+        if node.kind == CONCAT:
+            return self._concat(index, empty, streaming, batch_size)
+        if (
+            node.kind == JOIN
+            and not _is_scan(self._nodes[node.left].kind)
+            and not _is_scan(self._nodes[node.right].kind)
+        ):
+            # Both inputs computed (not scans): at once, as a union's.
+            var both = self._both_inputs(index, empty, streaming, batch_size)
+            return self._join_frames(
+                index, both[0].copy(), both[1].copy(), empty
+            )
         var input = self._execute(node.left, empty, streaming, batch_size)
+        # "Empty" inputs can still have rows: a scalar aggregate over no
+        # rows gives one.
+        if empty and input.height() == 0:
+            var schema = _schema_of(node, input)
+            if schema:
+                return schema.take()
         if node.kind == FILTER:
             return input.filter(node.exprs[0])
         if node.kind == SELECT:
@@ -3477,46 +4261,7 @@ struct LazyFrame(Copyable):
             )
         if node.kind == JOIN:
             var right = self._execute(node.right, empty, streaming, batch_size)
-            if node.how == JOIN_CROSS:
-                return input.join(right, how=node.text, suffix=node.names2[0])
-            # Consumers that ignore row order let the join skip restoring
-            # left-major order after probing.
-            # A schema has no row order to keep.
-            var free = empty or self._order_free_above(
-                index, self._live_parents(len(self._nodes) - 1), True
-            )
-            return input._join_impl(
-                right,
-                left_on=node.names,
-                right_on=node.right_keys,
-                # Parsed here, as `DataFrame.join` would: an unknown type
-                # raises.
-                how=join_type(node.text),
-                suffix=node.names2[0],
-                coalesce=node.coalesce,
-                keep_order=not free,
-            )
-        if node.kind == CONCAT:
-            var right = self._execute(node.right, empty, streaming, batch_size)
-            var names = input.columns()
-            var other = right.columns()
-            if len(other) != len(names):
-                raise Error(
-                    "concat: inputs have "
-                    + String(len(names))
-                    + " and "
-                    + String(len(other))
-                    + " columns"
-                )
-            for name in names:
-                if name not in other:
-                    raise Error("concat: right input has no column " + name)
-            # The right input's columns in the left's order; `concat`
-            # checks the types.
-            var parts = List[DataFrame]()
-            parts.append(input^)
-            parts.append(right.select(names))
-            return concat(parts)
+            return self._join_frames(index, input^, right^, empty)
         if node.kind == SORT:
             var n = len(node.names)
             var descending = List[Bool]()
@@ -3549,7 +4294,9 @@ struct LazyFrame(Copyable):
 
     def _optimized(self) raises -> Self:
         var plan = self.copy()
+        plan._unique_as_aggregate()
         plan._split_filters()
+        plan._filter_shared_subplans()
         plan._push_predicates()
         plan._merge_filters()
         plan._push_slices()
@@ -3587,35 +4334,10 @@ struct LazyFrame(Copyable):
         on the 11.7M-row joins below their date filters, and holding
         those doubled the query; Polars likewise drops a cache whose
         consumers filter differently)."""
-        # Two plans joined carry their own copies of a frame they both
-        # scan, in separate slots: a scan's signature names the first slot
-        # holding the same buffers.
-        var canonical = List[Int](capacity=len(self._frames))
-        for f in range(len(self._frames)):
-            var first = f
-            for g in range(f):
-                if canonical[g] == g and self._frames[g]._shares_buffers_with(
-                    self._frames[f]
-                ):
-                    first = g
-                    break
-            canonical.append(first)
-        var signatures = List[String]()
-        var sizes = List[Int]()
-        var reducing = List[Bool]()
-        for i in range(len(self._nodes)):
-            signatures.append(self._signature(i, signatures, canonical))
-            ref node = self._nodes[i]
-            var size = 1
-            var reduces = node.kind == AGG or node.kind == UNIQUE
-            if node.left >= 0:
-                size += sizes[node.left]
-                reduces = reduces or reducing[node.left]
-            if node.right >= 0:
-                size += sizes[node.right]
-                reduces = reduces or reducing[node.right]
-            sizes.append(size)
-            reducing.append(reduces)
+        var computed = self._subtree_signatures()
+        ref signatures = computed[0]
+        ref sizes = computed[1]
+        ref reducing = computed[2]
         # Which nodes hold a join, and each node's parent.
         var joining = List[Bool]()
         var parents = List[Int](length=len(self._nodes), fill=-1)
@@ -3636,7 +4358,11 @@ struct LazyFrame(Copyable):
             # The largest subtree that two uncovered nodes hold.
             var best = -1
             for i in range(len(self._nodes)):
-                if covered[i]:
+                # A reader's pinned filter stays outside what is shared
+                # (`_filter_shared_subplans`): two readers with one filter
+                # in common would otherwise share it, each pair with its
+                # own copy of the subplan below.
+                if covered[i] or _pinned(self._nodes[i]):
                     continue
                 if not reducing[i] and not self._read_whole(
                     i, signatures, parents, joining, covered
@@ -3783,15 +4509,224 @@ struct LazyFrame(Copyable):
     def _columns_of(self, index: Int) raises -> List[String]:
         return self._execute(index, True).columns()
 
-    def _split_filters(mut self):
+    def _unique_as_aggregate(mut self) raises:
+        """A unique over every column of its input, keeping any row of
+        each set of equal rows (or the first, in input order), is a
+        group_by on all of them: DuckDB plans DISTINCT as a hash
+        aggregate without aggregates, which then runs as the pipeline's
+        aggregate table, on every worker, rather than on the collected
+        rows. The table needs one aggregate, so a row count is added and
+        dropped again."""
+        var count = len(self._nodes)
+        var changed = False
+        self._remember_schemas()
+        for i in range(count):
+            ref node = self._nodes[i]
+            if node.kind != UNIQUE or node.left < 0:
+                continue
+            if node.text != "any" and node.text != "first":
+                continue
+            var columns = self._columns_of(node.left)
+            if len(columns) == 0:
+                continue
+            if len(node.names) > 0:
+                # A subset naming every column, in any order.
+                if len(node.names) != len(columns):
+                    continue
+                var every = True
+                for c in columns:
+                    if c not in node.names:
+                        every = False
+                if not every:
+                    continue
+            var counted = "__unique_rows"
+            while counted in columns:
+                counted += "_"
+            self._nodes.append(
+                _plan_node(
+                    AGG,
+                    node.left,
+                    exprs=[col(columns[0]).len().alias(counted)],
+                    names=columns,
+                    maintain_order=node.maintain_order,
+                )
+            )
+            var shown = List[Expr]()
+            for c in columns:
+                shown.append(col(c))
+            self._nodes[i] = _plan_node(
+                SELECT, len(self._nodes) - 1, exprs=shown
+            )
+            changed = True
+        self._schema_memo = None
+        if changed:
+            self._reorder()
+
+    def _subtree_signatures(
+        self,
+    ) -> Tuple[List[String], List[Int], List[Bool]]:
+        """Each node's `_signature`, its subtree's node count, and whether
+        the subtree holds an aggregation or a unique."""
+        # Two plans joined carry their own copies of a frame they both
+        # scan, in separate slots: a scan's signature names the first slot
+        # holding the same buffers.
+        var canonical = List[Int](capacity=len(self._frames))
+        for f in range(len(self._frames)):
+            var first = f
+            for g in range(f):
+                if canonical[g] == g and self._frames[g]._shares_buffers_with(
+                    self._frames[f]
+                ):
+                    first = g
+                    break
+            canonical.append(first)
+        var signatures = List[String]()
+        var sizes = List[Int]()
+        var reducing = List[Bool]()
+        for i in range(len(self._nodes)):
+            signatures.append(self._signature(i, signatures, canonical))
+            ref node = self._nodes[i]
+            var size = 1
+            var reduces = node.kind == AGG or node.kind == UNIQUE
+            if node.left >= 0:
+                size += sizes[node.left]
+                reduces = reduces or reducing[node.left]
+            if node.right >= 0:
+                size += sizes[node.right]
+                reduces = reduces or reducing[node.right]
+            sizes.append(size)
+            reducing.append(reduces)
+        return (signatures^, sizes^, reducing^)
+
+    def _filter_shared_subplans(mut self):
+        """A subplan written in several places that `_share_subplans` will
+        compute once (it aggregates), read by each copy only through
+        row-local filters, needs only the rows some reader keeps: the OR
+        of the readers' filters goes above every copy and moves into it,
+        while each reader's own filters are pinned where they are, so the
+        copies stay alike and are still computed once (DuckDB pushes the
+        disjunction of a CTE's consumers' filters into the CTE). TPC-DS
+        q4, q11 and q74 read one yearly total per channel and year from a
+        table of every channel and year."""
+        # Copies need two aggregations alike in their kind, keys,
+        # aggregate count and subtree size at least; most plans have none,
+        # and full signatures are not worth building for them (ClickBench
+        # q29's ninety sums, TPC-DS q41's two small distincts).
+        var subtree = List[Int](capacity=len(self._nodes))
+        var shapes = Dict[String, Int]()
+        var alike = False
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            var size = 1
+            if node.left >= 0:
+                size += subtree[node.left]
+            if node.right >= 0:
+                size += subtree[node.right]
+            subtree.append(size)
+            if node.kind != AGG and node.kind != UNIQUE:
+                continue
+            var shape = (
+                String(node.kind)
+                + "|"
+                + _field_list(node.names)
+                + "|"
+                + String(len(node.exprs))
+                + "|"
+                + String(size)
+            )
+            if shape in shapes:
+                alike = True
+                break
+            shapes[shape] = i
+        if not alike:
+            return
+        var computed = self._subtree_signatures()
+        ref signatures = computed[0]
+        ref sizes = computed[1]
+        ref reducing = computed[2]
+        var parents = self._parents()
+        var covered = List[Bool](length=len(self._nodes), fill=False)
+        var count = len(self._nodes)
+        while True:
+            # The largest aggregating subtree written twice or more, under
+            # its readers' filters (two readers may share one).
+            var best = -1
+            for i in range(count):
+                if covered[i] or not reducing[i]:
+                    continue
+                if self._nodes[i].kind == FILTER:
+                    continue
+                if best >= 0 and sizes[i] <= sizes[best]:
+                    continue
+                for j in range(count):
+                    if (
+                        j != i
+                        and not covered[j]
+                        and signatures[j] == signatures[i]
+                    ):
+                        best = i
+                        break
+            if best < 0:
+                break
+            var copies = List[Int]()
+            for j in range(count):
+                if not covered[j] and signatures[j] == signatures[best]:
+                    copies.append(j)
+                    self._cover(j, covered)
+            # Each copy's readers: the run of row-local filters above it.
+            var readers = List[List[Int]]()
+            var kept = List[Expr]()
+            var alike = True
+            for copy in copies:
+                var run = List[Int]()
+                var above = parents[copy]
+                while (
+                    above >= 0
+                    and self._nodes[above].kind == FILTER
+                    and _row_local(self._nodes[above].exprs)
+                    and not _pinned(self._nodes[above])
+                ):
+                    run.append(above)
+                    above = parents[above]
+                if len(run) == 0:
+                    break
+                var keeps = self._nodes[run[0]].exprs[0].copy()
+                for k in range(1, len(run)):
+                    keeps = keeps & self._nodes[run[k]].exprs[0]
+                if len(kept) > 0 and _expr_signature(keeps) != _expr_signature(
+                    kept[0]
+                ):
+                    alike = False
+                kept.append(keeps^)
+                readers.append(run^)
+            # A copy read whole needs every row; readers alike move into
+            # their copies alike anyway.
+            if len(readers) < len(copies) or alike:
+                continue
+            var any = kept[0].copy()
+            for k in range(1, len(kept)):
+                any = any | kept[k]
+            for c in range(len(copies)):
+                ref run = readers[c]
+                for r in run:
+                    self._nodes[r].flags = [True]
+                self._nodes.append(
+                    _plan_node(FILTER, copies[c], exprs=[any.copy()])
+                )
+                self._nodes[run[0]].left = len(self._nodes) - 1
+        if len(self._nodes) > count:
+            self._split_filters(count)
+            self._reorder()
+
+    def _split_filters(mut self, first: Int = 0):
         """A row-local filter on `a & b` becomes a filter on b over one on
         a, so predicate pushdown moves each part as far as it can go; a
         filter on an OR of ANDs also gets the single-input filters it
         implies (`_implied_filters`). `_merge_filters` rejoins the parts
-        that end up together."""
+        that end up together. Only nodes from `first` on are split."""
         var count = len(self._nodes)
         var added = False
-        for i in range(count):
+        for i in range(first, count):
             if self._nodes[i].kind != FILTER:
                 continue
             if not _row_local(self._nodes[i].exprs):
@@ -3835,6 +4770,10 @@ struct LazyFrame(Copyable):
                 if below.kind != FILTER:
                     continue
                 if not (_row_local(node.exprs) and _row_local(below.exprs)):
+                    continue
+                # A reader's pinned filters merge with each other, never
+                # with the shared subplan's own.
+                if _pinned(node) != _pinned(below):
                     continue
                 var merged = below.exprs[0] & node.exprs[0]
                 var child = below.left
@@ -4929,10 +5868,46 @@ struct LazyFrame(Copyable):
         self._remember_schemas()
         try:
             self._push_predicates_now()
+            self._drop_constant_filters()
         except e:
             self._schema_memo = None
             raise e^
         self._schema_memo = None
+
+    def _drop_constant_filters(mut self) raises:
+        """A filter folded to true (`_fold_constants`) keeps every row
+        and goes; one folded to false keeps none, and it and its input
+        become an empty frame of their columns (DuckDB's empty result):
+        a UNION ALL branch whose constant fails a filter is never run."""
+        var parents = self._parents()
+        var changed = False
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            if node.kind != FILTER or _pinned(node):
+                continue
+            ref nodes = node.exprs[0]._nodes
+            if len(nodes) != 1 or nodes[0].op != LIT_BOOL:
+                continue
+            if nodes[0].integer != 0:
+                var parent = parents[i]
+                if parent < 0:
+                    continue
+                var input = node.left
+                if self._nodes[parent].left == i:
+                    self._nodes[parent].left = input
+                if self._nodes[parent].right == i:
+                    self._nodes[parent].right = input
+                parents[input] = parent
+            else:
+                var empty = self._execute(i, True)
+                self._frames.append(empty^)
+                self._schemas.append(Optional[CsvSchema]())
+                self._nodes[i] = _plan_node(
+                    SCAN_FRAME, offset=len(self._frames) - 1
+                )
+            changed = True
+        if changed:
+            self._reorder()
 
     def _push_predicates_now(mut self) raises:
         # Filters are visited in children-before-parents order and moved
@@ -4942,17 +5917,56 @@ struct LazyFrame(Copyable):
         var root = len(self._nodes) - 1
         var moved = False
         var changed = True
+        # Filters found unable to move. A filter's verdict depends on its
+        # input and the run of filters under it, never on its parent, and
+        # a move changes no node's columns: after one, only the filters
+        # around the old and new place are asked again (`_unstick`).
+        var stuck = List[Bool](length=len(self._nodes), fill=False)
         while changed:
             changed = False
             for i in self._topological(root):
                 if self._nodes[i].kind != FILTER:
                     continue
+                if i < len(stuck) and stuck[i]:
+                    continue
                 var child = self._nodes[i].left
                 var side = self._passes(i, child)
                 if side >= 0:
-                    if i == root:
-                        root = child
-                    self._swap_in_place(i, child, side == 1)
+                    # The filter moves as far as it goes before the scan
+                    # restarts: a moved filter stays first in the order it
+                    # was found in, and no move below a filter changes
+                    # where an earlier one can go, so the moves are the
+                    # ones a restart after each would make, without a
+                    # scan of the plan per move.
+                    while side >= 0:
+                        if i == root:
+                            root = child
+                        ref below = self._nodes[child]
+                        if below.kind == SELECT or below.kind == WITH_COLUMNS:
+                            self._nodes[i].exprs = [
+                                _fold_constants(
+                                    _through_projection(
+                                        self._nodes[i].exprs[0], below.exprs
+                                    )
+                                )
+                            ]
+                        elif below.kind == JOIN:
+                            self._transfer_key_filter(i, child, side == 1)
+                        elif below.kind == CONCAT:
+                            # A copy filters the second input; the filter
+                            # itself moves above the first.
+                            self._nodes.append(
+                                _plan_node(
+                                    FILTER,
+                                    below.right,
+                                    exprs=self._nodes[i].exprs.copy(),
+                                )
+                            )
+                            self._nodes[child].right = len(self._nodes) - 1
+                        self._unstick(i, child, stuck)
+                        self._swap_in_place(i, child, side == 1)
+                        child = self._nodes[i].left
+                        side = self._passes(i, child)
                     changed = True
                     moved = True
                     break
@@ -4985,48 +5999,70 @@ struct LazyFrame(Copyable):
                 ):
                     if i == root:
                         root = child
+                    self._unstick(i, child, stuck)
                     self._swap_in_place(i, child, False)
                     changed = True
                     moved = True
                     break
+                if i < len(stuck):
+                    stuck[i] = True
         if moved:
             self._reorder(root)
+
+    def _unstick(self, filter: Int, child: Int, mut stuck: List[Bool]):
+        """Before `filter` moves below `child`: forget the verdicts it can
+        change, those of `filter` and `child` and of the run of filters
+        ending at `filter`'s parent, whose input or run below changes."""
+        var parents = self._parents()
+        for node in [filter, child]:
+            if node >= 0 and node < len(stuck):
+                stuck[node] = False
+        var above = parents[filter]
+        while above >= 0 and self._nodes[above].kind == FILTER:
+            if above < len(stuck):
+                stuck[above] = False
+            above = parents[above]
 
     def _passes(self, filter: Int, child: Int) raises -> Int:
         """Whether the filter at `filter` can move below the node at
         `child` without changing its result: -1 when not, else the side of
         `child` it moves into (0 left or only input, 1 right)."""
         var reads = _references(self._nodes[filter].exprs[0])
-        if not reads or child < 0:
+        if not reads or child < 0 or _pinned(self._nodes[filter]):
             return -1
         ref below = self._nodes[child]
         if below.kind == WITH_COLUMNS or below.kind == SELECT:
-            # Safe when the filter reads only unchanged input columns: a
-            # select of plain columns changes none, so it checks only that
-            # (below); with_columns may replace what it names.
-            if below.kind == WITH_COLUMNS:
-                # A window or aggregate over the input (a rank, a sum over
-                # a partition) depends on which rows are there: filtering
-                # first changes its values even for rows the filter keeps
-                # (TPC-DS q47 ranked months after `d_year = 1999` was
-                # pushed below the rank, so every rank shifted by one).
-                if not _row_local(below.exprs):
-                    return -1
-                var produced = _output_names(below.exprs)
-                for name in reads.value():
-                    for p in produced:
-                        if p == name:
-                            return -1
-            if below.kind == SELECT:
-                for e in below.exprs:
-                    var r = _references(e)
-                    if (
-                        not r
-                        or len(r.value()) != 1
-                        or r.value()[0] != e._name
-                        or len(e._nodes) != 1
-                    ):
+            # A window or aggregate over the input (a rank, a sum over a
+            # partition) depends on which rows are there: filtering first
+            # changes its values even for rows the filter keeps (TPC-DS
+            # q47 ranked months after `d_year = 1999` was pushed below the
+            # rank, so every rank shifted by one). A select of those, or of
+            # literals alone, also changes the row count.
+            if not _row_local(below.exprs) or not _row_local(
+                self._nodes[filter].exprs
+            ):
+                return -1
+            if below.kind == SELECT and not _reads_input(below.exprs):
+                return -1
+            # Each column the filter reads must be an input column the
+            # projection passes on, renamed or not, or a constant: the
+            # filter is then rewritten in the input's terms
+            # (`_through_projection`), as Polars renames a predicate's
+            # columns through an alias projection and DuckDB substitutes a
+            # projection's expressions (`PushdownProjection`).
+            for name in reads.value():
+                var at = _produced_at(below.exprs, name)
+                if at < 0:
+                    if below.kind == SELECT:
                         return -1
+                    continue
+                if not _plain_or_constant(below.exprs[at]):
+                    return -1
+            return 0
+        if below.kind == CONCAT and _row_local(self._nodes[filter].exprs):
+            # Both inputs supply the same names and types, so the filter
+            # applies to each (`_push_into_concat`), as both engines push
+            # predicates into every branch of a UNION ALL.
             return 0
         if (
             below.kind == AGG
@@ -5064,6 +6100,45 @@ struct LazyFrame(Copyable):
             ):
                 return 1
         return -1
+
+    def _transfer_key_filter(
+        mut self, filter: Int, join: Int, right_side: Bool
+    ):
+        """A filter moving into one input of an equi-join that reads only
+        that input's join keys also holds for the other input's keys:
+        a row there whose key fails it matches no row the filter keeps.
+        So a copy in the other input's key names filters that input too
+        (DuckDB derives it through the filter combiner's equivalence
+        sets). TPC-DS q78's `ss_sold_year = 2000`, above two left joins
+        on the year, then also narrows the web and catalog totals."""
+        ref node = self._nodes[join]
+        if len(node.names) != len(node.right_keys) or len(node.names) == 0:
+            return
+        if not _row_local(self._nodes[filter].exprs):
+            return
+        var keys = node.right_keys.copy() if right_side else node.names.copy()
+        var other = node.names.copy() if right_side else node.right_keys.copy()
+        var predicate = self._nodes[filter].exprs[0].copy()
+        for k in range(len(predicate._nodes)):
+            ref item = predicate._nodes[k]
+            if item.op == SELECTOR:
+                return
+            if item.op != COL:
+                continue
+            var at = -1
+            for j in range(len(keys)):
+                if keys[j] == item.text:
+                    at = j
+                    break
+            if at < 0:
+                return
+            predicate._nodes[k].text = other[at]
+        var target = node.left if right_side else node.right
+        self._nodes.append(_plan_node(FILTER, target, exprs=[predicate^]))
+        if right_side:
+            self._nodes[join].left = len(self._nodes) - 1
+        else:
+            self._nodes[join].right = len(self._nodes) - 1
 
     def _swap_down(mut self, filter: Int, child: Int, right_side: Bool):
         """Move filter from above child to directly above child's input."""
@@ -5702,6 +6777,22 @@ def _late_key_build(
             if not reads or name in reads.value() or e._name == name:
                 return -1
     return holder
+
+
+def _distinct_inputs(expressions: List[Expr]) -> Optional[List[String]]:
+    """The columns `n_unique` reductions read, or None when one reads an
+    expression rather than a column."""
+    var names = List[String]()
+    for expression in expressions:
+        ref nodes = expression._nodes
+        for node in nodes:
+            if node.op != N_UNIQUE:
+                continue
+            if node.left < 0 or nodes[node.left].op != COL:
+                return None
+            if nodes[node.left].text not in names:
+                names.append(nodes[node.left].text)
+    return names^
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:

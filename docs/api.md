@@ -508,7 +508,7 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def bit_width(self) -> Int`
   Bits per value for fixed-width types; 0 for variable-width.
 - `def sum_type(self) -> Self`
-  The result type of sum and cumulative sums (as in Polars): 8- and 16-bit integers widen to INT64; other types keep their type.
+  The result type of sum and cumulative sums: 8- and 16-bit integers widen to INT64 (as in Polars), decimals to decimal(38) at their scale (as in DuckDB); other types keep their type.
 - `def write_to(self, mut writer: T)`
 
 ## `date_range`

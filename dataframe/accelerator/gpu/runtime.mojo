@@ -447,7 +447,7 @@ def _preflight(
                 ):
                     raise Error("Mojo GPU invalid temporal operand descriptor")
                 var payload = bitcast[DType.uint64](plan.literals[node])
-                var expected = UInt64(0)
+                var expected: UInt64
                 if op == Int(ROW_TEMPORAL_BINARY):
                     if right < 0 or right >= node - step.start:
                         raise Error("Mojo GPU invalid temporal right operand")

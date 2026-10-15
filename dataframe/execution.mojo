@@ -732,9 +732,13 @@ def _masked_branch[
             False,
             then_mask,
         )
+    # Decimals too: only the validity changes, so the branch keeps its
+    # storage and type.
     var branch_numeric = (
         not then.is_chunked()
-        and not then.dtype().is_decimal()
+        and (
+            not then.dtype().is_decimal() or then.dtype() == bound.dtypes[index]
+        )
         and len(then) == size
         and len(flags) == size
     )
@@ -757,6 +761,12 @@ def _masked_branch[
                 _and_validity(flags, masked._bits[], masked._offset, size)
             )
             return Series("", masked^).with_dtype(then.dtype())
+    if then._data.isa[Column[Int128]]():
+        var masked = then._data[Column[Int128]].copy()
+        masked._bits = ArcPointer(
+            _and_validity(flags, masked._bits[], masked._offset, size)
+        )
+        return Series("", masked^).with_dtype(then.dtype())
     if len(selected) == 0:
         selected = List[Bool](unsafe_uninit_length=size)
         var then_mask = List[Bool](unsafe_uninit_length=size)
@@ -821,6 +831,15 @@ def _conditional[
     grouped: Bool,
     mask: List[Bool],
 ) raises -> Series:
+    if not grouped and len(mask) == 0 and _null_otherwise(bound, index):
+        # `when(c).then(x)` with null other rows: the branch's values under
+        # a validity that adds the predicate, as a streamed reduction's
+        # input already took (`_feed`), rather than chosen row by row. The
+        # aggregate table's inputs are evaluated whole: TPC-DS q2's seven
+        # weekday sums spent 18% in `choose` and its masks.
+        return _masked_branch[width](
+            bound, columns, aggregates, index, offset, length
+        )
     ref node = bound.expr._nodes[index]
     var shape = bound.shapes[index]
     var size = (
@@ -2616,19 +2635,37 @@ def _over[
         if done:
             trace_path("window.contiguous")
             return done.take()
-    var partitions = _partition_ids(keys, height)
+    # Partition ids from the frame's layout of these keys when one was
+    # made for another expression; computed otherwise.
+    var ids = List[Int]()
+    var count = 0
+    if layouts != 0:
+        var cache = Pointer[WindowLayouts, MutAnyOrigin](
+            unsafe_from_address=layouts
+        )
+        var at = cache[].find(node.text2)
+        if at >= 0:
+            ids = cache[].layouts[at].ids.copy()
+            count = cache[].layouts[at].count
+    if count == 0 and height > 0:
+        var partitions = _partition_ids(keys, height)
+        count = partitions.count()
+        ids = partitions.ids.copy()
+    # A nested over() reads the same rows, so it shares the frame's
+    # layouts (the contiguous route's runs read slices, and pass none).
     var result = evaluate[width](
         inner,
         columns,
         height,
         batch_size=batch_size,
         grouped=True,
-        groups=partitions.ids,
-        group_count=partitions.count(),
+        groups=ids,
+        group_count=count,
+        layouts=layouts,
     )
     if inner.shape() == ROWS:
         return result^
-    return result.take(partitions.ids)
+    return result.take(ids)
 
 
 # Eight lanes amortize expression-step dispatch across two AVX2 vectors and
@@ -2837,7 +2874,7 @@ def evaluate[
                 node_index,
                 height,
                 batch_size,
-                layouts if not grouped else 0,
+                layouts,
             )
     var size = height if bound.shape() == ROWS else (
         group_count if grouped else 1

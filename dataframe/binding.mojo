@@ -147,7 +147,7 @@ from .expr import (
 )
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
-from .decimal import common_decimal
+from .decimal import common_decimal, decimal_add_type, decimal_mul_type
 from .temporal import (
     ambiguous_code,
     non_existent_code,
@@ -378,10 +378,17 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
             raise Error(op_name(op) + " requires two decimal operands")
         if is_comparison(op):
             return DataType.BOOL
-        if op == ADD or op == SUB or op == MUL or op == DIV:
-            return DataType.decimal(38, max(left.scale(), right.scale()))
+        # DuckDB's decimal arithmetic types: sums and differences at the
+        # larger scale with one more integer digit, exact products, and
+        # quotients as DOUBLE.
+        if op == ADD or op == SUB:
+            return decimal_add_type(left, right)
+        if op == MUL:
+            return decimal_mul_type(left, right)
+        if op == DIV:
+            return DataType.FLOAT64
         if op == FILL_NULL:
-            return common_decimal(left, right, "fill_null")
+            return common_decimal(left, right)
         raise Error(op_name(op) + " is not supported for decimal operands")
     if left != right:
         raise Error(
@@ -916,9 +923,7 @@ def bind(
                 and dtype.is_decimal()
                 and types[node.extra].is_decimal()
             ):
-                dtype = common_decimal(
-                    dtype, types[node.extra], "when/then/otherwise"
-                )
+                dtype = common_decimal(dtype, types[node.extra])
             var children = List[Int]()
             children.append(node.left)
             children.append(node.right)

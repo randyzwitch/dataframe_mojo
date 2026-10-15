@@ -227,7 +227,6 @@ def projection(
     var prototypes = List[Series]()
     for expression in expressions:
         rewritten.append(rewrite(layout, expression))
-        ref root = expression._nodes[len(expression._nodes) - 1]
         var bound = bind(expression, layout.source._columns)
         var field = len(bound.dtypes) - 1
         while bound.expr._nodes[field].op == CAST:

@@ -7,7 +7,7 @@ expectations use exact Int128 references, never floating-point range checks.
 from std.math import abs, isnan, isinf
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Series, Expr, col, lit
+from dataframe import Column, DataFrame, DataType, Series, Expr, col, lit, when
 from tests.support.numeric_model import (
     INTEGER_DTYPES,
     FLOAT_DTYPES,
@@ -968,7 +968,22 @@ def test_numeric_binding_rejects_mixed_typed_widths_and_unrepresentable_adoption
                 _ = source.select(invalid)
 
 
-def test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor() raises:
+def _decimals(
+    name: String, values: List[Int128], valid: List[Bool], dtype: DataType
+) raises -> Series:
+    """Scaled integers as a column of `dtype`, at its storage width."""
+    return (
+        Series(name, Column[Int128](values.copy(), valid.copy()))
+        .with_dtype(DataType.decimal(38, dtype.scale()))
+        .cast(dtype)
+    )
+
+
+def test_decimal_arithmetic_takes_duckdb_types_and_null_zero_divisor() raises:
+    """DuckDB's decimal result types (`DecimalArithmeticBind`): a sum or
+    difference at the larger scale with one more integer digit, an exact
+    product at the scales added, a quotient as DOUBLE (null for a zero
+    divisor), each stored at its precision's width."""
     var left: List[Int128] = [125, 75, -125, -75, 250, 100, 300, 625, 375, 999]
     var right: List[Int128] = [50, 50, 50, 50, 0, 800, 800, 100, 100, 0]
     var valid: List[Bool] = [
@@ -986,18 +1001,37 @@ def test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor() r
     var results: List[List[Int128]] = [
         [175, 125, -75, -25, 250, 900, 1100, 725, 475, 0],
         [75, 25, -175, -125, 250, -700, -500, 525, 275, 0],
-        [62, 38, -62, -38, 0, 800, 2400, 625, 375, 0],
-        [250, 150, -250, -150, 0, 12, 38, 625, 375, 0],
+        [6250, 3750, -6250, -3750, 0, 80000, 240000, 62500, 37500, 0],
     ]
+    var types: List[DataType] = [
+        DataType.decimal(9, 2, 32),
+        DataType.decimal(9, 2, 32),
+        DataType.decimal(16, 4, 64),
+    ]
+    var quotients: List[Float64] = [
+        2.5,
+        1.5,
+        -2.5,
+        -1.5,
+        0,
+        0.125,
+        0.375,
+        6.25,
+        3.75,
+        0,
+    ]
+    var quotient_valid = valid.copy()
+    quotient_valid[4] = False
     for bits in [32, 64, 128]:
         var source = DataFrame(
             [
-                Series("a", Column[Int128](left.copy(), valid.copy()))
-                .with_dtype(DataType.decimal(8, 2))
-                .cast(DataType.decimal(8, 2, bits)),
-                Series("b", Column[Int128](right.copy()))
-                .with_dtype(DataType.decimal(8, 2))
-                .cast(DataType.decimal(8, 2, bits)),
+                _decimals("a", left, valid, DataType.decimal(8, 2, bits)),
+                _decimals(
+                    "b",
+                    right,
+                    List[Bool](length=len(right), fill=True),
+                    DataType.decimal(8, 2, bits),
+                ),
             ]
         )
         for layout in range(3):
@@ -1009,23 +1043,29 @@ def test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor() r
                 col("a") / col("b"),
             ]
             for op in range(4):
-                var result_valid = valid.copy()
+                var expected: DataFrame
                 if op == 3:
-                    result_valid[4] = False
-                var expected = DataFrame(
-                    [
-                        Series(
-                            "r",
-                            Column[Int128](results[op].copy(), result_valid^),
-                        ).with_dtype(DataType.decimal(38, 2))
-                    ]
-                )
+                    expected = DataFrame(
+                        [
+                            Series(
+                                "r",
+                                Column[Float64](
+                                    quotients.copy(), quotient_valid.copy()
+                                ),
+                            )
+                        ]
+                    )
+                else:
+                    expected = DataFrame(
+                        [_decimals("r", results[op], valid, types[op])]
+                    )
                 assert_frame(frame.select(expressions[op].alias("r")), expected)
                 assert_frame(
                     frame.clear().select(expressions[op].alias("r")),
                     expected.clear(),
                 )
-    # Different scales align exactly and choose the larger output scale.
+    # Different scales align exactly: the sum at the larger scale, the
+    # product at both scales.
     var mixed = DataFrame(
         [
             Series("a", Column[Int128]([125])).with_dtype(
@@ -1043,19 +1083,14 @@ def test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor() r
             (col("a") / col("b")).alias("div"),
         ]
     )
+    var one: List[Bool] = [True]
     assert_frame(
         output,
         DataFrame(
             [
-                Series("add", Column[Int128]([1625])).with_dtype(
-                    DataType.decimal(38, 3)
-                ),
-                Series("mul", Column[Int128]([469])).with_dtype(
-                    DataType.decimal(38, 3)
-                ),
-                Series("div", Column[Int128]([3333])).with_dtype(
-                    DataType.decimal(38, 3)
-                ),
+                _decimals("add", [1625], one, DataType.decimal(6, 3, 32)),
+                _decimals("mul", [46875], one, DataType.decimal(8, 5, 32)),
+                Series("div", Column[Float64]([Float64(1.25) / 0.375])),
             ]
         ),
     )
@@ -1070,8 +1105,139 @@ def test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor() r
             ),
         ]
     )
-    assert_equal(
-        String(large.select(col("a") + col("b")).item()), "9007199254740994"
+    var total = large.select(col("a") + col("b"))
+    assert_true(total.column("a").dtype() == DataType.decimal(21, 0))
+    assert_equal(String(total.item()), "9007199254740994")
+    # A product needing more than 38 places of scale is refused, as DuckDB
+    # does, rather than rounded.
+    var fine = DataFrame(
+        [
+            Series("a", Column[Int128]([1])).with_dtype(
+                DataType.decimal(38, 20)
+            ),
+        ]
+    )
+    with assert_raises(contains="scale 40"):
+        _ = fine.select(col("a") * col("a"))
+
+
+def test_decimal_arithmetic_on_64_bit_inputs_stays_64_bit() raises:
+    """Inputs of at most 18 digits give results of at most 18 digits,
+    checked for overflow, as DuckDB does: (18, 2) + (18, 2) is (18, 2),
+    (15, 2) * (15, 2) is (18, 4); a product at scale 18 or more widens."""
+    var frame = DataFrame(
+        [
+            _decimals(
+                "a",
+                [Int128(99999999999999999), 150],
+                [True, True],
+                DataType.decimal(18, 2, 64),
+            ),
+            _decimals("b", [1, 200], [True, True], DataType.decimal(18, 2, 64)),
+            _decimals(
+                "p", [125, -250], [True, True], DataType.decimal(15, 2, 64)
+            ),
+            _decimals("q", [1, 1], [True, True], DataType.decimal(10, 9, 64)),
+        ]
+    )
+    var sums = frame.select_exprs([(col("a") + col("b")).alias("s")])
+    assert_frame(
+        sums,
+        DataFrame(
+            [
+                _decimals(
+                    "s",
+                    [Int128(100000000000000000), 350],
+                    [True, True],
+                    DataType.decimal(18, 2, 64),
+                )
+            ]
+        ),
+    )
+    var products = frame.select_exprs(
+        [
+            (col("p") * col("p")).alias("pp"),
+            (col("q") * col("q")).alias("qq"),
+        ]
+    )
+    assert_frame(
+        products,
+        DataFrame(
+            [
+                _decimals(
+                    "pp",
+                    [15625, 62500],
+                    [True, True],
+                    DataType.decimal(18, 4, 64),
+                ),
+                _decimals("qq", [1, 1], [True, True], DataType.decimal(20, 18)),
+            ]
+        ),
+    )
+    # Past 18 digits is an error, not a wider type.
+    var top = DataFrame(
+        [
+            _decimals(
+                "a",
+                [Int128(999999999999999999)],
+                [True],
+                DataType.decimal(18, 2, 64),
+            )
+        ]
+    )
+    with assert_raises(contains="precision 18"):
+        _ = top.select(col("a") + col("a"))
+
+
+def test_decimal_conditionals_take_the_common_decimal_type() raises:
+    """A conditional or fill_null over decimals of different scales takes
+    DuckDB's common type: the larger scale and the larger integer part,
+    holding either side exactly. A product (scale 4) next to a price
+    (scale 2) is the usual case."""
+    var frame = DataFrame(
+        [
+            _decimals(
+                "p",
+                [1250, -75, 0],
+                [True, True, False],
+                DataType.decimal(7, 2, 32),
+            ),
+            _decimals(
+                "q",
+                [300, 200, 100],
+                [True, True, True],
+                DataType.decimal(7, 2, 32),
+            ),
+        ]
+    )
+    var product = col("p") * col("q")
+    var chosen = frame.select_exprs(
+        [
+            when(col("q") > lit("2.50").cast(DataType.decimal(7, 2)))
+            .then(product)
+            .otherwise(col("p"))
+            .alias("c"),
+            col("p").fill_null(product).alias("f"),
+            (product + col("p")).alias("s"),
+        ]
+    )
+    # (14, 4) and (7, 2): scale 4, ten integer digits.
+    var common = DataType.decimal(14, 4, 64)
+    assert_frame(
+        chosen,
+        DataFrame(
+            [
+                _decimals("c", [375000, -7500, 0], [True, True, False], common),
+                _decimals("f", [125000, -7500, 0], [True, True, False], common),
+                # A sum of a decimal32 and a decimal64 at the larger scale.
+                _decimals(
+                    "s",
+                    [500000, -22500, 0],
+                    [True, True, False],
+                    DataType.decimal(15, 4, 64),
+                ),
+            ]
+        ),
     )
 
 
@@ -1103,6 +1269,7 @@ def test_decimal_precision_overflow_is_per_valid_row_and_scalars_keep_decimal_ty
             ).with_dtype(dtype)
         ]
     )
+    # Results past 38 digits stay at 38.
     for expression in [col("a") + one, col("a") - one, col("a") * two]:
         var actual = poison.select(expression.alias("r"))
         assert_true(actual.column("r").dtype() == dtype)
@@ -1119,21 +1286,39 @@ def test_decimal_precision_overflow_is_per_valid_row_and_scalars_keep_decimal_ty
         scalar - col("a"),
         col("a") * scalar,
         scalar * col("a"),
-        col("a") / scalar,
-        scalar / col("a"),
     ]
-    var expected: List[Int128] = [175, 175, 75, -75, 62, 62, 250, 40]
+    var expected: List[Int128] = [175, 175, 75, -75, 6250, 6250]
+    var sum_type = DataType.decimal(5, 2, 32)
+    var product_type = DataType.decimal(8, 4, 32)
     for direction in range(len(expressions)):
         assert_frame(
             small.select(expressions[direction].alias("r")),
             DataFrame(
                 [
-                    Series(
-                        "r", Column[Int128]([expected[direction]])
-                    ).with_dtype(DataType.decimal(38, 2))
+                    _decimals(
+                        "r",
+                        [expected[direction]],
+                        [True],
+                        sum_type if direction < 4 else product_type,
+                    )
                 ]
             ),
         )
+    var quotients = small.select_exprs(
+        [
+            (col("a") / scalar).alias("x"),
+            (scalar / col("a")).alias("y"),
+        ]
+    )
+    assert_frame(
+        quotients,
+        DataFrame(
+            [
+                Series("x", Column[Float64]([2.5])),
+                Series("y", Column[Float64]([0.4])),
+            ]
+        ),
+    )
 
 
 def _nullable_clip[D: DType]() raises:

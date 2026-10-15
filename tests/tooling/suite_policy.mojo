@@ -1223,14 +1223,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_extended_windows.mojo::test_decimal_pct_change_obeys_documented_float64_result_contract",
-            "Verified all three decimal widths return Decimal(38,2) for pct_change, contrary to documented Float64. Focused strict mismatch; later combinations await repair.",
-            "decimal pct_change must return Float64",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_set_reshape_types.mojo::test_struct_unique_null_parents_ignore_every_hidden_field_payload",
             "Struct key equality reads hidden fields of null parents, retaining extra equivalent null keys.",
             "struct unique must ignore hidden null-parent fields",
@@ -1329,7 +1321,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_variance_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1236:39: get: wrong variant type",
+            "aggregate.mojo:1309:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -1337,7 +1329,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_standard_deviation_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1236:39: get: wrong variant type",
+            "aggregate.mojo:1309:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -2859,6 +2851,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
                 "tests/kernel_equivalence/test_window_contiguous.mojo",
                 "tests/kernel_equivalence/test_window_partition_table.mojo",
+                "tests/kernel_equivalence/test_window_running_minmax.mojo",
                 "tests/public_contracts/test_extended_windows.mojo",
                 "tests/public_contracts/test_order_windows.mojo",
                 "tests/public_contracts/test_window_precision.mojo",
@@ -2917,6 +2910,7 @@ def production_policy() -> SuitePolicy:
             "reduce.grouped",
             [
                 "tests/kernel_equivalence/test_aggregate_table.mojo",
+                "tests/kernel_equivalence/test_aggregate_selection.mojo",
                 "tests/public_contracts/test_distribution_shapes.mojo",
                 "tests/public_contracts/test_expression_boundaries.mojo",
                 "tests/public_contracts/test_grouped_types.mojo",
@@ -2942,7 +2936,11 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
+                "tests/kernel_equivalence/test_perfect_hash_join.mojo",
+                "tests/kernel_equivalence/test_morsel_ranges.mojo",
+                "tests/kernel_equivalence/test_full_join_direct.mojo",
                 "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
+                "tests/kernel_equivalence/test_pipeline_key_ranges.mojo",
                 "tests/kernel_equivalence/test_pipeline_projection_selection.mojo",
                 "tests/planner_correctness/test_asof_sources.mojo",
                 "tests/public_contracts/test_asof.mojo",
@@ -2970,6 +2968,7 @@ def production_policy() -> SuitePolicy:
             "types.cast",
             [
                 "tests/public_contracts/test_cast_boundaries.mojo",
+                "tests/kernel_equivalence/test_decimal_fast_paths.mojo",
                 "tests/public_contracts/test_cast_sources.mojo",
                 "tests/public_contracts/test_casts.mojo",
                 "tests/public_contracts/test_temporal.mojo",
@@ -3112,6 +3111,9 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_join_strategies.mojo",
                 "tests/planner_correctness/test_name_identity.mojo",
                 "tests/planner_correctness/test_nested_boundaries.mojo",
+                "tests/planner_correctness/test_projection_union_pushdown.mojo",
+                "tests/planner_correctness/test_concurrent_inputs.mojo",
+                "tests/planner_correctness/test_probe_key_reduction.mojo",
                 "tests/planner_correctness/test_relational.mojo",
                 "tests/planner_correctness/test_shared_aggregated_inputs.mojo",
                 "tests/planner_correctness/test_source_reuse.mojo",
