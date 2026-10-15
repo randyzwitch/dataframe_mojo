@@ -142,3 +142,11 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
             50,
         ] if coded else [40, 40, 60, 60, 50]
         assert_equal(over.column("total").int64().to_list(), expected_over)
+
+
+def test_grouped_typed_owner_contract_metadata_without_device_context() raises:
+    from tests.support.grouped_typed_owner_reference import (
+        scoped_grouped_typed_owner_contract,
+    )
+
+    scoped_grouped_typed_owner_contract()
