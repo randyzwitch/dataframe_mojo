@@ -22,7 +22,7 @@ from tests.support.coverage_generators import offset_layout, chunk_layout
 
 def _coded(category: Series) raises -> Series:
     var result = decode(category)
-    var codes = List[UInt32]([0, 1, 0])
+    var codes: List[UInt32] = [0, 1, 0]
     result._data[StringColumn]._codes = ArcPointer(
         StringCodes(ArcPointer(codes^), category.dtype())
     )
