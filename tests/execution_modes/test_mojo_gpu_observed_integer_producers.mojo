@@ -75,6 +75,26 @@ def test_mojo_gpu_observed_unused_integer_overflow_before_consumers() raises:
                 _ = _collect(query.head(0), gpu)
         with assert_raises(contains="overflow"):
             _ = _collect(producer.head(0), gpu)
+    # Both expressions fault on the first row; CPU expression order decides
+    # which fault is visible even when the consumer requests no rows.
+    for gpu in [False, True]:
+        for power_first in [False, True]:
+            var overflow = (col("v") + lit(Int64(1))).alias("overflow")
+            var power = col("v").pow(lit(Int64(-1))).alias("power")
+            var ordered = (
+                source.lazy()
+                .with_columns(
+                    [power.copy(), overflow.copy()] if power_first else [
+                        overflow.copy(),
+                        power.copy(),
+                    ]
+                )
+                .head(0)
+            )
+            with assert_raises(
+                contains="nonnegative exponent" if power_first else "overflow"
+            ):
+                _ = _collect(ordered, gpu)
     # A previous failed task does not contaminate a fresh query.
     assert_equal(_collect(_source().lazy().select(col("v")), True).height(), 3)
 
