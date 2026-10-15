@@ -159,7 +159,7 @@ frame position and column.
 keeps the left name. `Series.full_null(name, dtype, length)` builds an all-null
 column. Validity bitmaps are appended bytewise, with a shifted merge when the
 destination length is not a multiple of eight, so concatenation is linear in the
-output size (`pixi run bench-concat`).
+output size.
 
 ## Series operations
 
@@ -213,9 +213,8 @@ direction, NaN, and null placement; a bottom-up mergesort then compares rank
 tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
 first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
 the first `k` rows of `sort(by)`; both select with a bounded heap in
-O(n log k) instead of sorting every row. `pixi run bench-sort` compares the
-rank-based sort with the previous per-comparison comparator (kept as
-`Series._argsort_reference` for tests).
+O(n log k) instead of sorting every row. The previous per-comparison comparator
+is kept as `Series._argsort_reference` for tests.
 
 ## Joins
 
@@ -251,8 +250,8 @@ output row count does not overflow.
 
 Both sides' keys are encoded together by the shared row-key layer
 (`dataframe/hashing.mojo`) and right rows are bucketed by dense key id, so the
-probe does no dictionary lookup. `pixi run bench-join` compares side sizes and
-key skew. Unsupported join modes or key dtype mismatches raise explicitly.
+probe does no dictionary lookup. Unsupported join modes or key dtype mismatches
+raise explicitly.
 
 ## Ownership and errors
 

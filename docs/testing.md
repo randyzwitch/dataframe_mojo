@@ -87,46 +87,16 @@ with 10M rows can sit anywhere between them.
 
 The join/gather cutoffs and bounded-table budgets have a reproducible
 [measurement report](join-cutoffs.md), including density, cardinality,
-ordered-input and chunked-input counterexamples. Run its sweeps before
-changing those guards; record the machine and the losing side of a crossover.
+ordered-input and chunked-input counterexamples. Its sweeps are retired;
+check out revision `8a50a95` to rerun them before changing those guards, and
+record the machine and the losing side of a crossover.
 
 ## Broad join comparison
 
-`pixi run -e oracle bench-joins-polars --sizes 1000000,10000000 --threads 32`
-compares thirteen join shapes with the installed Polars version. It includes
-dense and sparse Int64 keys, string and composite keys, unmatched
-left/right/full joins, semi/anti joins, duplicate matches, and a lazy join
-followed by a narrow projection. Both engines use the same generated CSV input;
-frame construction is outside join timing, and row counts and numeric totals
-must agree.
-
-Every case runs on three key layouts, reported in the `keys` column:
-
-- `base`: the generated files. Every Int64 right key derives from a sorted
-  `range(n)`, which the ordered-key path (`_dense_right_int64_rows`) and the
-  direct-address paths (`_bounded_int64_join_rows` and the membership checks)
-  recognise, so these are fast-path numbers. Real data with this shape is a
-  lookup table keyed by sequential IDs stored in order.
-- `shuffled`: the same right rows in random order. The join and its result
-  are identical, but no ordered-key path applies.
-- `wide`: every key mapped one-to-one onto a 2^40 range, so no
-  direct-address path applies either.
-
-Treat `shuffled` and `wide` as the general join performance and `base` as
-the ordered-key case. A change that improves `base` alone has tuned a fast
-path, not the join. `--variants base` runs only the ordered layout.
-
-`pixi run -e oracle bench-joins-duckdb --sizes 1000000,10000000 --reps 5 --threads 32`
-adds DuckDB to the same matrix. DuckDB times `CREATE TEMP TABLE AS SELECT` for
-each join, so the full result is materialized in DuckDB's native format without
-Arrow export. Input tables and derived keys are prepared outside timing. The
-DuckDB result's columns are checked against the expected projection, and all
-three engines must agree on row counts and numeric totals before results print.
-The DuckDB time includes creating and filling a temporary table, while Mojo and
-Polars produce their native dataframe results.
-
-For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
-name as its fourth argument to run only that case.
+The join matrix (`bench_join_matrix`) and its Polars and DuckDB drivers are
+retired. The H2O join suite, PDS-H and TPC-DS now compare joins with both
+engines through `scripts/bench_suites.py`; check out revision `8a50a95` to
+rerun the old matrix.
 
 [worker-calibration.md](worker-calibration.md) records 4/8/16-worker sweeps
 on Threadripper and Apple M1, plus isolated worker-policy experiments.

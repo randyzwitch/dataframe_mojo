@@ -102,6 +102,7 @@ Raw captures remain in `build/profiles`.
 all evidence. Timings vary across cases; small changes are not robust proof
 of improvement. Raw whole-process peak RSS includes loading/runtime/warmup.
 
-Reproduce counts using `scripts/bench_upstream_revision.py --cases duplicate_strings`
-and membership using `scripts/bench_join_revision.py --cases semi_unmatched,anti_unmatched`,
-with #302 baseline/candidate runners, matching CSV inputs and output JSON paths.
+Counts came from the upstream join cases (`duplicate_strings`) and membership
+from the join matrix (`semi_unmatched`, `anti_unmatched`), with #302
+baseline/candidate runners. Both scripts are retired; check out the revision
+above to rerun them.

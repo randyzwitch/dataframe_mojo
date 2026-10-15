@@ -1,5 +1,7 @@
 # Join and gather cutoffs (#268, #272)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
+
 ## Measurement setup
 
 Measured 2026-09-26 against `b2013a55ae9c19ce447e2a37f692e7a394eeaa9a`,
@@ -18,7 +20,7 @@ not universal crossover guarantees or performance claims against another
 engine. The [companion CSV](join-cutoffs.csv) retains every round and sample. The focused final recheck uses four
 rounds of seven repetitions, with the same alternating order and summary rule.
 
-`benchmarks/bench_join_cutoffs.mojo` exercises CSR construction, progression
+The benchmark exercised CSR construction, progression
 mapping, bounded row chains, membership, dense IDs followed by CSR, chunked
 gathering, and public joins. Join keys are shuffled, with irregular gaps at
 100%, 50%, 25%, and 10% density so the sparse cases cannot silently compress
@@ -30,34 +32,13 @@ progression path. Neither shape stands in for general join performance.
 
 ## Reproduce
 
-The driver extracts the pinned baseline into disposable directories under
-`build/cutoffs`, then builds forced serial, parallel, and hash alternatives.
-It widens allocation guards only in those copies to measure domains that
-production correctly declines. Production source is never patched by the
-driver. `--revision` is explicit and the driver refuses revisions whose old
-allocation guards no longer match.
-
-```bash
-pixi run python3 scripts/bench_join_cutoffs.py --build
-pixi run python3 scripts/bench_join_cutoffs.py --run basic --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run ranges --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run strided --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run ids --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run fine --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run shape --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run tails --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run compact --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run portability --threads 8
-pixi run python3 scripts/bench_join_cutoffs.py --build --variants baseline,candidate
-pixi run python3 scripts/bench_join_cutoffs.py --run validation --threads 32
-pixi run python3 scripts/bench_join_cutoffs.py --run recheck --threads 32 --rounds 4 --reps 7
-pixi run python3 scripts/bench_join_cutoffs.py --report docs/join-cutoffs.csv
-```
-
-Use optimized `mojo build` executables, not JIT runs. CSVs under
-`build/cutoffs` keep every repetition; each filename includes its worker
-limit. `portability` rechecks CSR, progression, 2/8-column gathers, and
-100%/25%-dense row chains at 500k, 1M, 2M, and 4M rows. It changes worker
+The benchmark and its driver were retired; check out revision `8a50a95`,
+where this section lists the commands. The driver built forced serial,
+parallel and hash variants in disposable copies of the pinned baseline,
+widening allocation guards only in those copies, and never patched
+production source. Runs used optimized `mojo build` executables, not JIT
+runs. The `portability` sweep rechecked CSR, progression, 2/8-column gathers, and
+100%/25%-dense row chains at 500k, 1M, 2M, and 4M rows. It changed worker
 count on this machine, **not cache architecture**; #273 still covers other
 machines and the remaining pool/worker constants.
 

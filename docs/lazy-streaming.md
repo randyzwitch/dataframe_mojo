@@ -1,5 +1,7 @@
 # Lazy streaming: time and resident memory (#109)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
+
 The default lazy executor runs supported row-wise operators as ordered
 batches, merges aggregate state and streams supported join probe sides.
 `collect(streaming=False)` retains the materializing executor. The
@@ -86,14 +88,10 @@ on both machines.
 
 ## Reproduction and validation
 
-```bash
-pixi run python3 scripts/bench_lazy_streaming.py --build
-BENCH_WAIT_FOR_COMPILERS=1 pixi run python3 scripts/bench_lazy_streaming.py --run
-```
-
-The script creates fixtures in `build/lazy-streaming`, runs both modes, and
-writes `results.csv`. Repeat on the second machine. The committed artifact
-adds a machine column to both raw outputs.
+The benchmark and its driver were retired; check out revision `8a50a95`,
+where this section lists the commands. The driver created fixtures, ran both
+modes on each machine, and the committed artifact adds a machine column to
+both raw outputs.
 
 Linux validation covers the existing lazy, nested, Parquet, grouping,
 partitioned grouping, expression reduction and CSV scanner modules, plus
