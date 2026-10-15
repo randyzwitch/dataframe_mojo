@@ -8,6 +8,8 @@ from tests.execution_modes.test_mojo_gpu_partition_cuts import (
     test_public_partition_cut_qcut_eager_fault_order as faults,
     test_public_partition_cuts_original_categorical_keys as categories,
     test_public_partition_cuts_nested_numeric_scopes as nested,
+    test_public_partition_when_head_and_sibling_error_contracts as contracts,
+    test_public_partition_qcut_signed_zero_breakpoint_literals as zero_words,
 )
 from tests.public_contracts.test_partition_cut_capture import (
     test_partition_cut_capture_keeps_original_controls_and_eager_state as capture,
@@ -62,6 +64,18 @@ def main() raises:
     except error:
         failures += 1
         print("FAIL public partition nested scopes", String(error), flush=True)
+    try:
+        contracts()
+        print("PASS public partition WHEN/head/sibling literal error contracts", flush=True)
+    except error:
+        failures += 1
+        print("FAIL public partition WHEN/head/sibling contracts", String(error), flush=True)
+    try:
+        zero_words()
+        print("PASS public partition literal signed-zero edge words", flush=True)
+    except error:
+        failures += 1
+        print("FAIL public partition signed-zero words", String(error), flush=True)
     try:
         _native_report()
         print("PASS public partition actual Mojo GPU submissions and report", flush=True)

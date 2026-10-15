@@ -1,7 +1,7 @@
 """Public resident partition CUT/QCUT, literal outputs and CPU fault order."""
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import DataFrame, Series, Column, StringColumn, Expr, col, lit, when
+from dataframe import DataFrame, DataType, Series, Column, StringColumn, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
@@ -147,3 +147,108 @@ def test_public_partition_cuts_nested_numeric_scopes() raises:
                 _ = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
         _ = setting^
     print("PASS public partition nested numeric states and cache snapshots")
+
+
+def _literal_fault(query: LazyFrame, cpu_message: String, gpu_message: String) raises:
+    with assert_raises(contains=cpu_message):
+        _ = query.collect(engine="cpu", optimize=False, streaming=False)
+    with assert_raises(contains=gpu_message):
+        _ = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+
+
+def test_public_partition_when_head_and_sibling_error_contracts() raises:
+    _ = require_metal()
+    var frame = DataFrame([
+        Series("x", Column[Int64]([Int64.MAX, 1])),
+        Series("k", Column[Int32]([0, 0])),
+    ])
+    var probabilities: List[Float64] = [0.5]
+    var custom: List[String] = ["low", "high"]
+    var safe_state = col("x").qcut(probabilities, labels=custom).over("k")
+    var invalid_state = col("x").qcut([2.0]).over("k")
+    var overflow = col("x") + lit(Int64(1))
+    # Every eager window/OVER state precedes final row masks. The checked row
+    # expression in an unselected branch is nevertheless suppressed.
+    var suppressed = frame.lazy().select(
+        when(lit(False)).then(overflow.copy() > lit(Int64(0)))
+        .otherwise(safe_state.copy() == lit("low")).alias("wanted")
+    )
+    _check(suppressed)
+    var result = suppressed.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    assert_equal(result.item(0, "wanted").bool(), False)
+    assert_equal(result.item(1, "wanted").bool(), True)
+    var eager = frame.lazy().select(
+        when(lit(True)).then(overflow.copy() > lit(Int64(0)))
+        .otherwise(invalid_state.copy() == lit("low")).alias("wanted")
+    )
+    _literal_fault(eager, "quantiles must be between 0 and 1", "quantiles must be between 0 and 1")
+    _literal_fault(eager.head(0), "quantiles must be between 0 and 1", "quantiles must be between 0 and 1")
+    # Projection siblings bind together, then finish in original sibling order.
+    var row_first = frame.lazy().select_exprs([
+        overflow.copy().alias("row"), invalid_state.copy().alias("state"),
+    ])
+    var state_first = frame.lazy().select_exprs([
+        invalid_state.copy().alias("state"), overflow.copy().alias("row"),
+    ])
+    _literal_fault(row_first.head(0), "overflow", "overflow")
+    _literal_fault(state_first.head(0), "quantiles must be between 0 and 1", "quantiles must be between 0 and 1")
+    var invalid_binding = frame.lazy().select_exprs([
+        overflow.alias("row"), col("missing").qcut(probabilities).over("k").alias("state"),
+    ])
+    _literal_fault(invalid_binding.head(0), "missing", "missing")
+    # CUT/QCUT themselves are eager windows in expr.is_window. Their original
+    # AST order competes with OVER states even beneath opposite WHEN arms.
+    var finite = DataFrame([
+        Series("x", Column[Float64]([0, 2])),
+        Series("k", Column[Int32]([0, 0])),
+    ])
+    var bad_breaks: List[Float64] = [2.0, 1.0]
+    var bad_probabilities: List[Float64] = [2.0]
+    var cut_first = finite.lazy().select(
+        when(lit(True)).then(col("x").cut(bad_breaks))
+        .otherwise(col("x").qcut(bad_probabilities).over("k"))
+    )
+    var over_first = finite.lazy().select(
+        when(lit(False)).then(col("x").qcut(bad_probabilities).over("k"))
+        .otherwise(col("x").cut(bad_breaks))
+    )
+    _literal_fault(cut_first.head(0), "breaks must be unique", "breaks must be unique")
+    _literal_fault(over_first.head(0), "quantiles must be between 0 and 1", "quantiles must be between 0 and 1")
+    # Original scalar checked occurrences survive public dictionary/literal
+    # normalization and retain their CPU child-first order.
+    var cast = lit(Int64(128)).cast(DataType.INT8).cast(DataType.INT64)
+    var power = lit(Int64(2)).pow(lit(Int64(-1)))
+    var cast_first = finite.lazy().select((col("x").cast(DataType.INT64) + (cast.copy() + power.copy())).qcut(bad_probabilities).over("k"))
+    var power_first = finite.lazy().select((col("x").cast(DataType.INT64) + (power.copy() + cast.copy())).qcut(bad_probabilities).over("k"))
+    _literal_fault(cast_first.head(0), "cast from int64 to int8 failed", "strict cast failed")
+    _literal_fault(power_first.head(0), "nonnegative exponent", "nonnegative exponent")
+    # Constructor-owned literal metadata is unaffected by later caller writes.
+    var retained_probabilities: List[Float64] = [0.5]
+    var retained_labels: List[String] = ["low", "high"]
+    var retained = col("x").qcut(retained_probabilities, labels=retained_labels).over("k")
+    retained_probabilities[0] = 2.0
+    retained_labels[0] = "changed"
+    var immutable = finite.lazy().select(retained).collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    assert_equal(immutable.item(0, "x").string(), "low")
+    assert_equal(immutable.item(1, "x").string(), "high")
+    print("PASS public WHEN masks, eager/head/sibling order and immutable controls")
+
+
+def test_public_partition_qcut_signed_zero_breakpoint_literals() raises:
+    _ = require_metal()
+    var negative_zero = bitcast[DType.float64](UInt64(0x8000000000000000))
+    var frame = DataFrame([
+        Series("x", Column[Float64]([negative_zero, 0, negative_zero, 0])),
+        Series("k", Column[Int32]([0, 1, 0, 1])),
+    ])
+    var probabilities: List[Float64] = [0.0]
+    var query = frame.lazy().select(col("x").qcut(probabilities, include_breaks=True).over("k"))
+    var cpu = query.collect(engine="cpu", optimize=False, streaming=False)
+    var gpu = query.collect(accelerator=MetalRuntime(), optimize=False, streaming=False)
+    var expected: List[UInt64] = [0x8000000000000000, 0, 0x8000000000000000, 0]
+    for row in range(4):
+        assert_equal(bitcast[DType.uint64](cpu.item(row, "x").struct_field("breakpoint").float64()), expected[row])
+        assert_equal(bitcast[DType.uint64](gpu.item(row, "x").struct_field("breakpoint").float64()), expected[row])
+        assert_equal(cpu.item(row, "x").struct_field("category").string(), "(-inf, 0]")
+        assert_equal(gpu.item(row, "x").struct_field("category").string(), "(-inf, 0]")
+    print("PASS public partition qcut literal signed-zero breakpoint words")

@@ -73,7 +73,18 @@ def execute(
         scope.synchronize()
     except error:
         scope.synchronize()
+        _ = partials^
+        _ = winner^
+        _ = host^
+        _ = words^
+        _ = validity^
+        _ = errors^
         raise error^
+    # Keep asynchronous fault buffers alive until both observer/publication
+    # boundaries finish, rather than relying on a last enqueue's lifetime.
+    _ = partials^
+    _ = winner^
+    _ = host^
     reservation.release(result_bytes)
     var schema = DataFrame([Series.full_null(name, dtype, 0)])
     var columns: List[Int64] = [0]
