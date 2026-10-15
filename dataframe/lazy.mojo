@@ -1110,6 +1110,15 @@ struct _StreamJob(Job):
                 self.frame = self.frame.clear()
 
 
+def _same_names(a: List[String], b: List[String]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
 def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's results are the same whatever order
     its rows arrive in: the aggregate table's states, and distinct counts,
@@ -2528,9 +2537,9 @@ struct LazyFrame(Copyable):
     ) raises -> Optional[DataFrame]:
         """Semi-join reduction (magic sets) for aggregates built on: when
         a stream's inner or semi joins build on aggregates grouped by the
-        join key, the probe side below the lowest of them runs first, and
-        its distinct keys filter each aggregate's input through a semi
-        join. A group whose key the probe side lacks joins nothing, and a
+        join keys (one or several), the probe side below the lowest of them
+        runs first, and its distinct key tuples filter each aggregate's
+        input through a semi join. A group whose key the probe side lacks joins nothing, and a
         filter on a group key drops whole groups, so every result is
         unchanged. DuckDB decorrelates EXISTS this way, over the outer
         rows' distinct keys (its delim joins); PDS-H q21 counted the
@@ -2541,7 +2550,7 @@ struct LazyFrame(Copyable):
         stream has no such join or no filter narrows its probe side."""
         var joins = List[Int]()
         var aggregates = List[Int]()
-        var key = String()
+        var key = List[String]()
         var probe = top
         var lowest = -1
         var steps = List[Int]()
@@ -2558,23 +2567,28 @@ struct LazyFrame(Copyable):
                 break
             if (
                 (step.how == JOIN_INNER or step.how == JOIN_SEMI)
-                and len(step.names) == 1
-                and (not key.byte_length() or step.names[0] == key)
+                and len(step.names) > 0
+                and (len(key) == 0 or _same_names(step.names, key))
             ):
+                # One aggregate grouped on every right key (PDS-H q20's
+                # shipped quantities per part and supplier).
                 var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                for name in step.right_keys:
+                    if self._grouped_on(step.right, name) != aggregate:
+                        aggregate = -1
                 if aggregate >= 0:
                     # The row-local steps between this join and the one
-                    # above keep the key, so the keys reaching the higher
+                    # above keep the keys, so the keys reaching the higher
                     # join are a subset of those reaching this one (joins
                     # only drop or repeat left rows, keeping their columns).
                     var kept = True
-                    if key.byte_length():
+                    for name in key:
                         for at in steps:
-                            kept = kept and self._keeps_column(at, key)
+                            kept = kept and self._keeps_column(at, name)
                     if kept:
                         joins.append(probe)
                         aggregates.append(aggregate)
-                        key = step.names[0]
+                        key = step.names.copy()
                         lowest = probe
                         steps = List[Int]()
             probe = step.left
@@ -2589,48 +2603,56 @@ struct LazyFrame(Copyable):
             return None
         trace_path("stream.probe_key_reduction")
         var probed = self._execute(below, False, True, batch_size)
-        var keys = probed.select([key]).unique([key])
+        var keys = probed.select(key).unique(key)
         var plan = self.copy()
         plan._frames.append(probed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
         plan._nodes[lowest].left = len(plan._nodes) - 1
         var key_frame = len(plan._frames)
-        var count = keys.height()
-        # Each source column's span, found once: PDS-H q21's two aggregates
-        # read one lineitem column.
+        # Each probe key's distinct values, and each source column's span,
+        # found once: PDS-H q21's two aggregates read one lineitem column.
+        var distinct = List[Int]()
+        for name in key:
+            distinct.append(
+                keys.height() if len(key)
+                == 1 else keys.select([name]).unique([name]).height()
+            )
         var spans = Dict[String, Int]()
         plan._frames.append(keys^)
         plan._schemas.append(Optional[CsvSchema]())
         for k in range(len(joins)):
             var aggregate = aggregates[k]
             var input = plan._nodes[aggregate].left
-            var group_key = plan._nodes[joins[k]].right_keys[0]
-            # The filter pays when it drops most of the groups: the probe
-            # keys are at most half of the values the aggregate's key
-            # column spans (the half rule the pipeline's key ranges keep).
-            # TPC-DS q35's 97K probing customers kept 94% of a year's
-            # store sales, for 16 ms of probes.
-            var source = plan._key_source(input, group_key)
-            if not source or not _range_key(source.value().dtype()):
-                continue
-            var named = group_key + "/" + String(len(source.value()))
-            if named not in spans:
-                var bounds = _int_bounds(source.value())
-                spans[named] = (
-                    Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
-                ) if bounds else 0
-            if 2 * count > spans[named]:
+            var group_keys = plan._nodes[joins[k]].right_keys.copy()
+            # The filter pays when it drops most of the groups: some key's
+            # probe values are at most half of the values the aggregate's
+            # key column spans (the half rule the pipeline's key ranges
+            # keep). TPC-DS q35's 97K probing customers kept 94% of a
+            # year's store sales, for 16 ms of probes.
+            var pays = False
+            for i in range(len(group_keys)):
+                var source = plan._key_source(input, group_keys[i])
+                if not source or not _range_key(source.value().dtype()):
+                    continue
+                var named = group_keys[i] + "/" + String(len(source.value()))
+                if named not in spans:
+                    var bounds = _int_bounds(source.value())
+                    spans[named] = (
+                        Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
+                    ) if bounds else 0
+                pays = pays or 2 * distinct[i] <= spans[named]
+            if not pays:
                 continue
             plan._nodes.append(_plan_node(SCAN_FRAME, offset=key_frame))
             var semi = _plan_node(
                 JOIN,
                 input,
                 len(plan._nodes) - 1,
-                names=[plan._nodes[joins[k]].right_keys[0]],
+                names=group_keys^,
                 text="semi",
                 how=JOIN_SEMI,
-                right_keys=[key],
+                right_keys=key.copy(),
             )
             semi.names2 = ["_right"]
             plan._nodes.append(semi^)
@@ -3010,7 +3032,7 @@ struct LazyFrame(Copyable):
                         supported = supported and not key.dtype().is_nested()
                         sources.append(key.copy())
                     if supported:
-                        prepared = prepare_hash_index(sources)
+                        prepared = prepare_hash_index(sources, probe_rows=bound)
                         if prepared:
                             algorithm = "hash_index"
                 self._record(
@@ -4786,6 +4808,10 @@ struct LazyFrame(Copyable):
         one selecting its original output.
         """
         var original_frames = len(self._frames)
+        var plan_root = len(self._nodes) - 1
+        if self._flatten_join_trees():
+            # New nodes are appended after the root: renumber from it.
+            self._reorder(plan_root)
         var root = len(self._nodes) - 1
         # First choose each chain's first input, then order what joins it.
         var changed = self._probe_largest_inputs(root, streaming, batch_size)
@@ -4814,6 +4840,235 @@ struct LazyFrame(Copyable):
             self._compact_scan_slots()
         if changed:
             self._push_projections()
+
+    def _flatten_join_trees(mut self) raises -> Bool:
+        """Join the tables of an inner join chain nested as a join's right
+        input into the outer chain, from the table that supplies the outer
+        join's keys, as DuckDB's join order optimizer flattens every inner
+        join into one join graph before ordering it. PDS-H q2 joins its
+        brass parts to Europe's suppliers' partsupp rows, written as a
+        region, nation, supplier and partsupp chain: 159K supplier rows
+        were built and gathered to keep 642, where joining the parts' 3K
+        partsupp rows to their suppliers keeps the same 642.
+
+        The nested chain's joins are edges between its tables; starting at
+        the key supplier, each joins once one end is in, its sides swapped
+        where the walk meets it from its right, and its filters follow as
+        soon as their columns are. A selection then restores the join's
+        output: a key column a swapped join dropped is its equal partner
+        (inner join keys match exactly). Only where every column name is
+        unique across both sides, so no join renames one, and the nested
+        chain's base does not already supply the keys. True when a join
+        was rewritten."""
+        var changed = False
+        var root = len(self._nodes) - 1
+        var parents = self._live_parents(root)
+        var count = len(self._nodes)
+        for j in range(count):
+            if parents[j] == -2:
+                continue
+            ref outer = self._nodes[j]
+            if not (_chain_member(outer) and outer.kind == JOIN):
+                continue
+            var spine = List[Int]()
+            var cursor = outer.right
+            while cursor >= 0 and _chain_member(self._nodes[cursor]):
+                spine.append(cursor)
+                cursor = self._nodes[cursor].left
+            if cursor < 0 or len(spine) == 0:
+                continue
+            # Tables: the nested chain's base, then each join's right input.
+            var tables: List[Int] = [cursor]
+            var joins = List[Int]()
+            var filters = List[Int]()
+            for k in range(len(spine)):
+                var i = spine[len(spine) - 1 - k]
+                if self._nodes[i].kind == JOIN:
+                    joins.append(i)
+                    tables.append(self._nodes[i].right)
+                elif self._nodes[i].kind == FILTER:
+                    filters.append(i)
+            if len(joins) == 0:
+                continue
+            var provider = Dict[String, Int]()
+            var unique = True
+            for t in range(len(tables)):
+                for c in self._columns_of(tables[t]):
+                    if c in provider:
+                        unique = False
+                    provider[c] = t
+            for c in self._columns_of(outer.left):
+                if c in provider:
+                    unique = False
+            if not unique:
+                continue
+            # Each nested join's edge: the table its left keys come from.
+            var edge_from = List[Int]()
+            for k in range(len(joins)):
+                var source = -1
+                for name in self._nodes[joins[k]].names:
+                    var t = provider.get(name, -1)
+                    if source == -1:
+                        source = t
+                    elif source != t:
+                        source = -2
+                edge_from.append(source)
+                if source < 0:
+                    unique = False
+            var start = -1
+            for name in outer.right_keys:
+                var t = provider.get(name, -1)
+                if start == -1:
+                    start = t
+                elif start != t:
+                    start = -2
+            if not unique or start <= 0:
+                continue
+            var output = self._columns_of(j)
+            var available = Dict[String, Bool]()
+            for c in self._columns_of(outer.left):
+                available[c] = True
+            # A dropped key column's equal, kept partner.
+            var partner = Dict[String, String]()
+            var placed = List[Bool](length=len(tables), fill=False)
+            var done = List[Bool](length=len(joins), fill=False)
+            var placed_filter = List[Bool](length=len(filters), fill=False)
+            var at = len(self._nodes)
+            var current = outer.left
+            var added = List[PlanNode]()
+
+            def add_table(
+                mut added: List[PlanNode],
+                mut available: Dict[String, Bool],
+                mut current: Int,
+                at: Int,
+                left: Int,
+                table: Int,
+                names: List[String],
+                keys: List[String],
+                columns: List[String],
+            ) raises:
+                var join = _plan_node(
+                    JOIN,
+                    left,
+                    table,
+                    names=names,
+                    text="inner",
+                    how=JOIN_INNER,
+                    right_keys=keys,
+                )
+                join.names2 = ["_right"]
+                added.append(join^)
+                current = at + len(added) - 1
+                for c in columns:
+                    if c not in keys:
+                        available[c] = True
+
+            add_table(
+                added,
+                available,
+                current,
+                at,
+                current,
+                tables[start],
+                outer.names,
+                outer.right_keys,
+                self._columns_of(tables[start]),
+            )
+            for i in range(len(outer.names)):
+                partner[outer.right_keys[i]] = outer.names[i]
+            placed[start] = True
+            var progress = True
+            while progress:
+                progress = False
+                for f in range(len(filters)):
+                    if placed_filter[f]:
+                        continue
+                    var reads = _references(self._nodes[filters[f]].exprs[0])
+                    if not reads:
+                        continue
+                    var ready = True
+                    for name in reads.value():
+                        ready = ready and name in available
+                    if ready:
+                        var filter = self._nodes[filters[f]].copy()
+                        filter.left = current
+                        added.append(filter^)
+                        current = at + len(added) - 1
+                        placed_filter[f] = True
+                        progress = True
+                for k in range(len(joins)):
+                    if done[k]:
+                        continue
+                    ref node = self._nodes[joins[k]]
+                    var left_table = edge_from[k]
+                    var right_table = k + 1
+                    if placed[left_table] == placed[right_table]:
+                        continue
+                    if placed[left_table]:
+                        # As written: the walk reaches it from its left.
+                        add_table(
+                            added,
+                            available,
+                            current,
+                            at,
+                            current,
+                            tables[right_table],
+                            node.names,
+                            node.right_keys,
+                            self._columns_of(tables[right_table]),
+                        )
+                        for i in range(len(node.names)):
+                            partner[node.right_keys[i]] = node.names[i]
+                        placed[right_table] = True
+                    else:
+                        # Swapped: its right keys are present, its left
+                        # table joins; the left key columns it drops equal
+                        # the right ones kept.
+                        add_table(
+                            added,
+                            available,
+                            current,
+                            at,
+                            current,
+                            tables[left_table],
+                            node.right_keys,
+                            node.names,
+                            self._columns_of(tables[left_table]),
+                        )
+                        for i in range(len(node.names)):
+                            partner[node.names[i]] = node.right_keys[i]
+                        placed[left_table] = True
+                    done[k] = True
+                    progress = True
+            var complete = True
+            for k in range(len(joins)):
+                complete = complete and done[k]
+            for f in range(len(filters)):
+                complete = complete and placed_filter[f]
+            var exprs = List[Expr]()
+            for name in output:
+                var source = name
+                var steps = 0
+                while source not in available and source in partner:
+                    source = partner[source]
+                    steps += 1
+                    if steps > len(tables) + 1:
+                        break
+                if source not in available:
+                    complete = False
+                    break
+                exprs.append(
+                    col(source).alias(name) if source != name else col(name)
+                )
+            if not complete:
+                continue
+            trace_path("lazy.flatten_join_tree")
+            for node in added:
+                self._nodes.append(node.copy())
+            self._nodes[j] = _plan_node(SELECT, current, exprs=exprs^)
+            changed = True
+        return changed
 
     def _push_join_key_sets(mut self, streaming: Bool, batch_size: Int) raises:
         """Sideways information passing (DuckDB's join filter pushdown):

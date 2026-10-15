@@ -70,6 +70,7 @@ from .expr import (
 from .indexed_reduce import _canonical_int
 from .huge_pages import huge_list, huge_uninit
 from .parallel import Job, run_jobs
+from .rank import _key
 from .partition import (
     _NULL_KEY,
     _combine as _hash_combine,
@@ -154,6 +155,13 @@ comptime _K_NARROW_SUM = 8
 # A decimal sum or mean: 128-bit total, count; the total is held to the
 # result's precision on every add, as the `Reducer`'s decimal sums are.
 comptime _K_DECIMAL_SUM = 9
+# A group's k first (value, row) pairs by ordinal rank (DuckDB's
+# `arg_max(row, value, k)`, which its TopN window elimination makes of
+# `row_number() OVER (PARTITION BY ... ORDER BY value) <= k`): how many are
+# held, then each pair's order key and row, kept sorted, first best.
+comptime _K_TOP_ROWS = 10
+# The most pairs a group row holds inline: 33 state words, four cache lines.
+comptime TOP_ROWS_INLINE = 16
 
 
 @fieldwise_init
@@ -167,8 +175,13 @@ struct _Slot(Copyable, Movable):
     var floating: Bool
     # The state's type (a decimal sum's result type, for its precision).
     var dtype: DataType
+    # A top-rows state's pair count and direction.
+    var k: Int
+    var descending: Bool
 
     def words(self) -> Int:
+        if self.kind == _K_TOP_ROWS:
+            return 1 + 2 * self.k
         if (
             self.kind == _K_INT_SUM
             or self.kind == _K_MOMENTS
@@ -400,10 +413,12 @@ def _update_states(
     count: Int,
     rows: Pointer[Int, _],
     states_at: Int,
+    first: Int,
 ) raises:
     """Every reduction's states for a batch (`inputs` are the morsel's
     slices, one chunk each; `rows` the addresses of the rows' groups, whose
-    states start at word `states_at`)."""
+    states start at word `states_at`; `first` the source row of the
+    morsel's first)."""
     for s in range(len(slots)):
         ref slot = slots[s]
         var base = 8 * (states_at + slot.offset)
@@ -412,6 +427,24 @@ def _update_states(
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
             continue
         ref part = inputs[s]
+        if slot.kind == _K_TOP_ROWS:
+            var placed = False
+            comptime for t in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[t]
+                if not placed and part._data.isa[Column[Scalar[D]]]():
+                    _update_top_rows[D](
+                        slot,
+                        part._data[Column[Scalar[D]]],
+                        start,
+                        count,
+                        rows,
+                        base,
+                        first,
+                    )
+                    placed = True
+            if not placed:
+                raise Error("aggregate table: unsupported top-rows input")
+            continue
         if slot.kind == _K_DECIMAL_SUM:
             if part._data.isa[Column[Int64]]():
                 _update_decimal[DType.int64](
@@ -443,6 +476,62 @@ def _update_states(
             raise Error("aggregate table: unsupported reduction input")
 
 
+@always_inline
+def _keep_top(
+    state: Pointer[UInt64, MutAnyOrigin], k: Int, key: UInt64, row: UInt64
+):
+    """A (key, row) pair into a top-rows state (count, then pairs sorted
+    first best) when it is among its k first: smaller keys, then earlier
+    rows, come first, as ordinal rank orders them."""
+    var count = Int(state[])
+    if count == k:
+        var last_key = state[unsafe_offset=2 * k - 1]
+        var last_row = state[unsafe_offset=2 * k]
+        if key > last_key or (key == last_key and row > last_row):
+            return
+        count -= 1
+    else:
+        state[] = UInt64(count + 1)
+    var at = count
+    while at > 0:
+        var before_key = state[unsafe_offset=2 * at - 1]
+        var before_row = state[unsafe_offset=2 * at]
+        if before_key < key or (before_key == key and before_row < row):
+            break
+        state[unsafe_offset=2 * at + 1] = before_key
+        state[unsafe_offset=2 * at + 2] = before_row
+        at -= 1
+    state[unsafe_offset=2 * at + 1] = key
+    state[unsafe_offset=2 * at + 2] = row
+
+
+def _update_top_rows[
+    D: DType
+](
+    slot: _Slot,
+    column: Column[Scalar[D]],
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+    first: Int,
+):
+    """A batch's values into their groups' top-rows states; a null value
+    has no rank and is not kept."""
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    for k in range(count):
+        var i = start + k
+        if nulls and not column._valid(i):
+            continue
+        _keep_top(
+            _words_at(rows[unsafe_offset=k] + base),
+            slot.k,
+            _key[D](values[unsafe_offset=i], slot.descending),
+            UInt64(first + i),
+        )
+
+
 def _combine(slots: List[_Slot], into: Int, other: Int) raises:
     """Group row `other`'s states folded into group row `into` (both the
     addresses of their first state word's row)."""
@@ -451,7 +540,19 @@ def _combine(slots: List[_Slot], into: Int, other: Int) raises:
     for s in range(len(slots)):
         var w = slots[s].offset
         var kind = slots[s].kind
-        if kind <= _K_NULLS:
+        if kind == _K_TOP_ROWS:
+            var held = Int(b[unsafe_offset=w])
+            var into_state = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=into + 8 * w
+            )
+            for p in range(held):
+                _keep_top(
+                    into_state,
+                    slots[s].k,
+                    b[unsafe_offset=w + 1 + 2 * p],
+                    b[unsafe_offset=w + 2 + 2 * p],
+                )
+        elif kind <= _K_NULLS:
             a[unsafe_offset=w] += b[unsafe_offset=w]
         elif kind == _K_NARROW_SUM:
             a[unsafe_offset=w] += b[unsafe_offset=w]
@@ -1219,7 +1320,14 @@ def aggregate_layout(
         if kind != _K_LEN and kind != _K_DECIMAL_SUM:
             floating = _numeric_part(inputs[s]).value().dtype().is_float()
         slots.append(
-            _Slot(kind, state_words, floating, templates[s].make(0).dtype)
+            _Slot(
+                kind,
+                state_words,
+                floating,
+                templates[s].make(0).dtype,
+                0,
+                False,
+            )
         )
         state_words += slots[s].words()
     var key_templates = List[Series](capacity=len(keys))
@@ -1556,70 +1664,28 @@ struct AggregateSink(Movable):
                     )
                 w = second + 1
             var kept = len(keep) > 0
-            var keep_at = keep.unsafe_ptr().unsafe_offset(lo) if kept else (
-                keep.unsafe_ptr()
-            )
-            var discard = Int(self.discard.unsafe_ptr())
-            if not self.grow:
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        continue
-                    self.hll.add(hash_ptr[unsafe_offset=k])
-            if 3 * (self.live + count) >= 2 * self.capacity:
-                self._full(count)
-            self.cycle += count
-            if self.skip:
-                var appended = 0
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        group_at[unsafe_offset=k] = discard
-                        continue
-                    appended += 1
-                    group_at[unsafe_offset=k] = self.parts.append(
-                        hash_ptr[unsafe_offset=k],
-                        nulls[unsafe_offset=k],
-                        word_ptrs,
-                        k,
-                        first + lo + k,
-                    )
-                self.made += appended
-                self.live += appended
-                self.skipped += appended
+            # Rows a filter dropped are skipped in their own instantiation,
+            # so a sink without a selection runs the loops it always had.
+            if kept:
+                self._insert[True](
+                    count,
+                    first + lo,
+                    Int(hash_ptr),
+                    Int(nulls),
+                    word_ptrs,
+                    Int(group_at),
+                    Int(keep.unsafe_ptr().unsafe_offset(lo)),
+                )
             else:
-                var mask = self.capacity - 1
-                var table = _words_at(Int(self.entries.unsafe_ptr()))
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        group_at[unsafe_offset=k] = discard
-                        continue
-                    var hash = hash_ptr[unsafe_offset=k]
-                    var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
-                    var slot = Int(hash) & mask
-                    var null = nulls[unsafe_offset=k]
-                    while True:
-                        var entry = table[unsafe_offset=slot]
-                        if entry == 0:
-                            var at = self.parts.append(
-                                hash, null, word_ptrs, k, first + lo + k
-                            )
-                            if self.numbering:
-                                _words_at(
-                                    at + 8 * self.parts.states_at
-                                )[] = UInt64(self.made)
-                                self.representatives.append(first + lo + k)
-                            table[unsafe_offset=slot] = _entry(hash, at)
-                            self.live += 1
-                            self.made += 1
-                            group_at[unsafe_offset=k] = at
-                            break
-                        if (entry & ~_ID_MASK) == salt:
-                            var at = Int(entry & _ID_MASK)
-                            if _words_at(at)[] == hash and _same(
-                                at, self.addressed, word_ptrs, k, null
-                            ):
-                                group_at[unsafe_offset=k] = at
-                                break
-                        slot = (slot + _stride(hash)) & mask
+                self._insert[False](
+                    count,
+                    first + lo,
+                    Int(hash_ptr),
+                    Int(nulls),
+                    word_ptrs,
+                    Int(group_at),
+                    0,
+                )
             if self.numbering:
                 var states_at = 8 * self.parts.states_at
                 var ids = self.row_ids.unsafe_ptr()
@@ -1635,8 +1701,93 @@ struct AggregateSink(Movable):
                 count,
                 group_at,
                 self.parts.states_at,
+                first,
             )
         self.sunk += length
+
+    def _insert[
+        masked: Bool
+    ](
+        mut self,
+        count: Int,
+        row: Int,
+        hashes: Int,
+        nulls: Int,
+        word_ptrs: List[Int],
+        groups: Int,
+        keep: Int,
+    ) raises:
+        """A batch's `count` rows (source rows from `row`) into the table:
+        each row's group address into `groups`. With `masked`, rows whose
+        `keep` flag is off join no group and point at the discarded row."""
+        var hash_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes)
+        var null_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls)
+        var group_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=groups)
+        var keep_at = Pointer[Bool, MutAnyOrigin](unsafe_from_address=keep)
+        var discard = Int(self.discard.unsafe_ptr())
+        if not self.grow:
+            for k in range(count):
+                comptime if masked:
+                    if not keep_at[unsafe_offset=k]:
+                        continue
+                self.hll.add(hash_ptr[unsafe_offset=k])
+        if 3 * (self.live + count) >= 2 * self.capacity:
+            self._full(count)
+        self.cycle += count
+        if self.skip:
+            var appended = 0
+            for k in range(count):
+                comptime if masked:
+                    if not keep_at[unsafe_offset=k]:
+                        group_at[unsafe_offset=k] = discard
+                        continue
+                appended += 1
+                group_at[unsafe_offset=k] = self.parts.append(
+                    hash_ptr[unsafe_offset=k],
+                    null_ptr[unsafe_offset=k],
+                    word_ptrs,
+                    k,
+                    row + k,
+                )
+            self.made += appended
+            self.live += appended
+            self.skipped += appended
+            return
+        var mask = self.capacity - 1
+        var table = _words_at(Int(self.entries.unsafe_ptr()))
+        for k in range(count):
+            comptime if masked:
+                if not keep_at[unsafe_offset=k]:
+                    group_at[unsafe_offset=k] = discard
+                    continue
+            var hash = hash_ptr[unsafe_offset=k]
+            var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
+            var slot = Int(hash) & mask
+            var null = null_ptr[unsafe_offset=k]
+            while True:
+                var entry = table[unsafe_offset=slot]
+                if entry == 0:
+                    var at = self.parts.append(
+                        hash, null, word_ptrs, k, row + k
+                    )
+                    if self.numbering:
+                        _words_at(at + 8 * self.parts.states_at)[] = UInt64(
+                            self.made
+                        )
+                        self.representatives.append(row + k)
+                    table[unsafe_offset=slot] = _entry(hash, at)
+                    self.live += 1
+                    self.made += 1
+                    group_at[unsafe_offset=k] = at
+                    break
+                if (entry & ~_ID_MASK) == salt:
+                    var at = Int(entry & _ID_MASK)
+                    if _words_at(at)[] == hash and _same(
+                        at, self.addressed, word_ptrs, k, null
+                    ):
+                        group_at[unsafe_offset=k] = at
+                        break
+                slot = (slot + _stride(hash)) & mask
 
     def _reinsert(mut self):
         """Every row back into a grown table (growing strategy only, so no
@@ -1776,6 +1927,8 @@ struct _FinishJob(Job):
     var states: List[Reducer]
     var firsts: List[Int]
     var keys: List[Series]
+    # The rows every top-rows state holds.
+    var top_rows: List[Int]
     # The address of the sinks' `_HeldBuffers`.
     var held: Int
 
@@ -1803,6 +1956,7 @@ struct _FinishJob(Job):
         self.states = List[Reducer]()
         self.firsts = List[Int]()
         self.keys = List[Series]()
+        self.top_rows = List[Int]()
 
     def run(mut self) raises:
         ref jobs = Pointer[List[AggregateSink], MutAnyOrigin](
@@ -1907,6 +2061,17 @@ struct _FinishJob(Job):
                 )
             final = ordered^
         for s in range(len(self.templates)):
+            if self.slots[s].kind == _K_TOP_ROWS:
+                var w0 = final.states_at + self.slots[s].offset
+                var words = final.rows.unsafe_ptr()
+                for g in range(final.count()):
+                    var w = g * final.stride + w0
+                    for p in range(Int(words[unsafe_offset=w])):
+                        self.top_rows.append(
+                            Int(words[unsafe_offset=w + 2 + 2 * p])
+                        )
+                self.states.append(self.templates[s].make(0))
+                continue
             self.states.append(_unload(self.slots[s], final, self.templates[s]))
         # Keys scanned out of the stored words (DuckDB's gather from its
         # rows), not gathered from the input.
@@ -2215,6 +2380,7 @@ def aggregate_finish(
         var firsts = List[Int]()
         var states = List[Reducer]()
         var keys_out = List[Series]()
+        result.top_rows.extend(Span(finishes[p].top_rows))
         swap(firsts, finishes[p].firsts)
         swap(states, finishes[p].states)
         swap(keys_out, finishes[p].keys)
@@ -2232,11 +2398,59 @@ struct AggregateResult(Movable):
     var states: List[List[Reducer]]
     # Per partition, its groups' key columns.
     var keys: List[List[Series]]
+    # The rows held by top-rows states, every partition's.
+    var top_rows: List[Int]
 
     def __init__(out self):
         self.firsts = List[List[Int]]()
         self.states = List[List[Reducer]]()
         self.keys = List[List[Series]]()
+        self.top_rows = List[Int]()
+
+
+def aggregate_top_rows(
+    keys: List[Series],
+    value: Series,
+    k: Int,
+    descending: Bool,
+    ranges: List[Int],
+    workers: Int,
+) raises -> List[Int]:
+    """The rows of each group of `keys` whose `value` ranks among its k
+    first by ordinal rank (ties: the earlier row), over the (offset,
+    length) morsels `ranges` on `workers` threads, in no order: each
+    group's row in the table holds its k best (value, row) pairs, merged
+    across workers at the finish (DuckDB's `arg_max(row, value, k)`).
+    `k` is at most `TOP_ROWS_INLINE`; nulls are never kept."""
+    var count_spec = ReducerSpec(
+        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64
+    )
+    var layout = aggregate_layout(keys, [value.copy()], [count_spec^])
+    var dtype = layout.slots[0].dtype
+    layout.slots[0] = _Slot(
+        _K_TOP_ROWS, 0, value.dtype().is_float(), dtype, k, descending
+    )
+    layout.state_words = layout.slots[0].words()
+    var cursor = _Cursor.new()
+    var jobs = List[_SinkJob](capacity=workers)
+    for _ in range(max(1, workers)):
+        jobs.append(
+            _SinkJob(keys, [value.copy()], layout, ranges, cursor, workers)
+        )
+    try:
+        run_jobs(jobs)
+    except e:
+        cursor.free()
+        raise e^
+    cursor.free()
+    var sinks = List[AggregateSink](capacity=len(jobs))
+    while len(jobs) > 0:
+        var job = jobs.pop()
+        sinks.append(job^.take_sink())
+    var result = aggregate_finish(sinks, layout)
+    var rows = List[Int]()
+    swap(rows, result.top_rows)
+    return rows^
 
 
 def table_row_keys(keys: List[Series]) raises -> RowKeys:
