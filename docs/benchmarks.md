@@ -17,7 +17,7 @@ useful going forward, while acknowledging prior exposure.
    a time; they are not evidence of general performance.
 2. **Benchmarks and engine changes go in separate PRs.** A PR that changes
    `dataframe/` must not also add or change a suite,
-   its data generator or queries (`benchmarks/`, `scripts/bench_*`). This
+   its data generator, queries or drivers (anything under `benchmarks/`). This
    stops a fast path and the benchmark that justifies it from arriving together.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
@@ -98,10 +98,10 @@ beside the main checkout, `<checkout>_benchdata` (override with
 pixi run -e native build-dfparquet                                   # once
 
 # After a code change: about two minutes once built.
-pixi run -e oracle python3 scripts/bench_suites.py --baseline main
+pixi run -e oracle python3 benchmarks/tools/bench_suites.py --baseline main
 
 # For a report: hours; run it occasionally, not per change.
-pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
+pixi run -e oracle python3 benchmarks/tools/bench_suites.py --tier full --all-suites
 ```
 
 **Quick** (the default) runs the development suites (H2O at 1M rows, PDS-H at
@@ -128,7 +128,7 @@ driver waits while a compiler runs, records the load average before every
 worker and flags a busy host in the report. It writes raw samples with
 provenance to `build/suites/results.json` and the report beside it, as
 Markdown (`results.md`) and as a self-contained HTML page (`results.html`,
-from `scripts/bench_html.py`) that opens in any browser; `--report-from`
+from `benchmarks/tools/bench_html.py`) that opens in any browser; `--report-from`
 re-renders both from a saved file. Provenance includes engine and benchmark
 working-tree status, local query/generator/runner SHA-256 hashes, the CPU
 frequency governor (a parked thread wakes on a core `schedutil` has clocked
@@ -241,7 +241,7 @@ Regenerate from the current checkout and existing smoke/base benchmark
 data (requires the oracle environment and built Parquet library):
 
 ```bash
-pixi run -e oracle python scripts/query_diagrams.py
+pixi run -e oracle python benchmarks/tools/query_diagrams.py
 ```
 
 The command reads existing data under the usual benchmark data root;
@@ -251,7 +251,7 @@ It records the source fingerprint and saves the captured catalog in
 Mojo or loading benchmark data:
 
 ```bash
-python3 scripts/query_diagrams.py --from-json build/query-plans/plans.json
+python3 benchmarks/tools/query_diagrams.py --from-json build/query-plans/plans.json
 ```
 
 ## Answer checks
@@ -263,17 +263,19 @@ query's result is not unique, only the columns that determine it are
 compared: rows tied at a `LIMIT` boundary may legitimately differ between
 engines, and between runs of one engine, so ClickBench's top-N queries compare
 their `ORDER BY` column; q17, a `LIMIT` without `ORDER BY`, compares the row
-count. `CHECKS` in `scripts/bench_suites.py` lists them.
+count. `CHECKS` in `benchmarks/tools/bench_suites.py` lists them.
 
 ## Mechanism benchmarks
 
 The programs in `benchmarks/` measure one mechanism at a time. Use them to
-develop and calibrate a change, then confirm it on the suites above.
+develop and calibrate a change, then confirm it on the suites above. Their
+Python drivers, the suite driver `bench_suites.py`, its report builders and
+the query diagram generator live in `benchmarks/tools/`.
 
 | Benchmark | What it measures |
 |---|---|
 | `bench_csv`, `bench_numeric_parse`, `bench_cast_parse` | CSV ingestion and text-to-number parsing; the suites load data untimed, so these are the only parsing coverage |
-| `bench_parquet_stream`, `bench_arrow_import` | Parquet reads and Arrow import, with their drivers in `scripts/` |
+| `bench_parquet_stream`, `bench_arrow_import` | Parquet reads and Arrow import, with their drivers in `benchmarks/tools/` |
 
 ## Retired benchmarks
 
@@ -285,7 +287,7 @@ reproduce a historical record in `docs/`.
 | Benchmark | Revision | Why it was retired |
 |---|---|---|
 | `bench_vs_polars.mojo`, `scripts/bench_polars.py` (`bench-polars`) | `b9db9c6` | The old head-to-head; its grouped query was the shape the removed sum-plus-count group-by path matched (#306). The H2O suites replace it. Its data generator moved to `scripts/bench_join_data.py`, retired later (below) |
-| `bench_upstream_joins.mojo`, `scripts/bench_upstream_joins.py`, `scripts/bench_upstream_revision.py` | `b9db9c6` | Hand ports of two DuckDB join micro-benchmarks, one of them the target of the removed count fusion (#304). The H2O join suite and PDS-H replace them. Its compiler guard moved to `scripts/bench_host.py` |
+| `bench_upstream_joins.mojo`, `scripts/bench_upstream_joins.py`, `scripts/bench_upstream_revision.py` | `b9db9c6` | Hand ports of two DuckDB join micro-benchmarks, one of them the target of the removed count fusion (#304). The H2O join suite and PDS-H replace them. Its compiler guard moved to `benchmarks/tools/bench_host.py` |
 | `bench_progression.mojo`, `scripts/bench_progression.py` | `b9db9c6` | Written with the equal-run progression path it measured (#308); only its rejection cases remained meaningful, and the join matrix's `shuffled` layout covered them until it was retired too |
 | `bench_aggregate_fusion.mojo` | `b9db9c6` | Measured the fused Float64 group-by path removed in #319 |
 | `bench_agg_shapes.mojo`, `scripts/bench_agg_shapes_polars.py` | `b9db9c6` | One-off comparison for #319; the H2O group-by suite and its variants cover it |

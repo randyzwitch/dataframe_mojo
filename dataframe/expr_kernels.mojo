@@ -547,10 +547,38 @@ def _validity_bytes(series: Series, n: Int) -> List[UInt8]:
             return _window_bytes(
                 column._bits[], column._offset, len(column), n, 255
             )
+    if series._data.isa[Column[Int128]]():
+        ref wide = series._data[Column[Int128]]
+        return _window_bytes(wide._bits[], wide._offset, len(wide), n, 255)
     if series._data.isa[BoolColumn]():
         ref bools = series._data[BoolColumn]
         return _window_bytes(bools._bits[], bools._offset, len(bools), n, 255)
+    if series._data.isa[StringColumn]():
+        ref text = series._data[StringColumn]
+        return _window_bytes(text._bits[], text._offset, len(text), n, 255)
     return _pack_bits(validity(series))
+
+
+def _null_test[present: Bool](input: Series) -> Series:
+    """IS NOT NULL (present) or IS NULL, read from the validity bitmap a
+    byte at a time, as DuckDB's IsNull reads a vector's validity mask; the
+    result is never null. No decimal widening: only validity is read."""
+    var n = len(input)
+    var count = (n + 7) // 8
+    var values = _validity_bytes(input, n)
+    comptime if not present:
+        for k in range(count):
+            values[k] = ~values[k]
+    if count > 0 and n % 8 != 0:
+        values[count - 1] &= UInt8((1 << (n % 8)) - 1)
+    return Series(
+        "",
+        BoolColumn(
+            values=values^,
+            bits=List[UInt8](length=count, fill=255),
+            length=n,
+        ),
+    )
 
 
 def _keep_nulls_bits(left: Series, right: BoolColumn) raises -> BoolColumn:
@@ -1776,6 +1804,10 @@ def unary[
 ](
     input: Series, integer: Int64, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
+    comptime if op == IS_NULL or op == IS_NOT_NULL:
+        if input.is_chunked():
+            return _null_test[op == IS_NOT_NULL](input.rechunk())
+        return _null_test[op == IS_NOT_NULL](input)
     if input.is_chunked():
         return unary[op, width](input.rechunk(), integer, mask)
     comptime if op == NEG or op == ABS:
@@ -1786,13 +1818,7 @@ def unary[
     else:
         if input.dtype().is_decimal() and input.dtype().decimal_width() != 128:
             return unary[op, width](input._decimal128(), integer, mask)
-    comptime if op == IS_NULL or op == IS_NOT_NULL:
-        var valid = validity(input)
-        var values = List[Bool](capacity=len(valid))
-        for v in valid:
-            values.append(v if op == IS_NOT_NULL else not v)
-        return Series("", BoolColumn(values^))
-    elif op == NOT:
+    comptime if op == NOT:
         return _not_bits(input._data[BoolColumn])
     elif op >= IS_NAN and op <= IS_INFINITE:
         if input._data.isa[Column[Float32]]():

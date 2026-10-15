@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Rule 2 in docs/benchmarks.md: a PR that changes the engine
 # (dataframe/)
-# must not also change what measures it (benchmarks/, scripts/bench_*),
+# must not also change what measures it (benchmarks/, which holds the
+# suites, the mechanism programs and their drivers in benchmarks/tools/),
 # unless a commit explains why in a "Benchmark-Change:" trailer.
 #
 # Usage: scripts/check_benchmark_separation.sh [BASE_REF]   (default origin/main)
@@ -11,7 +12,7 @@ base_ref="${1:-origin/main}"
 base="$(git merge-base "$base_ref" HEAD)"
 changed="$(git diff --name-only "$base" HEAD)"
 engine="$(grep -E '^dataframe/' <<<"$changed" || true)"
-bench="$(grep -E '^(benchmarks/|scripts/bench_)' <<<"$changed" || true)"
+bench="$(grep -E '^benchmarks/' <<<"$changed" || true)"
 if [ -z "$engine" ] || [ -z "$bench" ]; then
     echo "benchmark separation: ok"
     exit 0

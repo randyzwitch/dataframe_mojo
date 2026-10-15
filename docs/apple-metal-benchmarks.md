@@ -1,6 +1,6 @@
 # Measuring Apple Metal development mechanisms
 
-`benchmarks/bench_metal.mojo` and `scripts/bench_metal.py` compare the existing
+`benchmarks/bench_metal.mojo` and `benchmarks/tools/bench_metal.py` compare the existing
 DataFrame CPU executor with the Mojo Metal backend on the same Mac.
 These are development mechanisms, not an external suite or evidence of general
 performance. `chain32` deliberately measures fusion across lazy projection
@@ -9,13 +9,13 @@ stages; its ratio includes the current CPU executor's per-stage overhead.
 Run from an Apple Silicon checkout:
 
 ```sh
-pixi run python3 scripts/bench_metal.py
+pixi run python3 benchmarks/tools/bench_metal.py
 ```
 
 The driver builds one optimized Mojo binary. For a quick correctness check:
 
 ```sh
-pixi run python3 scripts/bench_metal.py --rows 4097 --reps 2 --rounds 1
+pixi run python3 benchmarks/tools/bench_metal.py --rows 4097 --reps 2 --rounds 1
 ```
 
 Optional `--baseline-binary /path/to/older/bench-metal` compares separately
@@ -54,7 +54,7 @@ it and complete process stdout in a sibling directory. Re-render without
 rerunning measurements:
 
 ```sh
-python3 scripts/bench_metal.py --report-from build/metal/results.json
+python3 benchmarks/tools/bench_metal.py --report-from build/metal/results.json
 ```
 
 Provider profile timings come from an additional warm collection after the timed

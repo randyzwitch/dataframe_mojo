@@ -1493,14 +1493,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_scalar_string_membership_broadcast_preserves_nonnull_literal_validity",
-            "Public literal String is_in(column candidate) returns6 unexpected nulls of7; KEEP_NULLS nonnumeric validity fallback packs only one bit rather than broadcasting source validity.",
-            "scalar string membership must broadcast valid literal state",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_equality_api.mojo::test_structural_equals_ignores_children_hidden_by_a_null_struct_parent",
             "Two one-row null Struct parents, physically valid Int64 children123/-456. Same schema; self-equalityTrue and null_equalFalseFalse controls pass. Public equals must ignore hidden payload per semantics.md79ff but returnsFalse. Own precise error isolates assertion; unrelated failures propagate.",
             "Structural equality compared child payload hidden by a null struct parent",

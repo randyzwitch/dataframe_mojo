@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def generate(directory, left_rows, right_rows, seed, variant):

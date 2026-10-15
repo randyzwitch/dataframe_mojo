@@ -10,7 +10,7 @@ import sys
 import tarfile
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "build/parquet-stream"
 REV = "b2013a55ae9c19ce447e2a37f692e7a394eeaa9a"
 

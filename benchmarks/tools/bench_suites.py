@@ -6,11 +6,11 @@ build-dfparquet):
 
     # A code change, in minutes: development suites at 1M rows, this build
     # against main, Polars/DuckDB from the reference cache.
-    pixi run -e oracle python3 scripts/bench_suites.py --baseline main
+    pixi run -e oracle python3 benchmarks/tools/bench_suites.py --baseline main
 
     # A report: 10M rows, three rounds, fast-path coverage, development and
     # held-out suites (TPC-DS and ClickBench).
-    pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
+    pixi run -e oracle python3 benchmarks/tools/bench_suites.py --tier full --all-suites
 
 One worker process per (suite, variant, engine, round) loads the tables once
 (untimed), then warms up and times --reps runs of each query; the per-round
@@ -34,10 +34,10 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SUITES_DIR = ROOT / "benchmarks" / "suites"
 sys.path.insert(0, str(SUITES_DIR))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_html  # noqa: E402
 import bench_policy  # noqa: E402
@@ -557,9 +557,9 @@ def provenance(args):
                     "status",
                     "--porcelain",
                     "benchmarks/suites",
-                    "scripts/bench_suites.py",
-                    "scripts/bench_html.py",
-                    "scripts/bench_policy.py",
+                    "benchmarks/tools/bench_suites.py",
+                    "benchmarks/tools/bench_html.py",
+                    "benchmarks/tools/bench_policy.py",
                 ]
             )
         ),
