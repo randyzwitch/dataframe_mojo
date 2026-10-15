@@ -1988,7 +1988,7 @@ struct DataFrame(Copyable, Sized, Writable):
         # a left of more than one worker's rows (65,536), which sent a left
         # of 65K to 131K rows to the dictionary route below: on a 2M-row
         # right, 125K left rows took 114 ms there against 44 ms here.
-        var build_left = prefer_left_build(self.height(), right.height())
+        var build_left = _left_builds(self, right)
         if how == JOIN_INNER or how == JOIN_LEFT:
             var left_sources = List[Series](capacity=len(left_keys))
             var right_sources = List[Series](capacity=len(right_keys))
@@ -4169,6 +4169,19 @@ struct _RangeIndexBuildJob(Job):
                         self.unique_keys = False
                     next_rows[j] = heads[slot]
                     heads[slot] = j
+
+
+def _left_builds(left: DataFrame, right: DataFrame) -> Bool:
+    """Whether a join builds its hash table on the left input: DuckDB's
+    build side (`BuildProbeSideOptimizer`), the input of fewer rows times
+    columns, the right on a tie, as the lazy planner chooses it. A left of
+    747 rows against a right of 159K (PDS-H q2) built the right before."""
+    var left_rows = left.height()
+    if left_rows == 0 or left_rows > Int(Int32.MAX):
+        return False
+    return left_rows * max(left.width(), 1) < right.height() * max(
+        right.width(), 1
+    )
 
 
 def _bounded_int64_join_rows(
