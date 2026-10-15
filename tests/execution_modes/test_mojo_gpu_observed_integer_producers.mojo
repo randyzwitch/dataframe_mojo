@@ -1,6 +1,6 @@
 """Checked producers must finish before downstream consumers can hide faults."""
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, Series, col, lit
+from dataframe import Column, DataFrame, Expr, Series, col, lit
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.joins import (
@@ -81,16 +81,11 @@ def test_mojo_gpu_observed_unused_integer_overflow_before_consumers() raises:
         for power_first in [False, True]:
             var overflow = (col("v") + lit(Int64(1))).alias("overflow")
             var power = col("v").pow(lit(Int64(-1))).alias("power")
-            var ordered = (
-                source.lazy()
-                .with_columns(
-                    [power.copy(), overflow.copy()] if power_first else [
-                        overflow.copy(),
-                        power.copy(),
-                    ]
-                )
-                .head(0)
-            )
+            var expressions: List[Expr] = [
+                power.copy(),
+                overflow.copy(),
+            ] if power_first else [overflow.copy(), power.copy()]
+            var ordered = source.lazy().with_columns(expressions).head(0)
             with assert_raises(
                 contains="nonnegative exponent" if power_first else "overflow"
             ):
