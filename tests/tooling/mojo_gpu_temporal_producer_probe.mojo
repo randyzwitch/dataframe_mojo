@@ -53,7 +53,7 @@ def main() raises:
             _ = failing.collect(accelerator=runtime)
     # The verified optimizer bridge moves this leading head before the
     # checked row producer, so the gap in the second source row is unseen.
-    var optimized = checked.head(1).select("z")
+    var optimized = checked.head(1).select(col("z"))
     var optimized_expected = DataFrame(
         [Series("z", Column[Int64]([18000000000])).with_dtype(ny)]
     )
