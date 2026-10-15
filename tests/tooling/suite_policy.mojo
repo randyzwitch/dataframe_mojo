@@ -61,6 +61,8 @@ def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo::test_integer_candidate_scan_preserves_deferred_cut_controls",
+            "mojo_gpu",
             "tests/execution_modes/test_mojo_gpu_float_stream_public.mojo::test_public_float_stream_collected_density_preserves_generic_gpu_behavior_and_budget",
             "metal",
         )
@@ -3281,6 +3283,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",

@@ -7,6 +7,7 @@ may materialize intermediate frames; the provider reports those boundaries.
 from .metadata import prune_projections, schema_frame
 from .selectors import _live_nodes
 from .qcuts import is_qcut_marker, controls as qcut_controls
+from .cuts import has_cut_materializations
 from .capabilities import RowCapabilities
 from .rows import lower_rows
 from .explodes import schema as explode_schema
@@ -29,6 +30,8 @@ from dataframe.lazy import (
 from dataframe.series import Series
 from dataframe.expr import (
     is_reduction,
+    is_window,
+    OVER,
     ADD,
     SUB,
     MUL,
@@ -109,6 +112,16 @@ def _integer_producer(query: LazyFrame, index: Int) raises -> Bool:
     ref operation = query._nodes[index]
     if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
         return False
+    # Reject infallible consumers before executing ancestor metadata. CUT/QCUT
+    # control failures are deferred until their observed operand completes.
+    var possible = False
+    for expression in operation.exprs:
+        for node in expression._nodes:
+            if is_reduction(node.op) or is_window(node.op) or node.op == OVER:
+                return False
+            possible |= node.op in [ADD, SUB, MUL, NEG, ABS, FLOORDIV, POW]
+    if not possible:
+        return False
     var schema = schema_frame(query, operation.left)
     var checked = False
     for expression in operation.exprs:
@@ -130,7 +143,17 @@ def _checked_group(query: LazyFrame, index: Int) raises -> Bool:
     ref operation = query._nodes[index]
     if operation.kind != AGG:
         return False
+    var possible = False
+    for expression in operation.exprs:
+        possible |= (
+            len(expression._nodes) > 0
+            and expression._nodes[len(expression._nodes) - 1].op == SUM
+        )
+    if not possible:
+        return False
     var schema = schema_frame(query, operation.left)
+    # Match lower_rows' checked-SUM families. Widened narrow integer sums
+    # already have an exact accumulator and retain their fused consumer region.
     for expression in operation.exprs:
         var bound = bind(expression, schema._columns)
         var last = len(bound.expr._nodes) - 1
@@ -138,6 +161,19 @@ def _checked_group(query: LazyFrame, index: Int) raises -> Bool:
             last >= 0
             and bound.expr._nodes[last].op == SUM
             and bound.dtypes[last].is_integer()
+            and (
+                bound.dtypes[last] == DataType.INT32
+                or bound.dtypes[last] == DataType.UINT32
+                or (
+                    not bound.dtypes[bound.expr._nodes[last].left].is_decimal()
+                    and (
+                        bound.dtypes[bound.expr._nodes[last].left].physical()
+                        == DataType.INT64
+                        or bound.dtypes[bound.expr._nodes[last].left]
+                        == DataType.UINT64
+                    )
+                )
+            )
         ):
             return True
     return False
@@ -850,9 +886,16 @@ def lower_join_dag(
         not query._accelerator_settings
         or query._accelerator_settings.value().optimize
     )
-    if optimize and (
-        has_decimal_consumers(query) or has_checked_integer_consumers(query)
+    if (
+        optimize
+        and not has_cut_materializations(projected)
+        and (
+            has_decimal_consumers(query) or has_checked_integer_consumers(query)
+        )
     ):
+        # Lowered CUT/QCUT markers are eager observation boundaries even when
+        # their private operand AST is row-local. A later head cannot cross
+        # them; their normalizer already preserves CPU expression order.
         projected._push_slices()
     prune_projections(projected)
     _mark_decimal_producers(projected)
