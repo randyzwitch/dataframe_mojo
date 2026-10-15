@@ -271,8 +271,7 @@ def _row_program[
         if op == COL:
             var at = c * Int(stride) + row
             value = words[unsafe_offset=at]
-            if dtype == 12:
-                high = words[unsafe_offset=Int(stride) * Int(slots) + at]
+            high = words[unsafe_offset=Int(stride) * Int(slots) + at]
             present = validity[unsafe_offset=at] != 0
             error = errors[unsafe_offset=at]
         elif op == ROW_SLICE:
@@ -842,9 +841,9 @@ def _row_program[
             if active or replacement or cpu_kernel_ignores_mask:
                 certified_error = ordered_faults.merge(certified_error, error)
         values[unsafe_offset=node] = value if present else UInt64(0)
-        highs[unsafe_offset=node] = high if present and dtype == 12 else UInt64(
-            0
-        )
+        highs[unsafe_offset=node] = high if present and (
+            dtype == 12 or dtype == 9
+        ) else UInt64(0)
         valid[unsafe_offset=node] = UInt8(present)
         failed[unsafe_offset=node] = error
     comptime if certificate:

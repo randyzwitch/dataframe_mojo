@@ -128,6 +128,8 @@ def _gpu(query: LazyFrame) raises -> DataFrame:
                     UInt32(rows),
                     UInt32(rows),
                     UInt32(width),
+                    UInt32(0),
+                    dl.unsafe_ptr(),
                     grid_dim=blocks,
                     block_dim=256,
                 )

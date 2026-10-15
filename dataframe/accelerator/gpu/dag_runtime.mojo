@@ -11,6 +11,7 @@ from std.sys import size_of
 from std.memory import ArcPointer, Pointer
 from dataframe.accelerator.code_domains import TextQuery, TextField
 from .residency import TextDomain, TextColumn
+from dataframe.accelerator.code_domains import TextField
 from .text_domains import union_domain, source_maps, MapPlan, ColumnMap
 from .text_programs import recode_region
 from dataframe import Column, DataFrame, DataType, Series
@@ -223,6 +224,7 @@ def execute(
             task.kind == DAG_ROWS
             and task.source < 0
             and len(task.query._nodes) == 1
+            and (not text_context or index != dag.root)
         ):
             # Share original immutable scan buffers; no data evaluation or
             # device staging occurs until the first computed consumer.
@@ -312,6 +314,7 @@ def execute(
         var executed: Tuple[Table, DataFrame]
         var target_domain = Optional[ArcPointer[TextDomain]]()
         var join_maps = Optional[MapPlan]()
+        var join_source_text = List[TextField]()
         if base_domain:
             var input_fields = 0
             if task.source >= 0 and values[task.source]:
@@ -379,6 +382,39 @@ def execute(
                     )
                 )
                 join_maps = MapPlan(target_domain.value(), columns)
+                for side in range(2):
+                    var schema = right.copy() if side else left.copy()
+                    var fields = (
+                        right_node.text_fields.copy() if side else left_node.text_fields.copy()
+                    )
+                    for field in fields:
+                        for column in range(schema.width()):
+                            if schema._columns[column].name() == field.name:
+                                var renamed = field.copy()
+                                renamed.name = String(
+                                    column + (left.width() if side else 0)
+                                )
+                                var resident = (
+                                    values[task.right]
+                                    .copy() if side else values[task.source]
+                                    .copy()
+                                )
+                                if resident:
+                                    for at in range(
+                                        resident.value().schema.width()
+                                    ):
+                                        if (
+                                            resident.value()
+                                            .schema._columns[at]
+                                            .name()
+                                            == field.name
+                                        ):
+                                            renamed.category = (
+                                                resident.value()
+                                                .categories[at]
+                                                .copy()
+                                            )
+                                join_source_text.append(renamed^)
         if task.kind == DAG_EXPLODE:
             if not nested[task.source]:
                 raise Error("Resident EXPLODE source owner has been released")
@@ -433,6 +469,7 @@ def execute(
                 right_resident=values[task.right],
                 export_values=not (observation_only and index == dag.root),
                 text_remap=join_maps^,
+                source_text=join_source_text,
             )
             if not task.terminal:
                 executed[0].observe_errors()
@@ -447,6 +484,7 @@ def execute(
                 right_resident=values[task.right],
                 export_values=not (observation_only and index == dag.root),
                 text_remap=join_maps^,
+                source_text=join_source_text,
             )
         else:
             var resident = Optional[Table]()
@@ -513,8 +551,17 @@ def execute(
                     var domains = List[Optional[DataType]](
                         capacity=executed[0].schema.width()
                     )
-                    for field in executed[0].text:
-                        if field:
+                    for column in range(len(executed[0].text)):
+                        var field = executed[0].text[column].copy()
+                        if executed[0].categories[column]:
+                            domains.append(
+                                executed[0]
+                                .categories[column]
+                                .value()
+                                .owner[]
+                                .dtype
+                            )
+                        elif field:
                             domains.append(field.value().domain[].dtype)
                         else:
                             domains.append(None)
@@ -526,12 +573,7 @@ def execute(
             for column in result._columns:
                 host_result_bytes = rows._checked_add(
                     host_result_bytes,
-                    rows._checked_add(
-                        rows._checked_mul(
-                            result.height(), rows._width(column.dtype())
-                        ),
-                        (result.height() + 7) // 8,
-                    ),
+                    rows._host_column_bytes(column),
                 )
         query_host_result_bytes = (
             host_result_bytes if index == dag.root else query_host_result_bytes

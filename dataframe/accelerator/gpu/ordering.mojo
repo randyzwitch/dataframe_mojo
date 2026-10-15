@@ -9,6 +9,7 @@ from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer
 from . import floating, decimal
 from .rows import unsigned_type
+from dataframe.accelerator.rows import ROW_GROUP_KEY
 
 
 @always_inline
@@ -55,6 +56,9 @@ def order_less(
     keys: UInt32,
     stride: UInt32,
     slots: UInt32 = 0,
+    literals: Pointer[UInt64, ImmutAnyOrigin] = Pointer[UInt64, ImmutAnyOrigin](
+        unsafe_from_address=0
+    ),
 ) -> Bool:
     for key in range(Int(keys)):
         var node = Int(start) + key
@@ -63,7 +67,7 @@ def order_less(
         var bi = base + Int(b)
         var av = validity[unsafe_offset=ai] != 0
         var bv = validity[unsafe_offset=bi] != 0
-        var nulls_last = code[unsafe_offset=4 * node + 3] != 0
+        var nulls_last = (code[unsafe_offset=4 * node + 3] & 1) != 0
         if av != bv:
             return av if nulls_last else not av
         if not av:
@@ -71,6 +75,29 @@ def order_less(
         var aw = words[unsafe_offset=ai]
         var bw = words[unsafe_offset=bi]
         var dtype = types[unsafe_offset=node]
+        if code[unsafe_offset=4 * node] != ROW_GROUP_KEY and (
+            code[unsafe_offset=4 * node + 3] & 2
+        ):
+            var high_base = Int(stride) * Int(slots)
+            var offset = Int(literals[unsafe_offset=node])
+            aw = literals[
+                unsafe_offset=offset
+                + Int(words[unsafe_offset=high_base + ai] - 1)
+            ]
+            bw = literals[
+                unsafe_offset=offset
+                + Int(words[unsafe_offset=high_base + bi] - 1)
+            ]
+        if (
+            code[unsafe_offset=4 * node] == ROW_GROUP_KEY
+            and code[unsafe_offset=4 * node + 3] == 2
+        ):
+            var high_base = Int(stride) * Int(slots)
+            var ah = words[unsafe_offset=high_base + ai]
+            var bh = words[unsafe_offset=high_base + bi]
+            if ah != bh:
+                return ah < bh
+            continue
         if dtype == 12:
             var high_base = Int(stride) * Int(slots)
             var ah = words[unsafe_offset=high_base + ai]
@@ -122,6 +149,9 @@ def order_merge(
     stride: UInt32,
     run_width: UInt32,
     slots: UInt32 = 0,
+    literals: Pointer[UInt64, ImmutAnyOrigin] = Pointer[UInt64, ImmutAnyOrigin](
+        unsafe_from_address=0
+    ),
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -149,6 +179,7 @@ def order_merge(
             keys,
             stride,
             slots,
+            literals,
         ):
             lo = mid + 1
         else:

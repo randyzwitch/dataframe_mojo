@@ -163,6 +163,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             UInt32(capacity),
             UInt32(width),
             UInt32(0),
+            dl.unsafe_ptr(),
             grid_dim=blocks,
             block_dim=256,
         )
