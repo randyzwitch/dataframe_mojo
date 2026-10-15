@@ -76,7 +76,10 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
         )
         var projected = _collect(
             expanded.select_exprs(
-                [col("k").alias("key"), (col("items") + lit(1)).alias("next")]
+                [
+                    col("k").alias("key"),
+                    (col("items") + lit(Int64(1))).alias("next"),
+                ]
             ).head(3)
         )
         assert_equal(projected.column("next").int64().to_list(), [11, 31, 21])
