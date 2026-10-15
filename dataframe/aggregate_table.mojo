@@ -1556,70 +1556,28 @@ struct AggregateSink(Movable):
                     )
                 w = second + 1
             var kept = len(keep) > 0
-            var keep_at = keep.unsafe_ptr().unsafe_offset(lo) if kept else (
-                keep.unsafe_ptr()
-            )
-            var discard = Int(self.discard.unsafe_ptr())
-            if not self.grow:
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        continue
-                    self.hll.add(hash_ptr[unsafe_offset=k])
-            if 3 * (self.live + count) >= 2 * self.capacity:
-                self._full(count)
-            self.cycle += count
-            if self.skip:
-                var appended = 0
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        group_at[unsafe_offset=k] = discard
-                        continue
-                    appended += 1
-                    group_at[unsafe_offset=k] = self.parts.append(
-                        hash_ptr[unsafe_offset=k],
-                        nulls[unsafe_offset=k],
-                        word_ptrs,
-                        k,
-                        first + lo + k,
-                    )
-                self.made += appended
-                self.live += appended
-                self.skipped += appended
+            # Rows a filter dropped are skipped in their own instantiation,
+            # so a sink without a selection runs the loops it always had.
+            if kept:
+                self._insert[True](
+                    count,
+                    first + lo,
+                    Int(hash_ptr),
+                    Int(nulls),
+                    word_ptrs,
+                    Int(group_at),
+                    Int(keep.unsafe_ptr().unsafe_offset(lo)),
+                )
             else:
-                var mask = self.capacity - 1
-                var table = _words_at(Int(self.entries.unsafe_ptr()))
-                for k in range(count):
-                    if kept and not keep_at[unsafe_offset=k]:
-                        group_at[unsafe_offset=k] = discard
-                        continue
-                    var hash = hash_ptr[unsafe_offset=k]
-                    var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
-                    var slot = Int(hash) & mask
-                    var null = nulls[unsafe_offset=k]
-                    while True:
-                        var entry = table[unsafe_offset=slot]
-                        if entry == 0:
-                            var at = self.parts.append(
-                                hash, null, word_ptrs, k, first + lo + k
-                            )
-                            if self.numbering:
-                                _words_at(
-                                    at + 8 * self.parts.states_at
-                                )[] = UInt64(self.made)
-                                self.representatives.append(first + lo + k)
-                            table[unsafe_offset=slot] = _entry(hash, at)
-                            self.live += 1
-                            self.made += 1
-                            group_at[unsafe_offset=k] = at
-                            break
-                        if (entry & ~_ID_MASK) == salt:
-                            var at = Int(entry & _ID_MASK)
-                            if _words_at(at)[] == hash and _same(
-                                at, self.addressed, word_ptrs, k, null
-                            ):
-                                group_at[unsafe_offset=k] = at
-                                break
-                        slot = (slot + _stride(hash)) & mask
+                self._insert[False](
+                    count,
+                    first + lo,
+                    Int(hash_ptr),
+                    Int(nulls),
+                    word_ptrs,
+                    Int(group_at),
+                    0,
+                )
             if self.numbering:
                 var states_at = 8 * self.parts.states_at
                 var ids = self.row_ids.unsafe_ptr()
@@ -1637,6 +1595,90 @@ struct AggregateSink(Movable):
                 self.parts.states_at,
             )
         self.sunk += length
+
+    def _insert[
+        masked: Bool
+    ](
+        mut self,
+        count: Int,
+        row: Int,
+        hashes: Int,
+        nulls: Int,
+        word_ptrs: List[Int],
+        groups: Int,
+        keep: Int,
+    ) raises:
+        """A batch's `count` rows (source rows from `row`) into the table:
+        each row's group address into `groups`. With `masked`, rows whose
+        `keep` flag is off join no group and point at the discarded row."""
+        var hash_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes)
+        var null_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls)
+        var group_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=groups)
+        var keep_at = Pointer[Bool, MutAnyOrigin](unsafe_from_address=keep)
+        var discard = Int(self.discard.unsafe_ptr())
+        if not self.grow:
+            for k in range(count):
+                comptime if masked:
+                    if not keep_at[unsafe_offset=k]:
+                        continue
+                self.hll.add(hash_ptr[unsafe_offset=k])
+        if 3 * (self.live + count) >= 2 * self.capacity:
+            self._full(count)
+        self.cycle += count
+        if self.skip:
+            var appended = 0
+            for k in range(count):
+                comptime if masked:
+                    if not keep_at[unsafe_offset=k]:
+                        group_at[unsafe_offset=k] = discard
+                        continue
+                appended += 1
+                group_at[unsafe_offset=k] = self.parts.append(
+                    hash_ptr[unsafe_offset=k],
+                    null_ptr[unsafe_offset=k],
+                    word_ptrs,
+                    k,
+                    row + k,
+                )
+            self.made += appended
+            self.live += appended
+            self.skipped += appended
+            return
+        var mask = self.capacity - 1
+        var table = _words_at(Int(self.entries.unsafe_ptr()))
+        for k in range(count):
+            comptime if masked:
+                if not keep_at[unsafe_offset=k]:
+                    group_at[unsafe_offset=k] = discard
+                    continue
+            var hash = hash_ptr[unsafe_offset=k]
+            var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
+            var slot = Int(hash) & mask
+            var null = null_ptr[unsafe_offset=k]
+            while True:
+                var entry = table[unsafe_offset=slot]
+                if entry == 0:
+                    var at = self.parts.append(
+                        hash, null, word_ptrs, k, row + k
+                    )
+                    if self.numbering:
+                        _words_at(at + 8 * self.parts.states_at)[] = UInt64(
+                            self.made
+                        )
+                        self.representatives.append(row + k)
+                    table[unsafe_offset=slot] = _entry(hash, at)
+                    self.live += 1
+                    self.made += 1
+                    group_at[unsafe_offset=k] = at
+                    break
+                if (entry & ~_ID_MASK) == salt:
+                    var at = Int(entry & _ID_MASK)
+                    if _words_at(at)[] == hash and _same(
+                        at, self.addressed, word_ptrs, k, null
+                    ):
+                        group_at[unsafe_offset=k] = at
+                        break
+                slot = (slot + _stride(hash)) & mask
 
     def _reinsert(mut self):
         """Every row back into a grown table (growing strategy only, so no
