@@ -3,7 +3,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-spec = importlib.util.spec_from_file_location("cost_driver", Path(__file__).resolve().parents[2] / "scripts/bench_accelerator_cost.py")
+spec = importlib.util.spec_from_file_location("cost_driver", Path(__file__).resolve().parents[2] / "benchmarks/tools/bench_accelerator_cost.py")
 driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(driver)
 

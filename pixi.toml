@@ -78,7 +78,7 @@ python = ">=3.11"
 pyproj = ">=3.5,<4"
 
 [feature.oracle.tasks]
-bench-suites = "python3 scripts/bench_suites.py"
+bench-suites = "python3 benchmarks/tools/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]
 duckdb = ">=1.5.5, <2"

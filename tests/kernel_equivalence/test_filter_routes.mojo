@@ -1,7 +1,11 @@
 """Actual numeric conjunction, sorted-window and selective filter contracts."""
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col, lit, concat
-from dataframe.fused_compare import fused_comparisons, fused_mask
+from dataframe.fused_compare import (
+    fused_comparisons,
+    fused_mask,
+    selection_tree,
+)
 from dataframe.sorted_range import sorted_window
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
@@ -170,6 +174,78 @@ def test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_c
                 )
                 output += 1
             assert_equal(actual.height(), output)
+    _ = setting^
+
+
+def test_selection_trees_narrow_kept_rows_with_and_or_comparisons_and_null_tests() raises:
+    # After a selective first part, later parts made of AND/OR comparisons
+    # and null tests read the source columns at the kept rows. Columns are
+    # sliced so validity bitmaps start mid-byte, and nulls sit in every
+    # column the trees read.
+    var setting = WorkerSetting(4)
+    var n = 131073
+    var quantities = List[Int64]()
+    var quantity_valid = List[Bool]()
+    var prices = List[Float64]()
+    var price_valid = List[Bool]()
+    var codes = List[Int32]()
+    var code_valid = List[Bool]()
+    for row in range(n + 7):
+        quantities.append(Int64(row % 100))
+        quantity_valid.append(row % 13 != 2)
+        prices.append(Float64(row % 40))
+        price_valid.append(row % 9 != 4)
+        codes.append(Int32(row % 97))
+        code_valid.append(row % 11 != 5)
+    var frame = DataFrame(
+        [
+            Series("q", Column[Int64](quantities^, quantity_valid^)).slice(
+                7, n
+            ),
+            Series("a", Column[Float64](prices^, price_valid^)).slice(7, n),
+            Series("b", Column[Int32](codes^, code_valid^)).slice(7, n),
+        ]
+    )
+    var band = (
+        (col("a") >= lit(Float64(10))) & (col("a") <= lit(Float64(20)))
+        | (col("b") > lit(Int32(90)))
+        | col("a").is_null()
+    )
+    for selective in [True, False]:
+        var limit = 5 if selective else 90
+        var parts: List[Expr] = [
+            col("q") < lit(Int64(limit)),
+            band.copy(),
+            col("b").is_not_null(),
+        ]
+        var columns = frame._columns.copy()
+        assert_true(Bool(selection_tree(parts[1], columns)))
+        assert_true(Bool(selection_tree(parts[2], columns)))
+        assert_true(not selection_tree(col("a") > col("b"), columns))
+        var mask = frame._selective_mask(parts, 1025)
+        var actual = frame._filter_selective(parts, 1025, frame.columns())
+        var output = 0
+        for row in range(n):
+            var p = row + 7
+            var a_valid = p % 9 != 4
+            var b_valid = p % 11 != 5
+            var a = p % 40
+            var b = p % 97
+            var keep = (
+                p % 13 != 2
+                and p % 100 < limit
+                and (
+                    (a_valid and a >= 10 and a <= 20)
+                    or (b_valid and b > 90)
+                    or not a_valid
+                )
+                and b_valid
+            )
+            assert_equal(mask._get(row), keep)
+            if keep:
+                assert_equal(actual.item(output, "q").int64(), Int64(p % 100))
+                output += 1
+        assert_equal(actual.height(), output)
     _ = setting^
 
 
