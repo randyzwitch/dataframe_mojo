@@ -19,7 +19,12 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
-from .fused_compare import fused_comparisons, fused_mask
+from .fused_compare import (
+    SelectionTree,
+    fused_comparisons,
+    fused_mask,
+    selection_tree,
+)
 from .sorted_range import sorted_window
 from .expr import (
     decode_name,
@@ -2758,6 +2763,9 @@ struct DataFrame(Copyable, Sized, Writable):
 
         Parts comparing a numeric column with a constant go first, all of
         them in one pass (`fused_comparisons`), as if they were one part.
+        When every part still to run is an AND/OR of such comparisons and
+        null tests (`selection_tree`), those parts read the source columns
+        at the kept rows instead of a gathered copy.
         """
         var fused = fused_comparisons(self._columns, self._height, parts)
         var order = List[Int]()
@@ -2806,6 +2814,20 @@ struct DataFrame(Copyable, Sized, Writable):
                 for i in range(len(kept)):
                     kept[i] = rows[kept[i]]
             if k < len(order):
+                # Later parts made of comparisons and null tests narrow the
+                # kept rows in place, reading the source columns at those
+                # rows (DuckDB's selection vectors): nothing is gathered.
+                var trees = List[SelectionTree]()
+                for j in range(k, len(order)):
+                    var tree = selection_tree(parts[order[j]], self._columns)
+                    if not tree:
+                        break
+                    trees.append(tree.take())
+                if len(trees) == len(order) - k:
+                    trace_path("filter.selection_tree")
+                    for t in range(len(trees)):
+                        kept = trees[t].select(kept)
+                    return _rows_mask(kept, self._height)
                 # Only the columns later parts read are carried forward.
                 var names = List[String]()
                 for j in range(k, len(order)):

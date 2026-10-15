@@ -153,7 +153,7 @@ jobs:
           SUITES: ${{ matrix.suites }}
         run: >-
           python3 scripts/ci_time.py --label query-answers --budget-seconds 900 --
-          pixi run -e oracle python3 scripts/bench_suites.py
+          pixi run -e oracle python3 benchmarks/tools/bench_suites.py
           --suites "$SUITES" --scale smoke --correctness-only
           --engines mojo,duckdb --threads 4
       - name: Upload query answers

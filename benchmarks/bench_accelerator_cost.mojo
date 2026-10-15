@@ -1,4 +1,4 @@
-"""Provider-neutral generated calibration runner; scripts/bench_accelerator_cost.py.
+"""Provider-neutral generated calibration runner; benchmarks/tools/bench_accelerator_cost.py.
 
 Inputs and parity checks are untimed. Timings include complete materialization;
 cold observations add explicit runtime initialization. No input values are read

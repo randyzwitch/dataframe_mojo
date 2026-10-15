@@ -1,6 +1,6 @@
 """Build a local Mermaid explorer from benchmark LazyFrame.explain() output.
 
-Run with pixi run -e oracle python scripts/query_diagrams.py. Uses existing
+Run with pixi run -e oracle python benchmarks/tools/query_diagrams.py. Uses existing
 smoke/base data only; never generates data or runs timed benchmarks. PDS-H
 q11/q22 execute their scalar subqueries while constructing their final plans.
 """
@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks" / "suites"))
 from datagen import data_root, PDSH_TABLES, TPCDS_TABLES
 
@@ -139,7 +139,7 @@ def build_catalog(work, root):
     (work / "clickbench_plan.mojo").write_text(click)
     binary = work / "query_plans"
     subprocess.run([mojo, "build", "-I", str(ROOT), "-I", str(ROOT / "benchmarks/suites"),
-                    "-I", str(work), str(ROOT / "scripts/query_plans.mojo"),
+                    "-I", str(work), str(ROOT / "benchmarks/tools/query_plans.mojo"),
                     "-o", str(binary)], check=True, cwd=ROOT)
     catalog = {}
     for suite, numbers in SUITES.items():
@@ -192,7 +192,7 @@ def main():
                    "revision": subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                    "dirty": bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True))}
         (work / 'plans.json').write_text(json.dumps(payload, indent=2) + '\n')
-    template = (ROOT / 'scripts/query_diagrams.html').read_text()
+    template = (ROOT / 'benchmarks/tools/query_diagrams.html').read_text()
     data = json.dumps(payload).replace('<', '\\u003c').replace('&', '\\u0026')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     vendor = ROOT / 'docs/vendor'
