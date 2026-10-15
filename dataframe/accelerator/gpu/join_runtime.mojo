@@ -22,6 +22,9 @@ from .runtime import (
 )
 from .residency import Scope, Matrix, Table
 from .text_domains import MapPlan, Submission, submit as submit_text
+from dataframe.accelerator.code_domains import TextField
+from .runtime import _stage_category_column
+from . import category_keys
 from . import joins as j
 
 
@@ -152,10 +155,12 @@ def execute_plan(
     right_resident: Optional[Table] = None,
     export_values: Bool = True,
     var text_remap: Optional[MapPlan] = None,
+    source_text: List[TextField] = List[TextField](),
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
     var text_submission = Optional[Submission]()
+    var category_submission = category_keys.Submission(task)
     var layout = preflight(
         task,
         left,
@@ -236,6 +241,16 @@ def execute_plan(
                     words,
                     validity,
                 )
+            if not resident:
+                for field in source_text:
+                    if field.name == String(column):
+                        _stage_category_column(
+                            field,
+                            len(source),
+                            Int(layout.columns[column * j.COLUMN_WORDS]),
+                            words,
+                        )
+                        break
             column += 1
     var ctx = scope.context()
     # Host staging and layout owners survive every failed submission.
@@ -332,6 +347,18 @@ def execute_plan(
                 device_validity,
                 device_errors,
                 layout.capacity,
+            )
+        if text_submission:
+            category_submission.prepare(
+                scope,
+                task,
+                source_text,
+                text_submission.value().host.target,
+                layout.columns,
+                device_words,
+                device_validity,
+                False,
+                peak,
             )
         ctx.enqueue_copy(device_columns, layout.columns.unsafe_ptr())
         ctx.enqueue_copy(device_keys, layout.keys.unsafe_ptr())
@@ -508,6 +535,7 @@ def execute_plan(
             _checked_add(typed, materialization_scratch),
         )
         peak = _checked_add(peak, resident_workspace)
+        peak = _checked_add(peak, category_submission.bytes())
         _ = scope.check(peak)
         var result_words = ctx.enqueue_create_buffer[DType.uint64](
             2 * output_cells
@@ -520,6 +548,9 @@ def execute_plan(
         )
         var waits = 1
         if rows:
+            category_submission.enqueue(
+                scope, device_words, device_validity, True
+            )
             ctx.enqueue_function[j.join_gather](
                 device_words.unsafe_ptr(),
                 device_validity.unsafe_ptr(),
@@ -564,6 +595,36 @@ def execute_plan(
             output_slots^,
             rows,
         )
+        category_submission.attach(result)
+        if left_resident:
+            result.category_leases.extend(
+                left_resident.value().category_leases.copy()
+            )
+        if right_resident:
+            result.category_leases.extend(
+                right_resident.value().category_leases.copy()
+            )
+        # Non-key fields and ASOF outputs retain their exact source owner.
+        for output in range(len(task.fields)):
+            if result.categories[output]:
+                continue
+            ref field = task.fields[output]
+            var source = (
+                field.right if field.prefer_right
+                or field.left < 0 else field.left
+            )
+            for metadata in source_text:
+                if metadata.name == String(source):
+                    if (
+                        metadata.category
+                        and metadata.category.value().string_codes
+                        and task.how == 3
+                        and field.left >= 0
+                        and field.right >= 0
+                    ):
+                        break
+                    result.categories[output] = metadata.category.copy()
+                    break
         scope.record_launches(launches)
         var traffic = scope.transfers()
         launches = traffic[2] - before[2]
@@ -642,10 +703,12 @@ def execute_plan(
         _ = errors^
         _ = layout^
         _ = text_submission^
+        _ = category_submission^
         return (result^, report_frame^)
     except error:
         scope.synchronize()
         _ = text_submission^
+        _ = category_submission^
         _ = words^
         _ = validity^
         _ = errors^

@@ -61,7 +61,10 @@ def group_equal(
         var bv = validity[unsafe_offset=bi] != 0
         if av != bv:
             return False
-        if av and types[unsafe_offset=node] == 12:
+        if av and (
+            types[unsafe_offset=node] == 12
+            or code[unsafe_offset=node * 4 + 3] == 2
+        ):
             var high_base = Int(stride) * Int(slots)
             if (
                 words[unsafe_offset=high_base + ai]
@@ -211,6 +214,8 @@ def _partition_key(
     """
     var word = words[unsafe_offset=source]
     if descriptor & (UInt64(1) << 63):
+        if descriptor & (UInt64(1) << 61):
+            return words[unsafe_offset=cells + source] - 1
         return key_values[
             unsafe_offset=Int(descriptor & ((UInt64(1) << 62) - 1)) + Int(word)
         ]

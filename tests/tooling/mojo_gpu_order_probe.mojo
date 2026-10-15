@@ -1,6 +1,6 @@
 """Real-device stable sort against independent typed scalar reference order."""
 from max.gpu.host import DeviceContext
-from std.memory import bitcast
+from std.memory import bitcast, Pointer
 from std.testing import assert_equal
 from dataframe.accelerator.rows import ROW_SORT_KEY
 from dataframe.accelerator.gpu.ordering import (
@@ -162,6 +162,8 @@ def _case(kind: Int, n: Int, descending: Bool, nulls_last: Bool) raises:
             UInt32(n),
             UInt32(capacity),
             UInt32(width),
+            UInt32(0),
+            Pointer[UInt64, ImmutAnyOrigin](unsafe_from_address=0),
             grid_dim=blocks,
             block_dim=256,
         )

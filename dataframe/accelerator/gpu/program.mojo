@@ -16,6 +16,7 @@ from dataframe.expr import (
 )
 from dataframe.accelerator.rows import RowPlan, ROW_IANA_ZONE_FIELDS
 from . import decimal_descriptors, statistics, quantiles
+from .residency import Table, Scope, checked_mul
 
 
 def kind(dtype: DataType) raises -> Int64:
@@ -52,7 +53,12 @@ struct Program(Movable):
     var has_statistics: Bool
     var has_quantiles: Bool
 
-    def __init__(out self, plan: RowPlan) raises:
+    def __init__(
+        out self,
+        plan: RowPlan,
+        resident: Optional[Table] = None,
+        scope: Optional[Scope] = None,
+    ) raises:
         self.code = plan.code.copy()
         self.ordered_ranks = plan.ordered_ranks.copy()
         self.literals = List[UInt64](
@@ -92,6 +98,42 @@ struct Program(Movable):
                 self.code[4 * node + 2] += Int64(ordinary_literals)
         for word in plan.zone_words:
             self.literals.append(word)
+        for descriptor in plan.category_sorts:
+            var node = descriptor[0]
+            var slot = descriptor[1]
+            var dtype = descriptor[2]
+            if resident and slot < plan.source.width():
+                var name = plan.source._columns[slot].name()
+                for column in range(resident.value().schema.width()):
+                    if (
+                        resident.value().schema._columns[column].name() == name
+                        and resident.value().categories[column]
+                    ):
+                        dtype = (
+                            resident.value()
+                            .categories[column]
+                            .value()
+                            .owner[]
+                            .dtype
+                        )
+            var dictionary = dtype.dictionary()
+            var entries = len(dictionary[])
+            if scope:
+                _ = scope.value().check(checked_mul(entries, 32))
+            var order = List[Int](capacity=entries)
+            for entry in range(entries):
+                order.append(entry)
+
+            def less(a: Int, b: Int) {imm dictionary} -> Bool:
+                return dictionary[].get(a) < dictionary[].get(b)
+
+            sort(order, less)
+            var ranks = List[UInt64](length=entries, fill=0)
+            for position in range(entries):
+                ranks[order[position]] = UInt64(position)
+            self.code[node * 4 + 3] |= 2
+            self.literals[node] = UInt64(len(self.literals))
+            self.literals.extend(ranks^)
 
         if plan.reductions:
             for output in plan.outputs:

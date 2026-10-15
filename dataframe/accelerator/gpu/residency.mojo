@@ -15,6 +15,7 @@ from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.accelerator.code_domains import (
     TextField,
+    CategoryField,
     dictionary_bytes,
     same_dictionary,
     text_less,
@@ -352,6 +353,19 @@ struct TextColumn(Copyable):
     var domain: ArcPointer[TextDomain]
 
 
+struct CategoryLease(Movable):
+    var scope: Scope
+    var retained: Int
+
+    def __init__(out self, scope: Scope, bytes: Int) raises:
+        scope._retain(bytes)
+        self.scope = scope.copy()
+        self.retained = bytes
+
+    def __deinit__(deinit self):
+        self.scope._release(self.retained)
+
+
 struct Table(Copyable):
     var storage: Optional[ArcPointer[Matrix]]
     var identity_storage: Optional[ArcPointer[_Identity]]
@@ -360,6 +374,8 @@ struct Table(Copyable):
     var rows: Int
     var offset: Int
     var text: List[Optional[TextColumn]]
+    var categories: List[Optional[CategoryField]]
+    var category_leases: List[ArcPointer[CategoryLease]]
 
     def __init__(
         out self,
@@ -389,8 +405,13 @@ struct Table(Copyable):
         self.rows = rows
         self.offset = offset
         self.text = List[Optional[TextColumn]](capacity=self.schema.width())
+        self.categories = List[Optional[CategoryField]](
+            capacity=self.schema.width()
+        )
+        self.category_leases = List[ArcPointer[CategoryLease]]()
         for _ in range(self.schema.width()):
             self.text.append(None)
+            self.categories.append(None)
 
     def __init__(out self, var schema: DataFrame) raises:
         if schema.height() != 0:
@@ -404,8 +425,13 @@ struct Table(Copyable):
         self.rows = 0
         self.offset = 0
         self.text = List[Optional[TextColumn]](capacity=self.schema.width())
+        self.categories = List[Optional[CategoryField]](
+            capacity=self.schema.width()
+        )
+        self.category_leases = List[ArcPointer[CategoryLease]]()
         for _ in range(self.schema.width()):
             self.text.append(None)
+            self.categories.append(None)
 
     @staticmethod
     def empty(var schema: DataFrame) raises -> Self:
@@ -477,6 +503,15 @@ struct Table(Copyable):
                     "Private text field does not have UInt32 transport storage"
                 )
             self.text[index] = TextColumn(field.dtype, domain.copy())
+            if not self.categories[index]:
+                self.categories[index] = field.category.copy()
+
+    def attach_categories(mut self, fields: List[TextField]):
+        """Certify exact categorical identity; UInt32 alone proves nothing."""
+        for field in fields:
+            for index in range(self.schema.width()):
+                if self.schema._columns[index].name() == field.name:
+                    self.categories[index] = field.category.copy()
 
     def _text_bytes(self) -> Int:
         var total = 0
@@ -504,7 +539,17 @@ struct Table(Copyable):
         )
         # Domains are already charged exactly once by their scoped Arc owner.
         # This per-table report includes each retained dictionary once.
-        return payload + self._text_bytes()
+        var categories = 0
+        for index in range(len(self.category_leases)):
+            var owner = self.category_leases[index]
+            var duplicate = False
+            for before in range(index):
+                duplicate |= Int(
+                    Pointer(to=self.category_leases[before][])
+                ) == Int(Pointer(to=owner[]))
+            if not duplicate:
+                categories += owner[].retained
+        return payload + self._text_bytes() + categories
 
     def same_storage(self, other: Self) -> Bool:
         if self.identity_storage and other.identity_storage:
@@ -769,7 +814,10 @@ struct Table(Copyable):
                 [
                     self.columns[column],
                     Int64(target_start + target),
-                    Int64(dtype.is_decimal() and dtype.decimal_width() == 128),
+                    Int64(
+                        (dtype.is_decimal() and dtype.decimal_width() == 128)
+                        or Bool(self.categories[column])
+                    ),
                 ]
             )
         _ = scope.check(checked_mul(len(descriptors), 16))
