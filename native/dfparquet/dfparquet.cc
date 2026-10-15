@@ -1,12 +1,11 @@
 // dfparquet: a minimal C ABI over Arrow C++'s Parquet reader.
 //
-// dfq_read_parquet_stream decodes one selected row group per stream batch.
-// The legacy dfq_read_parquet still exports one combined batch for existing
-// ABI consumers, and dfq_row_group_statistics
-// exports the footer's per-row-group statistics as a record batch, so a
-// caller can decide which row groups a filter needs before decoding any.
-// Both export through the Arrow C Data Interface. Only the dfq_* symbols
-// are visible; Arrow and its bundled codecs are linked in statically.
+// dfq_read_parquet_stream decodes one selected row group per stream batch,
+// and dfq_row_group_statistics exports the footer's per-row-group statistics
+// as a record batch, so a caller can decide which row groups a filter needs
+// before decoding any. Both export through the Arrow C Data Interface.
+// Only the dfq_* symbols are visible; Arrow and its bundled codecs are
+// linked in statically.
 //
 // Column types the caller cannot hold are coerced on the way out:
 // dictionary columns are decoded to their value type, float16 widens to
@@ -354,54 +353,8 @@ bool IsBinaryLike(const arrow::DataType& type) {
 
 extern "C" {
 
-// Returns 0 and fills out_array/out_schema (caller releases both through
-// their release callbacks). Otherwise returns 1 and *error_out holds a
-// message to free with dfq_free.
-//
-// n_columns == 0 reads every column. n_row_groups < 0 reads every row
-// group; n_row_groups == 0 reads none and returns an empty batch that still
-// carries the schema.
-int dfq_read_parquet(const char* path, int use_threads, const char** columns,
-                     int n_columns, const int* row_groups, int n_row_groups,
-                     struct ArrowArray* out_array, struct ArrowSchema* out_schema,
-                     char** error_out) {
-  *error_out = nullptr;
-  std::unique_ptr<parquet::arrow::FileReader> reader;
-  arrow::Status status = Open(path, use_threads != 0, &reader);
-  if (!status.ok()) return fail(status, error_out);
-
-  std::vector<int> leaves;
-  if (n_columns > 0) {
-    auto result = LeafIndices(*reader, columns, n_columns);
-    if (!result.ok()) return fail(result.status(), error_out);
-    leaves = *result;
-  }
-
-  std::vector<int> groups;
-  if (n_row_groups < 0) {
-    for (int g = 0; g < reader->num_row_groups(); ++g) groups.push_back(g);
-  } else {
-    for (int i = 0; i < n_row_groups; ++i) {
-      if (row_groups[i] < 0 || row_groups[i] >= reader->num_row_groups()) {
-        return fail(arrow::Status::IndexError("row group ", row_groups[i],
-                                              " is out of range"),
-                    error_out);
-      }
-      groups.push_back(row_groups[i]);
-    }
-  }
-
-  auto table = n_columns > 0 ? reader->ReadRowGroups(groups, leaves)
-                             : reader->ReadRowGroups(groups);
-  if (!table.ok()) return fail(table.status(), error_out);
-  auto batch = (*table)->CombineChunksToBatch();
-  if (!batch.ok()) return fail(batch.status(), error_out);
-  auto coerced = CoerceBatch(*batch);
-  if (!coerced.ok()) return fail(coerced.status(), error_out);
-  status = arrow::ExportRecordBatch(**coerced, out_array, out_schema);
-  if (!status.ok()) return fail(status, error_out);
-  return 0;
-}
+// Entry points that take error_out return 0 on success. Otherwise they
+// return 1 and *error_out holds a message to free with dfq_free.
 
 // Export an Arrow C stream, one batch per selected row group. The caller
 // releases every array/schema and the stream, including on early termination.

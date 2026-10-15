@@ -47,6 +47,8 @@ from dataframe.accelerator.source_lists import has_source_lists
 from dataframe.accelerator.source_structs import has_source_structs
 from dataframe.accelerator.joins import has_join, has_scalar_consumers
 from dataframe.accelerator.explodes import has_explode
+from dataframe.accelerator.grouped_lists import has_grouped_implode
+from dataframe.accelerator.grouped_feeds import has_checked_grouped_feeds
 from dataframe.accelerator.lists import (
     has_implode,
     has_implode_materializations,
@@ -59,6 +61,12 @@ def _normalized(query: LazyFrame) raises -> LazyFrame:
     # Match MetalRuntime._run's shared, metadata-only normalization sequence.
     if has_explode(query):
         raise Error("Mojo scoped List expansion has no analytical calibration")
+    if has_grouped_implode(query) or has_checked_grouped_feeds(
+        query, eager_feed=True
+    ):
+        raise Error(
+            "Mojo grouped List/key/feed staging has no analytical calibration"
+        )
     if has_implode(query) or has_implode_materializations(query):
         raise Error(
             "Mojo private IMPLODE regions have no analytical calibration"

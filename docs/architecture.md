@@ -36,30 +36,21 @@ See [expression semantics](expressions.md) for the broadcasting, ordering, and
 reduction contracts that deliberately leave room for parallelism and SIMD.
 No universal dataframe trait or foreign-backend abstraction is imposed.
 
-## Next milestones, with CPU performance central
+## Current state
 
-1. **Measurements and copies:** benchmark representative expressions, scans,
-   grouping, joins, and sorting across row counts/null densities. (Immutable
-   shared buffers with zero-copy windows are done.) Measure allocations and peak
-   memory, not just kernel throughput.
-2. **Fusion and SIMD:** fuse compatible elementwise nodes within a batch, release
-   dead intermediates, share subexpressions, load contiguous SIMD vectors directly,
-   and optimize validity handling. Add vector overflow detection for Int64 kernels.
-3. **Parallel execution:** (reductions, row-wise expressions, and filter
-   compaction are done: contiguous row partitions on POSIX threads via
-   `parallel.mojo`, merged in partition order.) Hash grouping with
-   worker-local mappings remains. Apply `maintain_order` as an explicit requirement rather
-   than an accidental default. Validate against scalar and partitioned oracles.
-4. **Planning:** add a lazy relational plan using the same expressions, predicate
-   and projection pushdown, multi-aggregate scans, and an explicit logical-type
-   representation. Keep runtime schemas supported.
-5. **Storage and interchange:** (contiguous UTF-8 strings, bit-packed
-   Booleans, and Arrow C Data import/export are done.) Chunked arrays and
-   zero-copy import that retains foreign buffers remain.
-6. **Broader operations and input:** additional expressions/reductions, multiple
-   and numeric grouping/join keys, casts, multi-column sorting, and CSV input.
-   Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
-   until a Mojo-native reader exists; `dataframe/io/parquet.mojo` is the seam.
+The milestones this page used to list are in place: lazy plans with
+predicate, projection, and slice pushdown ([lazy queries](lazy.md)); parallel
+hash grouping, joins, and sorts on worker threads, with `maintain_order` as an
+explicit request; chunked columns and Arrow C Data import and export
+([Arrow interchange](arrow.md)); CSV and Parquet input ([CSV](csv.md),
+[Parquet](parquet.md)); and multi-column sorts with multiple numeric or string
+grouping and join keys. Performance work is measured query by query against
+Polars and DuckDB on external suites; see [benchmarks](benchmarks.md).
 
-GPU execution, distributed execution, arbitrary Python-object columns, pandas
-index compatibility, and cross-engine adapters remain outside the initial scope.
+Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
+until a Mojo-native reader exists; `dataframe/io/parquet.mojo` is the seam.
+
+Optional GPU execution on Apple silicon is covered in
+[Apple Metal](apple-metal.md). Distributed execution, arbitrary Python-object
+columns, pandas index compatibility, and cross-engine adapters are outside the
+scope.

@@ -60,7 +60,7 @@ includes the following operations and their valid compositions:
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
 | Struct fields | Direct source Struct projection over fixed-width primitive children, parent/child validity and field metadata; terminal `as_struct` over primitive fields |
-| Lists | Direct source `len`/constant-index `get`, terminal primitive `implode`, source `explode` with resident primitive consumers |
+| Lists | Direct source `len`/constant-index `get`, terminal primitive `implode`, direct keyed grouped primitive `implode`, source `explode` with resident primitive consumers |
 
 Float64 values retain their exact storage words. Arithmetic uses paired-word
 integer IEEE emulation because Apple GPUs lack native binary64 arithmetic.
@@ -119,6 +119,13 @@ labels remain distinct codes. Temporary join dictionaries do not replace the
 output's original dictionary. Coded String grouping follows decoded byte
 equality and publishes ordinary String values; numeric UInt32 columns retain
 numeric semantics.
+
+Direct keyed aggregation can produce primitive Lists alongside independent
+primitive reductions, followed by direct outputs, List `len`/constant-index
+`get`, or slices. The route preserves original key domains, child validity,
+input order and supported checked-expression fault order. General composed
+List consumers and uncertified parallel reduction associations remain outside
+this route.
 
 ## Residency, errors and memory
 
@@ -261,7 +268,7 @@ are not deployable calibration. See [benchmark rules](benchmarks.md) and
 ## Remaining CPU coverage
 
 Migrating the existing Metal implementation does not establish complete CPU
-query parity. Grouped mode/value counts and grouped/nested implode,
+query parity. Grouped mode/value counts and nested implode,
 IANA-zone duration windows, row-valued text parsing/formatting, remaining timezone
 operations, nested List/Struct operations, broader source Struct consumers,
 computed/grouped List expansion and unnest remain outside this accelerator
