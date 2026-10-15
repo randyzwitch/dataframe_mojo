@@ -436,6 +436,7 @@ def build(
                 UInt32(matrix[].capacity),
                 UInt32(width),
                 UInt32(matrix[].slots),
+                d_literals.unsafe_ptr(),
                 grid_dim=block_count,
                 block_dim=256,
             )
