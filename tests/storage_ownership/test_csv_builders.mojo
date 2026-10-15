@@ -1,7 +1,7 @@
 """Decoder scratch and reusable builders cannot mutate completed owned output."""
 from std.testing import assert_equal, assert_true
 from dataframe import CsvField, DataType, Series
-from dataframe.csv_buffers import CsvBuffer
+from dataframe.io.csv_buffers import CsvBuffer
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES
 
 

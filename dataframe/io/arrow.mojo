@@ -30,21 +30,21 @@ Pointers in the C structs are held as `Int` addresses: C pointer fields are
 nullable and Mojo `Pointer`s are not.
 """
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
-from .bool_column import BoolColumn
-from .column import Column, _copy_bits, _copy_validity
+from ..bool_column import BoolColumn
+from ..column import Column, _copy_bits, _copy_validity
 from std.collections import Dict
-from .categorical import encode
-from .geometry import from_wkb
-from .field_metadata import _append_metadata, _has_extension_name
-from .geospatial_metadata import apply_geoparquet_metadata
-from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
-from .hashing import encode_string_rows_parallel
-from .frame import DataFrame
-from .parallel import Job, Pool, worker_count
+from ..categorical import encode
+from ..geometry import from_wkb
+from ..field_metadata import _append_metadata, _has_extension_name
+from ..geospatial_metadata import apply_geoparquet_metadata
+from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
+from ..hashing import encode_string_rows_parallel
+from ..frame import DataFrame
+from ..parallel import Job, Pool, worker_count
 from std.sys import CompilationTarget
-from .nested_column import ListColumn, StructColumn
-from .series import Series
-from .string_column import StringBuilder, StringColumn
+from ..nested_column import ListColumn, StructColumn
+from ..series import Series
+from ..string_column import StringBuilder, StringColumn
 
 
 struct ArrowSchema(Movable):

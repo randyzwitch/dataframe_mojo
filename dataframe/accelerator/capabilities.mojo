@@ -61,6 +61,7 @@ struct RowCapabilities(Copyable):
     var slices: Bool
     var scalar_regions: Bool
     var asof_joins: Bool
+    var primitive_list_explode: Bool
     var temporal_fields: Bool
     var temporal_binary_arithmetic: Bool
     var temporal_physical_casts: Bool
@@ -135,6 +136,7 @@ struct RowCapabilities(Copyable):
         slices: Bool = False,
         scalar_regions: Bool = False,
         asof_joins: Bool = False,
+        primitive_list_explode: Bool = False,
         temporal_fields: Bool = False,
         temporal_binary_arithmetic: Bool = False,
         temporal_physical_casts: Bool = False,
@@ -205,6 +207,7 @@ struct RowCapabilities(Copyable):
         self.slices = slices
         self.scalar_regions = scalar_regions
         self.asof_joins = asof_joins
+        self.primitive_list_explode = primitive_list_explode
         self.temporal_fields = temporal_fields
         self.temporal_binary_arithmetic = temporal_binary_arithmetic
         self.temporal_physical_casts = temporal_physical_casts

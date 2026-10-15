@@ -49,7 +49,7 @@ from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 
-from .parallel import Job, Pool, run_jobs
+from ..parallel import Job, Pool, run_jobs
 from .arrow import (
     ArrowArray,
     ArrowSchema,
@@ -62,7 +62,7 @@ from .arrow import (
     _release_imported,
     _set_metadata,
 )
-from .expr import (
+from ..expr import (
     AND,
     COL,
     EQ,
@@ -78,13 +78,13 @@ from .expr import (
     Node,
     col,
 )
-from .frame import DataFrame, concat
-from .geospatial_metadata import geoparquet_metadata
-from .categorical import decode_contiguous
-from .column import Column
-from .dtype import DataType
-from .series import Series
-from .string_column import StringCodes, StringColumn
+from ..frame import DataFrame, concat
+from ..geospatial_metadata import geoparquet_metadata
+from ..categorical import decode_contiguous
+from ..column import Column
+from ..dtype import DataType
+from ..series import Series
+from ..string_column import StringCodes, StringColumn
 
 comptime PARQUET_LIBRARY_ENV = "DATAFRAME_PARQUET_LIBRARY"
 

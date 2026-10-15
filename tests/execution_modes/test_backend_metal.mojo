@@ -17,7 +17,7 @@ from dataframe import (
     col,
     import_arrow_series,
 )
-from dataframe.arrow import export_arrow_series
+from dataframe.io.arrow import export_arrow_series
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime, metal_installed
 from tests.support.lifecycle_stream import array_release, schema_release

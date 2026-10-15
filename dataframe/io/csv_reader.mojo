@@ -20,10 +20,10 @@ from .csv_types import (
 from .csv_decode import decode_chunk
 from .csv_scan import CountLines, chunk_size
 from .csv_splitfields import CsvSplitFields
-from .frame import DataFrame, concat
-from .expr import Expr
-from .series import Series
-from .parallel import Job, Pool, _ProducedJobs, configured_workers
+from ..frame import DataFrame, concat
+from ..expr import Expr
+from ..series import Series
+from ..parallel import Job, Pool, _ProducedJobs, configured_workers
 
 
 struct _ReadContext(Movable):

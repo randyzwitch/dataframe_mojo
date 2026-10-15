@@ -238,7 +238,7 @@ struct RowPlan(Movable):
     # Shared immutable ranks avoid a second host payload during Program prep.
     var ordered_ranks: ArcPointer[List[UInt32]]
     # 0 legacy flags, 1 private CUT scalar, 2 direct terminal ROWS projections,
-    # 3 certified private IMPLODE ROWS producer.
+    # 3 certified private IMPLODE ROWS producer, 4 observed Decimal producer.
     var ordered_mode: Int
     var source_text: List[TextField]
     var output_text: List[TextField]
@@ -501,30 +501,8 @@ def _program(
             or capabilities.decimal_multiplicative
             and (op == MUL or op == DIV)
         )
-        # The device computes decimal sums, differences and products in
-        # 128 bits at the larger input scale, and decimal quotients. The
-        # CPU gives DuckDB's types: a sum or difference at the larger scale
-        # (the same values; the device runs it when the type is 128 bits),
-        # an exact product at the scales added (the same when one side has
-        # scale 0), a quotient as DOUBLE (never on the device).
-        if left_type.is_decimal() and (
-            op == ADD or op == SUB or op == MUL or op == DIV
-        ):
-            var result = bound.dtypes[i]
-            var same_type = (
-                op != DIV
-                and result.is_decimal()
-                and result.decimal_width() == 128
-                and (
-                    op != MUL or min(left_type.scale(), right_type.scale()) == 0
-                )
-            )
-            if not same_type:
-                capabilities.reject(
-                    "logical",
-                    "decimal arithmetic at its exact result type requires"
-                    " CPU execution",
-                )
+        # Decimal arithmetic descriptors preserve the exact bound result
+        # precision, scale and physical output width (Float64 for DIV).
         if (
             temporal
             and left_type.is_datetime()
@@ -1224,6 +1202,21 @@ def lower_rows(
         ordered_terminal &= needs_order
         if ordered_terminal:
             ordered_mode = 2
+        var ordered_decimal = node.text == "metal_decimal_materialization"
+        if ordered_decimal:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or (node.kind != SELECT and node.kind != WITH_COLUMNS)
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != "metal_decimal_materialization"
+            ):
+                capabilities.reject(
+                    "ordered decimal", "invalid observed producer"
+                )
+            ordered_mode = 4
+        var decimal_expression = 0
         var ordered_private = implode_ordered.tagged(node)
         if ordered_private:
             if (
@@ -1246,9 +1239,18 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if ordered_decimal:
+                if not ordered_rows.eligible(bound) or node.names2[
+                    1 + decimal_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "ordered decimal",
+                        "producer AST or logical metadata changed",
+                    )
+                decimal_expression += 1
             if ordered_private:
                 implode_ordered.validate(node, bound)
-            if ordered_terminal or ordered_private:
+            if ordered_terminal or ordered_private or ordered_decimal:
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
                 )
@@ -1341,7 +1343,7 @@ def lower_rows(
                         "temporal",
                         "prototype requires a direct scan and terminal projections without head (SELECT only)",
                     )
-                if ordered_terminal or ordered_private:
+                if ordered_terminal or ordered_private or ordered_decimal:
                     temporal_expressions.validate_pairs(bound)
                 else:
                     temporal_expressions.validate(bound)
@@ -1488,25 +1490,6 @@ def lower_rows(
                         "plan",
                         "checked decimal arithmetic requires terminal projections without head",
                     )
-                if (
-                    capabilities.decimal_multiplicative
-                    and part.op == MUL
-                    and bound.dtypes[part_index].is_decimal()
-                ):
-                    var left = bound.dtypes[part.left]
-                    var right = bound.dtypes[part.right]
-                    var scale = max(left.scale(), right.scale())
-                    # CPU's nullable/masked multiplication checks unused
-                    # rescaling that its dense fast path skips. Require a
-                    # proof so results cannot depend on those paths.
-                    if not (
-                        _decimal_scale_safe(left, scale)
-                        and _decimal_scale_safe(right, scale)
-                    ):
-                        capabilities.reject(
-                            "plan",
-                            "decimal multiplication with different scales requires a static rescaling proof",
-                        )
                 if (
                     is_comparison(part.op)
                     and part.left >= 0
@@ -2393,11 +2376,16 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
-            if ordered_terminal or ordered_private:
+            if ordered_terminal or ordered_private or ordered_decimal:
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
                 ordered_ranks.extend(expression_ranks.copy())
-            if ordered_scalar or ordered_terminal or ordered_private:
+            if (
+                ordered_scalar
+                or ordered_terminal
+                or ordered_private
+                or ordered_decimal
+            ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
                 while len(ordered_ranks) < len(literals):
@@ -2687,7 +2675,7 @@ def lower_rows(
             "ordered implode",
             "requires one fresh private output and preserved inputs",
         )
-    if ordered_mode == 2 or ordered_mode == 3:
+    if ordered_mode == 2 or ordered_mode == 3 or ordered_mode == 4:
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(
                 "ordered rows", "invalid occurrence descriptor geometry"

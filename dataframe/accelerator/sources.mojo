@@ -2,7 +2,7 @@
 from .memory import checked_add, checked_mul
 from .metadata import prune_projections
 from .source_compaction import compact_source
-from dataframe.csv import CsvSchema
+from dataframe.io.csv import CsvSchema
 from dataframe.bool_column import BoolColumn
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame

@@ -34,9 +34,9 @@ from std.time import perf_counter_ns
 from std.io import FileDescriptor
 from std.collections import Dict, Optional
 from std.memory import ArcPointer
-from .csv_reader import _CsvBatches, _DecodeJob
-from .csv_types import _map_file
-from .parquet import _ParquetBatches
+from .io.csv_reader import _CsvBatches, _DecodeJob
+from .io.csv_types import _map_file
+from .io.parquet import _ParquetBatches
 from .pipeline import (
     _BOUND_FLOAT,
     _BOUND_INT,
@@ -88,8 +88,8 @@ from .expr import (
 from .frame import concat
 from .sorted_range import sorted_window
 from .value import AnyValue
-from .csv import CsvSchema, read_csv
-from .csv_reader import read_csv_explicit, read_csv_inferred
+from .io.csv import CsvSchema, read_csv
+from .io.csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
     AND,
     COL,
@@ -123,7 +123,7 @@ from .frame import (
     _stream_reductions,
     table_supported,
 )
-from .parquet import (
+from .io.parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
     read_parquet,
