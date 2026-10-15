@@ -689,8 +689,7 @@ def _total_cast(source: DataType, target: DataType) -> Bool:
     """Whether a strict numeric cast is defined for every value, so its
     strictness can never raise: a float target (a numeric cast raises only
     for an integer target out of range), or an integer target whose range
-    holds the source's. TPC-DS q9's strict casts of float columns to
-    Float64 chose their rows through masks for nothing."""
+    holds the source's."""
     if target.is_float():
         return True
     if not (source.is_integer() and target.is_integer()):
@@ -761,7 +760,7 @@ def _masked_branch[
         )
     # A batch that spans a source's chunks (a Parquet column's row
     # groups) merges its branch once: one copy, where choosing every row
-    # through three row masks cost more (TPC-DS q9's ten masked means).
+    # through three row masks cost more.
     if then.is_chunked():
         then = then.rechunk()
     # Decimals too: only the validity changes, so the branch keeps its

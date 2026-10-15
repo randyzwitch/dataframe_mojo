@@ -108,11 +108,11 @@ def test_binding_error_precedes_overflow_and_aggregate_conditions_keep_group_sha
 
 
 def test_masked_means_under_a_scalar_condition_and_total_strict_casts() raises:
-    # TPC-DS q9's shape: a scalar `when` choosing between the means of two
-    # null-otherwise conditionals, whose branches cast strictly to Float64.
-    # Plain, offset and chunked layouts give the same values; a strict
-    # narrowing cast still never raises on rows its predicate drops, even
-    # under the scalar branch that is not taken.
+    # A scalar `when` choosing between reductions of null-otherwise
+    # conditionals whose branches cast strictly: total casts take the
+    # validity route, and plain, offset and chunked layouts agree. A strict
+    # narrowing cast still never raises on rows its predicate drops, under
+    # the taken scalar branch and the untaken one.
     assert_true(_total_cast(DataType.FLOAT64, DataType.FLOAT64))
     assert_true(_total_cast(DataType.INT64, DataType.FLOAT32))
     assert_true(_total_cast(DataType.INT8, DataType.INT64))
