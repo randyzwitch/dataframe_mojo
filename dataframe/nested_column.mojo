@@ -205,9 +205,13 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
     def _end(self, i: Int) -> Int:
         return Int(self._offsets[][self._offset + i + 1])
 
-    def element_count(self, i: Int) -> Int:
-        """Elements in row i (0 for null rows)."""
+    def _physical_count(self, i: Int) -> Int:
+        """Stored child span, including hidden payload beneath a null parent."""
         return self._end(i) - self._start(i)
+
+    def element_count(self, i: Int) -> Int:
+        """Logical elements in row i (0 for null rows)."""
+        return self._physical_count(i) if self._valid(i) else 0
 
     def row(self, i: Int) raises -> Series:
         """Row i's elements as a series (empty for an empty or null row)."""
@@ -236,7 +240,7 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
             valid.append(self._valid(i))
             for r in range(self._start(i), self._end(i)):
                 child_rows.append(r)
-            total += self.element_count(i)
+            total += self._physical_count(i)
             offsets.append(Int64(total))
         var bits = List[UInt8]()
         if len(self._bits[]) != 0:
@@ -260,7 +264,7 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
             valid.append(self._valid(i))
             for r in range(self._start(i), self._end(i)):
                 child_rows.append(r)
-            total += self.element_count(i)
+            total += self._physical_count(i)
             offsets.append(Int64(total))
         return Self(offsets^, self.child().take(child_rows), _pack_bits(valid))
 
@@ -277,11 +281,11 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
         offsets.append(0)
         var total = 0
         for i in range(self._length):
-            total += self.element_count(i)
+            total += self._physical_count(i)
             offsets.append(Int64(total))
             valid.append(self._valid(i))
         for i in range(other._length):
-            total += other.element_count(i)
+            total += other._physical_count(i)
             offsets.append(Int64(total))
             valid.append(other._valid(i))
         var mine = self.child().slice(

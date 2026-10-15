@@ -19,20 +19,24 @@ ROOT = Path(__file__).resolve().parent.parent
 def exported_names() -> list[str]:
     text = (ROOT / "dataframe" / "__init__.mojo").read_text()
     names: list[str] = []
-    for block in re.findall(r"from \.\w+ import (\([^)]*\)|[^\n]*)", text):
+    for block in re.findall(r"from \.[\w.]+ import (\([^)]*\)|[^\n]*)", text):
         for name in re.split(r"[(),\s]+", block):
             if name:
                 names.append(name)
     return names
 
 
-def index(decl: dict) -> dict[str, tuple[str, dict]]:
-    found: dict[str, tuple[str, dict]] = {}
+def index(decl: dict, found: dict[str, tuple[str, dict]] | None = None) -> dict[str, tuple[str, dict]]:
+    """Index structs and functions by name, top-level modules before subpackages."""
+    if found is None:
+        found = {}
     for module in decl["modules"]:
         for struct in module["structs"]:
             found.setdefault(struct["name"], ("struct", struct))
         for function in module["functions"]:
             found.setdefault(function["name"], ("function", function))
+    for package in decl.get("packages", []):
+        index(package, found)
     return found
 
 

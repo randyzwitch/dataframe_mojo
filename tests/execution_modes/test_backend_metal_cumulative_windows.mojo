@@ -309,12 +309,19 @@ def test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_a
             )
         ]
     )
-    with assert_raises(contains="overflow"):
-        _ = (
-            decimal.lazy()
-            .select(col("x").cum_sum())
-            .collect(accelerator=MetalRuntime())
-        )
+    # SQL SUM widens every decimal storage width to precision 38.
+    # Anchor the values and type independently of CPU/GPU agreement.
+    for reverse in [False, True]:
+        var query = decimal.lazy().select(col("x").cum_sum(reverse))
+        var actual = query.collect(accelerator=MetalRuntime())
+        same(actual, query.collect(engine="cpu"))
+        assert_true(actual.column("x").dtype() == DataType.decimal(38, 0))
+        var expected: List[Int128] = [99, 0, -1] if reverse else [99, 100, 99]
+        for row in range(3):
+            assert_equal(
+                actual.column("x").numeric[DType.int128]().value(row),
+                expected[row],
+            )
 
     var narrow = DataFrame([Series("x", Column[Int32]([2147483647, 1, -1]))])
     with assert_raises(contains="overflow"):
@@ -345,6 +352,8 @@ def test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_a
             )
         ]
     )
+    with assert_raises(contains="precision"):
+        _ = wide.lazy().select(col("x").cum_sum()).collect(engine="cpu")
     with assert_raises(contains="overflow"):
         _ = (
             wide.lazy()

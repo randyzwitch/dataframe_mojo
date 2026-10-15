@@ -9,7 +9,8 @@
   and built with `StringBuilder`.
 - `bool_column.mojo`: Boolean columns with bit-packed values (one bit per
   row), sharing the bitmap helpers with validity.
-- `arrow.mojo`: Arrow C Data Interface export (zero-copy where layouts
+- `io/`: CSV, Parquet, GeoJSON, and Shapefile readers and writers, and
+  (`io/arrow.mojo`) Arrow C Data Interface export (zero-copy where layouts
   agree) and import.
 - `series.mojo`: named, runtime-tagged columns and batch slicing/concatenation.
 - `expr.mojo`: flat expression nodes and composition, independent of data.
@@ -58,7 +59,7 @@ No universal dataframe trait or foreign-backend abstraction is imposed.
 6. **Broader operations and input:** additional expressions/reductions, multiple
    and numeric grouping/join keys, casts, multi-column sorting, and CSV input.
    Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
-   until a Mojo-native reader exists; `dataframe/parquet.mojo` is the seam.
+   until a Mojo-native reader exists; `dataframe/io/parquet.mojo` is the seam.
 
 GPU execution, distributed execution, arbitrary Python-object columns, pandas
 index compatibility, and cross-engine adapters remain outside the initial scope.

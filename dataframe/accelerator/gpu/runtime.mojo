@@ -210,6 +210,7 @@ def capabilities() -> RowCapabilities:
         fixed_zone_duration_rolling=True,
         grouped=True,
         asof_joins=True,
+        primitive_list_explode=True,
         contiguous_window_reductions=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,
@@ -864,7 +865,11 @@ def estimate_resources(
         # Two-word control record has simultaneous host/device owners and is
         # reused for input-zero proof and ranked output observation.
         peak = _checked_add(peak, 16)
-        if plan.ordered_mode == 2 or plan.ordered_mode == 3:
+        if (
+            plan.ordered_mode == 2
+            or plan.ordered_mode == 3
+            or plan.ordered_mode == 4
+        ):
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
             )
@@ -955,11 +960,15 @@ def estimate_resources(
     if rows and len(plan.ordered_ranks[]):
         var observations = 2 if plan.ordered_mode == 1 else len(
             plan.steps
-        ) + Int(plan.ordered_mode == 3)
+        ) + Int(plan.ordered_mode == 3 or plan.ordered_mode == 4)
         launches = _checked_add(
             launches,
             observations
-            * (2 if plan.ordered_mode == 2 or plan.ordered_mode == 3 else 1),
+            * (
+                2 if plan.ordered_mode == 2
+                or plan.ordered_mode == 3
+                or plan.ordered_mode == 4 else 1
+            ),
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
@@ -1094,7 +1103,8 @@ def execute_plan(
     var ordered_scalar = plan.ordered_mode == 1
     var ordered_terminal = plan.ordered_mode == 2
     var ordered_private = plan.ordered_mode == 3
-    var ordered_rows = ordered_terminal or ordered_private
+    var ordered_decimal = plan.ordered_mode == 4
+    var ordered_rows = ordered_terminal or ordered_private or ordered_decimal
     var ordered = ordered_scalar or ordered_rows
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
@@ -1124,6 +1134,16 @@ def execute_plan(
     ):
         raise Error(
             "Mojo GPU ordered IMPLODE requires one certified observed row producer"
+        )
+    if ordered_decimal and (
+        not terminal_boundary
+        or plan.limit >= 0
+        or plan.reductions
+        or len(plan.steps) < 1
+        or len(plan.ordered_ranks[]) != len(plan.literals)
+    ):
+        raise Error(
+            "Mojo GPU ordered decimal requires an observed row producer"
         )
     if ordered_scalar and (
         rows != 1
@@ -1337,7 +1357,7 @@ def execute_plan(
                             raise Error(
                                 "Mojo GPU ordered scalar requires already observed successful inputs"
                             )
-                    if ordered_private:
+                    if ordered_private or ordered_decimal:
                         # Input cells are ordinary flags from an already
                         # observed producer. Prove every staged source cell is
                         # zero before any kernel can interpret ranked tokens.
@@ -1370,7 +1390,7 @@ def execute_plan(
                         waits += 1
                         if input_failure[0]:
                             raise Error(
-                                "Mojo GPU ordered IMPLODE requires already observed successful inputs"
+                                "Mojo GPU ordered row producer requires already observed successful inputs"
                             )
                 if len(plan.key_values):
                     var lookup = ctx.enqueue_create_buffer[DType.uint64](

@@ -11,10 +11,10 @@ from .shapefile_binary import (
     text,
 )
 from .shapefile_dbf import read_dbf
-from .series import Series
-from .frame import DataFrame
-from .geometry import from_wkb
-from .json_value import json_quote
+from ..series import Series
+from ..frame import DataFrame
+from ..geometry import from_wkb
+from ..json_value import json_quote
 
 
 def _header(data: List[UInt8], component: String) raises -> Int:

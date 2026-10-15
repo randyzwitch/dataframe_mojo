@@ -1,4 +1,4 @@
-"""Decimal products and quotients preserve checked integer CPU semantics."""
+"""Exact Decimal products and Float64 quotients preserve CPU semantics."""
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -47,10 +47,6 @@ def parity(query: LazyFrame, runtime: MetalRuntime) raises:
 
 def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     assert_true(not RowCapabilities().decimal_multiplicative)
-    # The device gives a product's exact type (DuckDB's: the scales added)
-    # when it is 128 bits and one side has scale 0: decimal(18, 0) times
-    # decimal(38, 2) is decimal(38, 2). Two 64-bit sides give a 64-bit
-    # product, which runs on the CPU.
     var whole = DataFrame(
         [decimal_series("a", 64, 0, 99), decimal_series("b", 128, 2, 99)]
     )
@@ -68,22 +64,21 @@ def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
-    # Products at two nonzero scales and quotients (DOUBLE) run on the CPU.
     for expression in List[Expr]([col("a") * col("b"), col("a") / col("b")]):
-        with assert_raises(contains="exact result type"):
-            _ = lower_rows(
-                safe_fixture().lazy().select(expression), _capabilities()
-            )
-    var mixed_wide = DataFrame(
-        [
-            decimal_series("a", 128, 0, 1),
-            decimal_series("b", 128, 1, 1),
-        ]
-    )
-    with assert_raises(contains="static rescaling proof"):
         _ = lower_rows(
-            mixed_wide.lazy().select(col("a") * col("b")), _capabilities()
+            safe_fixture().lazy().select(expression), _capabilities()
         )
+    assert_equal(descriptors.literals[2], UInt64(38))
+    var quotient = Program(
+        lower_rows(whole.lazy().select(col("a") / col("b")), _capabilities())
+    )
+    assert_equal(quotient.code[8], Int64(219))
+    var mixed_wide = DataFrame(
+        [decimal_series("a", 128, 0, 1), decimal_series("b", 128, 1, 1)]
+    )
+    _ = lower_rows(
+        mixed_wide.lazy().select(col("a") * col("b")), _capabilities()
+    )
 
 
 def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_and_slices() raises:
@@ -107,11 +102,21 @@ def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_an
                     decimal_series("b", others[pair], common, magnitude),
                 ]
             )
-            var product = frame.lazy().select(col("a") * col("b"))
-            same(
-                product.collect(accelerator=runtime),
-                product.collect(engine="cpu"),
-            )
+            if common * 2 <= 38:
+                parity(frame.lazy().select(col("a") * col("b")), runtime)
+            else:
+                with assert_raises(contains="past the maximum of 38"):
+                    _ = (
+                        frame.lazy()
+                        .select(col("a") * col("b"))
+                        .collect(engine="cpu")
+                    )
+                with assert_raises(contains="past the maximum of 38"):
+                    _ = (
+                        frame.lazy()
+                        .select(col("a") * col("b"))
+                        .collect(accelerator=runtime)
+                    )
             var divided = DataFrame(
                 [
                     decimal_series(
@@ -142,7 +147,7 @@ def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_an
             quotient.collect(accelerator=runtime),
             quotient.collect(engine="cpu"),
         )
-    for scale in range(39):
+    for scale in range(20):
         var minimum_product = DataFrame(
             [
                 Series("a", Column[Int128]([2, -2])).with_dtype(
@@ -167,7 +172,8 @@ def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_an
     )
     var product = frame.lazy().select(col("a") * col("b"))
     var result = product.collect(accelerator=runtime)
-    var expected: List[Int128] = [12, 38, -12, -38]
+    assert_equal(result.column("a").dtype(), DataType.decimal(38, 4))
+    var expected: List[Int128] = [1250, 3750, -1250, -3750]
     for i in range(4):
         assert_equal(result.column("a")._decimal_raw(i), expected[i])
     same(result, product.collect(engine="cpu"))
@@ -181,8 +187,13 @@ def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_an
     )
     var quotient = divisor.lazy().select(col("a") / col("b"))
     result = quotient.collect(accelerator=runtime)
+    assert_equal(result.column("a").dtype(), DataType.FLOAT64)
+    var expected_quotients: List[Float64] = [0.125, 0.375, -0.125, -0.375]
     for i in range(4):
-        assert_equal(result.column("a")._decimal_raw(i), expected[i])
+        assert_equal(
+            result.column("a")._data[Column[Float64]]._get(i),
+            expected_quotients[i],
+        )
     same(result, quotient.collect(engine="cpu"))
     for length in List[Int]([0, 1, 3]):
         parity(
@@ -260,8 +271,11 @@ def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_an
         _ = product.collect(engine="cpu")
     with assert_raises(contains="decimal multiplication overflow"):
         _ = product.collect(accelerator=runtime)
-    with assert_raises(contains="checked decimal arithmetic"):
-        _ = product.head(1).collect(accelerator=runtime)
+    # The optimizer pushes this head before the row-local product.
+    same(
+        product.head(1).collect(accelerator=runtime),
+        product.head(1).collect(engine="cpu"),
+    )
     var masked = frame.lazy().select(
         when(col("p"))
         .then(col("a") * col("b"))
@@ -278,11 +292,13 @@ def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_an
             ),
         ]
     )
-    var overflow = scaled.lazy().select(col("a") / col("b"))
-    with assert_raises(contains="decimal precision"):
-        _ = overflow.collect(engine="cpu")
-    with assert_raises(contains="decimal precision"):
-        _ = overflow.collect(accelerator=runtime)
+    var quotient = scaled.lazy().select(col("a") / col("b"))
+    var large = quotient.collect(accelerator=runtime)
+    assert_equal(large.column("a").dtype(), DataType.FLOAT64)
+    assert_equal(
+        large.column("a")._data[Column[Float64]]._get(0), Float64(1e38)
+    )
+    same(large, quotient.collect(engine="cpu"))
     var zero = frame.slice(0, 1).lazy().select(col("a") / col("b"))
     var result = zero.collect(accelerator=runtime)
     assert_equal(result.column("a").null_count(), 1)
@@ -290,3 +306,85 @@ def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_an
     with assert_raises(contains="budget"):
         _ = zero.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
     same(zero.collect(accelerator=runtime), zero.collect(engine="cpu"))
+
+
+def test_native_metal_decimal_exact_product_literals_layouts_and_precision() raises:
+    from tests.public_contracts.test_decimal_exact_product import (
+        exact_scale_fixture,
+        capped_precision_fixture,
+    )
+    from tests.support.coverage_generators import offset_layout, chunk_layout
+
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    for nullable in [False, True]:
+        var source = exact_scale_fixture(nullable)
+        for frame in [
+            source.copy(),
+            offset_layout(source),
+            chunk_layout(source),
+        ]:
+            var query = frame.lazy().select(col("a") * col("b"))
+            var result = query.collect(accelerator=runtime)
+            assert_equal(result.column("a").dtype(), DataType.decimal(38, 38))
+            assert_equal(result.column("a")._decimal_raw(0), Int128(6))
+            assert_equal(result.column("a")._decimal_raw(1), Int128(-6))
+            assert_equal(result.column("a")._decimal_raw(2), Int128(0))
+            assert_equal(result.column("a").null_count(), Int(nullable))
+            same(result, query.collect(engine="cpu"))
+        source = capped_precision_fixture(nullable)
+        for frame in [
+            source.copy(),
+            offset_layout(source),
+            chunk_layout(source),
+        ]:
+            parity(frame.lazy().select(col("a") * col("b")), runtime)
+            var query = frame.lazy().select(
+                when(col("p"))
+                .then(col("a") * col("b"))
+                .otherwise(lit("0").cast(DataType.decimal(18, 0, 64)))
+            )
+            var masked = query.collect(accelerator=runtime)
+            assert_equal(masked.column("a")._decimal_raw(0), Int128(0))
+            assert_equal(masked.column("a").null_count(), Int(nullable))
+            same(masked, query.collect(engine="cpu"))
+
+
+def test_native_metal_decimal_product_width_and_quotient_literal_bits() raises:
+    from std.memory import bitcast
+
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    var small = DataFrame(
+        [
+            Series("a", Column[Int32]([25, -25])).with_dtype(
+                DataType.decimal(4, 2, 32)
+            ),
+            Series("b", Column[Int32]([50, 50])).with_dtype(
+                DataType.decimal(4, 2, 32)
+            ),
+        ]
+    )
+    var result = (
+        small.lazy().select(col("a") * col("b")).collect(accelerator=runtime)
+    )
+    assert_equal(result.column("a").dtype(), DataType.decimal(8, 4, 32))
+    assert_equal(result.column("a")._decimal_raw(0), Int128(1250))
+    assert_equal(result.column("a")._decimal_raw(1), Int128(-1250))
+    var rounded = DataFrame(
+        [
+            Series("a", Column[Int64]([9_007_199_254_740_993])).with_dtype(
+                DataType.decimal(18, 2, 64)
+            ),
+            Series("b", Column[Int64]([3])).with_dtype(
+                DataType.decimal(18, 1, 64)
+            ),
+        ]
+    )
+    var query = rounded.lazy().select(col("a") / col("b"))
+    result = query.collect(accelerator=runtime)
+    assert_equal(
+        bitcast[DType.uint64](result.column("a").float64()._get(0)),
+        UInt64(0x42F1111111111111),
+    )
+    same(result, query.collect(engine="cpu"))

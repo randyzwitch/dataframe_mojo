@@ -82,7 +82,12 @@ from .accelerator.metadata import schema_frame
 from .accelerator.cost import PlanEstimate, CalibrationKey
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.gpu.target import METAL_TARGET
-from .accelerator.joins import has_join, has_scalar_consumers
+from .accelerator.joins import (
+    has_join,
+    has_scalar_consumers,
+    has_decimal_consumers,
+)
+from .accelerator.explodes import has_explode
 from .lazy import AcceleratorBackend, LazyFrame
 from .column import Column
 from .frame import DataFrame
@@ -111,12 +116,14 @@ def _capabilities() -> RowCapabilities:
 
 def _describe_mojo_gpu(
     query: LazyFrame, ordered_source: Bool = False
-) -> String:
+) raises -> String:
     from .accelerator.gpu.runtime import describe, capabilities
     from .accelerator.gpu.dag_runtime import describe as describe_dag
 
     if (
         has_join(query)
+        or has_decimal_consumers(query)
+        or has_explode(query)
         or has_scalar_consumers(query)
         or has_cut_materializations(query)
         or has_implode_materializations(query)
@@ -302,6 +309,16 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_explode(query):
+            return execute_dag(
+                query,
+                self._device,
+                self._budget,
+                profiling,
+                capabilities(),
+                observation_only=self._observation_only,
+                text_context=self._text_context,
+            )
         if has_implode(query):
             var plan = lower_terminal_implode(
                 query, ordered_source=original_entry
@@ -892,6 +909,7 @@ struct MetalRuntime(AcceleratorBackend):
             return (result^, report^)
         if (
             has_join(query)
+            or has_decimal_consumers(query)
             or has_scalar_consumers(query)
             or has_cut_materializations(query)
             or has_implode_materializations(query)
@@ -934,6 +952,8 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal schema selector expansion; " + self._describe(
                     lower_selectors(query), False
                 )
+            if has_explode(query):
+                return _describe_mojo_gpu(query)
             if has_implode(query):
                 var plan = lower_terminal_implode(
                     query, ordered_source=original_entry
