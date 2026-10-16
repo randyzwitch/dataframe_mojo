@@ -146,6 +146,20 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
+`benchmarks/tools/bench_metal_suites.py` separately checks exact CPU/Apple
+query results with every query `collect` forced onto Metal. Summarize one or
+more immutable receipt files with
+`python3 benchmarks/tools/metal_query_report.py RECEIPT.json --output REPORT.json`.
+The tool checks consistent engine, SDK, workload and runner identities,
+rejects duplicate cases, and derives catalog and translation counts from the
+retained query sources. Partial grids remain partial. JSON and text reports
+separate populated and empty matches, preserve unsupported and differing
+answers, and exclude source-audited hybrid cases from conservative counts.
+An unequal CPU repeat remains diagnostic evidence, not an exemption from the
+exact comparison. The case audit registry records q24's eager CPU mean;
+forcing its `collect` calls does not make that aggregate a GPU operation.
+Coverage `collection_ns` values are diagnostic and are not performance results.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join
