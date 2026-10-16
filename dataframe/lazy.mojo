@@ -82,6 +82,8 @@ from .expr import (
     QUANTILE,
     CORR,
     COV,
+    CAST,
+    LIT_NULL,
 )
 from .frame import concat
 from .sorted_range import sorted_window
@@ -130,7 +132,7 @@ from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
-from .execution import direct_reductions
+from .execution import direct_reductions, evaluate
 from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
@@ -394,6 +396,168 @@ def _fold_constants(expr: Expr) -> Expr:
     var out = List[Node]()
     _ = _emit_folded(nodes, value, n - 1, out)
     return Expr(out^, expr._name)
+
+
+def _fold_casts(expr: Expr) raises -> Optional[Expr]:
+    """`expr` with each cast of a column-free subexpression replaced by the
+    literal it evaluates to, or None when there is none to fold. A cast
+    that raises is left in place, so its error is raised where it was."""
+    ref nodes = expr._nodes
+    var replaced = Dict[Int, Node]()
+    for i in range(len(nodes)):
+        ref node = nodes[i]
+        if node.op != CAST or node.left < 0:
+            continue
+        if not _column_free(expr, i):
+            continue
+        try:
+            var no_columns = List[Series]()
+            var value = evaluate(
+                bind(subtree(expr, i), no_columns), no_columns, 1
+            )
+            var literal = _literal_node(value)
+            if literal:
+                replaced[i] = literal.take()
+        except:
+            continue
+    if len(replaced) == 0:
+        return None
+    var out = List[Node]()
+    _ = _emit_replaced(nodes, replaced, len(nodes) - 1, out)
+    return Optional(Expr(out^, expr._name))
+
+
+def _column_free(expr: Expr, root: Int) -> Bool:
+    """Whether the subexpression at `root` reads no column, selector,
+    aggregate or window: one value whatever the rows."""
+    var stack: List[Int] = [root]
+    while len(stack) > 0:
+        var i = stack.pop()
+        ref node = expr._nodes[i]
+        if (
+            node.op == COL
+            or node.op == SELECTOR
+            or is_reduction(node.op)
+            or is_window(node.op)
+        ):
+            return False
+        if node.left >= 0:
+            stack.append(node.left)
+        if node.right >= 0:
+            stack.append(node.right)
+        if node.op == WHEN and node.extra >= 0:
+            stack.append(node.extra)
+    return True
+
+
+def _literal_node(value: Series) raises -> Optional[Node]:
+    """A one-row result as a typed literal node: integers, temporal values
+    and decimals as `LIT_INT` (a 128-bit decimal's high word in `text2`),
+    floats as `LIT_FLOAT`, Booleans, strings and nulls as theirs. None for
+    anything else (a list, a struct, a categorical)."""
+    if len(value) != 1:
+        return None
+    var dtype = value.dtype()
+    var dtypes: List[Optional[DataType]] = [Optional(dtype)]
+    if value.null_count() == 1:
+        return Optional(
+            Node(LIT_NULL, -1, -1, dtype.name(), 0, 0, 0, -1, "", dtypes^)
+        )
+    if dtype == DataType.BOOL:
+        return Optional(
+            Node(
+                LIT_BOOL,
+                -1,
+                -1,
+                "",
+                Int64(1) if value.get(0).bool() else Int64(0),
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+    if dtype == DataType.STRING:
+        return Optional(
+            Node(
+                LIT_STRING,
+                -1,
+                -1,
+                value.get(0).string(),
+                0,
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+    if dtype.is_categorical() or dtype.is_nested():
+        return None
+    if value._data.isa[Column[Int128]]():
+        if not dtype.is_decimal():
+            return None
+        var raw = value._data[Column[Int128]]._get(0)
+        var low = Int64(UInt64(UInt128(raw) & UInt128(0xFFFFFFFFFFFFFFFF)))
+        var high = Int64(raw >> 64)
+        return Optional(
+            Node(LIT_INT, -1, -1, "", low, 0, 0, -1, String(high), dtypes^)
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if value._data.isa[Column[Scalar[D]]]():
+            var x = value._data[Column[Scalar[D]]]._get(0)
+            comptime if D.is_floating_point():
+                return Optional(
+                    Node(
+                        LIT_FLOAT,
+                        -1,
+                        -1,
+                        "",
+                        0,
+                        x.cast[DType.float64](),
+                        0,
+                        -1,
+                        "",
+                        dtypes^,
+                    )
+                )
+            else:
+                return Optional(
+                    Node(
+                        LIT_INT,
+                        -1,
+                        -1,
+                        "",
+                        x.cast[DType.int64](),
+                        0,
+                        0,
+                        -1,
+                        "",
+                        dtypes^,
+                    )
+                )
+    return None
+
+
+def _emit_replaced(
+    nodes: List[Node], replaced: Dict[Int, Node], i: Int, mut out: List[Node]
+) raises -> Int:
+    """Append node `i` to `out` after its inputs, a folded subexpression as
+    its literal; its index in `out`."""
+    if i in replaced:
+        out.append(replaced[i].copy())
+        return len(out) - 1
+    var copy = nodes[i].copy()
+    if copy.left >= 0:
+        copy.left = _emit_replaced(nodes, replaced, nodes[i].left, out)
+    if copy.right >= 0:
+        copy.right = _emit_replaced(nodes, replaced, nodes[i].right, out)
+    if nodes[i].op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_replaced(nodes, replaced, nodes[i].extra, out)
+    out.append(copy^)
+    return len(out) - 1
 
 
 def _emit_folded(
@@ -4340,6 +4504,7 @@ struct LazyFrame(Copyable):
 
     def _optimized(self) raises -> Self:
         var plan = self.copy()
+        plan._fold_casts()
         plan._unique_as_aggregate()
         plan._split_filters()
         plan._filter_shared_subplans()
@@ -4349,6 +4514,26 @@ struct LazyFrame(Copyable):
         plan._fuse_top_k()
         plan._push_projections()
         return plan^
+
+    def _fold_casts(mut self) raises:
+        """Constant folding (DuckDB's `ConstantFoldingRule`): a cast of an
+        expression that reads no column is evaluated once, here, and
+        becomes a literal of its type, rather than being evaluated again
+        for every batch or morsel the expression meets (a decimal written
+        as a cast string literal was parsed per morsel)."""
+        for i in range(len(self._nodes)):
+            var kind = self._nodes[i].kind
+            if not (
+                kind == FILTER
+                or kind == SELECT
+                or kind == WITH_COLUMNS
+                or kind == AGG
+            ):
+                continue
+            for k in range(len(self._nodes[i].exprs)):
+                var folded = _fold_casts(self._nodes[i].exprs[k])
+                if folded:
+                    self._nodes[i].exprs[k] = folded.take()
 
     def _share_subplans(mut self, streaming: Bool, batch_size: Int) raises:
         """Execute a subplan used in two places once (common-subplan
