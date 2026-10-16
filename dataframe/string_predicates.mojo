@@ -435,7 +435,6 @@ def slice_strings(
     else:
         buffers.append(column._bytes.copy())
     var nulls = column.null_count() > 0
-    var total = 0
     var total_buffer = 0
     for k in range(n):
         if nulls and not column._valid(k):
@@ -470,7 +469,6 @@ def slice_strings(
             b0 = _codepoint_end(data, size, 0, max(points + offset, 0))
         var b1 = size if length < 0 else _codepoint_end(data, size, b0, length)
         var part = b1 - b0
-        total += part
         var low = UInt64(part)
         var high = UInt64(0)
         var p = data.unsafe_offset(b0)
@@ -490,5 +488,5 @@ def slice_strings(
         words.unsafe_offset(2 * k + 1)[] = high
     var bits = _copy_validity(column._bits[], column._offset, n)
     return StringColumn(
-        StringViewStorage(views^, buffers^, bits^, n, total, total_buffer)
+        StringViewStorage(views^, buffers^, bits^, n, total_buffer)
     )

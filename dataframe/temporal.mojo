@@ -75,19 +75,6 @@ def ticks_per_day(dtype: DataType) -> Int64:
     return SECONDS_PER_DAY * dtype.per_second()
 
 
-def convert_units(
-    value: Int64, source: DataType, target: DataType
-) raises -> Int64:
-    """Rescale ticks between units: finer is exact (checked), coarser floors."""
-    var a = source.per_second()
-    var b = target.per_second()
-    if a == b:
-        return value
-    if b > a:
-        return checked_mul(value, b // a)
-    return floor_div(value, a // b)
-
-
 @fieldwise_init
 struct Parts(Copyable):
     """Broken-down fields of a date, datetime, or time."""

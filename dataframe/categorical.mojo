@@ -25,7 +25,7 @@ from .gather import take_parallel
 from .hashing import encode_string_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
-from .string_column import StringBuilder, StringColumn
+from .string_column import StringColumn
 from .string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
@@ -97,13 +97,11 @@ def decode(values: Series) raises -> Series:
     var views = List[StringView](capacity=n)
     var data = column._ptr()
     var nulls = column.null_count() > 0
-    var total = 0
     for i in range(n):
         if nulls and not column._valid(i):
             views.append(StringView(0, 0, 0, 0))
             continue
         ref view = table[Int(data[unsafe_offset=i])]
-        total += Int(view.length)
         views.append(view.copy())
     var size = len(buffer[])
     var storage = StringViewStorage(
@@ -115,7 +113,6 @@ def decode(values: Series) raises -> Series:
             ) if nulls else List[UInt8]()
         ),
         n,
-        total,
         size,
     )
     return Series(values.name(), StringColumn(storage^))
