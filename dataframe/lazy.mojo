@@ -178,6 +178,19 @@ comptime UNNEST = 13
 comptime ASOF = 14
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
+# Row-order operators, each run by its eager DataFrame method on its whole
+# input in order (a pipeline breaker under streaming); filters, slices and
+# other row-changing rewrites do not cross them.
+# The last `offset` rows (DataFrame.tail; a negative count drops rows).
+comptime TAIL = 16
+# The rows in reverse order (DataFrame.reverse).
+comptime REVERSE = 17
+# Every column moved `offset` rows later (DataFrame.shift); `exprs` holds
+# the fill value when one was given.
+comptime SHIFT = 18
+# A leading Int64 row number named `names[0]`, starting at `offset`
+# (DataFrame.with_row_index).
+comptime ROW_INDEX = 19
 
 
 @fieldwise_init
@@ -1803,6 +1816,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         return result^
 
+    def tail(self, n: Int = 5) -> Self:
+        """The last n rows; a negative n drops the first -n rows. See
+        DataFrame.tail. Filters and slices written above it stay above
+        it."""
+        return self._push(_plan_node(TAIL, offset=n))
+
+    def reverse(self) -> Self:
+        """The rows in reverse order; see DataFrame.reverse."""
+        return self._push(_plan_node(REVERSE))
+
+    def shift(self, n: Int = 1, *, fill_value: Optional[Expr] = None) -> Self:
+        """Every column moved n rows later (earlier when negative), the
+        vacated rows null or `fill_value`; see DataFrame.shift."""
+        var exprs = List[Expr]()
+        if fill_value:
+            exprs.append(fill_value.value().copy())
+        return self._push(_plan_node(SHIFT, exprs=exprs, offset=n))
+
+    def with_row_index(self, name: String = "index", offset: Int64 = 0) -> Self:
+        """Prepend an Int64 row number starting at offset; see
+        DataFrame.with_row_index. The numbers count the rows this plan
+        produces here, so filters and slices above it stay above it."""
+        return self._push(
+            _plan_node(ROW_INDEX, names=[name], offset=Int(offset))
+        )
+
     def explode(self, columns: List[String]) -> Self:
         """One row per list element; see DataFrame.explode."""
         return self._push(_plan_node(EXPLODE, names=columns))
@@ -2872,12 +2911,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _ends_in_breaker(self, index: Int) -> Bool:
         """Whether node `index` is a pipeline breaker (an aggregate, a
-        unique or a sort), or row-local steps over one: it is computed in
+        unique, a sort or a row-order operator such as tail), or row-local
+        steps over one: it is computed in
         full before any of its rows stream on."""
         var at = index
         while at >= 0:
             ref node = self._nodes[at]
-            if node.kind == AGG or node.kind == UNIQUE or node.kind == SORT:
+            if (
+                node.kind == AGG
+                or node.kind == UNIQUE
+                or node.kind == SORT
+                or _row_order_step(node.kind)
+            ):
                 return True
             if node.kind == DROP or _stream_rows(node):
                 at = node.left
@@ -4530,6 +4575,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return input.explode(node.names)
         if node.kind == UNNEST:
             return input.unnest(node.text)
+        if node.kind == TAIL:
+            return input.tail(node.offset)
+        if node.kind == REVERSE:
+            return input.reverse()
+        if node.kind == SHIFT:
+            if len(node.exprs) > 0:
+                return input.shift(node.offset, fill_value=node.exprs[0].copy())
+            return input.shift(node.offset)
+        if node.kind == ROW_INDEX:
+            return input.with_row_index(node.names[0], Int64(node.offset))
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -6961,6 +7016,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or node.kind == EXPLODE
                 or node.kind == UNNEST
                 or node.kind == CONCAT
+                or _row_order_step(node.kind)
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -7135,6 +7191,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "UNNEST " + node.text
         elif node.kind == CONCAT:
             label = "CONCAT"
+        elif node.kind == TAIL:
+            label = "TAIL " + String(node.offset)
+        elif node.kind == REVERSE:
+            label = "REVERSE"
+        elif node.kind == SHIFT:
+            label = "SHIFT " + String(node.offset)
+            if len(node.exprs) > 0:
+                label += " fill " + node.exprs[0]._name
+        elif node.kind == ROW_INDEX:
+            label = (
+                "WITH_ROW_INDEX "
+                + node.names[0]
+                + " from "
+                + String(node.offset)
+            )
         else:
             label = "DROP " + _joined(node.names)
         return label^
@@ -7471,6 +7542,12 @@ def _chain_member(node: PlanNode) -> Bool:
                 return False
         return True
     return False
+
+
+def _row_order_step(kind: Int) -> Bool:
+    """Whether `kind` is a row-order operator (tail, reverse, shift,
+    with_row_index): run whole, in input order, by its eager method."""
+    return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
 
 
 def _is_scan(kind: Int) -> Bool:

@@ -300,6 +300,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Last n rows; a negative n drops the first -n rows.
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def reverse(self) -> Self`
+- `def shift(self, n: Int = Int(1), *, fill_value: Optional[Expr] = None) -> Self`
+  Every column's values moved n rows later (earlier when n is negative), as Polars' DataFrame.shift. Height and schema stay the same. The min(|n|, height) rows left empty at the start (or, for a negative n, the end) are null, or `fill_value` cast to each column's type. `fill_value` is a scalar expression evaluated against this frame: a literal, or a reduction such as `col("a").max()`.
 - `def vstack(self, other: Self) -> Self`
   Append other's rows; schemas must match exactly.
 - `def hstack(self, other: Self) -> Self`
@@ -956,6 +958,14 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def drop(self, names: List[String]) -> Self`
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+- `def tail(self, n: Int = Int(5)) -> Self`
+  The last n rows; a negative n drops the first -n rows. See DataFrame.tail. Filters and slices written above it stay above it.
+- `def reverse(self) -> Self`
+  The rows in reverse order; see DataFrame.reverse.
+- `def shift(self, n: Int = Int(1), *, fill_value: Optional[Expr] = None) -> Self`
+  Every column moved n rows later (earlier when negative), the vacated rows null or `fill_value`; see DataFrame.shift.
+- `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
+  Prepend an Int64 row number starting at offset; see DataFrame.with_row_index. The numbers count the rows this plan produces here, so filters and slices above it stay above it.
 - `def explode(self, columns: List[String]) -> Self`
   One row per list element; see DataFrame.explode.
 - `def explode(self, column: String) -> Self`
