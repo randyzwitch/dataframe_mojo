@@ -6,7 +6,7 @@ column is in ascending order with no nulls, so the run's bounds come from
 two binary searches and the rows are a zero-copy slice, as DuckDB's zone
 maps and ClickHouse's primary key skip whole blocks. Order is checked, not
 assumed: one pass over the column's whole buffer the first time, stopping
-at the first descent, kept in the buffer's order cell (`Column._order`)
+at the first descent, kept in the buffer's order cell (`Column._facts`)
 for every later filter on any window onto it, as DuckDB keeps zone maps
 with its row groups. Data stored in key order is
 common (ClickBench's hits table is ordered by CounterID and EventDate);
@@ -200,7 +200,7 @@ def _ascending_cached[D: DType](column: Column[Scalar[D]]) raises -> Bool:
     it is asked; a window onto any other buffer is checked on its own
     rows."""
     var cell = Pointer[Int, MutAnyOrigin](
-        unsafe_from_address=Int(column._order.ptr())
+        unsafe_from_address=Int(column._facts.ptr())
     )
     if cell[] == 0:
         var whole = column.copy()
