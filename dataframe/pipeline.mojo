@@ -393,7 +393,7 @@ def _zones_lock() -> ref[MutAnyOrigin] Atomic[Int64]:
 
 
 def _ensure_zones(series: Series):
-    """Fill the zone map (`Column._zones`) of each buffer under an
+    """Fill the zone map (`Column._facts`) of each buffer under an
     integer column (see `_range_key`) that has none, once, before any
     worker reads it. Pipelines run at once (a union's inputs) may scan one
     table: a buffer is checked and filled under one process-wide lock, so
@@ -415,7 +415,7 @@ def _ensure_zones(series: Series):
 
 
 def _fill_zones[D: DType](column: Column[Scalar[D]]):
-    if len(column._zones[]) > 0:
+    if len(column._facts[].zones) > 0:
         return
     var whole = column.copy()
     whole._offset = 0
@@ -434,7 +434,7 @@ def _fill_zones[D: DType](column: Column[Scalar[D]]):
         else:
             zones.append(Int64.MAX)
             zones.append(Int64.MIN)
-    column._zones[] = zones^
+    column._facts[].zones = zones^
 
 
 def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
@@ -462,7 +462,7 @@ def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
 def _zoned_bounds[
     D: DType
 ](column: Column[Scalar[D]]) -> Tuple[Bool, Int64, Int64]:
-    ref zones = column._zones[]
+    ref zones = column._facts[].zones
     if len(zones) == 0:
         return _column_bounds(column)
     if len(column) == 0:
