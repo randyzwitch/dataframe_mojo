@@ -147,7 +147,9 @@ def _decimal_group_producer(query: LazyFrame, index: Int) raises -> Bool:
     ref source = query._nodes[operation.left]
     for field in source.text_fields:
         if field.name in operation.names and (
-            field.category or field.dtype._is_bytes() or field.dtype.is_nested()
+            (field.category and not field.category.value().string_codes)
+            or field.dtype._is_bytes()
+            or field.dtype.is_nested()
         ):
             return False
     var schema = schema_frame(query, operation.left)

@@ -620,3 +620,120 @@ def test_mojo_gpu_decimal_group_feed_budget_precedes_device() raises:
                 resident_input=foreign.copy(),
                 terminal_boundary=True,
             )
+
+
+# requires: metal
+def test_mojo_gpu_decimal_group_feed_coded_keys_publish_plain_strings() raises:
+    from std.memory import ArcPointer
+    from std.testing import assert_false
+    from dataframe.categorical import decode
+    from dataframe.dtype import CategoricalDictionary
+    from dataframe.string_column import StringCodes
+
+    var dictionary = CategoricalDictionary()
+    for label in ["dup", "dup", "unused"]:
+        dictionary.append(label)
+    var dtype = DataType.categorical(dictionary^)
+    var codes: List[UInt32] = [0, 1, 0, 0]
+    var strings = decode(
+        Series(
+            "k", Column[UInt32](codes.copy(), [True, True, True, False])
+        ).with_dtype(dtype)
+    )
+    strings._data[StringColumn]._codes = ArcPointer(
+        StringCodes(ArcPointer(codes^), dtype)
+    )
+    var raw = DataFrame(
+        [
+            strings^,
+            Series("a", Column[Int32]([1, 2, 4, 8])).with_dtype(
+                DataType.decimal(9, 0, 32)
+            ),
+            Series("b", Column[Int32]([10, 10, 10, 10])).with_dtype(
+                DataType.decimal(9, 0, 32)
+            ),
+        ]
+    )
+    for layout in range(3):
+        var source = (
+            raw.copy() if layout
+            == 0 else offset_layout(raw) if layout
+            == 1 else chunk_layout(raw)
+        )
+        var query = (
+            source.lazy()
+            .group_by("k", maintain_order=True)
+            .agg((col("a") * col("b")).sum().alias("total"))
+        )
+        for gpu in [False, True]:
+            for streaming in [False, True]:
+                var grouped = query.collect(
+                    accelerator=MetalRuntime(),
+                    optimize=False,
+                    streaming=streaming,
+                ) if gpu else query.collect(
+                    engine="cpu", optimize=False, streaming=streaming
+                )
+                # Independent original-code partitions, including nulls and
+                # two distinct codes sharing one decoded label.
+                assert_equal(grouped.height(), 3)
+                assert_equal(grouped.item(0, "k").string(), "dup")
+                assert_equal(grouped.item(1, "k").string(), "dup")
+                assert_true(grouped.item(2, "k").is_null())
+                var expected: List[Int128] = [50, 20, 80]
+                for row in range(3):
+                    assert_equal(
+                        grouped.column("total")._decimal_raw(row), expected[row]
+                    )
+                assert_equal(grouped.column("k").dtype(), DataType.STRING)
+                assert_false(Bool(grouped.column("k")._dictionary_codes()))
+                assert_false(Bool(grouped.column("k")._field_metadata))
+                var next_query = query.group_by("k", maintain_order=True).agg(
+                    col("total").sum()
+                )
+                var regrouped = next_query.collect(
+                    accelerator=MetalRuntime(),
+                    optimize=False,
+                    streaming=streaming,
+                ) if gpu else next_query.collect(
+                    engine="cpu", optimize=False, streaming=streaming
+                )
+                assert_equal(regrouped.height(), 2)
+                assert_equal(
+                    regrouped.column("total")._decimal_raw(0), Int128(70)
+                )
+                assert_equal(
+                    regrouped.column("total")._decimal_raw(1), Int128(80)
+                )
+    with assert_raises(contains="budget"):
+        _ = (
+            raw.lazy()
+            .group_by("k")
+            .agg((col("a") * col("b")).sum())
+            .collect(
+                accelerator=MetalRuntime(
+                    device_id=999999, memory_limit_bytes=0
+                ),
+                streaming=True,
+            )
+        )
+    var bad = raw.with_column(
+        Series("a", Column[Int32]([Int32.MAX, 2, 4, 8])).with_dtype(
+            DataType.decimal(9, 0, 32)
+        )
+    ).with_column(
+        Series("b", Column[Int32]([Int32.MAX, 10, 10, 10])).with_dtype(
+            DataType.decimal(9, 0, 32)
+        )
+    )
+    for gpu in [False, True]:
+        with assert_raises(contains="precision"):
+            var failed = (
+                bad.lazy()
+                .group_by("k")
+                .agg((col("a") * col("b")).sum())
+                .head(0)
+            )
+            _ = failed.collect(
+                accelerator=MetalRuntime()
+            ) if gpu else failed.collect(engine="cpu")
