@@ -61,7 +61,49 @@ def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo::test_mojo_gpu_grouped_floating_exact_values_layouts_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo::test_mojo_gpu_grouped_floating_special_values_and_association",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo::test_mojo_gpu_grouped_floating_null_payloads_and_min_count",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo::test_mojo_gpu_grouped_floating_accumulator_width_overflow_and_underflow",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_exact_values_layouts_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_special_values_and_association",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_null_payloads_and_min_count",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_accumulator_width_overflow_and_underflow",
             "mojo_gpu",
         )
     )
@@ -73,32 +115,14 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
-            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_special_values_and_association",
-            "mojo_gpu",
-        )
-    )
-    policy.requirements.append(
-        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals",
             "metal",
         )
     )
     policy.requirements.append(
         CapabilityRequirement(
-            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_null_payloads_and_min_count",
-            "mojo_gpu",
-        )
-    )
-    policy.requirements.append(
-        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_projection_fault_order_before_consumer",
             "metal",
-        )
-    )
-    policy.requirements.append(
-        CapabilityRequirement(
-            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_accumulator_width_overflow_and_underflow",
-            "mojo_gpu",
         )
     )
     policy.requirements.append(
@@ -327,6 +351,12 @@ def production_policy() -> SuitePolicy:
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_scalar_when_and_numeric_mean_siblings",
             "metal",
         )
     )
@@ -3778,8 +3808,9 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo",
                 "tests/execution_modes/test_decimal_scalar_feed_metadata.mojo",
                 "tests/execution_modes/test_conditional_decimal_aggregate_planning.mojo",
-                "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo",
                 "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
+                "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
