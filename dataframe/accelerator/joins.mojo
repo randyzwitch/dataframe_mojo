@@ -144,37 +144,7 @@ def _decimal_feed_producer(query: LazyFrame, index: Int) raises -> Bool:
 
 
 def _decimal_group_producer(query: LazyFrame, index: Int) raises -> Bool:
-    ref operation = query._nodes[index]
-    if operation.kind != AGG or not len(operation.names):
-        return False
-    var possible = False
-    for expression in operation.exprs:
-        for node in expression._nodes:
-            possible |= node.op in [ADD, SUB, MUL]
-    if not possible:
-        return False
-    if not prefix_infallible(query, operation.left):
-        return False
-    for key in operation.window_keys:
-        if (
-            key.dtype.is_categorical()
-            or key.dtype._is_bytes()
-            or key.dtype.is_nested()
-        ):
-            return False
-    ref source = query._nodes[operation.left]
-    for field in source.text_fields:
-        if field.name in operation.names and (
-            (field.category and not field.category.value().string_codes)
-            or field.dtype._is_bytes()
-            or field.dtype.is_nested()
-        ):
-            return False
-    var schema = schema_frame(query, operation.left)
-    var bounds = List[BoundExpr]()
-    for expression in operation.exprs:
-        bounds.append(bind(expression, schema._columns))
-    return decimal_group_feed.eligible(bounds, schema._columns, operation.names)
+    return decimal_group_feed.producer(query, index)
 
 
 def has_decimal_consumers(query: LazyFrame) raises -> Bool:

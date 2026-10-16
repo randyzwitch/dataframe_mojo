@@ -201,6 +201,24 @@ def has_checked_grouped_feeds(
     ref frame = original._frames[original._nodes[0].offset]
     if frame.height() >= 32768:
         return False
+    # The precision-only original GROUP observer already covers this family.
+    # Resolve source-independent typed text constants before choosing a feed;
+    # otherwise their STRING leaves look like transported text operands.
+    # The exact issuer proof includes source-prefix and key restrictions.
+    from .constants import fold_literal_text_parsing
+    from .decimal_group_feed import producer as decimal_group_producer
+
+    if not original._nodes[0].source_failure:
+        var canonical = original.copy()
+        var canonicalized = True
+        try:
+            canonical = fold_literal_text_parsing(original)
+        except:
+            # A failed metadata bridge proves no route preference. Leave the
+            # original query and the legacy adapter's diagnostics untouched.
+            canonicalized = False
+        if canonicalized and decimal_group_producer(canonical, root):
+            return False
     var needed = False
     for expression in original._nodes[root].exprs:
         var bound = bind(expression, frame._columns)

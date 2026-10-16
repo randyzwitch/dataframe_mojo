@@ -3,6 +3,7 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import BoundExpr, bind
 from dataframe.accelerator import decimal_group_feed
+from dataframe.accelerator.grouped_feeds import has_checked_grouped_feeds
 from dataframe.accelerator.constants import fold_literal_text_parsing
 from dataframe.accelerator.joins import lower_join_dag
 from dataframe.accelerator.rows import lower_rows
@@ -53,9 +54,21 @@ def expressions() raises -> List[Expr]:
 
 def test_decimal_same_scale_selection_literals_and_cast_refusals() raises:
     var frame = source()
-    var query = fold_literal_text_parsing(
+    var original = (
         frame.lazy().group_by("g", maintain_order=True).agg(expressions())
     )
+    # Public eager dispatch must reach the same original mode7 proof as
+    # metadata lowering, rather than the legacy text/List feed adapter.
+    assert_true(not has_checked_grouped_feeds(original, eager_feed=True))
+    var query = fold_literal_text_parsing(original)
+    assert_true(not has_checked_grouped_feeds(query, eager_feed=True))
+    var failed_source = original.copy()
+    failed_source._nodes[0].source_failure = "original source failure"
+    assert_true(has_checked_grouped_feeds(failed_source, eager_feed=True))
+    var mixed = expressions()
+    mixed.append(lit("bad").cast(DataType.INT64).sum().alias("foreign"))
+    var invalid_literal = frame.lazy().group_by("g").agg(mixed)
+    assert_true(has_checked_grouped_feeds(invalid_literal, eager_feed=True))
     var bounds = List[BoundExpr]()
     for expression in query._nodes[1].exprs:
         bounds.append(bind(expression, frame._columns))
