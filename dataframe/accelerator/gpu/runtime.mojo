@@ -16,6 +16,7 @@ from std.memory import bitcast, ArcPointer, Pointer
 from std.time import perf_counter_ns
 from std.sys import size_of
 from max.gpu.host import DeviceBuffer
+from dataframe.parallel import configured_workers
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.binding import temporal_result
@@ -1342,6 +1343,21 @@ def execute_plan(
         resident_input.value().rows if resident_input else plan.source.height()
     )
     var ordered_scalar = plan.ordered_mode == 1
+    if plan.decimal_feed_batch_rows:
+        if (
+            plan.decimal_feed_batch_rows != 8192
+            or configured_workers() > 65535
+            or len(plan.outputs) != 1
+            or plan.outputs[0].reduction != SUM
+            or not plan.slot_dtypes[plan.outputs[0].slot].is_decimal()
+            or not plan.reductions
+            or plan.limit >= 0
+            or not terminal_boundary
+        ):
+            raise Error("Mojo GPU checked Decimal feed certificate changed")
+        for step in plan.steps:
+            if step.filter or step.order or step.grouped:
+                raise Error("Mojo GPU checked Decimal feed cannot move rows")
     var observed_producer = plan.ordered_mode == 6
     var observed_rank = plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
     var ordered_batch_rows = checked_rank.BATCH_ROWS if observed_rank else 8192
@@ -2966,6 +2982,23 @@ def execute_plan(
                         result.categories[output] = CategoryField(
                             field.category.value().owner.copy(),
                             result.categories[output].value().string_codes,
+                        )
+    if resident_input:
+        for output in range(len(plan.outputs)):
+            var slot = plan.outputs[output].slot
+            if (
+                plan.outputs[output].reduction < 0
+                and slot >= 0
+                and slot < plan.source.width()
+            ):
+                var name = plan.source._columns[slot].name()
+                for column in range(resident_input.value().schema.width()):
+                    if (
+                        resident_input.value().schema._columns[column].name()
+                        == name
+                    ):
+                        result.grouped_keys[output] = (
+                            resident_input.value().grouped_keys[column].copy()
                         )
     if not terminal_boundary:
         result.observe_errors()

@@ -61,6 +61,54 @@ def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_exact_values_layouts_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_composition_filter_group_join_and_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_special_values_and_association",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_null_payloads_and_min_count",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_projection_fault_order_before_consumer",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_accumulator_width_overflow_and_underflow",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_nullable_original_values_and_dtype",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo::test_mojo_gpu_temporal_producer_head_order_group_faults_and_recovery",
             "metal",
         )
@@ -291,6 +339,24 @@ def production_policy() -> SuitePolicy:
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_checked_rank.mojo::test_mojo_gpu_checked_rank_year_month_sibling_and_resident_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_conditional_counts_and_budget",
             "metal",
         )
     )
@@ -3132,6 +3198,25 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo::test_checked_decimal_feed_metadata_retains_eager_boundary_and_signature",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo::test_mojo_gpu_checked_decimal_sum_feed_success_layouts_nulls_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo::test_mojo_gpu_checked_decimal_sum_feed_faults_before_head_and_empty_join",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -3189,6 +3274,8 @@ def production_policy() -> SuitePolicy:
             "execution.apple_parity",
             [
                 "tests/execution_modes/test_mojo_gpu_checked_rank.mojo",
+                "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
+                "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
                 "tests/public_contracts/test_partition_cut_capture.mojo",
@@ -3219,6 +3306,8 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_strict_cast_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo",
                 "tests/execution_modes/test_temporal_producer_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo",
                 "tests/execution_modes/test_iana_metadata.mojo",
@@ -3626,6 +3715,15 @@ def production_policy() -> SuitePolicy:
     )
     policy.groups.append(
         ContractGroup(
+            "execution.strict_cast_producers",
+            [
+                "tests/execution_modes/test_strict_cast_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
             "execution.iana_producers",
             [
                 "tests/execution_modes/test_temporal_producer_metadata.mojo",
@@ -3647,6 +3745,10 @@ def production_policy() -> SuitePolicy:
             "execution.backends",
             [
                 "tests/execution_modes/test_mojo_gpu_checked_rank.mojo",
+                "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo",
+                "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
+                "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
                 "tests/public_contracts/test_partition_cut_capture.mojo",
@@ -3859,6 +3961,18 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/kernel_equivalence/test_borrowed_parsers.mojo",
             ],
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_literal_raw_domains_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity",
+            "metal",
         )
     )
     policy.requirements.append(
