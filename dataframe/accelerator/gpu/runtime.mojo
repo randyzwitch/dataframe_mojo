@@ -5,6 +5,8 @@ The compiler emits GPU code from `rows.mojo`; DeviceContext owns the queue,
 buffers, transfers and synchronization. Unsupported regions reject before
 initializing a context while the remaining native operations are migrated.
 """
+from dataframe.accelerator import decimal_sum_receipts
+
 from .residency import TextDomain
 from .text_domains import (
     MapPlan,
@@ -268,6 +270,7 @@ def _preflight(
     *,
     terminal_boundary: Bool = True,
     source_rows: Int = -1,
+    sum_receipt: Optional[ArcPointer[decimal_sum_receipts.Receipt]] = None,
     ordered_source: Bool = False,
 ) raises -> RowPlan:
     if source_rows < -1 or source_rows > Int(Int32.MAX):
@@ -279,6 +282,7 @@ def _preflight(
         capabilities(),
         terminal_boundary=terminal_boundary,
         source_rows=source_rows,
+        sum_receipt=sum_receipt,
         ordered_source=ordered_source,
     )
     if plan.source.height() > Int(Int32.MAX):

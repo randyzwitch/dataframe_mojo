@@ -12,6 +12,17 @@ struct MetadataReservation(Movable):
         var seen = List[Int]()
         var retained = 0
         for task in dag.tasks:
+            if task.sum_receipt:
+                var receipt = task.sum_receipt.value()
+                var identity = Int(Pointer(to=receipt[]))
+                if identity not in seen:
+                    seen.append(identity)
+                    retained = checked_add(retained, receipt[].retained_bytes)
+                var origin = receipt[].origin
+                identity = Int(Pointer(to=origin[]))
+                if identity not in seen:
+                    seen.append(identity)
+                    retained = checked_add(retained, origin[].retained_bytes)
             for node in task.query._nodes:
                 if node.producer_origin:
                     var owner = node.producer_origin.value()
