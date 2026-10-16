@@ -1,4 +1,5 @@
 """Empty chunks, cross-boundary windows and cache reuse preserve typed cells."""
+# contract-group: storage.chunks
 from std.testing import assert_true
 from dataframe import DataFrame, Series
 from tests.support.reference_model import generated_model

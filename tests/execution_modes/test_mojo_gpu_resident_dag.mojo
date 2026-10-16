@@ -5,6 +5,7 @@ from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_resident_dag_branches_final_export_profile_and_budget() raises:
     var source = DataFrame(
         [
@@ -64,6 +65,7 @@ def test_mojo_gpu_resident_dag_branches_final_export_profile_and_budget() raises
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_resident_dag_empty_scalar_identity_and_zero_column_consumers() raises:
     var source = DataFrame([Series("x", Column[Float64](List[Float64]()))])
     var query = (

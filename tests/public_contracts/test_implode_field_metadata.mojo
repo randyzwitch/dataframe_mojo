@@ -1,4 +1,5 @@
 """IMPLODE accumulators retain prepared child metadata and fresh computations."""
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when

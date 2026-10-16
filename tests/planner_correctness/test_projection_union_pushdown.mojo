@@ -3,6 +3,7 @@ input of a union, and into a subplan several readers filter differently,
 without changing any result: each plan is compared with itself run
 unoptimized, with nulls in the filtered and aggregated columns. Where a
 filter lands is checked through the rows the operators below it read."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,

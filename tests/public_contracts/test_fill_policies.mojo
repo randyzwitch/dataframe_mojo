@@ -1,4 +1,5 @@
 """Filling and predicates choose source validity without conflating null and NaN."""
+# contract-group: expr.null_logic
 from std.math import isnan, isinf
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, null

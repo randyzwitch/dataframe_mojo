@@ -6,6 +6,7 @@ straddling the range) and scattered ones, nullable probe keys, a build
 with no rows, a build whose keys are all null, Int64, Int32 and Date
 keys, inner and semi joins chained after one another, on one and eight
 workers."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 
 from dataframe import (

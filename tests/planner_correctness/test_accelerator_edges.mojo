@@ -1,4 +1,5 @@
 """Portable accelerator eligibility and metadata are independently observable."""
+# contract-group: planner.routing
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, col, lit
 from dataframe.lazy import LazyFrame

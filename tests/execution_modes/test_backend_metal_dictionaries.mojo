@@ -1,4 +1,5 @@
 """Native ordered dictionaries must preserve logical text and source codes."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -186,6 +187,7 @@ def dictionary_operation_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_dictionary_unary_lookup_tables_preserve_utf8_nulls_and_report_host_staging() raises:
     dictionary_operation_cases(require_metal(), True)
 
@@ -326,6 +328,7 @@ def categorical_cases(runtime: MetalRuntime, native: Bool) raises:
         assert_true(out.equals(projected.collect(engine="cpu")))
 
 
+# requires: metal
 def test_native_metal_categorical_join_styles_reconcile_independent_codes_and_restore_dictionary_identity() raises:
     categorical_cases(require_metal(), True)
 
@@ -380,6 +383,7 @@ def dictionary_distinct_cases(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions() raises:
     dictionary_distinct_cases(require_metal(), True)
 

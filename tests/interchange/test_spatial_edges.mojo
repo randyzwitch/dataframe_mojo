@@ -1,4 +1,6 @@
 """Optional SHP measures, DBF decoding and geometry extension storage edges."""
+# contract-group: io.arrow
+# contract-group: io.spatial
 from std.os import getenv
 from std.os.path import exists
 from std.ffi import external_call

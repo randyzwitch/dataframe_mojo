@@ -1,4 +1,5 @@
 """Numeric cast dispatch and results against independently bounded scalars."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import BoolColumn, Column, DataType, Series
 from dataframe.cast import _cast_exact, cast_series

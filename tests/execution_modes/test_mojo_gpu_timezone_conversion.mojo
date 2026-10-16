@@ -1,4 +1,6 @@
 """Zone metadata conversion keeps exact ticks and uses the GPU row executor."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, LazyFrame, col
 from dataframe.metal import MetalRuntime
@@ -43,6 +45,7 @@ def _assert_ticks(actual: DataFrame, source: Series, dtype: DataType) raises:
             assert_equal(values.value(row), expected.value(row))
 
 
+# requires: metal
 def test_mojo_gpu_timezone_conversion_extreme_ticks_nullable_layouts_and_metadata() raises:
     var raw: List[Int64] = [
         Int64.MIN,
@@ -113,6 +116,7 @@ def test_mojo_gpu_timezone_conversion_extreme_ticks_nullable_layouts_and_metadat
                     )
 
 
+# requires: metal
 def test_mojo_gpu_timezone_conversion_composes_with_gpu_rows_and_utc_roundtrip() raises:
     var source = Series(
         "t",
@@ -165,6 +169,7 @@ def test_mojo_gpu_timezone_conversion_composes_with_gpu_rows_and_utc_roundtrip()
     assert_frame(actual, roundtrip.collect(engine="cpu"))
 
 
+# requires: metal
 def test_mojo_gpu_timezone_conversion_validates_zones_and_retains_local_operation_refusals() raises:
     var frame = DataFrame(
         [

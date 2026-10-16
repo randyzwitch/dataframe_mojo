@@ -41,6 +41,7 @@ def _check(query: LazyFrame) raises:
                     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_transport_expressions_casts_and_arithmetic() raises:
     for layout in range(3):
         var source = wide_fixture(257)
@@ -139,6 +140,7 @@ def test_mojo_gpu_decimal_transport_expressions_casts_and_arithmetic() raises:
         _check(source.lazy().select_exprs(expressions))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_reductions_grouping_order_rank_and_join() raises:
     for n in [0, 1, 257, 65537]:
         var frame = wide_fixture(n)
@@ -211,6 +213,7 @@ def test_mojo_gpu_decimal_reductions_grouping_order_rank_and_join() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_windows_keep_both_words_and_precision() raises:
     var frame = wide_fixture(257)
     _check(
@@ -282,6 +285,7 @@ def _check_decimal_over_worker_prefix() raises:
     _ = setting^
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation() raises:
     _check_decimal_over_worker_prefix()
     for query in List[LazyFrame](

@@ -1,4 +1,5 @@
 """Exact two-word decimal transport and reductions on Metal."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
@@ -81,6 +82,7 @@ def wide_fixture(n: Int = 513) raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() raises:
     _ = require_metal()
     var frame = wide_fixture(3)
@@ -130,6 +132,7 @@ def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() ra
         _ = fold_literal_text_parsing(bad)
 
 
+# requires: metal
 def test_native_metal_decimal128_sum_mean_global_grouped_nulls_and_consumers() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 513, 65537]):
@@ -243,6 +246,7 @@ def _sparse_decimal(
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_prefix_and_worker_merge_overflow_observable() raises:
     _ = require_metal()
     var prefix = _sparse_decimal(3, 999, 1, 1)
@@ -271,6 +275,7 @@ def test_native_metal_decimal128_prefix_and_worker_merge_overflow_observable() r
     )
 
 
+# requires: metal
 def test_native_metal_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 257, 4097]):
@@ -308,6 +313,7 @@ def test_native_metal_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() 
     )
 
 
+# requires: metal
 def test_native_metal_decimal_wide_grouped_sums_sort_filter_and_resident_copy() raises:
     _ = require_metal()
     for n in List[Int]([0, 257, 4097]):
@@ -359,6 +365,7 @@ def test_native_metal_decimal_wide_grouped_sums_sort_filter_and_resident_copy() 
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_transport_comparisons_order_rank_and_keys() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 513]):
@@ -442,6 +449,7 @@ def test_native_metal_decimal128_transport_comparisons_order_rank_and_keys() rai
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_joins_payloads_keys_and_scalar_broadcast() raises:
     _ = require_metal()
     var frame = wide_fixture(37)
@@ -489,6 +497,7 @@ def test_native_metal_decimal128_joins_payloads_keys_and_scalar_broadcast() rais
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_extrema_first_last_and_resident_reductions() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 513]):
@@ -524,6 +533,7 @@ def test_native_metal_decimal128_extrema_first_last_and_resident_reductions() ra
     )
 
 
+# requires: metal
 def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache() raises:
     var frame = wide_fixture(17)
     var query = frame.lazy().select_exprs([col("k"), col("v")])

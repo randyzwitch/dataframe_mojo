@@ -1,4 +1,5 @@
 """Paired Float64 covariance, Pearson and Spearman through resident Metal."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import isnan
@@ -115,6 +116,7 @@ def test_pair_moment_capability_right_slots_ddof_and_spearman_staging() raises:
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_pair_moments_mixed_widths_independent_pairs_and_layouts() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
@@ -200,6 +202,7 @@ def test_native_metal_pair_moments_mixed_widths_independent_pairs_and_layouts() 
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_pair_moments_ieee_null_pairs_unsigned_and_wide_physical_slots() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
@@ -365,6 +368,7 @@ def test_native_metal_pair_moments_ieee_null_pairs_unsigned_and_wide_physical_sl
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_pair_moments_large_workers_centered_accuracy_and_spearman_ties() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -450,6 +454,7 @@ def test_native_metal_pair_moments_large_workers_centered_accuracy_and_spearman_
         _ = setting^
 
 
+# requires: metal
 def test_native_metal_pair_moments_nested_consumers_checked_inputs_budget_cost_and_reuse() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)

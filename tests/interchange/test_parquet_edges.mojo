@@ -1,4 +1,7 @@
 """External physical coercions and dictionary values after row transformations."""
+# contract-group: kernel.row_ops
+# contract-group: io.arrow
+# contract-group: io.parquet
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,

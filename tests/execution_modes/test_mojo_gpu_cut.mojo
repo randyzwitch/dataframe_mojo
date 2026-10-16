@@ -1,4 +1,7 @@
 """Explicit CUT executes resident checked operands before label consumers."""
+# contract-group: expr.cut
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.math import isnan
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
@@ -115,6 +118,7 @@ def _check_ordered_scalar_faults(
             _ = query.collect(accelerator=runtime)
 
 
+# requires: metal
 def test_mojo_gpu_cut_literals_default_labels_nullable_layouts_and_struct_breakpoints() raises:
     var raw = _source()
     var inf = Float64(1) / Float64(0)
@@ -238,6 +242,7 @@ def test_mojo_gpu_cut_literals_default_labels_nullable_layouts_and_struct_breakp
             )
 
 
+# requires: metal
 def test_mojo_gpu_cut_single_nan_edge_empty_edges_filter_and_computed_operands() raises:
     var nan = Float64(0) / Float64(0)
     var source = DataFrame(
@@ -322,6 +327,7 @@ def test_mojo_gpu_cut_single_nan_edge_empty_edges_filter_and_computed_operands()
             assert_equal(result.item(row, "x").string(), labels[row])
 
 
+# requires: metal
 def test_mojo_gpu_cut_eager_operand_and_deferred_control_error_order_recovery() raises:
     var source = DataFrame([Series("x", Column[Int64]([Int64.MAX]))])
     var safe = DataFrame([Series("x", Column[Int64]([0]))])
@@ -371,6 +377,7 @@ def test_mojo_gpu_cut_eager_operand_and_deferred_control_error_order_recovery() 
     )
 
 
+# requires: metal
 def test_mojo_gpu_cut_budget_profiles_and_pending_families_are_explicit() raises:
     var source = _source()
     var query = source.lazy().select(
@@ -413,6 +420,7 @@ def test_mojo_gpu_cut_budget_profiles_and_pending_families_are_explicit() raises
         )
 
 
+# requires: metal
 def test_mojo_gpu_cut_scalar_reduction_siblings_observe_expression_order_and_empty_errors() raises:
     var source = DataFrame([Series("x", Column[Int64]([Int64.MAX, 1]))])
     var runtime = MetalRuntime()
@@ -510,6 +518,7 @@ def test_mojo_gpu_cut_scalar_reduction_siblings_observe_expression_order_and_emp
     assert_equal(empty.columns(), ["scalar", "total", "bin"])
 
 
+# requires: metal
 def test_mojo_gpu_cut_literal_only_window_rejections_and_literal_sibling_broadcast() raises:
     var runtime = MetalRuntime(device_id=999999)
     for rows in [0, 2]:

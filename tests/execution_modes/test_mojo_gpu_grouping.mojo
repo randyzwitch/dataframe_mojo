@@ -122,6 +122,7 @@ def _layout_case[D: DType](n: Int, chunked: Bool) raises:
         assert_equal(total, Int64(n))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts() raises:
     comptime types = (DType.int8, DType.uint64, DType.float32, DType.float64)
     comptime for i in range(len(types)):
@@ -131,6 +132,7 @@ def test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts() rais
             _layout_case[D](n, True)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions() raises:
     var keys = List[UInt64]()
     for row in range(1027):
@@ -165,6 +167,7 @@ def test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions()
     assert_equal(result.height(), 3)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow() raises:
     var source = DataFrame(
         [

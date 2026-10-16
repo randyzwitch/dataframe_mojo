@@ -1,4 +1,6 @@
 """Structural file-failure prefixes never guess types or probe future files."""
+# contract-group: public.accelerator_staging
+# contract-group: public.apple_parity
 
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (

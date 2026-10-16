@@ -1,4 +1,5 @@
 """Grouped native intervals and mixed indexed/gathered preparation have scalar oracles."""
+# contract-group: kernel.reduce
 from std.math import isnan
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true

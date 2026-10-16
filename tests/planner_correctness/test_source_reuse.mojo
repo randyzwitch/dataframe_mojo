@@ -1,4 +1,5 @@
 """Planning measurements and profiles observe one execution of each source."""
+# contract-group: planner.relational
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
