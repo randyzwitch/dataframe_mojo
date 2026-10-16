@@ -97,6 +97,7 @@ def _literal(frame: DataFrame, nullable: Bool = False) raises:
 
 
 def _money_and_prefix_certificates() raises:
+    print("GROUP metadata: original money literals and signatures")
     var source = _source().with_column(
         Series("discount", Column[Int64]([10, 20, 30])).with_dtype(
             DataType.decimal(15, 2, 64)
@@ -197,6 +198,7 @@ def _money_and_prefix_certificates() raises:
     # The public route encodes String fields before numeric DAG lowering.
     # DATE retains its original Int64 logical/physical representation; the
     # fresh String segment is the only carrier normalization needed here.
+    print("GROUP metadata: public dictionary staging with Int64 DATE keys")
     var dictionary = DictionaryCodes(normalized)
     var encoded = encode_query(normalized, dictionary)
     var dag = lower_join_dag(encoded, capabilities())
@@ -205,6 +207,9 @@ def _money_and_prefix_certificates() raises:
         for node in task.query._nodes:
             observed += Int(node.text == decimal_group_feed.MATERIALIZATION)
     assert_equal(observed, 1)
+    print(
+        "GROUP metadata: original prefix fault and wide physical refusal checks"
+    )
     # A fallible value in either original JOIN arm is not made infallible by
     # a successful eventual GPU input-zero observation.
     var poison = (col("g").cast(DataType.INT64) + lit(Int64.MAX)).alias(
