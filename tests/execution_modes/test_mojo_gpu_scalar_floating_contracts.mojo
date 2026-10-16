@@ -38,11 +38,11 @@ def test_mojo_gpu_scalar_floating_exact_values_layouts_and_nulls() raises:
 
 
 def test_mojo_gpu_scalar_floating_special_values_and_association() raises:
-    for case in range(6):
-        var frame = special_fixture(case)
+    for case_index in range(6):
+        var frame = special_fixture(case_index)
         var query = frame.lazy().select_exprs(special_expressions())
         for gpu in [False, True]:
-            check_special(_collect(query, gpu), special_kind(case))
+            check_special(_collect(query, gpu), special_kind(case_index))
 
 
 def test_mojo_gpu_scalar_floating_null_payloads_and_min_count() raises:
@@ -54,8 +54,8 @@ def test_mojo_gpu_scalar_floating_null_payloads_and_min_count() raises:
 
 
 def test_mojo_gpu_scalar_floating_accumulator_width_overflow_and_underflow() raises:
-    for case in range(5):
-        var fixture = edge_fixture(case)
+    for case_index in range(5):
+        var fixture = edge_fixture(case_index)
         var query = fixture[0].lazy().select_exprs(edge_expressions())
         for gpu in [False, True]:
             check_edge(_collect(query, gpu), fixture[1], fixture[2], fixture[3])

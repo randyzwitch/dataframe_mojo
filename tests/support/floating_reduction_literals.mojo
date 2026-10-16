@@ -110,7 +110,7 @@ def one_group_fixture(
     return DataFrame([source^, Series("k", Column[Int32]([1, 1, 1]))])
 
 
-def special_fixture(case: Int) raises -> DataFrame:
+def special_fixture(case_index: Int) raises -> DataFrame:
     var minimum_subnormal = bitcast[DType.float64](UInt64(1))
     var cases: List[List[Float64]] = [
         [18_014_398_509_481_984.0, 1.0, -18_014_398_509_481_984.0],
@@ -120,12 +120,12 @@ def special_fixture(case: Int) raises -> DataFrame:
         [-0.0, -0.0, -0.0],
         [minimum_subnormal, minimum_subnormal, minimum_subnormal],
     ]
-    return one_group_fixture(cases[case])
+    return one_group_fixture(cases[case_index])
 
 
-def special_kind(case: Int) -> Int:
+def special_kind(case_index: Int) -> Int:
     var kinds: List[Int] = [0, 1, 1, 2, 3, 4]
-    return kinds[case]
+    return kinds[case_index]
 
 
 def check_special(actual: DataFrame, kind: Int) raises:
@@ -161,7 +161,7 @@ def null_payload_fixture(narrow: Bool) raises -> DataFrame:
     return DataFrame([x^, Series("k", Column[Int32]([1, 1, 1]))])
 
 
-def edge_fixture(case: Int) raises -> Tuple[DataFrame, Bool, Int, Float64]:
+def edge_fixture(case_index: Int) raises -> Tuple[DataFrame, Bool, Int, Float64]:
     var largest = bitcast[DType.float64](UInt64(0x7FEFFFFFFFFFFFFF))
     var tiny = bitcast[DType.float64](UInt64(1))
     var largest32 = Float64(bitcast[DType.float32](UInt32(0x7F7FFFFF)))
@@ -173,10 +173,10 @@ def edge_fixture(case: Int) raises -> Tuple[DataFrame, Bool, Int, Float64]:
         [largest32, largest32, -largest32],
         [tiny32, 0.0, 0.0],
     ]
-    var narrow = case >= 3
-    var kind = 0 if case == 0 or case == 3 else 1 if case == 1 else 2
-    var frame = one_group_fixture(cases[case], narrow)
-    return (frame^, narrow, kind, cases[case][0])
+    var narrow = case_index >= 3
+    var kind = 0 if case_index == 0 or case_index == 3 else 1 if case_index == 1 else 2
+    var frame = one_group_fixture(cases[case_index], narrow)
+    return (frame^, narrow, kind, cases[case_index][0])
 
 
 def check_edge(
