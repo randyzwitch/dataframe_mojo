@@ -154,13 +154,8 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
         _ = unsafe.collect(accelerator=runtime)
     var recovered = unsafe.head(1).collect(accelerator=runtime)
     assert_equal(recovered.item(0, "bad").int64(), Int64.MIN + 1)
-    var restricted = _capabilities()
-    restricted.deferred_integer_errors = False
-    with assert_raises(contains="terminal projections"):
-        _ = lower_rows(
-            source.lazy().filter((col("x") + lit(Int64(1))) > lit(Int64(0))),
-            restricted,
-        )
+    # test_integer_proofs_cover_unsigned_product_and_literal_boundaries covers
+    # the refusal by a backend without deferred errors.
     with assert_raises(contains="strict casts"):
         _ = (
             source.lazy()
