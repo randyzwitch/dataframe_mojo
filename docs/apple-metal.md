@@ -78,6 +78,13 @@ than device Int128 instructions. Decimal sums/means preserve precision checks,
 ordered worker-prefix behavior, cancellation and scaled conversion semantics.
 Moving, sorting, ranking, joining and arg min/max on decimals retain both words.
 
+An eager scalar SUM with one checked Decimal arithmetic occurrence can remain
+resident through later filters, joins and heads. Its replay observes each
+8192-row operand batch before that batch's sum prefix, checks worker failures
+before merging partials, and keeps the original nulls and result dtype. This
+certificate does not cover streaming morsels, grouped/OVER feeds, multiple
+fallible operand occurrences or fallible sibling expressions.
+
 Sorts preserve source order on ties, configured per-key null placement, and
 original value encodings. Nulls, NaNs and signed zeros retain the CPU grouping
 and join equivalence rules. Rank direction follows the CPU rank contract,
@@ -100,6 +107,13 @@ query budget. IANA timezone replacement, calendar offsets and truncation support
 a direct in-memory scan followed by a single SELECT. They preserve datetime
 units, ambiguity/gap policies, checked reconstruction, conditional masks and
 scalar activation within each original CPU batch.
+
+Eligible original strict-cast row projections can feed resident filters,
+sorting, head, grouping and joins. Their typed producer certificate retains the
+complete original phase and immutable source owners, so a later consumer cannot
+hide an earlier cast failure. Conditional branches retain their original masks.
+Scalar casts and casts nested inside aggregate/window operands retain their
+existing restrictions; structural rewrites must preserve the certified prefix.
 
 Eligible original IANA row producers can also feed resident sorting, head and
 grouped consumers. Typed certificates retain the original expression, source
@@ -145,6 +159,15 @@ reduction siblings. The producer retains device owners until its consumers
 finish and checks original input phases before publishing results. Encoded
 grouping keys still require a separate typed-domain owner; arbitrary checked
 resident inputs are not admitted by this route.
+
+Grouped primitive List producers can retain String, Binary, Geometry and
+categorical key domains through EXPLODE and supported resident row, join and
+group consumers. Query-scoped owners certify the original plan, source view
+and dictionary or byte domain, and retain staging charges through the last
+consumer. Categorical keys retain their original dictionary and codes; coded
+String grouped keys publish ordinary String values. This route keeps the
+existing primitive List and certified-producer limits; it does not add general
+nested List values or arbitrary composed producers.
 
 Partitioned `cut(...).over(...)` and `qcut(...).over(...)` keep numeric operands
 resident, preserve original key domains and eager operand/control error order,
