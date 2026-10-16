@@ -3135,6 +3135,25 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_date_rows.mojo::test_decimal_date_rows_certificate_preserves_original_prefix_and_states",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_date_rows.mojo::test_mojo_gpu_decimal_date_rows_literals_extremes_nulls_and_layouts",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_date_rows.mojo::test_mojo_gpu_decimal_date_rows_precision_before_group_and_join",
+            "mojo_gpu",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_decimal_group_feed_certificate_preserves_whole_original_agg",
             "mojo_gpu",
         )
@@ -3242,6 +3261,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_date_rows.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo",
                 "tests/execution_modes/test_decimal_scalar_feed_metadata.mojo",
                 "tests/execution_modes/test_conditional_decimal_aggregate_planning.mojo",
@@ -3704,6 +3724,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_date_rows.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo",
                 "tests/execution_modes/test_decimal_scalar_feed_metadata.mojo",
                 "tests/execution_modes/test_conditional_decimal_aggregate_planning.mojo",
