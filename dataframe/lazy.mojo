@@ -94,6 +94,7 @@ from .expr import (
     EQ,
     NE,
     NOT,
+    STR_LIKE,
     WHEN,
     LIT_BOOL,
     LIT_FLOAT,
@@ -283,6 +284,68 @@ def _plan_node(
         partition_exprs.copy(),
         partition_columns.copy(),
     )
+
+
+# DuckDB's selectivity of a filter no statistic answers
+# (`RelationStatisticsHelper::DEFAULT_SELECTIVITY`).
+comptime _DEFAULT_SELECTIVITY = 0.2
+
+
+def _scan_estimate(frame: DataFrame, predicate: Expr) raises -> Int:
+    """Rows of `frame` that `predicate` keeps, as DuckDB estimates a
+    filtered table scan (`ExtractGetStats`, `InspectTableFilter`), with no
+    rows read. Each conjunct reading one column is a filter on that column:
+    an equality keeps the rows over the column's distinct count (the
+    table's statistics, `DataFrame._distinct_count`), a NOT LIKE on a
+    column without nulls four fifths, anything else every row; the scan
+    keeps the fewest any of them keeps, or a fifth when none says less.
+    Conjuncts reading several columns stay above the scan and keep a fifth
+    of that."""
+    var base = frame.height()
+    if base == 0:
+        return 0
+    var after = base
+    var column_filters = False
+    var above = False
+    for part in conjuncts(predicate):
+        var reads = _references(part)
+        if not reads:
+            above = True
+            continue
+        var names = List[String]()
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+        if len(names) != 1:
+            above = True
+            continue
+        column_filters = True
+        after = min(after, _column_filter_rows(frame, names[0], part, base))
+    if after == base and column_filters:
+        after = max(Int(Float64(base) * _DEFAULT_SELECTIVITY), 1)
+    if above:
+        after = max(Int(Float64(after) * _DEFAULT_SELECTIVITY), 1)
+    return after
+
+
+def _column_filter_rows(
+    frame: DataFrame, name: String, part: Expr, base: Int
+) raises -> Int:
+    """Rows one column's filter keeps (`InspectTableFilter`)."""
+    ref root = part._nodes[len(part._nodes) - 1]
+    if root.op == EQ:
+        var distinct = frame._distinct_count(name)
+        if distinct > 0:
+            return (base + distinct - 1) // distinct
+        return base
+    if (
+        root.op == NOT
+        and root.left >= 0
+        and part._nodes[root.left].op == STR_LIKE
+        and frame.column(name).null_count() == 0
+    ):
+        return max(Int(Float64(base) * (1.0 - _DEFAULT_SELECTIVITY)), 1)
+    return base
 
 
 def _references(expr: Expr) -> Optional[List[String]]:
@@ -5302,11 +5365,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _estimated_rows(self, index: Int) raises -> Int:
         """Rows node `index` yields, without running it: exact for a table,
-        estimated for one row-local filter over a table by applying the
-        filter to 64 evenly spaced runs of 1,024 rows (every row of a table
-        that small). -1 for anything else. Evenly spaced runs, not a
-        prefix: tables are often stored in date or key order, which a
-        prefix would misjudge."""
+        and for one row-local filter over a table what DuckDB estimates
+        for a filtered scan (`_scan_estimate`). -1 for anything else."""
         ref node = self._nodes[index]
         if node.kind == SCAN_FRAME:
             return self._frames[node.offset].height()
@@ -5320,30 +5380,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         ref source = self._nodes[node.left]
         if source.kind != SCAN_FRAME:
             return -1
-        var height = self._frames[source.offset].height()
-        var runs = 64
-        var run = 1024
-        # Only the columns the filter reads.
-        var reads = _references(node.exprs[0])
-        if not reads:
-            return -1
-        var names = List[String]()
-        for name in reads.value():
-            if name not in names:
-                names.append(name)
-        var sample = self._frames[source.offset].select(names)
-        if height > runs * run:
-            var picked = List[Int](capacity=runs * run)
-            for k in range(runs):
-                var first = k * (height // runs)
-                for i in range(run):
-                    picked.append(first + i)
-            # Gathered within each stored chunk, so no column is merged first.
-            sample = sample._filter_rows(picked^)
-        var kept = sample.filter(node.exprs[0]).height()
-        if height <= runs * run:
-            return kept
-        return Int(Float64(kept) / Float64(runs * run) * Float64(height))
+        return _scan_estimate(self._frames[source.offset], node.exprs[0])
 
     def _progression_key(self, index: Int, keys: List[String]) raises -> Bool:
         """Whether a join building on node `index` with these keys needs no
