@@ -63,6 +63,10 @@ def production_policy() -> SuitePolicy:
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_exact_values_layouts_and_nulls",
             "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_composition_filter_group_join_and_layouts",
             "metal",
         )
@@ -71,6 +75,10 @@ def production_policy() -> SuitePolicy:
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_special_values_and_association",
             "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals",
             "metal",
         )
@@ -79,6 +87,10 @@ def production_policy() -> SuitePolicy:
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_null_payloads_and_min_count",
             "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_projection_fault_order_before_consumer",
             "metal",
         )
@@ -87,6 +99,10 @@ def production_policy() -> SuitePolicy:
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo::test_mojo_gpu_scalar_floating_accumulator_width_overflow_and_underflow",
             "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_nullable_original_values_and_dtype",
             "metal",
         )
