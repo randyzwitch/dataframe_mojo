@@ -4,8 +4,10 @@ Every reachable branch is bound before device initialization. Child regions
 are not terminal boundaries for checked expressions. Executing these tasks
 may materialize intermediate frames; the provider reports those boundaries.
 """
+from std.memory import ArcPointer
 from .metadata import prune_projections, schema_frame
 from .selectors import _live_nodes
+from .grouped_lists import GroupedListsPlan, prepare as prepare_grouped_lists
 from .qcuts import is_qcut_marker, controls as qcut_controls
 from .cuts import has_cut_materializations
 from .capabilities import RowCapabilities
@@ -244,6 +246,7 @@ comptime DAG_JOIN = 1
 comptime DAG_ASOF = 2
 comptime DAG_SOURCE_FIELDS = 3
 comptime DAG_EXPLODE = 4
+comptime DAG_GROUPED_FIELDS = 5
 
 
 def _scalar_reduction(query: LazyFrame, index: Int) -> Bool:
@@ -290,6 +293,7 @@ struct DagTask(Copyable):
     var keys: List[Int64]
     var fields: List[JoinField]
     var equal_rows: Bool
+    var grouped: Optional[ArcPointer[GroupedListsPlan]]
 
 
 @fieldwise_init
@@ -388,6 +392,9 @@ def _join_task(
     limit: Int,
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> Int:
     ref node = query._nodes[root]
     if node.how < 0 or node.how > 6:
@@ -404,8 +411,24 @@ def _join_task(
             "Join requires the same nonzero number of left and right keys"
         )
     var equal_rows = len(node.flags) > 1 and node.flags[1]
-    var left_id = _task(query, node.left, equal_rows, capabilities, tasks)
-    var right_id = _task(query, node.right, equal_rows, capabilities, tasks)
+    var left_id = _task(
+        query,
+        node.left,
+        equal_rows,
+        capabilities,
+        tasks,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
+    )
+    var right_id = _task(
+        query,
+        node.right,
+        equal_rows,
+        capabilities,
+        tasks,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
+    )
     var left = tasks[left_id].schema.copy()
     var right = tasks[right_id].schema.copy()
     if left.width() + right.width() > capabilities.max_join_columns:
@@ -521,6 +544,7 @@ def _join_task(
             keys^,
             fields^,
             equal_rows,
+            None,
         )
     )
     return id
@@ -533,6 +557,9 @@ def _asof_task(
     limit: Int,
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> Int:
     if not capabilities.asof_joins:
         capabilities.reject("plan", "as-of joins require backend support")
@@ -541,8 +568,24 @@ def _asof_task(
         raise Error("join_asof requires one ordered key on each side")
     # CPU materializes and observes complete left then right producers before
     # validating sortedness. A final head cannot hide producer value errors.
-    var left_id = _task(query, node.left, True, capabilities, tasks)
-    var right_id = _task(query, node.right, True, capabilities, tasks)
+    var left_id = _task(
+        query,
+        node.left,
+        True,
+        capabilities,
+        tasks,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
+    )
+    var right_id = _task(
+        query,
+        node.right,
+        True,
+        capabilities,
+        tasks,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
+    )
     var left = tasks[left_id].schema.copy()
     var right = tasks[right_id].schema.copy()
     if left.width() + right.width() > capabilities.max_join_columns:
@@ -613,6 +656,7 @@ def _asof_task(
             keys^,
             fields^,
             False,
+            None,
         )
     )
     return id
@@ -627,58 +671,135 @@ def _cached_rows(tasks: List[DagTask], root: Int) -> Int:
     return -1
 
 
+def _grouped_fields_task(
+    query: LazyFrame,
+    root: Int,
+    capabilities: RowCapabilities,
+    mut tasks: List[DagTask],
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
+) raises -> Int:
+    if not capabilities.grouped or not capabilities.primitive_list_explode:
+        capabilities.reject(
+            "grouped explode",
+            "grouped primitive List publication is unavailable",
+        )
+    for index in range(len(tasks)):
+        if (
+            tasks[index].root == root
+            and tasks[index].kind == DAG_GROUPED_FIELDS
+        ):
+            return index
+    var producer = query.copy()
+    producer._reorder(root)
+    producer._compact_scan_slots()
+    if len(producer._nodes) < 2 or producer._nodes[0].kind != SCAN_FRAME:
+        capabilities.reject(
+            "grouped explode", "direct original grouped List producer required"
+        )
+    var failure = producer._nodes[0].source_failure
+    producer._nodes[0].source_failure = ""
+    var prepared = prepare_grouped_lists(
+        producer, ordered_source=ordered_source, eager_feed=eager_feed
+    )
+    producer._nodes[0].source_failure = failure
+    prepared.scan.source_failure = failure
+    prepared.source.source_failure = failure
+    if (
+        len(prepared.key_provenance)
+        or prepared.source.source_domain
+        or len(prepared.source.source_text)
+    ):
+        capabilities.reject(
+            "grouped explode",
+            "encoded keys require a retained typed domain owner",
+        )
+    var schema = prepared.schema.copy()
+    var id = len(tasks)
+    tasks.append(
+        DagTask(
+            DAG_GROUPED_FIELDS,
+            root,
+            producer^,
+            -1,
+            -1,
+            schema^,
+            True,
+            -1,
+            -1,
+            List[Int64](),
+            List[JoinField](),
+            False,
+            ArcPointer(prepared^),
+        )
+    )
+    return id
+
+
 def _explode_task(
     query: LazyFrame,
     root: Int,
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> Int:
     ref operation = query._nodes[root]
     ref scan = query._nodes[operation.left]
-    if scan.kind != SCAN_FRAME:
-        capabilities.reject(
-            "explode",
-            "initial scoped List producer requires a direct in-memory source",
-        )
-    if scan.code_domain or len(scan.text_fields):
-        capabilities.reject(
-            "explode",
-            "private encoded source domains are not primitive List sources",
-        )
-    var source = query._frames[scan.offset].copy()
-    if len(scan.names):
-        source = source.select(scan.names)
-    var schema = explode_schema(source, operation.names, capabilities)
     var source_id = -1
-    for index in range(len(tasks)):
-        if (
-            tasks[index].kind == DAG_SOURCE_FIELDS
-            and tasks[index].root == operation.left
-        ):
-            source_id = index
-            break
-    if source_id < 0:
-        var input = LazyFrame(source)
-        input._nodes[0] = scan.copy()
-        input._nodes[0].offset = 0
-        input._nodes[0].names = List[String]()
-        source_id = len(tasks)
-        tasks.append(
-            DagTask(
-                DAG_SOURCE_FIELDS,
-                operation.left,
-                input^,
-                -1,
-                -1,
-                source.clear(),
-                True,
-                -1,
-                -1,
-                List[Int64](),
-                List[JoinField](),
-                False,
+    var source: DataFrame
+    if scan.kind == SCAN_FRAME:
+        if scan.code_domain or len(scan.text_fields):
+            capabilities.reject(
+                "explode",
+                "private encoded source domains are not primitive List sources",
             )
+        source = query._frames[scan.offset].copy()
+        if len(scan.names):
+            source = source.select(scan.names)
+        for index in range(len(tasks)):
+            if (
+                tasks[index].kind == DAG_SOURCE_FIELDS
+                and tasks[index].root == operation.left
+            ):
+                source_id = index
+                break
+        if source_id < 0:
+            var input = LazyFrame(source)
+            input._nodes[0] = scan.copy()
+            input._nodes[0].offset = 0
+            input._nodes[0].names = List[String]()
+            source_id = len(tasks)
+            tasks.append(
+                DagTask(
+                    DAG_SOURCE_FIELDS,
+                    operation.left,
+                    input^,
+                    -1,
+                    -1,
+                    source.clear(),
+                    True,
+                    -1,
+                    -1,
+                    List[Int64](),
+                    List[JoinField](),
+                    False,
+                    None,
+                )
+            )
+    else:
+        source_id = _grouped_fields_task(
+            query,
+            operation.left,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
         )
+        source = tasks[source_id].schema.copy()
+    var schema = explode_schema(source, operation.names, capabilities)
     var metadata = LazyFrame(source.clear())
     var marker = operation.copy()
     marker.left = 0
@@ -701,6 +822,7 @@ def _explode_task(
             List[Int64](),
             List[JoinField](),
             False,
+            None,
         )
     )
     return id
@@ -712,6 +834,9 @@ def _task(
     terminal: Bool,
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> Int:
     var boundary = (
         terminal
@@ -727,11 +852,36 @@ def _task(
             tasks[cached].terminal = True
         return cached
     if query._nodes[root].kind == EXPLODE:
-        return _explode_task(query, root, capabilities, tasks)
+        return _explode_task(
+            query,
+            root,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
+        )
     if query._nodes[root].kind == JOIN:
-        return _join_task(query, root, boundary, -1, capabilities, tasks)
+        return _join_task(
+            query,
+            root,
+            boundary,
+            -1,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
+        )
     if query._nodes[root].kind == ASOF:
-        return _asof_task(query, root, boundary, -1, capabilities, tasks)
+        return _asof_task(
+            query,
+            root,
+            boundary,
+            -1,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
+        )
     # A direct head is a join output limit, so large fanout can be bounded
     # without allocating the unobserved Cartesian-sized result.
     ref top = query._nodes[root]
@@ -741,7 +891,14 @@ def _task(
         and query._nodes[top.left].kind == JOIN
     ):
         return _join_task(
-            query, top.left, boundary, top.length, capabilities, tasks
+            query,
+            top.left,
+            boundary,
+            top.length,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
         )
     if (
         top.kind == SLICE
@@ -749,7 +906,14 @@ def _task(
         and query._nodes[top.left].kind == ASOF
     ):
         return _asof_task(
-            query, top.left, boundary, top.length, capabilities, tasks
+            query,
+            top.left,
+            boundary,
+            top.length,
+            capabilities,
+            tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
         )
     var chain = List[Int]()
     var cursor = root
@@ -830,6 +994,8 @@ def _task(
             Bool(query._nodes[root].producer_origin),
             capabilities,
             tasks,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
         )
         frame = tasks[source].schema.copy()
     else:
@@ -869,6 +1035,7 @@ def _task(
                 List[Int64](),
                 List[JoinField](),
                 False,
+                None,
             )
         )
         return id
@@ -904,13 +1071,18 @@ def _task(
             List[Int64](),
             List[JoinField](),
             False,
+            None,
         )
     )
     return id
 
 
 def lower_join_dag(
-    query: LazyFrame, capabilities: RowCapabilities
+    query: LazyFrame,
+    capabilities: RowCapabilities,
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> JoinDag:
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
@@ -941,7 +1113,13 @@ def lower_join_dag(
         _mark_integer_producers(projected)
     var tasks = List[DagTask]()
     var root = _task(
-        projected, len(projected._nodes) - 1, True, capabilities, tasks
+        projected,
+        len(projected._nodes) - 1,
+        True,
+        capabilities,
+        tasks,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
     )
     var joins = 0
     for task in tasks:
