@@ -28,6 +28,7 @@ from dataframe.expr import (
     DIV,
     CAST,
     WHEN,
+    FILL_NULL,
     IS_NULL,
     IS_NOT_NULL,
     EQ,
@@ -46,6 +47,9 @@ from dataframe.expr import (
 from .integer_ranges import proven_integer_nodes
 from . import ordered_rows
 from dataframe.decimal import pow10
+from dataframe.lazy import LazyFrame, AGG
+from .metadata import schema_frame
+from .decimal_prefix import prefix_infallible
 
 comptime MATERIALIZATION = "metal_narrow_decimal_group_feed"
 comptime ORDERED_MODE = 7
@@ -80,6 +84,37 @@ def narrow_value(bound: BoundExpr, at: Int) -> Bool:
     )
 
 
+def _selection_branch(bound: BoundExpr, child: Int, target: DataType) -> Bool:
+    if child < 0 or child >= len(bound.dtypes):
+        return False
+    var source = bound.dtypes[child]
+    if source == target:
+        return True
+    if (
+        not source.is_decimal()
+        or not target.is_decimal()
+        or source.scale() != target.scale()
+        or bound.expr._nodes[child].op != LIT_INT
+        or not narrow_value(bound, child)
+    ):
+        return False
+    # CPU casts both valid branches before selecting, even when unchosen.
+    # A canonical signed64 literal at the same scale needs no word rescale
+    # and cannot raise if its exact raw value fits the target precision.
+    ref node = bound.expr._nodes[child]
+    if node.text2.byte_length() and node.text2 != String(
+        -1 if node.integer < 0 else 0
+    ):
+        return False
+    var raw = Int128(node.integer)
+    if (source.decimal_width() == 32 or target.decimal_width() == 32) and (
+        raw < Int128(Int32.MIN) or raw > Int128(Int32.MAX)
+    ):
+        return False
+    var limit = pow10(target.precision())
+    return raw > -limit and raw < limit
+
+
 def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
     if not ordered_rows.eligible(bound):
         return (False, False)
@@ -95,14 +130,20 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
         if node.op == CAST and proven[at]:
             continue
         if node.op == WHEN:
-            # A Decimal common dtype can implicitly rescale both branches.
-            # That introduces separate cast observations and requires its own
-            # alignment certificate; raw WHEN selection cannot prove them.
             if (
                 node.extra < 0
                 or bound.dtypes[node.left] != DataType.BOOL
-                or bound.dtypes[node.right] != dtype
-                or bound.dtypes[node.extra] != dtype
+                or not _selection_branch(bound, node.right, dtype)
+                or not _selection_branch(bound, node.extra, dtype)
+            ):
+                return (False, False)
+            continue
+        if node.op == FILL_NULL:
+            if (
+                node.left < 0
+                or node.right < 0
+                or not _selection_branch(bound, node.left, dtype)
+                or not _selection_branch(bound, node.right, dtype)
             ):
                 return (False, False)
             continue
@@ -186,3 +227,37 @@ def eligible(
             ):
                 return False
     return checked
+
+
+def producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != AGG or not len(operation.names):
+        return False
+    var possible = False
+    for expression in operation.exprs:
+        for node in expression._nodes:
+            possible |= node.op in [ADD, SUB, MUL]
+    if not possible:
+        return False
+    if not prefix_infallible(query, operation.left):
+        return False
+    for key in operation.window_keys:
+        if (
+            key.dtype.is_categorical()
+            or key.dtype._is_bytes()
+            or key.dtype.is_nested()
+        ):
+            return False
+    ref source = query._nodes[operation.left]
+    for field in source.text_fields:
+        if field.name in operation.names and (
+            (field.category and not field.category.value().string_codes)
+            or field.dtype._is_bytes()
+            or field.dtype.is_nested()
+        ):
+            return False
+    var schema = schema_frame(query, operation.left)
+    var bounds = List[BoundExpr]()
+    for expression in operation.exprs:
+        bounds.append(bind(expression, schema._columns))
+    return eligible(bounds, schema._columns, operation.names)

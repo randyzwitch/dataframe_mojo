@@ -111,6 +111,13 @@ exception category; the existing Float64 reassociation contract applies.
 Original checked Decimal operands still finish their observations before
 `min_count`, heads or later consumers. Float32 operations and foreign checked
 casts remain outside this proof.
+
+Grouped WHEN/FILL_NULL operands may also select a canonical signed64 Decimal
+literal with a different precision or storage width when its scale already
+matches and its exact raw value fits the common result precision. These
+implicit casts cannot raise, including on an unchosen branch. No row values
+are inspected to prove this; differing scales, wide raw sources and unproved
+column casts retain their guards.
 Typed Decimal128 constants also qualify when their exact high word proves an
 Int64 sign extension; this does not admit arbitrary Decimal128 source values.
 The original input prefix, including both JOIN arms, must be infallible. A GPU
