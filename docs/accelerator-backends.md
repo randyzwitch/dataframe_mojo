@@ -138,7 +138,7 @@ overhead; automatic-execution latency is not directly measured. Invalid
 calibrations report the CPU fallback while retaining hypothetical model choices
 for diagnosis. Reports include coverage, wrong choices, engine regret and total
 regret including planning overhead. Named mechanisms were previously used in
-development and are held out only from this fit. TPC-DS/ClickBench policy in
+development and are held out only from this fit. ClickBench policy in
 `benchmarks/tools/bench_policy.py` remains validation-only. No external-suite coverage or
 measured speedup is claimed by these source changes.
 
