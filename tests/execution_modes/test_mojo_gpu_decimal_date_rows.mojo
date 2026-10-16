@@ -162,8 +162,13 @@ def test_decimal_date_rows_certificate_preserves_original_prefix_and_states() ra
         ["g", "y", "volume"]
     )
     assert_true(
-        _decimal_date_producer(
+        not _decimal_date_producer(
             joined._with_accelerator_settings(False, True, 17), index
+        )
+    )
+    assert_true(
+        _decimal_date_producer(
+            joined._with_accelerator_settings(False, False, 17), index
         )
     )
     assert_true(not _decimal_date_producer(joined, index))
@@ -251,16 +256,61 @@ def test_mojo_gpu_decimal_date_rows_precision_before_group_and_join() raises:
         var workers = WorkerSetting(count)
         for streaming in [False, True]:
             for batch in [1, 7]:
-                for query in [
+                var queries: List[LazyFrame] = [
                     _grouped(bad),
                     _grouped(bad, True),
                     producer.join(selected.lazy(), on="g", how="inner").select(
                         ["g", "y", "volume"]
                     ),
-                ]:
+                ]
+                for query_index in range(len(queries)):
+                    var query = queries[query_index].copy()
                     for gpu in [False, True]:
-                        with assert_raises(contains="decimal precision"):
-                            _ = _collect(query, gpu, streaming, batch)
+                        if query_index == 2 and streaming:
+                            # CPU streaming key-range filtering observes only
+                            # g=0; the valid late MAX payload is unmatched.
+                            # Forced GPU must refuse this unproved ROW domain.
+                            if gpu:
+                                with assert_raises(
+                                    contains="checked decimal arithmetic requires terminal projections"
+                                ):
+                                    _ = _collect(query, gpu, streaming, batch)
+                            else:
+                                var result = _collect(
+                                    query, gpu, streaming, batch
+                                )
+                                assert_equal(result.height(), 1)
+                                assert_equal(
+                                    result.columns(), ["g", "y", "volume"]
+                                )
+                                assert_equal(
+                                    result.column("g").dtype(), DataType.INT32
+                                )
+                                assert_equal(
+                                    result.column("y").dtype(), DataType.INT64
+                                )
+                                assert_equal(
+                                    result.column("volume").dtype(),
+                                    DataType.decimal(18, 4, 64),
+                                )
+                                assert_equal(
+                                    result.column("g").int32().value(0),
+                                    Int32(0),
+                                )
+                                assert_equal(
+                                    result.column("y").int64().value(0),
+                                    Int64(-25252734927764585),
+                                )
+                                assert_true(
+                                    not result.item(0, "volume").is_null()
+                                )
+                                assert_equal(
+                                    result.column("volume")._decimal_raw(0),
+                                    Int128(7500),
+                                )
+                        else:
+                            with assert_raises(contains="decimal precision"):
+                                _ = _collect(query, gpu, streaming, batch)
         _ = workers^
     # Keep three source morsels at batch65536 and place a precision site
     # after the first two. Configured workers1/2 are controlled; no selected

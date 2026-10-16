@@ -215,6 +215,10 @@ def consumers_infallible(query: LazyFrame, producer: Int) raises -> Bool:
         not query._accelerator_settings
         or query._accelerator_settings.value().optimize
     )
+    var streaming = (
+        not query._accelerator_settings
+        or query._accelerator_settings.value().streaming
+    )
     var affected = List[Bool](length=len(query._nodes), fill=False)
     affected[producer] = True
     var grouped = 0
@@ -232,12 +236,18 @@ def consumers_infallible(query: LazyFrame, producer: Int) raises -> Bool:
         ):
             continue
         affected[index] = True
+        # CPU streaming JOIN key ranges can suppress unmatched source rows
+        # before WITH_COLUMNS even with optimize=False. Their late precision
+        # sites are not necessarily observed, so a complete ROW preflight is
+        # not justified for this continuation.
+        if streaming and node.kind == JOIN:
+            return False
         if optimize:
             # CPU predicate/key-set pushdown and dead-expression pruning can
             # change which producer rows/occurrences are visited. Certify only
             # a single whole GROUP, optional infallible composition projection
-            # and ordering, with every original output still consumed. Unoptimized graphs retain
-            # the explicit ROW-before-consumer phase and have the proof below.
+            # and ordering, with every original output still consumed. The
+            # remaining unoptimized graphs have the proof below.
             if node.kind != AGG and node.kind != SORT and node.kind != SELECT:
                 return False
             if node.kind == AGG:
