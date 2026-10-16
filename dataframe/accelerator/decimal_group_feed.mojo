@@ -55,7 +55,7 @@ def infallible_sum(dtype: DataType, rows: Int) -> Bool:
     var width = dtype.decimal_width()
     if width != 32 and width != 64:
         return False
-    var maximum = Int128(1) << (width - 1)
+    var maximum = Int128(1) << Int128(width - 1)
     return Int128(rows) <= (pow10(38) - 1) // maximum
 
 
