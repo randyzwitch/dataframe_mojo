@@ -161,7 +161,9 @@ def null_payload_fixture(narrow: Bool) raises -> DataFrame:
     return DataFrame([x^, Series("k", Column[Int32]([1, 1, 1]))])
 
 
-def edge_fixture(case_index: Int) raises -> Tuple[DataFrame, Bool, Int, Float64]:
+def edge_fixture(
+    case_index: Int,
+) raises -> Tuple[DataFrame, Bool, Int, Float64]:
     var largest = bitcast[DType.float64](UInt64(0x7FEFFFFFFFFFFFFF))
     var tiny = bitcast[DType.float64](UInt64(1))
     var largest32 = Float64(bitcast[DType.float32](UInt32(0x7F7FFFFF)))
@@ -174,7 +176,9 @@ def edge_fixture(case_index: Int) raises -> Tuple[DataFrame, Bool, Int, Float64]
         [tiny32, 0.0, 0.0],
     ]
     var narrow = case_index >= 3
-    var kind = 0 if case_index == 0 or case_index == 3 else 1 if case_index == 1 else 2
+    var kind = (
+        0 if case_index == 0 or case_index == 3 else 1 if case_index == 1 else 2
+    )
     var frame = one_group_fixture(cases[case_index], narrow)
     return (frame^, narrow, kind, cases[case_index][0])
 
