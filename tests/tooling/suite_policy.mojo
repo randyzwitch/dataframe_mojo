@@ -302,6 +302,24 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_conditional_counts_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_native_execution_profile",
             "metal",
         )
@@ -3213,6 +3231,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
@@ -3682,6 +3701,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",

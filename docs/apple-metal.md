@@ -29,6 +29,10 @@ streaming and batch settings through provider dispatch and recursive planning.
 With `optimize=False`, file staging preserves the original source prefix rather
 than applying optimizer projection or head pushdown. A requested streaming batch
 does not replace the CPU's eager expression batch size.
+Checked scalar SUM consumers apply the CPU's canonical predicate optimization
+before issuing observation boundaries. With `optimize=True`, a filter folded to
+constant false eliminates its input; with `optimize=False`, that input is evaluated.
+Surviving checked producers are observed before downstream consumers.
 `DATAFRAME_ACCEL_DEVICE` and `DATAFRAME_ACCEL_MEMORY_LIMIT` configure default
 collections. `DATAFRAME_METAL_LIBRARY` is unnecessary and does not select the
 implementation. `MetalRuntime.device_count()` explicitly discovers devices;
