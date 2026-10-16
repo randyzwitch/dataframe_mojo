@@ -119,3 +119,48 @@ def test_repeated_runs_return_the_same_rows_in_the_same_order() raises:
     for _ in range(4):
         assert_same_run(eager.group_by(["s", "i"]).agg(reductions()), grouped)
     _ = workers^
+
+
+def test_repartitioned_sinks_return_the_same_order_on_every_run() raises:
+    # Partitions start at one per worker and multiply as tables clear: 60K
+    # groups fill every table at three and eight workers, so how many
+    # partitions the sinks reach depends on which worker took which
+    # morsel. Groups still come back in one order on every run with the
+    # same workers. One worker copies its rows without merging them, in
+    # first-row order.
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var rows = 240_000
+    var groups = 60_000
+    var frame = aggregate_frame(rows, groups)
+    var models = group_models(rows, groups)
+    var plan = (
+        frame.lazy()
+        .filter(col("r") >= lit(Int64(0)))
+        .group_by(["s", "i"])
+        .agg(reductions())
+    )
+    for threads in [1, 2, 3, 8]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        var observed = StrategyTrace()
+        var first = plan.collect()
+        if threads == 1:
+            assert_true(
+                "dataframe-path: aggregate_table.single_sink_finish\n"
+                in observed.text(),
+                "one worker's rows were merged rather than copied",
+            )
+            # With one partition, that is first-occurrence order.
+            assert_same_run(
+                frame.lazy()
+                .filter(col("r") >= lit(Int64(0)))
+                .group_by(["s", "i"], maintain_order=True)
+                .agg(reductions())
+                .collect(),
+                first,
+            )
+        _ = observed^
+        assert_groups(first, models, False)
+        for _ in range(3):
+            assert_same_run(plan.collect(), first)
+        _ = workers^
+    _ = trace^

@@ -19,10 +19,12 @@ Two phases, as there:
    table: a flat array of 8-byte entries, the hash's top 16 bits (a salt)
    over the address of a group's row. A salt that differs rejects a slot
    without reading the row. A new group's row is appended to its
-   partition (256, by the hash bits below the salt) in blocks that never
-   move, so the finish reads a partition's rows in sequence with no
-   reordering. The batch's states then update through each row's group
-   address (DuckDB's `UpdateStates`).
+   partition (by the hash bits below the salt) in blocks that never move,
+   so the finish reads a partition's rows in sequence with no reordering.
+   The batch's states then update through each row's group address
+   (DuckDB's `UpdateStates`). Partitions start at one per worker (at most
+   16); once a worker's rows fill half a block per partition, every
+   worker's rows move to 256 (DuckDB's `MaybeRepartition`).
 
    With more than two workers the table never grows: two-thirds full, its
    entries are cleared and its rows kept (DuckDB's `Abandon`), so the
@@ -34,10 +36,17 @@ Two phases, as there:
 
 2. Finish. Consecutive partitions holding about half a 256 KiB block of
    rows form a run; each run merges every worker's rows of its partitions
-   in a fresh table sized for them, on its own thread, folding a repeated
-   group's states into its first row. Its states then load into `Reducer`s,
+   in a table sized for them, folding a repeated group's states into its
+   first row. Consecutive runs holding an equal share of the rows per
+   worker form a job, on its own thread, whose groups are one chunk of
+   the result. Its states then load into `Reducer`s,
    which finish them as every other route does, and its keys are read
-   back out of the rows.
+   back out of the rows. A run holding one worker's rows, from a table
+   that never cleared its entries, has each group once already: its rows
+   are copied as they are (DuckDB's `single_ht`). Groups come out by
+   partition at the most bits the workers could reach (none for one
+   worker: first-row order), then by first row, so every run with the
+   same workers returns the same order.
 
 A string longer than twelve bytes is compared through the address of its
 bytes in the input, which outlives the aggregation; the input is never
@@ -69,7 +78,7 @@ from .expr import (
 )
 from .indexed_reduce import _canonical_int
 from .huge_pages import huge_list, huge_uninit
-from .parallel import Job, run_jobs
+from .parallel import Job, configured_workers, run_jobs
 from .rank import _key
 from .partition import (
     _NULL_KEY,
@@ -111,7 +120,12 @@ comptime _HLL_BITS = 10
 # Bytes of groups a finish partition holds at most: half of a 256 KiB
 # block, where DuckDB adds partition bits.
 comptime _PARTITION_BYTES = 128 * 1024
+# DuckDB's partition bits (`RadixHTConfig`): log2 of the workers to start,
+# at most 4 (MAXIMUM_INITIAL_SINK_RADIX_BITS); more once a worker's rows per
+# partition pass half a 256 KiB block (BLOCK_FILL_FACTOR), up to 8.
+comptime _MAX_INITIAL_BITS = 4
 comptime _MAX_PARTITION_BITS = 8
+comptime _BLOCK_BYTES = 256 * 1024
 # Bytes of a worker's row arena: two huge pages.
 comptime _ARENA_BYTES = 4 << 20
 
@@ -1075,6 +1089,37 @@ struct _Partitioned(Movable):
             return self.block_rows[p][b]
         return (self.next[p] - self.blocks[p][b]) // (8 * self.stride)
 
+    def repartitioned(self, bits: Int) -> _Partitioned:
+        """These rows in `bits` partitions, more than now (DuckDB's
+        `Repartition`): each partition's rows go, in order, to the
+        partitions its hash bits extend to, so a partition's rows keep
+        their first-row order."""
+        var out = _Partitioned(
+            bits,
+            List[Bool](length=self.states_at - _HEAD, fill=False),
+            self.stride - self.states_at,
+        )
+        var stride = self.stride
+        var bytes = 8 * stride
+        var shift = UInt64(48 - bits)
+        var mask = UInt64((1 << bits) - 1)
+        for p in range(len(self.blocks)):
+            for b in range(len(self.blocks[p])):
+                var at = self.blocks[p][b]
+                for _ in range(self.rows_in(p, b)):
+                    var row = _words_at(at)
+                    var q = Int((row[] >> shift) & mask)
+                    var to = out.next.unsafe_ptr()[unsafe_offset=q]
+                    if to + bytes > out.end.unsafe_ptr()[unsafe_offset=q]:
+                        out._new_block(q)
+                        to = out.next.unsafe_ptr()[unsafe_offset=q]
+                    var into = _words_at(to)
+                    for w in range(stride):
+                        into[unsafe_offset=w] = row[unsafe_offset=w]
+                    out.next.unsafe_ptr()[unsafe_offset=q] = to + bytes
+                    at += bytes
+        return out^
+
 
 @always_inline
 def _same(
@@ -1276,6 +1321,52 @@ struct ReducerSpec(Copyable, Movable):
         )
 
 
+struct _SinkBits(Movable):
+    """The partition bits every worker's sink appends to, only ever raised
+    (DuckDB's thread-global `sink_radix_bits`); unset until a sink starts."""
+
+    var bits: Atomic[Int64]
+
+    def __init__(out self):
+        self.bits = Atomic[Int64](-1)
+
+    def start(mut self, bits: Int) -> Int:
+        """The bits now, `bits` if no sink has started."""
+        var expected = Int64(-1)
+        if self.bits.compare_exchange(expected, Int64(bits)):
+            return bits
+        return Int(self.bits.load())
+
+    def raise_to(mut self, bits: Int) -> Int:
+        """At least `bits` from now on; the bits now."""
+        while True:
+            var now = self.bits.load()
+            if now >= Int64(bits):
+                return Int(now)
+            var expected = now
+            if self.bits.compare_exchange(expected, Int64(bits)):
+                return bits
+
+
+def _initial_bits(workers: Int) -> Int:
+    """DuckDB's `InitialSinkRadixBits`: log2 of the workers rounded up to a
+    power of two, at most 4."""
+    var bits = 0
+    while (1 << bits) < workers:
+        bits += 1
+    return min(bits, _MAX_INITIAL_BITS)
+
+
+def _maximum_bits(workers: Int) -> Int:
+    """DuckDB's `MaximumSinkRadixBits`: the starting bits when tables grow
+    (two workers or fewer), else 8. DuckDB lowers it for rows of 32 bytes
+    or more; the finish here sizes its runs by whole partitions, which
+    then held a megabyte or more and left its tables out of cache."""
+    if workers <= _GROW_WORKERS:
+        return _initial_bits(workers)
+    return _MAX_PARTITION_BITS
+
+
 @fieldwise_init
 struct AggregateLayout(Copyable, Movable):
     """What every worker's sink and the finish share: each reduction's
@@ -1286,7 +1377,7 @@ struct AggregateLayout(Copyable, Movable):
     var templates: List[ReducerSpec]
     var addressed: List[Bool]
     var state_words: Int
-    var bits: Int
+    var radix: ArcPointer[_SinkBits]
     var key_templates: List[Series]
 
 
@@ -1338,7 +1429,7 @@ def aggregate_layout(
         templates.copy(),
         addressed^,
         state_words,
-        _MAX_PARTITION_BITS,
+        ArcPointer(_SinkBits()),
         key_templates^,
     )
 
@@ -1469,6 +1560,9 @@ struct AggregateSink(Movable):
     var slots: List[_Slot]
     var addressed: List[Bool]
     var parts: _Partitioned
+    # Every sink's partition bits, and the most this one's may reach.
+    var radix: ArcPointer[_SinkBits]
+    var max_bits: Int
     var grow: Bool
     # This worker's share of memory, in bytes.
     var memory: Int
@@ -1484,6 +1578,9 @@ struct AggregateSink(Movable):
     var cycle: Int
     var skipped: Int
     var skip: Bool
+    # Whether a full table ever lost its entries (`Abandon`): until then
+    # every group has one row here.
+    var abandoned: Bool
     var hll: _HyperLogLog
     # Batch buffers, kept across batches.
     var hashes: List[UInt64]
@@ -1511,9 +1608,13 @@ struct AggregateSink(Movable):
     def __init__(out self, layout: AggregateLayout, workers: Int):
         self.slots = layout.slots.copy()
         self.addressed = layout.addressed.copy()
+        self.radix = layout.radix
         self.parts = _Partitioned(
-            layout.bits, layout.addressed, layout.state_words
+            self.radix[].start(_initial_bits(workers)),
+            layout.addressed,
+            layout.state_words,
         )
+        self.max_bits = _maximum_bits(workers)
         self.grow = workers <= _GROW_WORKERS
         self.memory = _worker_memory(workers)
         self.capacity = _SINK_CAPACITY
@@ -1524,6 +1625,7 @@ struct AggregateSink(Movable):
         self.cycle = 0
         self.skipped = 0
         self.skip = False
+        self.abandoned = False
         self.hll = _HyperLogLog()
         self.hashes = List[UInt64](length=_BATCH, fill=0)
         self.nulls = List[UInt64](length=_BATCH, fill=0)
@@ -1553,6 +1655,7 @@ struct AggregateSink(Movable):
             self.entries = huge_list(self.capacity, UInt64(0))
             self._reinsert()
             return
+        self.abandoned = True
         var grown = 0
         if not self.skip:
             grown = _grown_capacity(
@@ -1586,6 +1689,20 @@ struct AggregateSink(Movable):
                 self.skip = False
         self.live = 0
         self.cycle = 0
+        # With its entries gone, the rows may move (`MaybeRepartition`):
+        # the most bits for every sink once this one's rows fill half a
+        # block per partition. DuckDB adds two bits at a time; each step
+        # copies every row made so far, which cost a fifth of a 100K-group
+        # aggregation here, so one step copies them once.
+        var bits = self.parts.bits
+        if 8 * self.made * self.parts.stride > (_BLOCK_BYTES // 2) << bits:
+            bits = self.radix[].raise_to(self.max_bits)
+        self.repartition(max(bits, Int(self.radix[].bits.load())))
+
+    def repartition(mut self, bits: Int):
+        """This sink's rows in `bits` partitions, when it has fewer."""
+        if bits > self.parts.bits:
+            self.parts = self.parts.repartitioned(bits)
 
     def sink(
         mut self,
@@ -1912,12 +2029,61 @@ def _merge_row(
         slot = (slot + _stride(hash)) & mask
 
 
+def _by_partition(
+    spans: List[Int], sizes: List[Int], bits: Int, mut into: _Groups
+):
+    """The rows of `spans` (each an address and its `sizes` rows) appended
+    to `into` by the top `bits` bits of their hash: a counting sort, stable
+    for rows of one partition."""
+    var parts = 1 << bits
+    var shift = UInt64(48 - bits)
+    var mask = UInt64(parts - 1)
+    var bytes = 8 * into.stride
+    var starts = List[Int](length=parts + 1, fill=0)
+    for k in range(len(spans)):
+        for r in range(sizes[k]):
+            var hash = _words_at(spans[k] + r * bytes)[]
+            starts[Int((hash >> shift) & mask) + 1] += 1
+    starts[0] = into.n
+    for p in range(parts):
+        starts[p + 1] += starts[p]
+    var stride = into.stride
+    var place = starts.unsafe_ptr()
+    for k in range(len(spans)):
+        var at = spans[k]
+        for _ in range(sizes[k]):
+            var row = _words_at(at)
+            var p = Int((row[] >> shift) & mask)
+            var to = _words_at(into.at(place[unsafe_offset=p]))
+            for w in range(stride):
+                to[unsafe_offset=w] = row[unsafe_offset=w]
+            place[unsafe_offset=p] += 1
+            at += bytes
+    into.n = starts[parts]
+
+
+def _capacity_for(rows: Int) -> Int:
+    """DuckDB's finalize table capacity: a power of two holding `rows` at a
+    1.5 load factor, at least 64."""
+    var capacity = 64
+    while 2 * capacity < 3 * max(rows, 1):
+        capacity *= 2
+    return capacity
+
+
 struct _FinishJob(Job):
-    """Phase 2: a run of partitions' rows from every worker merged in a
-    fresh table sized for them, states folded into each group's row."""
+    """Phase 2: a range of partitions' rows from every worker, merged one
+    run of partitions at a time in a table sized for the run, states
+    folded into each group's row, into one chunk of groups."""
 
     var sinks: Int
+    # The partitions where each run starts, and each run's rows.
+    var run_starts: List[Int]
+    var run_rows: List[Int]
     var bits: Int
+    # The partition bits groups come out by: the most the sinks could
+    # reach, the same on every run.
+    var order_bits: Int
     var lo: Int
     var hi: Int
     var total: Int
@@ -1943,10 +2109,16 @@ struct _FinishJob(Job):
         slots: List[_Slot],
         key_templates: List[Series],
         bits: Int,
+        order_bits: Int,
+        var run_starts: List[Int],
+        var run_rows: List[Int],
     ):
         self.sinks = sinks
+        self.run_starts = run_starts^
+        self.run_rows = run_rows^
         self.held = held
         self.bits = bits
+        self.order_bits = order_bits
         self.lo = lo
         self.hi = hi
         self.total = total
@@ -1962,13 +2134,6 @@ struct _FinishJob(Job):
         ref jobs = Pointer[List[AggregateSink], MutAnyOrigin](
             unsafe_from_address=self.sinks
         )[]
-        # DuckDB's finalize capacity: the rows' count at a 1.5 load factor.
-        var capacity = 64
-        while 2 * capacity < 3 * max(self.total, 1):
-            capacity *= 2
-        var mask = capacity - 1
-        var entries = huge_list(capacity, UInt64(0))
-        var table = entries.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
         ref addressed = jobs[0].addressed
         var final = _Groups(
             len(addressed),
@@ -1985,81 +2150,155 @@ struct _FinishJob(Job):
         # at its earliest row, in that order, with no sort and no second
         # copy of the groups (both were a tenth of near-unique group-bys).
         var sinks = len(jobs)
-        var block = List[Int](length=sinks, fill=0)
-        var row_in = List[Int](length=sinks, fill=0)
-        # Each worker's next row's first row, Int.MAX when it has none.
-        var head = List[Int](length=sinks, fill=Int.MAX)
-        var in_order = True
-        for p in range(self.lo, self.hi):
-            for j in range(sinks):
-                block[j] = 0
-                row_in[j] = 0
-                head[j] = _next_first(jobs[j].parts, p, 0, 0)
-            var last = -1
-            while True:
-                # The worker whose next row comes first, and the first
-                # row next after it among the others.
-                var best = -1
-                var best_first = Int.MAX
-                var after = Int.MAX
-                for j in range(sinks):
-                    var first = head[j]
-                    if first < best_first:
-                        after = best_first
-                        best_first = first
-                        best = j
-                    elif first < after:
-                        after = first
-                if best < 0:
+        # One worker's rows alone, from a table that never abandoned its
+        # entries, are its groups already, each once and in first-row order
+        # within a partition: copied as they are, with no table (DuckDB's
+        # `single_ht`, per run of partitions rather than per query).
+        var only = -1
+        for j in range(sinks):
+            for p in range(self.lo, self.hi):
+                if len(jobs[j].parts.blocks[p]) > 0:
+                    only = j if only == -1 else -2
                     break
-                ref parts = jobs[best].parts
-                # Its rows up to the others' next, block by block.
-                while block[best] < len(parts.blocks[p]):
-                    var rows = parts.rows_in(p, block[best])
-                    var base = parts.blocks[p][block[best]]
-                    var stop = False
-                    while row_in[best] < rows:
-                        var at = base + 8 * row_in[best] * stride
-                        var first = Int(_words_at(at)[unsafe_offset=2])
-                        if first > after:
-                            stop = True
-                            break
-                        if _merge_row(
-                            at, table, mask, final, addressed, self.slots
-                        ):
-                            in_order = in_order and first > last
-                            last = first
-                        row_in[best] += 1
-                    if stop:
+        var in_order = True
+        # Whether the groups are in the output order already.
+        var ordered = False
+        if only >= 0 and not jobs[only].abandoned:
+            trace_path("aggregate_table.single_sink_finish")
+            ref parts = jobs[only].parts
+            var spans = List[Int]()
+            var sizes = List[Int]()
+            for p in range(self.lo, self.hi):
+                var last = -1
+                for b in range(len(parts.blocks[p])):
+                    var rows = parts.rows_in(p, b)
+                    spans.append(parts.blocks[p][b])
+                    sizes.append(rows)
+                    var words = _words_at(parts.blocks[p][b])
+                    for r in range(rows):
+                        var first = Int(words[unsafe_offset=r * stride + 2])
+                        in_order = in_order and first > last
+                        last = first
+            if in_order and self.bits < self.order_bits:
+                # Into the output order as they are copied (see below).
+                _by_partition(spans, sizes, self.order_bits, final)
+                ordered = True
+            else:
+                for k in range(len(spans)):
+                    _ = external_call["memcpy", Int](
+                        final.at(final.n), spans[k], 8 * sizes[k] * stride
+                    )
+                    final.n += sizes[k]
+        else:
+            # Each run's table at DuckDB's finalize capacity (its rows at a
+            # 1.5 load factor), in one buffer sized for the largest run.
+            var largest = 0
+            for r in range(len(self.run_rows)):
+                largest = max(largest, self.run_rows[r])
+            var entries = huge_list(_capacity_for(largest), UInt64(0))
+            var table = entries.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+            var mask = 0
+            var run = 0
+            var block = List[Int](length=sinks, fill=0)
+            var row_in = List[Int](length=sinks, fill=0)
+            # Each worker's next row's first row, Int.MAX when it has none.
+            var head = List[Int](length=sinks, fill=Int.MAX)
+            for p in range(self.lo, self.hi):
+                if run < len(self.run_starts) and p == self.run_starts[run]:
+                    # A run's first partition: an empty table for its rows.
+                    var capacity = _capacity_for(self.run_rows[run])
+                    if run > 0:
+                        for e in range(capacity):
+                            table[unsafe_offset=e] = 0
+                    mask = capacity - 1
+                    run += 1
+                for j in range(sinks):
+                    block[j] = 0
+                    row_in[j] = 0
+                    head[j] = _next_first(jobs[j].parts, p, 0, 0)
+                var last = -1
+                while True:
+                    # The worker whose next row comes first, and the first
+                    # row next after it among the others.
+                    var best = -1
+                    var best_first = Int.MAX
+                    var after = Int.MAX
+                    for j in range(sinks):
+                        var first = head[j]
+                        if first < best_first:
+                            after = best_first
+                            best_first = first
+                            best = j
+                        elif first < after:
+                            after = first
+                    if best < 0:
                         break
-                    block[best] += 1
-                    row_in[best] = 0
-                head[best] = _next_first(parts, p, block[best], row_in[best])
-        _ = entries^
+                    ref parts = jobs[best].parts
+                    # Its rows up to the others' next, block by block.
+                    while block[best] < len(parts.blocks[p]):
+                        var rows = parts.rows_in(p, block[best])
+                        var base = parts.blocks[p][block[best]]
+                        var stop = False
+                        while row_in[best] < rows:
+                            var at = base + 8 * row_in[best] * stride
+                            var first = Int(_words_at(at)[unsafe_offset=2])
+                            if first > after:
+                                stop = True
+                                break
+                            if _merge_row(
+                                at, table, mask, final, addressed, self.slots
+                            ):
+                                in_order = in_order and first > last
+                                last = first
+                            row_in[best] += 1
+                        if stop:
+                            break
+                        block[best] += 1
+                        row_in[best] = 0
+                    head[best] = _next_first(
+                        parts, p, block[best], row_in[best]
+                    )
+            _ = entries^
         if not in_order:
             # A worker's rows were not in first-row order: sort the groups.
             trace_path("aggregate_table.sorted_groups")
             # Each as one 128-bit key: partition and first row above, the
             # group below (first rows stay under 2^56).
-            var shift = UInt64(48 - self.bits)
-            var part_mask = UInt64((1 << self.bits) - 1)
+            var shift = UInt64(48 - self.order_bits)
+            var part_mask = UInt64((1 << self.order_bits) - 1)
             var keyed = List[UInt128](capacity=final.count())
             for g in range(final.count()):
                 var part = (_words_at(final.at(g))[] >> shift) & part_mask
                 var place = (UInt128(part) << 56) | UInt128(final.first(g))
                 keyed.append((place << 64) | UInt128(g))
             sort(keyed)
-            var ordered = _Groups(
+            var sorted = _Groups(
                 final.width(),
                 final.addressed.copy(),
                 final.stride - final.states_at,
                 final.count(),
             )
             for key in keyed:
-                _ = ordered.copy_row(
+                _ = sorted.copy_row(
                     final.at(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
                 )
-            final = ordered^
+            final = sorted^
+        elif self.bits < self.order_bits and not ordered:
+            # Fewer partitions than the output order's (the most the sinks
+            # could have reached): each group to its place among those,
+            # stably, so groups keep their first-row order within each and
+            # every run returns the same order whatever partitions the
+            # sinks reached.
+            var into = _Groups(
+                final.width(),
+                final.addressed.copy(),
+                final.stride - final.states_at,
+                final.count(),
+            )
+            _by_partition([final.at(0)], [final.count()], self.order_bits, into)
+            # The old groups stay alive until their rows are copied.
+            swap(final, into)
+            _ = into^
         for s in range(len(self.templates)):
             if self.slots[s].kind == _K_TOP_ROWS:
                 var w0 = final.states_at + self.slots[s].offset
@@ -2333,6 +2572,24 @@ def aggregate_table(
     return aggregate_finish(sinks, layout)
 
 
+struct _CombineJob(Job):
+    """One sink's rows moved to the shared partition bits."""
+
+    var sinks: Int
+    var index: Int
+    var bits: Int
+
+    def __init__(out self, sinks: Int, index: Int, bits: Int):
+        self.sinks = sinks
+        self.index = index
+        self.bits = bits
+
+    def run(mut self) raises:
+        Pointer[List[AggregateSink], MutAnyOrigin](
+            unsafe_from_address=self.sinks
+        )[][self.index].repartition(self.bits)
+
+
 def aggregate_finish(
     mut sinks: List[AggregateSink], layout: AggregateLayout
 ) raises -> AggregateResult:
@@ -2343,35 +2600,72 @@ def aggregate_finish(
     var result = AggregateResult()
     if len(sinks) == 0:
         return result^
-    var bits = layout.bits
+    # Every sink's rows at the shared bits first, each on its own thread
+    # (DuckDB's `Combine`, which repartitions to the global bits).
+    var bits = Int(layout.radix[].bits.load())
+    var combines = List[_CombineJob]()
+    for j in range(len(sinks)):
+        if sinks[j].parts.bits < bits:
+            combines.append(_CombineJob(Int(Pointer(to=sinks)), j, bits))
+    if len(combines) > 0:
+        run_jobs(combines)
     var stride = sinks[0].parts.stride
     var held = _HeldBuffers(sinks)
+    # Runs: consecutive partitions holding about half a 256 KiB block of
+    # rows, each merged in its own cache-sized table. Jobs: consecutive
+    # runs holding about an equal share of the rows per worker, and at
+    # least a run's, each one chunk of the result, as Polars finishes a partition per thread (a
+    # chunk per run made later steps pay their per-chunk cost hundreds of
+    # times).
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))
+    var parts = 1 << bits
+    var rows = List[Int](length=parts, fill=0)
+    var total = 0
+    for p in range(parts):
+        for j in range(len(sinks)):
+            for b in range(len(sinks[j].parts.blocks[p])):
+                rows[p] += sinks[j].parts.rows_in(p, b)
+        total += rows[p]
+    var per_job = max(per_run, -(-total // max(1, configured_workers())))
     var finishes = List[_FinishJob]()
     var lo = 0
     var run = 0
-    for p in range(1 << bits):
-        for j in range(len(sinks)):
-            ref blocks = sinks[j].parts.blocks[p]
-            for b in range(len(blocks)):
-                run += sinks[j].parts.rows_in(p, b)
-        if run >= per_run or p == (1 << bits) - 1:
-            if run > 0:
+    var job = 0
+    var starts = List[Int]()
+    var run_rows = List[Int]()
+    var open = False
+    for p in range(parts):
+        if not open:
+            starts.append(p)
+            open = True
+        run += rows[p]
+        job += rows[p]
+        if run >= per_run or job >= per_job or p == parts - 1:
+            run_rows.append(run)
+            run = 0
+            open = False
+        if job >= per_job or p == parts - 1:
+            if job > 0:
                 finishes.append(
                     _FinishJob(
                         Int(Pointer(to=sinks)),
                         Int(Pointer(to=held)),
                         lo,
                         p + 1,
-                        run,
+                        job,
                         layout.templates,
                         layout.slots,
                         layout.key_templates,
                         bits,
+                        sinks[0].max_bits,
+                        starts^,
+                        run_rows^,
                     )
                 )
+            starts = List[Int]()
+            run_rows = List[Int]()
             lo = p + 1
-            run = 0
+            job = 0
     run_jobs(finishes)
     _ = held^
     for p in range(len(finishes)):
