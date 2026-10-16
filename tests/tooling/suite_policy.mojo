@@ -356,6 +356,12 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_scalar_when_and_numeric_mean_siblings",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse",
             "metal",
         )
@@ -3750,8 +3756,8 @@ def production_policy() -> SuitePolicy:
             "execution.backends",
             [
                 "tests/execution_modes/test_mojo_gpu_grouped_floating_contracts.mojo",
-                "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo",
                 "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo",
+                "tests/execution_modes/test_mojo_gpu_scalar_floating_contracts.mojo",
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
