@@ -1,4 +1,5 @@
 """Exact range checks and explicit lossy conversions at the public boundary."""
+# contract-group: types.cast
 from std.math import isnan
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (

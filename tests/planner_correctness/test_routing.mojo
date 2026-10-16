@@ -1,4 +1,5 @@
 """Eligibility and automatic placement are tested before any device submission."""
+# contract-group: planner.routing
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
 from dataframe.accelerator.capabilities import RowCapabilities

@@ -1,4 +1,5 @@
 """Inspection preserves typed rows, bounded text and specified summary layouts."""
+# contract-group: api.inspect
 from std.math import isnan
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -153,6 +154,8 @@ def test_selectors_expand_names_in_schema_order_and_validate_empty_frames() rais
             _ = zero.select(expression)
 
 
+# expected-failure: An empty selector expansion collapses input height to one.
+# expected-diagnostic: empty selector expansion must preserve input height
 def test_empty_selector_expansion_preserves_input_height() raises:
     var frame = frame_from_model(generated_model(9))
     var mismatches = List[String]()
@@ -173,6 +176,9 @@ def test_empty_selector_expansion_preserves_input_height() raises:
     )
 
 
+# expected-failure: Selecting all columns of a zero-column frame collapses its
+# expected-failure: height to one.
+# expected-diagnostic: all selector must preserve zero-column input height
 def test_all_selector_preserves_zero_column_frame_height() raises:
     var result = DataFrame(List[Series](), height=3).select(all_columns())
     assert_equal(result.width(), 0)
@@ -565,6 +571,10 @@ def _assert_nested_description(nested: DataFrame) raises:
                 assert_true(actual.item(row, "nested").is_null())
 
 
+# expected-failure: describe() rejects lists instead of returning documented
+# expected-failure: parent counts and null summary statistics.
+# expected-diagnostic: count does not support list or struct expressions yet,
+# expected-diagnostic: found list[int64]
 def test_describe_lists_reports_only_parent_counts() raises:
     _assert_nested_description(
         DataFrame(
@@ -582,6 +592,10 @@ def test_describe_lists_reports_only_parent_counts() raises:
     )
 
 
+# expected-failure: describe() rejects structs instead of returning documented
+# expected-failure: parent counts and null summary statistics.
+# expected-diagnostic: count does not support list or struct expressions yet,
+# expected-diagnostic: found struct[x: int64]
 def test_describe_structs_reports_only_parent_counts() raises:
     _assert_nested_description(
         DataFrame(

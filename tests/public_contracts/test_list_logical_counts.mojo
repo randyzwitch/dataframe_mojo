@@ -1,4 +1,6 @@
 """Independent logical List counts versus immutable hidden physical backing."""
+# contract-group: public.apple_parity
+# contract-group: expr.nested
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, ListColumn, Series, col

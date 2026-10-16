@@ -1,4 +1,6 @@
 """Whole scalar SUM states observe checked Decimal operands on the GPU."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -171,6 +173,7 @@ def test_decimal_scalar_feed_original_ast_prefix_and_resources() raises:
     )
 
 
+# requires: metal
 def test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts() raises:
     require_metal()
     var frame = money_source()
@@ -201,6 +204,7 @@ def test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts() raises:
     assert_equal(joined_gpu.column("ratio").float64()._get(0), Float64(80))
 
 
+# requires: metal
 def test_mojo_gpu_decimal_scalar_feed_selected_faults_dead_arms_and_min_count() raises:
     require_metal()
     var frame = DataFrame(
@@ -264,6 +268,7 @@ def test_mojo_gpu_decimal_scalar_feed_selected_faults_dead_arms_and_min_count() 
         _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_decimal_scalar_feed_null_empty_budget_and_recovery() raises:
     require_metal()
     var runtime = MetalRuntime()

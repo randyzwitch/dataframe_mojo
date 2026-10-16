@@ -1,4 +1,5 @@
 """Ordered cumulative state and nested OVER scopes through resident Metal."""
+# contract-group: execution.backends
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
@@ -64,6 +65,7 @@ def test_nested_window_lowering_preserves_cpu_scopes_without_device() raises:
         )
 
 
+# requires: metal
 def test_native_metal_cumulative_numeric_widths_null_partitions_and_reverse() raises:
     _ = require_metal()
     comptime for D in NUMERIC_DTYPES:
@@ -88,6 +90,7 @@ def test_native_metal_cumulative_numeric_widths_null_partitions_and_reverse() ra
                 check(frame, cumulative(col("x"), method, reverse).over("k"))
 
 
+# requires: metal
 def test_native_metal_cumulative_floating_association_nan_zeros_and_subnormals() raises:
     _ = require_metal()
     var words: List[UInt64] = [
@@ -136,6 +139,7 @@ def test_native_metal_cumulative_floating_association_nan_zeros_and_subnormals()
                 check(frame, cumulative(col(name), method, reverse).over("k"))
 
 
+# requires: metal
 def test_native_metal_cumulative_decimal_boolean_text_and_logical_storage() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -184,6 +188,7 @@ def test_native_metal_cumulative_decimal_boolean_text_and_logical_storage() rais
                 check(frame, cumulative(col(name), method, reverse).over("k"))
 
 
+# requires: metal
 def test_native_metal_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -260,6 +265,7 @@ def test_native_metal_cumulative_nested_scopes_resident_consumers_empty_and_budg
     same(query.collect(accelerator=MetalRuntime()), query.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_and_when() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -368,6 +374,7 @@ def test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_a
     )
 
 
+# requires: metal
 def test_native_metal_cumulative_large_global_partition_preserves_serial_float_order() raises:
     _ = require_metal()
     var values = List[Float64](length=1048576, fill=0)

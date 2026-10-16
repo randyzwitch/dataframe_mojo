@@ -1,4 +1,5 @@
 """Full join rows and schema against a nested-loop oracle; duplicates are pairs."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, Series
 from tests.support.reference_model import (

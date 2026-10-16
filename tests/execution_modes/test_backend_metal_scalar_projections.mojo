@@ -1,4 +1,5 @@
 """Scalar-only selections retain one-row CPU shapes through resident consumers."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -78,6 +79,7 @@ def test_scalar_projection_normalization_shape_aliases_and_metadata() raises:
     )
 
 
+# requires: metal
 def test_native_metal_scalar_projections_empty_sources_types_and_literal_text() raises:
     var runtime = require_metal()
     var source = DataFrame([Series("x", Column[Int32]([1, 2, 3, 4]))])
@@ -110,6 +112,7 @@ def test_native_metal_scalar_projections_empty_sources_types_and_literal_text() 
     assert_equal(literal.column("i").int32()._get(0), Int32(7))
 
 
+# requires: metal
 def test_native_metal_scalar_projection_consumers_limits_joins_and_collisions() raises:
     var runtime = require_metal()
     var frame = DataFrame(
@@ -143,6 +146,7 @@ def test_native_metal_scalar_projection_consumers_limits_joins_and_collisions() 
     )
 
 
+# requires: metal
 def test_native_metal_scalar_projection_profiles_budgets_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = empty(17).lazy().select_exprs(expressions())

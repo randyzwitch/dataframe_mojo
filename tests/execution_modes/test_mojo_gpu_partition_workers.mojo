@@ -6,6 +6,7 @@ from tests.execution_modes.test_backend_metal_moments import near
 from tests.support.lifecycle_jobs import WorkerSetting
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_partition_workers_dense_and_hash_order_proofs() raises:
     var setting = WorkerSetting(8)
     var runtime = MetalRuntime()

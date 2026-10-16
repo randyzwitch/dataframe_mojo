@@ -1,4 +1,6 @@
 """Both-empty joins validate metadata and need no device or retained bytes."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series
 from dataframe.lazy import LazyFrame
@@ -30,6 +32,7 @@ def _empty_query(
     return left.lazy().join(right.lazy(), on="k", how=how, coalesce=coalesce)
 
 
+# requires: metal
 def test_mojo_gpu_both_empty_join_styles_schema_zero_budget_without_device() raises:
     var inputs = _empty_inputs()
     # An invalid device ID proves that neither staging nor a GPU context is
@@ -101,6 +104,7 @@ def test_mojo_gpu_both_empty_join_styles_schema_zero_budget_without_device() rai
                             )
 
 
+# requires: metal
 def test_mojo_gpu_both_empty_join_invalid_metadata_precedes_device_setup() raises:
     var inputs = _empty_inputs()
     var runtime = MetalRuntime(999999, memory_limit_bytes=0)

@@ -1280,6 +1280,18 @@ def lower_rows(
                     "ordered decimal", "invalid observed producer"
                 )
             ordered_mode = 4
+        var observed_sum = node.text == "metal_sum_materialization"
+        if observed_sum:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != SELECT
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject("observed sum", "invalid observed producer")
+        var sum_expression = 0
         var precision_rows = node.text == decimal_row_feed.MATERIALIZATION
         if precision_rows:
             if (
@@ -1380,9 +1392,11 @@ def lower_rows(
         var ordered_producer = Bool(node.producer_origin)
         if ordered_producer:
             producer_phases.validate_region(query, node)
-            if (
-                node.producer_origin.value()[].phase
-                != producer_phases.OBSERVED_IANA
+            if node.producer_origin.value()[].phase not in List[Int](
+                [
+                    producer_phases.OBSERVED_IANA,
+                    producer_phases.OBSERVED_STRICT_CAST,
+                ]
             ):
                 capabilities.reject(
                     "observed temporal", "unknown producer phase"
@@ -1430,6 +1444,15 @@ def lower_rows(
                         "producer AST or logical metadata changed",
                     )
                 decimal_expression += 1
+            if observed_sum:
+                if node.names2[1 + sum_expression] != implode_ordered.signature(
+                    bound
+                ):
+                    capabilities.reject(
+                        "observed sum",
+                        "producer AST or logical metadata changed",
+                    )
+                sum_expression += 1
             if precision_rows:
                 if node.names2[
                     1 + decimal_expression
@@ -1783,6 +1806,7 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
+                    and not ordered_producer
                     and not (
                         capabilities.proven_integer_operations
                         and proven[part_index]
@@ -3068,7 +3092,7 @@ def lower_rows(
             )
     var capsule_peak = 0
     var zone_words = List[UInt64]()
-    if len(capsule.descriptors):
+    if len(capsule.words):
         for step in steps:
             for node in range(step.start, step.start + step.nodes):
                 var op = code[4 * node]

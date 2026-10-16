@@ -1,4 +1,5 @@
 """Narrow primitive source List GET metadata accumulator contracts."""
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, ListColumn, Series, col

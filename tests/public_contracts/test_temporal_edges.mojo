@@ -1,4 +1,5 @@
 """Parser field boundaries, zone rule horizons and unsigned time aggregates."""
+# contract-group: expr.temporal
 from std.testing import assert_equal, assert_true, assert_raises
 from std.math import sqrt
 from std.sys import size_of

@@ -10,6 +10,7 @@ from tests.tooling.suite_policy import (
     CapabilityRequirement,
     ContractGroup,
     empty_policy,
+    policy_from,
 )
 from tests.tooling.contract_runner import (
     RunnerOptions,
@@ -606,6 +607,46 @@ def test_mapping_probe_rejects_mapped_pages_and_observes_each_unmap() raises:
         assert_mapped_page(region)
 
 
+def test_policy_markers_attach_to_the_next_test_and_reject_strays() raises:
+    var root = temporary_directory("/tmp/df-contract-runner-selftest")
+    write_text(
+        root + "/test_a.mojo",
+        (
+            '"""Module."""\n# contract-group: zeta\n# contract-group:'
+            " alpha\n\n\n# requires: metal\n# requires: mojo_gpu\ndef"
+            " test_gpu() raises:\n    pass\n\n\n# expected-failure: Wrong"
+            " total\n# expected-failure: on chunks.\n# expected-diagnostic:"
+            " sum mismatch\n# expected-exit: variant-abort\ndef"
+            " test_known() raises:\n    pass\n\n\ndef test_plain() raises:\n"
+            "    # requires: metal\n    pass\n"
+        ),
+    )
+    var policy = policy_from(root)
+    var module = root + "/test_a.mojo"
+    assert_equal(len(policy.requirements), 2)
+    assert_equal(policy.requirements[0].entry, module + "::test_gpu")
+    assert_equal(policy.requirements[0].capability, "metal")
+    assert_equal(policy.requirements[1].capability, "mojo_gpu")
+    assert_equal(len(policy.failures), 1)
+    assert_equal(policy.failures[0].entry, module + "::test_known")
+    assert_equal(policy.failures[0].reason, "Wrong total on chunks.")
+    assert_equal(policy.failures[0].diagnostic, "sum mismatch")
+    assert_equal(
+        policy.failures[0].exit_code,
+        133 if CompilationTarget.is_macos() else 132,
+    )
+    assert_equal(len(policy.groups), 2)
+    assert_equal(policy.groups[0].name, "alpha")
+    assert_equal(policy.groups[1].name, "zeta")
+    assert_equal(policy.groups[1].modules, [module])
+    write_text(
+        root + "/test_b.mojo",
+        "# requires: metal\nvar stray = 1\n\ndef test_x() raises:\n    pass\n",
+    )
+    with assert_raises(contains="directly above"):
+        _ = policy_from(root)
+
+
 def main() raises:
     var suite = TestSuite()
     suite.test[
@@ -636,4 +677,5 @@ def main() raises:
     suite.test[
         test_mapping_probe_rejects_mapped_pages_and_observes_each_unmap
     ]()
+    suite.test[test_policy_markers_attach_to_the_next_test_and_reject_strays]()
     suite^.run()

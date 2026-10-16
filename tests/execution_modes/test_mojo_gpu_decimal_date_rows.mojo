@@ -1,4 +1,6 @@
 """Independent Date.YEAR and checked Decimal producer composition witnesses."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -116,6 +118,7 @@ def _collect(
     )
 
 
+# requires: mojo_gpu
 def test_decimal_date_rows_certificate_preserves_original_prefix_and_states() raises:
     var source = _source()
     var expressions = _expressions()
@@ -195,6 +198,7 @@ def test_decimal_date_rows_certificate_preserves_original_prefix_and_states() ra
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_date_rows_literals_extremes_nulls_and_layouts() raises:
     # Literal years independently derived by binary searching Gregorian Jan1
     # day counts, not by calling or copying civil_from_days' era decomposition.
@@ -248,6 +252,7 @@ def test_mojo_gpu_decimal_date_rows_literals_extremes_nulls_and_layouts() raises
                 assert_equal(result.column("share").float64().to_list(), shares)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_decimal_date_rows_precision_before_group_and_join() raises:
     var bad = _source(bad=True)
     var selected = DataFrame([Series("g", Column[Int32]([0]))])

@@ -1,4 +1,6 @@
 """Resource ownership verified with real foreign callbacks and production cursors."""
+# contract-group: storage.release
+# contract-group: execution.lifecycle
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true, assert_raises
 from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page

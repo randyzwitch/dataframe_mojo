@@ -1,4 +1,5 @@
 """Mojo analytical facts describe metadata without source reads or execution."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, scan_csv
 from dataframe.metal import MetalRuntime
@@ -49,6 +50,7 @@ def cost_query(
     return (source.lazy().select_exprs(expressions), DataFrame(expected^))
 
 
+# requires: metal
 def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata() raises:
     var runtime = require_metal()
     var setting = WorkerSetting(1)
@@ -160,6 +162,7 @@ def cost_preflight() raises:
         )
 
 
+# requires: metal
 def test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access() raises:
     _ = require_metal()
     cost_preflight()

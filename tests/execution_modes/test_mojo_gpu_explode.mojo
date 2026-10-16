@@ -1,4 +1,6 @@
 """Public scoped List EXPLODE; requires the logical parent-count CPU repair."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, ListColumn, Series, col, lit
@@ -26,6 +28,7 @@ def _literal(output: DataFrame) raises:
     assert_equal(output.column("wide")._decimal_raw(3), (Int128(1) << 80) + 7)
 
 
+# requires: metal
 def test_mojo_gpu_explode_source_layouts_hidden_spans_high_words_and_metadata() raises:
     var original = _source()
     for variant in range(3):
@@ -95,6 +98,7 @@ def test_mojo_gpu_explode_source_layouts_hidden_spans_high_words_and_metadata() 
                 assert_equal(field._chunked.value()[].cache[].state.load(), 0)
 
 
+# requires: metal
 def test_mojo_gpu_explode_resident_row_join_group_and_complete_cardinality_observation() raises:
     var source = _source()
     var expanded = source.lazy().explode(["xs", "wide"])
@@ -174,6 +178,7 @@ def test_mojo_gpu_explode_resident_row_join_group_and_complete_cardinality_obser
     _literal(expanded.collect(accelerator=MetalRuntime(), engine="accel"))
 
 
+# requires: metal
 def test_mojo_gpu_explode_empty_metadata_guards_exact_budget_observer_and_recovery() raises:
     var source = _source()
     var query = chunk_layout(source).lazy().explode(["xs", "wide"])
@@ -240,6 +245,7 @@ def test_mojo_gpu_explode_empty_metadata_guards_exact_budget_observer_and_recove
         )
 
 
+# requires: metal
 def test_mojo_gpu_explode_ieee_words_and_child_metadata_survive_projection() raises:
     var words: List[UInt64] = [
         0x8000000000000000,

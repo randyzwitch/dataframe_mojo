@@ -1,4 +1,6 @@
 """Grouped List siblings use the CPU fused local moment update."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
@@ -7,6 +9,7 @@ from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_var_std_siblings_local_fma_literal() raises:
     var values: List[Float64] = [-1e16, 3, 2, 2, 1e16, -1e16]
     var source = DataFrame(
@@ -116,6 +119,7 @@ def _higher_moment_words(fixture_index: Int) -> List[UInt64]:
     )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads() raises:
     var setting = WorkerSetting(1)
     var names: List[String] = ["s_b", "s_u", "k_f_b", "k_p_b", "k_f_u", "k_p_u"]

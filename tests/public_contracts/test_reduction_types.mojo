@@ -1,4 +1,7 @@
 """Public reduction semantics across numeric and extended logical types."""
+# contract-group: public.apple_parity
+# contract-group: expr.decimal_extrema
+# contract-group: reduce.global
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.reduction_types_reference import (
@@ -288,10 +291,18 @@ def _advertised_decimal_scalar(operation: String) raises:
                 near(value.float64(), expected)
 
 
+# expected-failure: Advertised decimal reduction aborts while accessing
+# expected-failure: physical storage as the wrong variant.
+# expected-diagnostic: aggregate.mojo:1303:39: get: wrong variant type
+# expected-exit: variant-abort
 def test_decimal_variance_retains_numeric_scale() raises:
     _advertised_decimal_scalar("var")
 
 
+# expected-failure: Advertised decimal reduction aborts while accessing
+# expected-failure: physical storage as the wrong variant.
+# expected-diagnostic: aggregate.mojo:1303:39: get: wrong variant type
+# expected-exit: variant-abort
 def test_decimal_standard_deviation_retains_numeric_scale() raises:
     _advertised_decimal_scalar("std")
 
@@ -304,10 +315,16 @@ def test_decimal_quantile_retains_numeric_scale() raises:
     _advertised_decimal_scalar("quantile")
 
 
+# expected-failure: Advertised public reduction does not satisfy its
+# expected-failure: documented numeric contract.
+# expected-diagnostic: expected a numeric column
 def test_decimal_skew_accepts_advertised_numeric_input() raises:
     _advertised_decimal_scalar("skew")
 
 
+# expected-failure: Advertised public reduction does not satisfy its
+# expected-failure: documented numeric contract.
+# expected-diagnostic: expected a numeric column
 def test_decimal_kurtosis_accepts_advertised_numeric_input() raises:
     _advertised_decimal_scalar("kurtosis")
 
