@@ -171,6 +171,39 @@ class MetalQueryReport(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.execution_audit(c, {"query.mojo": "source"}, current)
 
+    def test_measured_audit_and_canonical_derived_identity(self):
+        c = case("q1")
+        entry = dict(
+            workload_kind="canonical",
+            execution_boundary="gpu_collects",
+            source_path="query.mojo",
+            source_sha256="canonical",
+            metal_derived_source_sha256="new worker",
+            audit_reason="typed insertion proof",
+            whole_query_gpu_certificate=False,
+            alignment_keys=["key"],
+        )
+        metadata = {"cases": {"example/base/q1": entry}}
+        observed = report.execution_audit(
+            c, {"query.mojo": "canonical"}, metadata, {"metal_query.mojo": "new worker"}
+        )
+        self.assertEqual(observed["execution_boundary"], "gpu_collects")
+        for derived in ({}, {"metal_query.mojo": "old worker"}):
+            unknown = report.execution_audit(
+                c, {"query.mojo": "canonical"}, metadata, derived
+            )
+            self.assertEqual(unknown["execution_boundary"], "unknown")
+            self.assertEqual(unknown["alignment_keys"], [])
+        c["execution_audit"] = dict(
+            entry, execution_boundary="hybrid", metal_derived_source_sha256="old worker"
+        )
+        historical = report.execution_audit(
+            c, {"query.mojo": "canonical"}, metadata, {"metal_query.mojo": "old worker"}
+        )
+        self.assertEqual(historical["execution_boundary"], "hybrid")
+        self.assertFalse(historical["whole_query_gpu_certificate"])
+
+
     def test_untranslated_success_cannot_inflate_support_counts(self):
         c = case("q3")
         with self.assertRaisesRegex(ValueError, "absent from the translated"):

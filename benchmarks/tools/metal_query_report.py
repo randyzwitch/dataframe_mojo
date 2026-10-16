@@ -142,14 +142,19 @@ def load_receipts(paths, revision=None):
                 raise ValueError(
                     f"Successful case lacks comparison/repetition evidence: {case_key}"
                 )
-            cases[case_key] = dict(case)
+            cases[case_key] = dict(
+                case,
+                _measurement_derived_source_sha256=provenance.get(
+                    "derived_source_sha256", {}
+                ),
+            )
         receipts.append({"path": str(path), "sha256": digest(path.read_bytes())})
     if identity is None:
         raise ValueError("At least one receipt is required")
     return cases, identity, source_hashes, receipts
 
 
-def execution_audit(case, source_hashes, metadata):
+def execution_audit(case, source_hashes, metadata, derived_hashes=None):
     entry = case.get("execution_audit")
     if entry is None:
         entry = metadata.get("cases", {}).get(
@@ -166,10 +171,22 @@ def execution_audit(case, source_hashes, metadata):
         {"format": "dataframe-metal-case-metadata-v1", "cases": {"selected": entry}}
     )
     result = dict(entry)
+    reason = ""
     if source_hashes.get(entry["source_path"]) != entry["source_sha256"]:
+        reason = "Execution audit canonical source hash does not match receipt."
+    if entry.get("metal_derived_source_sha256"):
+        measured = derived_hashes if derived_hashes is not None else case.get(
+            "_measurement_derived_source_sha256", {}
+        )
+        worker = "metal_" + Path(entry["source_path"]).stem + ".mojo"
+        if measured.get(worker) != entry["metal_derived_source_sha256"]:
+            reason = "Execution audit derived worker hash is missing or does not match receipt."
+    if reason:
         result.update(
             execution_boundary="unknown",
-            audit_reason="Execution audit source hash does not match receipt.",
+            alignment_keys=[],
+            order_keys=[],
+            audit_reason=reason,
         )
     return result
 
