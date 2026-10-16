@@ -2,12 +2,17 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit
-from dataframe.dtype import DataType
-from dataframe.lazy import LazyFrame
+from dataframe.dtype import DataType, CategoricalDictionary
+from dataframe.lazy import LazyFrame, SELECT, _plan_node
 from dataframe.binding import bind
 from dataframe.accelerator.constants import fold_literal_text_parsing
 from dataframe.accelerator.joins import lower_join_dag, _mark_decimal_producers
 from dataframe.accelerator.metadata import prune_projections
+from dataframe.accelerator.code_domains import (
+    CategoryOwner,
+    CategoryField,
+    TextField,
+)
 from dataframe.accelerator import decimal_sum_bounds as raw
 from dataframe.accelerator import decimal_sum_receipts
 from dataframe.accelerator.gpu.runtime import capabilities, _preflight
@@ -237,7 +242,7 @@ def test_sum_output_bounds_refuse_arbitrary_wide_columns_and_scale18_products() 
 
 def _guarded_prefix_cases() raises:
     var frame = source().with_column(
-        Series("unused", Column[Int32]([7, 8, 9, 10]))
+        Series("unused", Column[UInt32]([0, 1, 0, 1]))
     )
     var right = DataFrame(
         [
@@ -260,6 +265,16 @@ def _guarded_prefix_cases() raises:
         .filter(col("sale") > lit("2").cast(dtype) * col("refund"))
         .select(["g"])
     )
+    var dictionary = CategoricalDictionary()
+    dictionary.append("a")
+    dictionary.append("b")
+    var category_dtype = DataType.categorical(dictionary^)
+    var codes = List[Column[UInt32]]()
+    codes.append(frame.column("unused").uint32().copy())
+    var owner = ArcPointer(CategoryOwner(category_dtype, codes^))
+    original._nodes[0].text_fields = [
+        TextField("unused", DataType.STRING, CategoryField(owner.copy(), True))
+    ]
     for at in range(len(original._nodes)):
         original._nodes[at].lineage_anchor = ArcPointer(at)
     var group = 4
@@ -298,7 +313,7 @@ def _guarded_prefix_cases() raises:
     # including an unused column. Values/dtype equality never waives owners.
     var changed_source = projected.copy()
     changed_source._frames[0] = frame.with_column(
-        Series("unused", Column[Int32]([7, 8, 9, 10]))
+        Series("unused", Column[UInt32]([0, 1, 0, 1]))
     )
     assert_true(
         not decimal_sum_receipts.matches(origin[], changed_source, mapped)
@@ -328,4 +343,50 @@ def _guarded_prefix_cases() raises:
         not decimal_sum_receipts.matches(
             origin[], changed_transport_metadata, mapped
         )
+    )
+
+    var changed_category = projected.copy()
+    changed_category._nodes[0].text_fields[0].category = CategoryField(
+        owner.copy(), False
+    )
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], changed_category, mapped)
+    )
+    var replaced_owner = ArcPointer(
+        CategoryOwner(category_dtype, owner[].codes.copy())
+    )
+    var changed_owner = projected.copy()
+    changed_owner._nodes[0].text_fields[0].category = CategoryField(
+        replaced_owner.copy(), True
+    )
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], changed_owner, mapped)
+    )
+    # Same visible STRING field/name and exact COL AST: only private category
+    # semantics differ. The pruning transport must reject each independently.
+    var transported = frame.lazy()
+    transported._nodes[0].text_fields = original._nodes[0].text_fields.copy()
+    transported._nodes.append(
+        _plan_node(
+            SELECT,
+            0,
+            exprs=[col("unused")],
+            text_fields=transported._nodes[0].text_fields,
+        )
+    )
+    assert_true(decimal_sum_receipts._transport_matches(transported, 1))
+    var transport_flags = transported.copy()
+    transport_flags._nodes[1].text_fields[0].category = CategoryField(
+        owner.copy(), False
+    )
+    assert_true(not decimal_sum_receipts._transport_matches(transport_flags, 1))
+    var transport_owner = transported.copy()
+    transport_owner._nodes[1].text_fields[0].category = CategoryField(
+        replaced_owner, True
+    )
+    assert_true(not decimal_sum_receipts._transport_matches(transport_owner, 1))
+    var transport_presence = transported.copy()
+    transport_presence._nodes[1].text_fields[0].category = None
+    assert_true(
+        not decimal_sum_receipts._transport_matches(transport_presence, 1)
     )

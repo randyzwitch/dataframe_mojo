@@ -46,6 +46,7 @@ struct Origin(Movable):
     var signatures: List[String]
     var source_owners: List[Series]
     var prefix_signatures: List[String]
+    var prefix_categories: List[String]
     var prefix_indices: List[Int]
     var prefix_nodes: List[PlanNode]
     var source_counts: List[Int]
@@ -100,11 +101,13 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
         raise Error("Decimal SUM bound original GROUP operand proof missing")
     var owners = List[Series]()
     var prefixes = List[String]()
+    var categories = List[String]()
     var indices = List[Int]()
     var snapshots = List[PlanNode]()
     var source_counts = List[Int]()
     for at in _ancestors(query, group):
         prefixes.append(_prefix_signature(query, at))
+        categories.append(_category_signature(query._nodes[at].text_fields))
         indices.append(at)
         snapshots.append(query._nodes[at].copy())
         source_counts.append(0)
@@ -143,7 +146,10 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
     retained = checked_add(
         retained,
         checked_mul(
-            keys.capacity() + signatures.capacity() + prefixes.capacity(),
+            keys.capacity()
+            + signatures.capacity()
+            + prefixes.capacity()
+            + categories.capacity(),
             size_of[String](),
         ),
     )
@@ -154,6 +160,10 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
             retained, checked_mul(text.byte_length() + 32, 2)
         )
     for text in signatures:
+        retained = checked_add(
+            retained, checked_mul(text.byte_length() + 32, 2)
+        )
+    for text in categories:
         retained = checked_add(
             retained, checked_mul(text.byte_length() + 32, 2)
         )
@@ -180,6 +190,7 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
             signatures^,
             owners^,
             prefixes^,
+            categories^,
             indices^,
             snapshots^,
             source_counts^,
@@ -469,7 +480,11 @@ def prefix_matches(origin: Origin, query: LazyFrame, group: Int) raises -> Bool:
             normalized.text = original.text
             normalized.names2 = original.names2.copy()
         staged._nodes[current] = normalized^
-        if _prefix_signature(staged, current) != origin.prefix_signatures[i]:
+        if (
+            _prefix_signature(staged, current) != origin.prefix_signatures[i]
+            or _category_signature(query._nodes[current].text_fields)
+            != origin.prefix_categories[i]
+        ):
             return False
     return source_slot == len(origin.source_owners)
 
@@ -527,4 +542,46 @@ def _transport_matches(query: LazyFrame, at: Int) raises -> Bool:
     )
     var staged = query.copy()
     staged._nodes[at] = expected^
-    return _prefix_signature(query, at) == _prefix_signature(staged, at)
+    return _prefix_signature(query, at) == _prefix_signature(
+        staged, at
+    ) and _category_signature(node.text_fields) == _category_signature(
+        staged._nodes[at].text_fields
+    )
+
+
+def _category_signature(fields: List[TextField]) -> String:
+    """Snapshot private code interpretation omitted by the shared signature.
+
+    Includes immutable original dictionary/code-buffer identities, offsets and
+    validity owners. No dictionary labels or source code payloads are read.
+    """
+    var result = String(len(fields)) + ";"
+    for field in fields:
+        result += String(field.name.byte_length()) + ":" + field.name
+        result += ";category=" + String(Bool(field.category))
+        if not field.category:
+            continue
+        ref category = field.category.value()
+        var owner = category.owner.copy()
+        result += ";string_codes=" + String(category.string_codes)
+        result += ";owner=" + String(Int(Pointer(to=owner[])))
+        var dtype_name = owner[].dtype.name()
+        result += (
+            ";dtype=" + String(dtype_name.byte_length()) + ":" + dtype_name
+        )
+        if owner[].dtype.is_categorical():
+            result += ";dictionary=" + String(
+                Int(Pointer(to=owner[].dtype.dictionary()[]))
+            )
+        result += ";codes=" + String(len(owner[].codes))
+        for code in owner[].codes:
+            result += ";values=" + String(Int(Pointer(to=code._data[])))
+            result += ";valid=" + String(Int(Pointer(to=code._bits[])))
+            result += (
+                ";offset="
+                + String(code._offset)
+                + ";length="
+                + String(code._length)
+            )
+        result += ";"
+    return result^
