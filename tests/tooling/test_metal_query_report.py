@@ -59,20 +59,36 @@ def definitions():
 
 
 class MetalQueryReport(unittest.TestCase):
-    def test_catalog_is_source_derived_and_untranslated_cells_remain_visible(self):
+    def test_catalog_is_source_derived_and_untranslated_cells_remain_visible(
+        self,
+    ):
         catalog = report.catalog()
         self.assertEqual(sum(len(d["queries"]) for d in catalog.values()), 179)
         self.assertEqual(
             sum(len(d["translated_queries"]) for d in catalog.values()), 168
         )
         self.assertEqual(
-            sum(len(d["queries"]) * len(d["variants"]) for d in catalog.values()), 345
+            sum(
+                len(d["queries"]) * len(d["variants"]) for d in catalog.values()
+            ),
+            345,
         )
         self.assertNotIn("q28", catalog["clickbench"]["translated_queries"])
         self.assertEqual(
             set(catalog["tpcds"]["queries"])
             - set(catalog["tpcds"]["translated_queries"]),
-            {"q5", "q14", "q18", "q22", "q36", "q67", "q70", "q77", "q80", "q86"},
+            {
+                "q5",
+                "q14",
+                "q18",
+                "q22",
+                "q36",
+                "q67",
+                "q70",
+                "q77",
+                "q80",
+                "q86",
+            },
         )
 
     def test_partial_grid_cannot_claim_all_variants_or_complete_percent(self):
@@ -83,9 +99,13 @@ class MetalQueryReport(unittest.TestCase):
         self.assertIsNone(
             summary["raw_adapter"]["matching_percent_of_translated_cases"]
         )
-        self.assertEqual(summary["raw_adapter"]["all_variants_matching_queries"], [])
+        self.assertEqual(
+            summary["raw_adapter"]["all_variants_matching_queries"], []
+        )
 
-    def test_complete_counts_keep_wrong_unsupported_empty_and_hybrid_separate(self):
+    def test_complete_counts_keep_wrong_unsupported_empty_and_hybrid_separate(
+        self,
+    ):
         rows = [
             case("q1", rows=0),
             case("q1", "decimal"),
@@ -116,13 +136,15 @@ class MetalQueryReport(unittest.TestCase):
         raw = summary["raw_adapter"]
         self.assertEqual((raw["matching_cases"], raw["runnable_cases"]), (2, 3))
         self.assertEqual(
-            (raw["matching_empty_cases"], raw["matching_populated_cases"]), (1, 1)
+            (raw["matching_empty_cases"], raw["matching_populated_cases"]),
+            (1, 1),
         )
         self.assertEqual(raw["matching_percent_of_translated_cases"], 50)
         self.assertEqual(raw["all_variants_matching_queries"], ["example/q1"])
         conservative = summary["known_hybrid_and_unknown_audits_excluded"]
         self.assertEqual(
-            (conservative["matching_cases"], conservative["excluded_cases"]), (0, 2)
+            (conservative["matching_cases"], conservative["excluded_cases"]),
+            (0, 2),
         )
         self.assertEqual(summary["cpu_repeat_ordered_equality"], {"False": 1})
         self.assertEqual(
@@ -185,7 +207,10 @@ class MetalQueryReport(unittest.TestCase):
         )
         metadata = {"cases": {"example/base/q1": entry}}
         observed = report.execution_audit(
-            c, {"query.mojo": "canonical"}, metadata, {"metal_query.mojo": "new worker"}
+            c,
+            {"query.mojo": "canonical"},
+            metadata,
+            {"metal_query.mojo": "new worker"},
         )
         self.assertEqual(observed["execution_boundary"], "gpu_collects")
         for derived in ({}, {"metal_query.mojo": "old worker"}):
@@ -195,14 +220,18 @@ class MetalQueryReport(unittest.TestCase):
             self.assertEqual(unknown["execution_boundary"], "unknown")
             self.assertEqual(unknown["alignment_keys"], [])
         c["execution_audit"] = dict(
-            entry, execution_boundary="hybrid", metal_derived_source_sha256="old worker"
+            entry,
+            execution_boundary="hybrid",
+            metal_derived_source_sha256="old worker",
         )
         historical = report.execution_audit(
-            c, {"query.mojo": "canonical"}, metadata, {"metal_query.mojo": "old worker"}
+            c,
+            {"query.mojo": "canonical"},
+            metadata,
+            {"metal_query.mojo": "old worker"},
         )
         self.assertEqual(historical["execution_boundary"], "hybrid")
         self.assertFalse(historical["whole_query_gpu_certificate"])
-
 
     def test_untranslated_success_cannot_inflate_support_counts(self):
         c = case("q3")
@@ -224,7 +253,10 @@ class MetalQueryReport(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "Supplemental witnesses"):
             report.summarize(
-                {report.key(c): c}, definitions(), {"query.mojo": "source"}, metadata
+                {report.key(c): c},
+                definitions(),
+                {"query.mojo": "source"},
+                metadata,
             )
 
     def test_cli_cannot_overwrite_immutable_receipt(self):
@@ -247,7 +279,9 @@ class MetalQueryReport(unittest.TestCase):
             self.assertIn("must not overwrite", process.stderr)
             self.assertEqual(path.read_text(), original)
 
-    def test_duplicate_dirty_mixed_revision_and_partial_success_are_rejected(self):
+    def test_duplicate_dirty_mixed_revision_and_partial_success_are_rejected(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             first, second = Path(tmp) / "one.json", Path(tmp) / "two.json"
             original = receipt([case("q1")])
