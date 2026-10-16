@@ -5688,19 +5688,41 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # Each relation's table rows before its filters: its columns'
             # distinct counts, as DuckDB takes them with no statistics.
             var domains = List[Float64](capacity=n)
+            var estimates = List[Int](capacity=n)
+            var tables = List[Int](capacity=n)
+            var runs = List[Int]()
             for r in range(n):
-                var table = self._spine_rows(relations[r])
-                var estimated = self._relation_estimate(relations[r])
-                if estimated < 0:
-                    var frame = self._execute(
-                        relations[r], False, streaming, batch_size
+                tables.append(self._spine_rows(relations[r]))
+                estimates.append(self._relation_estimate(relations[r]))
+                if estimates[r] < 0:
+                    runs.append(r)
+            # Relations that must run to be counted are independent
+            # pipelines: run them at once, as Polars and DuckDB run
+            # independent pipelines (`_prefetch_breakers`), not one after
+            # another on a crew their serial phases leave partly idle.
+            if len(runs) > 0:
+                var jobs = List[_SubplanJob](capacity=len(runs))
+                for r in runs:
+                    jobs.append(
+                        _SubplanJob(
+                            self.copy(), relations[r], streaming, batch_size
+                        )
                     )
-                    estimated = frame.height()
-                    self._frames.append(frame^)
+                if len(jobs) == 1:
+                    jobs[0].run()
+                else:
+                    run_jobs(jobs)
+                for k in range(len(runs)):
+                    var r = runs[k]
+                    estimates[r] = jobs[k].result.height()
+                    self._frames.append(jobs[k].result.copy())
                     self._schemas.append(Optional[CsvSchema]())
                     self._nodes[relations[r]] = _plan_node(
                         SCAN_FRAME, offset=len(self._frames) - 1
                     )
+            for r in range(n):
+                var table = tables[r]
+                var estimated = estimates[r]
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
             # Each key column's distinct count, where its relation's table
