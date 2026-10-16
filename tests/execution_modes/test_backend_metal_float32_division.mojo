@@ -1,4 +1,5 @@
 """Float32 floor division preserves its rounded quotient before flooring."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true
@@ -7,6 +8,7 @@ from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
+# requires: metal
 def test_native_metal_float32_floor_division_bits_nulls_children_and_cost() raises:
     _ = require_metal()
     var words: List[UInt32] = [

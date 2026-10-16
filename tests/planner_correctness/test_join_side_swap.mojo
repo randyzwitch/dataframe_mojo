@@ -6,6 +6,7 @@ left is hashed and the right streams through it. The swap must not change
 the result, the join's column names (the left key's own name), its key type,
 or which rows join; it is declined where row order matters to the consumer
 (an ordered group-by) and where a shared non-key name would be suffixed."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 
 from dataframe import (

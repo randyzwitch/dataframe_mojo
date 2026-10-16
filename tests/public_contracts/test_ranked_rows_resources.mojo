@@ -1,4 +1,6 @@
 """Private ranked operand resource geometry is metadata-only and wide-safe."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Expr, Series, col
@@ -21,6 +23,7 @@ def ranked_operand(expression: Expr, source: DataFrame) raises -> RowPlan:
     return plan^
 
 
+# requires: mojo_gpu
 def test_private_ranked_rows_resources_zero_rows_descriptors_and_wide_cells() raises:
     var source = DataFrame([Series.full_null("x", DataType.INT64, 0)])
     var plan = ranked_operand(col("x").cast(DataType.INT8), source)

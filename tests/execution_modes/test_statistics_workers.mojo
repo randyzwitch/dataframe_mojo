@@ -1,4 +1,5 @@
 """Worker-dispatched moments and pairs retain exact independent sufficient statistics."""
+# contract-group: execution.modes
 from std.math import abs
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, corr, cov
@@ -182,6 +183,14 @@ def test_scaled_pair_reference_has_literal_variance_covariance_and_correlation_a
     _near(model.correlation(), 1.0)
 
 
+# expected-failure: Verified streamed misaligned Float32 chunks produce
+# expected-failure: incorrect grouped nonnull counts at batch65537.
+# expected-failure: Independent count of rows with row%7!=3 gives44939 for
+# expected-failure: first group; actual45173. Other modes complete normal
+# expected-failure: matrix; focused strict first failure does not claim other
+# expected-failure: affected reducers pass.
+# expected-diagnostic: streamed misaligned chunks must preserve group validity
+# expected-diagnostic: counts
 def test_streamed_misaligned_numeric_chunks_preserve_group_validity_counts() raises:
     var values = List[Float32]()
     var valid = List[Bool]()

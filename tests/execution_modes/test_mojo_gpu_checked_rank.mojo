@@ -1,4 +1,6 @@
 """Checked eager rank inputs are observed before rank sorting and consumers."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.metal import MetalRuntime, _capabilities
@@ -38,6 +40,7 @@ def _integer_words(method: String, partitioned: Bool) -> List[Int64]:
     return expected^
 
 
+# requires: metal
 def test_mojo_gpu_checked_rank_literal_methods_nulls_layouts_and_partitions() raises:
     var setting = WorkerSetting(1)
     var source = _rank_source()
@@ -117,6 +120,7 @@ def test_mojo_gpu_checked_rank_literal_methods_nulls_layouts_and_partitions() ra
     _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_checked_rank_operand_batch_when_errors_and_reuse() raises:
     var setting = WorkerSetting(1)
     var runtime = MetalRuntime()
@@ -218,6 +222,7 @@ def test_mojo_gpu_checked_rank_operand_batch_when_errors_and_reuse() raises:
     _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_checked_rank_year_month_sibling_and_resident_consumers() raises:
     var setting = WorkerSetting(1)
     var source = DataFrame(

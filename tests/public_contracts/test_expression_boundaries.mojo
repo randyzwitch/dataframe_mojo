@@ -1,4 +1,7 @@
 """Binding precedes evaluation; nested branches evaluate only selected rows."""
+# contract-group: expr.null_logic
+# contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.execution import _total_cast

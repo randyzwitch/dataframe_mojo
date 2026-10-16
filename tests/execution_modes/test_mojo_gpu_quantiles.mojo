@@ -50,6 +50,7 @@ def _layout_case[D: DType](n: Int, chunked: Bool) raises:
         assert_true(actual.item(0, "linear").is_null())
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_quantiles_numeric_layouts_empty_masks_and_mixed_reductions() raises:
     comptime types = (DType.int64, DType.uint64, DType.float32, DType.float64)
     comptime for i in range(len(types)):
@@ -59,6 +60,7 @@ def test_mojo_gpu_quantiles_numeric_layouts_empty_masks_and_mixed_reductions() r
             _layout_case[D](n, True)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_quantiles_nonfinite_zero_and_interpolation_anchors() raises:
     var examples: List[List[Float64]] = [
         [],
@@ -101,6 +103,7 @@ def test_mojo_gpu_quantiles_nonfinite_zero_and_interpolation_anchors() raises:
     _ = _check(wide.lazy().select_exprs(_expressions(0.37)))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_quantiles_grouped_filtered_sliced_and_checked_errors() raises:
     var keys = List[Int32]()
     var values = List[Float64]()

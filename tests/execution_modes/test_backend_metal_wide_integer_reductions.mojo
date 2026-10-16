@@ -1,4 +1,5 @@
 """Exact integer sums and means preserve cancellation and checked final results."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit
 from dataframe.dtype import DataType
@@ -8,6 +9,7 @@ from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
 
 
+# requires: metal
 def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -104,6 +106,7 @@ def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raise
     assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(query).family)
 
 
+# requires: metal
 def test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

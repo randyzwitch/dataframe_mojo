@@ -1,4 +1,5 @@
 """Column aliases share resident values without changing visible schemas."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
@@ -75,6 +76,7 @@ def test_column_slot_preflight_reuses_values_and_bounds_outputs() raises:
         )
 
 
+# requires: metal
 def test_native_metal_column_slot_gpu_aliases_filters_order_slices_and_replacement() raises:
     _ = require_metal()
     var raw = wide_frame(256)
@@ -116,6 +118,7 @@ def test_native_metal_column_slot_gpu_aliases_filters_order_slices_and_replaceme
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
 
 
+# requires: metal
 def test_native_metal_column_slot_gpu_resident_joins_reductions_and_dictionaries() raises:
     _ = require_metal()
     var source = numeric_frame().select(["x"])

@@ -3,6 +3,7 @@ direct hash route and then adds the right rows nothing matched, in order:
 the same rows, in the same order, as a scalar model of SQL's FULL OUTER
 JOIN (null keys match nothing), on two-column keys with duplicates and
 unmatched rows on both sides."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series

@@ -1,4 +1,5 @@
 """Fixed-offset rolling converts each calendar stage between local and UTC ticks."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -70,6 +71,7 @@ def test_fixed_zone_duration_capability_signed_offsets_no_device_and_independent
             )
 
 
+# requires: metal
 def test_native_metal_fixed_zone_duration_literal_local_month_clamps_units_offsets_types_layouts_and_partitions() raises:
     var runtime = require_metal()
     for unit in ["ms", "us", "ns"]:
@@ -143,6 +145,7 @@ def test_native_metal_fixed_zone_duration_literal_local_month_clamps_units_offse
                 )
 
 
+# requires: metal
 def test_native_metal_fixed_zone_duration_full_width_local_wrapping_checked_reconstruction_and_pure_fixed_ticks() raises:
     var runtime = require_metal()
     for unit in ["ms", "us", "ns"]:
@@ -205,6 +208,7 @@ def test_native_metal_fixed_zone_duration_full_width_local_wrapping_checked_reco
                 )
 
 
+# requires: metal
 def test_native_metal_fixed_zone_duration_resident_consumers_offset_families_and_exact_budgets() raises:
     var runtime = require_metal()
     var frame = local_fixture(DataType.datetime("us", "-03:30"))

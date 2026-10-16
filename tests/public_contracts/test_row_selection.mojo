@@ -1,4 +1,5 @@
 """Row transforms preserve schema, order and clipped height, including width zero."""
+# contract-group: table.row_selection
 from std.testing import assert_equal, assert_raises
 from dataframe import DataFrame, Series
 from tests.support.coverage_generators import frame_from_model, chunk_layout

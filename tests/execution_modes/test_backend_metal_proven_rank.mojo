@@ -1,4 +1,5 @@
 """Static no-error proofs admit rank inputs without hiding checked children."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_raises
 from tests.execution_modes.test_backend_metal import require_metal
@@ -36,6 +37,7 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
         assert_true(observed.ordered_mode == 10)
 
 
+# requires: metal
 def test_native_metal_proven_rank_gpu_methods_limits_partitions_and_slices() raises:
     _ = require_metal()
     var source = DataFrame(
@@ -82,6 +84,7 @@ def test_native_metal_proven_rank_gpu_methods_limits_partitions_and_slices() rai
     check(source.slice(0, 0).lazy().select((col("x") + lit(Int64(0))).rank()))
 
 
+# requires: metal
 def test_native_metal_proven_rank_gpu_resident_consumers_head_and_rejections() raises:
     _ = require_metal()
     var source = frame()

@@ -1,4 +1,6 @@
 """Truth tables and selected-branch evaluation, with poison hidden under nulls."""
+# contract-group: expr.arithmetic
+# contract-group: expr.null_logic
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit, when, coalesce, null
 from tests.support.coverage_generators import chunk_layout

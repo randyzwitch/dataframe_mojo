@@ -1,4 +1,6 @@
 """Public original-route dispatch for ordered grouped floating states."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, Expr, col
@@ -17,6 +19,7 @@ from tests.support.float_streaming import (
 )
 
 
+# requires: metal
 def test_public_float_stream_finite_order_types_and_profile() raises:
     var workers = WorkerSetting(1)
     comptime for i in range(2):
@@ -129,6 +132,7 @@ def _priority_case[
     _ = flush^
 
 
+# requires: metal
 def test_public_float_stream_nan_literal_payloads() raises:
     var workers = WorkerSetting(1)
     comptime for i in range(2):
@@ -166,6 +170,7 @@ def test_public_float_stream_nan_literal_payloads() raises:
     _ = workers^
 
 
+# requires: metal
 def test_public_float_stream_empty_without_device_and_route_guards() raises:
     var workers = WorkerSetting(1)
     var frame = source[DType.float64](0)
@@ -211,6 +216,7 @@ def test_public_float_stream_empty_without_device_and_route_guards() raises:
     _ = two^
 
 
+# requires: metal
 def test_public_float_stream_cpu_optimized_source_morsels_and_single_actual_job() raises:
     var workers = WorkerSetting(2)
     var frame = source[DType.float64](0, n=64)
@@ -297,6 +303,7 @@ def test_public_float_stream_cpu_optimized_source_morsels_and_single_actual_job(
     _ = serial^
 
 
+# requires: metal
 def test_public_float_stream_all_null_and_large_min_count() raises:
     var workers = WorkerSetting(1)
     comptime for i in range(2):
@@ -374,6 +381,7 @@ def test_public_float_capture_geometry_and_construction_budget() raises:
                 assert_equal(Int(captured.values[at]), cpu[at])
 
 
+# requires: metal
 def test_public_float_stream_extrema_exact_zero_nan_inf_and_null_bits() raises:
     var workers = WorkerSetting(1)
     comptime for i in range(2):
@@ -451,6 +459,7 @@ def test_public_float_stream_extrema_exact_zero_nan_inf_and_null_bits() raises:
     _ = workers^
 
 
+# requires: metal
 def test_public_float_stream_eligibility_preserves_generic_main_routes() raises:
     var workers = WorkerSetting(1)
     var frame = source[DType.float64](0)
@@ -517,6 +526,7 @@ def test_public_float_stream_eligibility_preserves_generic_main_routes() raises:
     _ = workers^
 
 
+# requires: metal
 def test_public_float_stream_null_negative_keys_independent_partition_flush_and_layout() raises:
     from dataframe.frame import _word_hash, _equality_words
 
@@ -654,6 +664,7 @@ def test_public_float_stream_null_negative_keys_independent_partition_flush_and_
     _ = workers^
 
 
+# requires: metal
 def test_public_float_stream_large_source_original_pipeline_boundary() raises:
     var workers = WorkerSetting(1)
     var frame = source[DType.float64](0, n=32769)
@@ -682,6 +693,7 @@ def test_public_float_stream_large_source_original_pipeline_boundary() raises:
     _ = workers^
 
 
+# requires: metal
 def test_public_float_stream_collected_density_preserves_generic_gpu_behavior_and_budget() raises:
     var workers = WorkerSetting(1)
     comptime for i in range(2):
