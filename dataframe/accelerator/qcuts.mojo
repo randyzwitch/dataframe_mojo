@@ -177,11 +177,12 @@ def controls(query: LazyFrame) raises -> Controls:
 
 
 def has_default_qcuts(query: LazyFrame) -> Bool:
+    from .partition_cuts import TAG as PARTITION_CUT_TAG
+
     for node in query._nodes:
-        if (
-            len(node.names2) > 1
-            and node.names2[0] == QCUT_TAG
-            and node.names2[1] == QCUT_DEFAULT
+        if len(node.names2) > 1 and (
+            (node.names2[0] == QCUT_TAG and node.names2[1] == QCUT_DEFAULT)
+            or node.names2[0] == PARTITION_CUT_TAG
         ):
             return True
     return False

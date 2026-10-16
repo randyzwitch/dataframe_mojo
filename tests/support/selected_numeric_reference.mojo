@@ -1,5 +1,4 @@
 """Scalar statistics over explicitly ordered source rows, independent of kernels."""
-from std.math import sqrt
 
 
 struct SelectedNumbers(Copyable):

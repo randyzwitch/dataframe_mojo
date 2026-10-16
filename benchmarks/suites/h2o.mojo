@@ -3,7 +3,7 @@ reference SQL and the Polars versions). Usage: see suite_common.mojo."""
 from std.collections import Dict
 from std.sys import argv
 
-from dataframe import DataFrame, Expr, col, corr, lit
+from dataframe import DataFrame, col, corr, lit
 from suite_common import run
 
 

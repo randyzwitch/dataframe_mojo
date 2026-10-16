@@ -131,6 +131,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # TPC-DS has been a development suite since 2026-10-15; it keeps its
+        # own job only so the two halves run in parallel.
         include:
           - name: development
             suites: h2o_groupby,h2o_join,pdsh

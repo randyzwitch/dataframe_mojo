@@ -4,7 +4,7 @@ from .temporal import format as format_temporal
 from .bool_column import BoolColumn
 from .column import Column
 from .decimal import format_decimal
-from .string_column import StringColumn, StringBuilder, escape_bytes
+from .string_column import StringColumn, escape_bytes
 from .series import Series
 from .wkb import _wkb_display
 
