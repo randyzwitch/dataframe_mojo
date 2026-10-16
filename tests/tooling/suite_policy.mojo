@@ -61,6 +61,30 @@ def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_composition_filter_group_join_and_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_projection_fault_order_before_consumer",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo::test_mojo_gpu_strict_cast_nullable_original_values_and_dtype",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo::test_mojo_gpu_temporal_producer_head_order_group_faults_and_recovery",
             "metal",
         )
@@ -3067,6 +3091,8 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_strict_cast_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo",
                 "tests/execution_modes/test_temporal_producer_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_temporal_producers.mojo",
                 "tests/execution_modes/test_iana_metadata.mojo",
@@ -3469,6 +3495,15 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_worker_scheduling.mojo",
                 "tests/execution_modes/test_crew_startup.mojo",
                 "tests/storage_ownership/test_release.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
+            "execution.strict_cast_producers",
+            [
+                "tests/execution_modes/test_strict_cast_producer_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_strict_cast_producers.mojo",
             ],
         )
     )

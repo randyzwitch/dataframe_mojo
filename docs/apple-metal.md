@@ -97,6 +97,13 @@ a direct in-memory scan followed by a single SELECT. They preserve datetime
 units, ambiguity/gap policies, checked reconstruction, conditional masks and
 scalar activation within each original CPU batch.
 
+Eligible original strict-cast row projections can feed resident filters,
+sorting, head, grouping and joins. Their typed producer certificate retains the
+complete original phase and immutable source owners, so a later consumer cannot
+hide an earlier cast failure. Conditional branches retain their original masks.
+Scalar casts and casts nested inside aggregate/window operands retain their
+existing restrictions; structural rewrites must preserve the certified prefix.
+
 Eligible original IANA row producers can also feed resident sorting, head and
 grouped consumers. Typed certificates retain the original expression, source
 owners, input geometry and phase order; each checked producer is observed before
