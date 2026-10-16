@@ -5518,7 +5518,25 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     )
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
-            var chosen = order_joins(rows, domains, edges)
+            # Each key column's distinct count, where its relation's table
+            # keeps statistics: DuckDB's estimator then takes a set's
+            # domain as the largest count among its columns.
+            var distinct = Dict[String, Float64]()
+            for e in edges:
+                for i in range(len(e.a_keys)):
+                    for side in range(2):
+                        var rel = e.a if side == 0 else e.b
+                        var name = e.a_keys[i] if side == 0 else e.b_keys[i]
+                        var key = String(rel) + "/" + name
+                        if key in distinct:
+                            continue
+                        var table = self._spine_frame(relations[rel])
+                        if not table:
+                            continue
+                        var count = table.value()._distinct_count(name)
+                        if count > 0:
+                            distinct[key] = Float64(count)
+            var chosen = order_joins(rows, domains, edges, distinct)
             if not chosen:
                 continue
             var tree = chosen.take()
@@ -5880,6 +5898,28 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
         trace_path("lazy.probe_largest")
         return True
+
+    def _spine_frame(self, index: Int) -> Optional[DataFrame]:
+        """The in-memory table under `index`, along the steps
+        `_spine_rows` follows; None through anything else."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                return Optional(self._frames[node.offset].copy())
+            if (
+                node.kind == FILTER
+                or node.kind == DROP
+                or (node.kind == JOIN and node.how == JOIN_INNER)
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                cursor = node.left
+                continue
+            return None
+        return None
 
     def _spine_rows(self, index: Int) -> Int:
         """Rows of the table under `index` along steps that keep, drop or
