@@ -1,7 +1,7 @@
 """Issue #224 mechanism measurement; input loading and output writing untimed."""
 from std.sys import argv
 from std.time import monotonic
-from dataframe import DataFrame, read_parquet, write_parquet
+from dataframe import read_parquet, write_parquet
 
 
 def main() raises:
