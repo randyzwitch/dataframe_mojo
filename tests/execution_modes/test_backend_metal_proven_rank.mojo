@@ -18,6 +18,7 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
     assert_true(len(plan.steps) == 2)
     var disabled = _capabilities()
     disabled.proven_integer_operations = False
+    disabled.observed_rank_inputs = False
     with assert_raises(contains="checked rank inputs"):
         _ = lower_rows(query, disabled)
     for unsafe in List[Expr](
@@ -29,8 +30,10 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
             col("x") // lit(Int64(-1)),
         ]
     ):
-        with assert_raises(contains="checked rank inputs"):
-            _ = lower_rows(source.lazy().select(unsafe.rank()), _capabilities())
+        var observed = lower_rows(
+            source.lazy().select(unsafe.rank()), _capabilities()
+        )
+        assert_true(observed.ordered_mode == 10)
 
 
 def test_native_metal_proven_rank_gpu_methods_limits_partitions_and_slices() raises:
@@ -93,7 +96,7 @@ def test_native_metal_proven_rank_gpu_resident_consumers_head_and_rejections() r
             source.lazy().select(col("u").alias("right")), how="cross"
         ).head(11)
     )
-    with assert_raises(contains="checked rank inputs"):
+    with assert_raises(contains="overflow"):
         _ = (
             source.lazy()
             .select((col("x") + lit(Int64(1))).rank())
