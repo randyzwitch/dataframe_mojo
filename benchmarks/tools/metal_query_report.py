@@ -49,11 +49,17 @@ def catalog(root=ROOT):
         module, function = definitions[name]
         path = root / "benchmarks/suites" / (module + ".mojo")
         source = path.read_text()
-        match = re.search(r"(?ms)^def " + function + r"\(.*?(?=^def |\Z)", source)
+        match = re.search(
+            r"(?ms)^def " + function + r"\(.*?(?=^def |\Z)", source
+        )
         if not match:
-            raise ValueError(f"Missing reviewed dispatch function: {path}:{function}")
+            raise ValueError(
+                f"Missing reviewed dispatch function: {path}:{function}"
+            )
         body = match.group()
-        branches = list(re.finditer(r"(?m)^    if (?:q|query|n)\s*==.*:$", body))
+        branches = list(
+            re.finditer(r"(?m)^    if (?:q|query|n)\s*==.*:$", body)
+        )
         if not branches:
             raise ValueError(f"Unrecognized query dispatch: {path}:{function}")
         translated = set()
@@ -66,9 +72,9 @@ def catalog(root=ROOT):
             if not ids:
                 raise ValueError(f"Unrecognized dispatch header: {header}")
             dispatched.update(ids)
-            end = branches[index + 1].start() if index + 1 < len(branches) else len(
-                body
-            )
+            end = branches[index + 1].start() if index + 1 < len(
+                branches
+            ) else len(body)
             block = body[branch.end() : end]
             if not re.search(r"(?m)^        raise unsupported\(", block):
                 translated.update(ids)
@@ -77,7 +83,9 @@ def catalog(root=ROOT):
         result[name] = {
             "queries": list(spec["queries"]),
             "variants": list(suites.VARIANTS[name]),
-            "translated_queries": [q for q in spec["queries"] if q in translated],
+            "translated_queries": [
+                q for q in spec["queries"] if q in translated
+            ],
             "role": spec["role"],
             "source_path": str(path.relative_to(root)),
             "source_sha256": digest(path.read_bytes()),
@@ -124,7 +132,9 @@ def load_receipts(paths, revision=None):
         if identity is not None and observed != identity:
             raise ValueError(f"Mixed measurement identity: {path}")
         identity = observed
-        for source, value in provenance.get("original_source_sha256", {}).items():
+        for source, value in provenance.get(
+            "original_source_sha256", {}
+        ).items():
             if source in source_hashes and source_hashes[source] != value:
                 raise ValueError(f"Mixed workload source: {source}")
             source_hashes[source] = value
@@ -142,34 +152,58 @@ def load_receipts(paths, revision=None):
                 raise ValueError(
                     f"Successful case lacks comparison/repetition evidence: {case_key}"
                 )
-            cases[case_key] = dict(case)
-        receipts.append({"path": str(path), "sha256": digest(path.read_bytes())})
+            cases[case_key] = dict(
+                case,
+                _measurement_derived_source_sha256=provenance.get(
+                    "derived_source_sha256", {}
+                ),
+            )
+        receipts.append(
+            {"path": str(path), "sha256": digest(path.read_bytes())}
+        )
     if identity is None:
         raise ValueError("At least one receipt is required")
     return cases, identity, source_hashes, receipts
 
 
-def execution_audit(case, source_hashes, metadata):
+def execution_audit(case, source_hashes, metadata, derived_hashes=None):
     entry = case.get("execution_audit")
     if entry is None:
         entry = metadata.get("cases", {}).get(
             case["suite"] + "/" + case["variant"] + "/" + case["query"]
         )
     if entry is None:
-        entry = metadata.get("cases", {}).get(case["suite"] + "/" + case["query"])
+        entry = metadata.get("cases", {}).get(
+            case["suite"] + "/" + case["query"]
+        )
     if not entry:
         return {
             "execution_boundary": "gpu_collects",
             "audit_reason": "Adapter forces every collect; other eager operations are not certified.",
         }
     validate_metadata(
-        {"format": "dataframe-metal-case-metadata-v1", "cases": {"selected": entry}}
+        {
+            "format": "dataframe-metal-case-metadata-v1",
+            "cases": {"selected": entry},
+        }
     )
     result = dict(entry)
+    reason = ""
     if source_hashes.get(entry["source_path"]) != entry["source_sha256"]:
+        reason = "Execution audit canonical source hash does not match receipt."
+    if entry.get("metal_derived_source_sha256"):
+        measured = derived_hashes if derived_hashes is not None else case.get(
+            "_measurement_derived_source_sha256", {}
+        )
+        worker = "metal_" + Path(entry["source_path"]).stem + ".mojo"
+        if measured.get(worker) != entry["metal_derived_source_sha256"]:
+            reason = "Execution audit derived worker hash is missing or does not match receipt."
+    if reason:
         result.update(
             execution_boundary="unknown",
-            audit_reason="Execution audit source hash does not match receipt.",
+            alignment_keys=[],
+            order_keys=[],
+            audit_reason=reason,
         )
     return result
 
@@ -178,7 +212,11 @@ def validate_metadata(metadata):
     if metadata.get("format") != "dataframe-metal-case-metadata-v1":
         raise ValueError("Unknown case metadata format")
     for case, entry in metadata.get("cases", {}).items():
-        if entry.get("execution_boundary") not in {"gpu_collects", "hybrid", "unknown"}:
+        if entry.get("execution_boundary") not in {
+            "gpu_collects",
+            "hybrid",
+            "unknown",
+        }:
             raise ValueError(f"Invalid execution boundary: {case}")
         if entry.get("workload_kind") not in {"canonical", "supplemental"}:
             raise ValueError(f"Invalid workload kind: {case}")
@@ -216,8 +254,13 @@ def summarize(cases, definitions, source_hashes, metadata):
         for q in d["translated_queries"]
     }
     if set(cases) - expected:
-        raise ValueError(f"Cases outside catalog: {sorted(set(cases) - expected)}")
-    if any(k not in translated and c["status"] in RUNNABLE for k, c in cases.items()):
+        raise ValueError(
+            f"Cases outside catalog: {sorted(set(cases) - expected)}"
+        )
+    if any(
+        k not in translated and c["status"] in RUNNABLE
+        for k, c in cases.items()
+    ):
         raise ValueError(
             "Receipt reports a runnable query absent from the translated source dispatch"
         )
@@ -273,7 +316,8 @@ def summarize(cases, definitions, source_hashes, metadata):
     conservative = [
         c
         for c in enriched
-        if c["execution_audit"]["execution_boundary"] not in {"hybrid", "unknown"}
+        if c["execution_audit"]["execution_boundary"]
+        not in {"hybrid", "unknown"}
     ]
     missing = collections.defaultdict(list)
     for c in enriched:
@@ -287,15 +331,20 @@ def summarize(cases, definitions, source_hashes, metadata):
         ),
         "translated_cases": len(translated),
         "complete": expected <= set(cases),
-        "unmeasured_cases": ["/".join(k) for k in sorted(expected - set(cases))],
+        "unmeasured_cases": [
+            "/".join(k) for k in sorted(expected - set(cases))
+        ],
         "raw_adapter": counts(enriched),
-        "known_hybrid_and_unknown_audits_excluded": counts(conservative, excluded=True),
+        "known_hybrid_and_unknown_audits_excluded": counts(
+            conservative, excluded=True
+        ),
         "exclusion_note": "The original translated denominator is retained. Forced collect coverage does not certify every eager query operation executes on GPU.",
         "unsupported_first_blockers": dict(missing),
         "by_suite": {
             s: {
                 "catalog_cases": len(d["queries"]) * len(d["variants"]),
-                "translated_cases": len(d["translated_queries"]) * len(d["variants"]),
+                "translated_cases": len(d["translated_queries"])
+                * len(d["variants"]),
                 "measured_cases": sum(c["suite"] == s for c in enriched),
                 "statuses": dict(
                     collections.Counter(
@@ -354,10 +403,15 @@ def main():
         "--case-metadata", type=Path, default=TOOLS / "metal_case_metadata.json"
     )
     parser.add_argument(
-        "--output", type=Path, required=True, help="JSON report; text written beside it"
+        "--output",
+        type=Path,
+        required=True,
+        help="JSON report; text written beside it",
     )
     args = parser.parse_args()
-    inputs = {p.resolve() for p in args.receipts} | {args.case_metadata.resolve()}
+    inputs = {p.resolve() for p in args.receipts} | {
+        args.case_metadata.resolve()
+    }
     if (
         args.output.resolve() in inputs
         or args.output.with_suffix(".txt").resolve() in inputs
@@ -372,7 +426,10 @@ def main():
             cases[key(case)]["diagnostics"] = cpu_repeat(case, path)
     definitions = catalog()
     for definition in definitions.values():
-        if source_hashes.get(definition["source_path"]) != definition["source_sha256"]:
+        if (
+            source_hashes.get(definition["source_path"])
+            != definition["source_sha256"]
+        ):
             raise ValueError(
                 "Catalog query sources differ from measurement: "
                 + definition["source_path"]
