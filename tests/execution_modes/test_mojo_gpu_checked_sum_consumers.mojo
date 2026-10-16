@@ -107,8 +107,30 @@ def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() r
         for optimize in [False, True]:
             with assert_raises(contains="overflow"):
                 _ = _collect_sum(producer.head(0), gpu, optimize)
+            if optimize:
+                assert_equal(
+                    _collect_sum(
+                        producer.filter(lit(False)), gpu, optimize
+                    ).height(),
+                    0,
+                )
+            else:
+                with assert_raises(contains="overflow"):
+                    _ = _collect_sum(producer.filter(lit(False)), gpu, optimize)
+            var folded_false = producer.filter(lit(Int64(1)) > lit(Int64(2)))
+            if optimize:
+                assert_equal(
+                    _collect_sum(folded_false, gpu, optimize).height(), 0
+                )
+            else:
+                with assert_raises(contains="overflow"):
+                    _ = _collect_sum(folded_false, gpu, optimize)
             with assert_raises(contains="overflow"):
-                _ = _collect_sum(producer.filter(lit(False)), gpu, optimize)
+                _ = _collect_sum(
+                    producer.filter(col("total") < 0), gpu, optimize
+                )
+            with assert_raises(contains="overflow"):
+                _ = _collect_sum(producer.filter(lit(True)), gpu, optimize)
             with assert_raises(contains="overflow"):
                 _ = _collect_sum(
                     producer.join(right.head(0), on="total", how="inner"),
@@ -242,3 +264,23 @@ def test_checked_sum_consumer_signatures_and_fallible_operand_guard() raises:
         .head(0)
     )
     assert_true(not _checked_scalar_sum(fallible, 1))
+
+
+def test_checked_sum_canonical_false_filter_precedes_boundary_capture() raises:
+    var source = DataFrame([Series("v", Column[Int64]([Int64.MAX, 1]))])
+    var query = source.lazy().select(col("v").sum()).filter(lit(False))
+    var optimized = lower_join_dag(
+        query._with_accelerator_settings(True, False, 65536), _capabilities()
+    )
+    assert_equal(len(optimized.tasks), 1)
+    assert_equal(optimized.tasks[0].query._frames[0].height(), 0)
+    assert_equal(optimized.tasks[0].schema.column("v").dtype(), DataType.INT64)
+    var original = lower_join_dag(
+        query._with_accelerator_settings(False, False, 65536), _capabilities()
+    )
+    var observed = False
+    for task in original.tasks:
+        ref node = task.query._nodes[len(task.query._nodes) - 1]
+        observed |= node.text == "metal_sum_materialization" and task.terminal
+    assert_true(observed)
+    assert_equal(query._frames[0].height(), 2)

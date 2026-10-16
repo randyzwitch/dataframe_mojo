@@ -167,6 +167,19 @@ def _checked_scalar_sum(query: LazyFrame, index: Int) raises -> Bool:
     return checked
 
 
+def _optimize_scalar_sums(mut query: LazyFrame, optimize: Bool) raises:
+    if not optimize:
+        return
+    var live = _live_nodes(query)
+    for index in range(len(query._nodes) - 1):
+        if live[index] and _checked_scalar_sum(query, index):
+            # Canonical CPU predicate folding includes constant-false branch
+            # elimination. Issue observation markers only for surviving work.
+            # Its empty-schema execution reads no source row payload.
+            query._push_predicates()
+            return
+
+
 def _mark_scalar_sums(mut query: LazyFrame) raises:
     var live = _live_nodes(query)
     for index in range(len(query._nodes) - 1):
@@ -309,6 +322,7 @@ def prepare_temporal_prefix(
 ) raises -> LazyFrame:
     """Finalize existing CPU-equivalent bridges before temporal signatures."""
     var result = query.copy()
+    _optimize_scalar_sums(result, optimize)
     if optimize:
         result._push_slices()
         prune_projections(result)
@@ -1165,8 +1179,14 @@ def lower_join_dag(
     eager_feed: Bool = False,
 ) raises -> JoinDag:
     """Validate every branch, prune unused inputs, then bind every region."""
-    _validate_sources(query, capabilities)
     var projected = query.copy()
+    var optimize = (
+        not query._accelerator_settings
+        or query._accelerator_settings.value().optimize
+    )
+    if not producer_phases.has_certified(projected):
+        _optimize_scalar_sums(projected, optimize)
+    _validate_sources(projected, capabilities)
     if producer_phases.has_certified(projected):
         # Original-entry normalization records the annotations as part of
         # each immutable prefix. No optimizer or marker may mutate it later.
@@ -1174,10 +1194,6 @@ def lower_join_dag(
             if projected._nodes[index].producer_origin:
                 producer_phases.validate_prefix(projected, index)
     else:
-        var optimize = (
-            not query._accelerator_settings
-            or query._accelerator_settings.value().optimize
-        )
         if (
             optimize
             and not has_cut_materializations(projected)
