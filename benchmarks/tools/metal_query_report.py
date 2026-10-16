@@ -103,6 +103,7 @@ def load_receipts(paths, revision=None):
         "scale",
         "repetitions",
         "driver_sha256",
+        "case_metadata_sha256",
         "comparison",
     )
     for path in paths:
@@ -149,12 +150,21 @@ def load_receipts(paths, revision=None):
 
 
 def execution_audit(case, source_hashes, metadata):
-    entry = metadata.get("cases", {}).get(case["suite"] + "/" + case["query"])
+    entry = case.get("execution_audit")
+    if entry is None:
+        entry = metadata.get("cases", {}).get(
+            case["suite"] + "/" + case["variant"] + "/" + case["query"]
+        )
+    if entry is None:
+        entry = metadata.get("cases", {}).get(case["suite"] + "/" + case["query"])
     if not entry:
         return {
             "execution_boundary": "gpu_collects",
             "audit_reason": "Adapter forces every collect; other eager operations are not certified.",
         }
+    validate_metadata(
+        {"format": "dataframe-metal-case-metadata-v1", "cases": {"selected": entry}}
+    )
     result = dict(entry)
     if source_hashes.get(entry["source_path"]) != entry["source_sha256"]:
         result.update(

@@ -98,6 +98,7 @@ class MetalQueryReport(unittest.TestCase):
         metadata = {
             "cases": {
                 "example/q1": {
+                    "workload_kind": "canonical",
                     "execution_boundary": "hybrid",
                     "source_path": "query.mojo",
                     "source_sha256": "source",
@@ -132,6 +133,7 @@ class MetalQueryReport(unittest.TestCase):
         metadata = {
             "cases": {
                 "example/q1": {
+                    "workload_kind": "canonical",
                     "execution_boundary": "gpu_collects",
                     "source_path": "query.mojo",
                     "source_sha256": "old",
@@ -145,6 +147,29 @@ class MetalQueryReport(unittest.TestCase):
             ],
             "unknown",
         )
+
+    def test_embedded_audit_is_preserved_instead_of_current_registry(self):
+        c = case("q1")
+        c["execution_audit"] = dict(
+            workload_kind="canonical",
+            execution_boundary="hybrid",
+            source_path="query.mojo",
+            source_sha256="source",
+            audit_reason="measured adapter boundary",
+        )
+        current = {
+            "cases": {
+                "example/base/q1": dict(
+                    c["execution_audit"], execution_boundary="gpu_collects"
+                )
+            }
+        }
+        selected = report.execution_audit(c, {"query.mojo": "source"}, current)
+        self.assertEqual(selected["execution_boundary"], "hybrid")
+        self.assertEqual(selected["audit_reason"], "measured adapter boundary")
+        c["execution_audit"] = {"execution_boundary": "hybrid"}
+        with self.assertRaises(ValueError):
+            report.execution_audit(c, {"query.mojo": "source"}, current)
 
     def test_untranslated_success_cannot_inflate_support_counts(self):
         c = case("q3")
