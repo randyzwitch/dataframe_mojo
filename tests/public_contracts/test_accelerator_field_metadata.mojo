@@ -1,4 +1,6 @@
 """Arrow field metadata follows source fields, not computed result values."""
+# contract-group: public.accelerator_staging
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col

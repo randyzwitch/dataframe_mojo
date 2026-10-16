@@ -1,4 +1,6 @@
 """Public backend dispatch contracts, independent of installed device hardware."""
+# contract-group: planner.routing
+# contract-group: execution.backends
 from std.memory import Pointer
 from std.sys import CompilationTarget
 from std.testing import assert_equal, assert_true, assert_raises

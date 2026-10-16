@@ -5,6 +5,7 @@ joins over the separately collected inputs: two aggregates on one key above
 a selective join chain (PDS-H q21's shape, distinct counts included), a semi
 join, an aggregate on another key, which is left alone, and an aggregate
 grouped on both keys of a two-key join (PDS-H q20's shape)."""
+# contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame

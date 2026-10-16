@@ -1,4 +1,6 @@
 """Original successful SUM bounds authorize only infallible consumers."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit
@@ -111,6 +113,7 @@ def test_sum_output_bound_raw_math_and_original_slots() raises:
     _guarded_prefix_cases()
 
 
+# requires: metal
 def test_mojo_gpu_sum_output_bounds_scaled_literal_nulls_layouts() raises:
     var frame = source()
     for layout in [frame.copy(), offset_layout(frame), chunk_layout(frame)]:
@@ -143,6 +146,7 @@ def test_mojo_gpu_sum_output_bounds_scaled_literal_nulls_layouts() raises:
             _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_sum_output_bounds_preserve_producer_fault_and_budget() raises:
     var good = query(source())
     var measured = good.profile(

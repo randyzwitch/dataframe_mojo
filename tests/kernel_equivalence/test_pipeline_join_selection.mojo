@@ -6,6 +6,7 @@ it gather every column at the repeated rows. Inner, semi and anti joins run
 on fresh morsels and after dense and sparse filters, with nullable keys,
 unmatched keys, a suffixed name and uncoalesced keys, for several worker
 counts and batch sizes."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 
 from dataframe import (

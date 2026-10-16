@@ -1,4 +1,5 @@
 """Ordered schemas and name validation, independently of storage implementation."""
+# contract-group: table.schema
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series
 

@@ -1,4 +1,5 @@
 """Fusion eligibility follows resolved types; enabled/disabled paths obey scalar math."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.binding import bind

@@ -3,6 +3,7 @@ live only in that morsel's buffers. The aggregate table keeps a group's key as
 the address of its bytes, so it must hold those buffers until its groups are
 read out: the result's keys are correct, and stay correct after the source,
 the plan and every morsel are gone and their memory is reused."""
+# contract-group: storage.release
 from std.testing import assert_equal
 
 from dataframe import DataFrame, Expr, col, lit

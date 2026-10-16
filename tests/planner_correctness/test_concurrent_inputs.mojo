@@ -3,6 +3,7 @@ union's inputs (stacked in input order, nested unions included), a join's
 two computed inputs, and a stream's aggregate builds and source, which run
 ahead of it. Results match the inputs computed one by one, and an error in
 any input reaches the caller."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
 from dataframe.frame import concat

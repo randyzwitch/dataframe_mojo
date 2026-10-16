@@ -48,6 +48,8 @@ from . import source_fields
 from .producer_phases_runtime import MetadataReservation
 from . import explode
 from .grouped_lists_producer import produce as produce_grouped_fields
+from .grouped_key_owner import GroupedKeyOwner, staging_bytes
+from .device_lists import HostReservation
 
 
 def preflight(
@@ -279,15 +281,35 @@ def execute(
             var input_rows = 0
             if task.kind == DAG_GROUPED_FIELDS:
                 ref prepared = task.grouped.value()[]
+                var staging = Optional[ArcPointer[HostReservation]]()
+                if prepared.original_keys:
+                    staging = ArcPointer(
+                        HostReservation(
+                            scope,
+                            staging_bytes(prepared.original_keys.value()[]),
+                        )
+                    )
                 var source = rows.execute_plan(
                     prepared.source,
                     scope,
                     profiling=profiling,
                     export_values=False,
+                    text_domain=base_domain,
                 )
+                var typed = Optional[ArcPointer[GroupedKeyOwner]]()
+                if prepared.original_keys:
+                    typed = ArcPointer(
+                        GroupedKeyOwner(
+                            prepared.original_keys.value(),
+                            task.grouped.value(),
+                            source[0],
+                            scope,
+                            staging.value(),
+                        )
+                    )
                 prepared.scan._record_execution()
                 fields = produce_grouped_fields(
-                    prepared, source[0], scope, profiling
+                    prepared, source[0], scope, profiling, typed=typed
                 )
                 input_rows = prepared.rows
                 _ = source^

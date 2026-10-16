@@ -3,6 +3,7 @@ them, not when its operation starts: an operation with nothing to run in
 parallel creates none. The first thread creates the others, so that first
 call is served by helpers as they come up; every thread is joined on
 release, whether or not any was created."""
+# contract-group: execution.lifecycle
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer

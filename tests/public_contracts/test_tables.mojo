@@ -1,4 +1,10 @@
 """Public behavior: shape, schema, order, nulls, and independent row expectations."""
+# contract-group: table.schema
+# contract-group: table.row_selection
+# contract-group: table.filter
+# contract-group: table.sort
+# contract-group: harness.sensitivity
+# contract-group: reference.anchors
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, Series, col
 from tests.support.coverage_generators import generated_frame

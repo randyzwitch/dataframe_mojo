@@ -1,4 +1,6 @@
 """Public grouped IMPLODE: real GPU layout, resident consumers and budgets."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
@@ -50,6 +52,7 @@ def _expressions() -> List[Expr]:
     ]
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_mixed_keys_children_reductions_layouts_and_residency() raises:
     var raw = _source()
     for layout in range(3):
@@ -155,6 +158,7 @@ def test_mojo_gpu_grouped_implode_mixed_keys_children_reductions_layouts_and_res
         )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_empty_nulls_projection_errors_head_and_exact_budget() raises:
     var raw = _source()
     var query = (
@@ -264,6 +268,7 @@ def test_mojo_gpu_grouped_implode_empty_nulls_projection_errors_head_and_exact_b
     )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_metadata_admission_and_parallel_schedule_guards() raises:
     var frame = _source()
     var query = (
@@ -361,6 +366,7 @@ def test_mojo_gpu_grouped_implode_metadata_admission_and_parallel_schedule_guard
     )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_implode_large_checked_cpu_bucket_and_heavy_fault_order() raises:
     assert_equal(_mix(UInt64(4)), UInt64(0xB7A4712C74562914))
     for kind in range(3):

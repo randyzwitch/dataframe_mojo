@@ -1,4 +1,5 @@
 """Packed validity append and Kleene words are checked against scalar truth."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal
 from dataframe import Series
 from dataframe.bool_column import BoolColumn

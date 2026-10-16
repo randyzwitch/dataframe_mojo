@@ -1,4 +1,8 @@
 """Termination drains actual jobs, propagates late failures, and permits retry."""
+# contract-group: kernel.reduce
+# contract-group: execution.modes
+# contract-group: execution.lifecycle
+# contract-group: io.csv
 from std.ffi import external_call
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises

@@ -1,4 +1,6 @@
 """Exact ordinal decimal extrema, including null rows and worker merges."""
+# contract-group: public.apple_parity
+# contract-group: expr.decimal_extrema
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.coverage_generators import offset_layout, chunk_layout

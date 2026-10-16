@@ -24,8 +24,11 @@ Known implementation defects run with exact diagnostic matching; an unrelated
 failure or unexpected pass fails the suite. Fatal defects run in isolated
 processes with exact platform-specific exit-status matching. Native hardware
 cases report explicit capability skips and require actual device execution when enabled. Named module
-groups, failure signatures and capability gates live in
-[`tests/tooling/suite_policy.mojo`](../tests/tooling/suite_policy.mojo).
+groups, failure signatures and capability gates are marker comments in the test
+modules they describe (`# contract-group:`, `# expected-failure:`,
+`# requires:`), read by
+[`tests/tooling/suite_policy.mojo`](../tests/tooling/suite_policy.mojo), so a
+change adding tests edits only its own files.
 
 Run metadata and compile/execute logs are written under `build/contract-tests/`.
 They record the compiler, source fingerprints, revision, selected cases, settings

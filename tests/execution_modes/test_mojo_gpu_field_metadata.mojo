@@ -1,4 +1,6 @@
 """Resident movement and ASOF exports retain exact Arrow field owners."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, Series, col
 from dataframe.metal import MetalRuntime
@@ -12,6 +14,7 @@ from tests.public_contracts.test_accelerator_field_metadata import (
 )
 
 
+# requires: metal
 def test_mojo_gpu_field_metadata_rows_groups_empty_and_computed_outputs() raises:
     var original = field_source()
     var runtime = MetalRuntime()
@@ -39,6 +42,7 @@ def test_mojo_gpu_field_metadata_rows_groups_empty_and_computed_outputs() raises
     assert_false(Bool(output.column("x")._field_metadata))
 
 
+# requires: metal
 def test_mojo_gpu_field_metadata_asof_resident_aliases_and_public_export() raises:
     var left = field_source().sort("k")
     var right = (
@@ -75,6 +79,7 @@ def test_mojo_gpu_field_metadata_asof_resident_aliases_and_public_export() raise
             )
 
 
+# requires: metal
 def test_mojo_gpu_field_metadata_dictionary_aliases_asof_and_empty_owners() raises:
     var runtime = MetalRuntime()
     for categorical in [False, True]:

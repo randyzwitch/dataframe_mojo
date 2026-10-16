@@ -1,4 +1,5 @@
 """Calendar duration bounds clamp months and retain checked temporal semantics."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -109,6 +110,7 @@ def test_calendar_duration_capability_headers_units_and_no_device_preflight() ra
         )
 
 
+# requires: metal
 def test_native_metal_calendar_duration_leap_clamps_closed_sides_numeric_decimal_layouts_and_partitions() raises:
     var runtime = require_metal()
     for dtype in List[DataType](
@@ -164,6 +166,7 @@ def test_native_metal_calendar_duration_leap_clamps_closed_sides_numeric_decimal
             )
 
 
+# requires: metal
 def test_native_metal_calendar_duration_date_extremes_datetime_overflow_and_index_validation() raises:
     var runtime = require_metal()
     var source = DataFrame(
@@ -222,6 +225,7 @@ def test_native_metal_calendar_duration_date_extremes_datetime_overflow_and_inde
     )
 
 
+# requires: metal
 def test_native_metal_calendar_duration_resident_axes_consumers_profiles_and_exact_budgets() raises:
     var runtime = require_metal()
     var frame = fixture(DataType.DATE)

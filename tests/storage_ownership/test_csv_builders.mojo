@@ -1,4 +1,5 @@
 """Decoder scratch and reusable builders cannot mutate completed owned output."""
+# contract-group: storage.isolation
 from std.testing import assert_equal, assert_true
 from dataframe import CsvField, DataType, Series
 from dataframe.io.csv_buffers import CsvBuffer

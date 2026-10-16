@@ -1,4 +1,6 @@
 """Resident custom-label QCUT controls, exact edges and ordered failures."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
@@ -7,6 +9,7 @@ from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_qcut_custom_labels_layouts_closure_and_consumers() raises:
     var nan = bitcast[DType.float64](UInt64(0x7FF8000000000042))
     var raw = DataFrame(
@@ -78,6 +81,7 @@ def test_mojo_gpu_qcut_custom_labels_layouts_closure_and_consumers() raises:
             assert_equal(actual.item().string(), "only")
 
 
+# requires: metal
 def test_mojo_gpu_qcut_duplicate_labels_null_nan_and_control_order() raises:
     var nan = bitcast[DType.float64](UInt64(0x7FF8000000000042))
     var source = DataFrame(
@@ -142,6 +146,7 @@ def test_mojo_gpu_qcut_duplicate_labels_null_nan_and_control_order() raises:
         assert_true(actual.item(row, "x").struct_field("breakpoint").is_null())
 
 
+# requires: metal
 def test_mojo_gpu_qcut_exact_breakpoints_association_and_zero_permutation() raises:
     # These are independent rational IEEE anchors, not tolerance comparisons.
     var cases: List[UInt64] = [
@@ -221,6 +226,7 @@ def test_mojo_gpu_qcut_exact_breakpoints_association_and_zero_permutation() rais
     )
 
 
+# requires: metal
 def test_mojo_gpu_qcut_eager_producers_scalar_siblings_budget_and_recovery() raises:
     var bad = DataFrame([Series("x", Column[Int64]([Int64.MAX, 1]))])
     var safe = DataFrame([Series("x", Column[Int64]([0, 1]))])

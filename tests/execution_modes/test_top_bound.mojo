@@ -1,4 +1,5 @@
 """Streamed Top-N bounds preserve later ties and never bound replaced keys."""
+# contract-group: execution.modes
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col

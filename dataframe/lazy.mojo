@@ -134,6 +134,8 @@ from .execution import direct_reductions
 from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
+from .accelerator.grouped_key_queries import KeyQuery
+from .accelerator.opaque_dictionary import ByteDomain
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
@@ -177,7 +179,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable):
+struct PlanNode(Copyable, Deinitable, Movable):
     var kind: Int
     var left: Int
     var right: Int
@@ -210,10 +212,19 @@ struct PlanNode(Copyable):
     var producer_origin: Optional[ArcPointer[ProducerOrigin]]
     var lineage_anchor: Optional[ArcPointer[Int]]
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Original grouped key domains survive whole-query code normalization.
+    var grouped_keys: Optional[ArcPointer[KeyQuery]]
+    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
     # Original partition state/operand proof is outside rewritten row ASTs.
     # Columns contain schema-only Series; no source values are retained here.
     var partition_exprs: List[Expr]
     var partition_columns: List[Series]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def _record_execution(self):
         if self._executions:
@@ -267,6 +278,8 @@ def _plan_node(
         Optional[ArcPointer[ProducerOrigin]](),
         Optional[ArcPointer[Int]](),
         Optional[ArcPointer[RegionProof]](),
+        None,
+        None,
         partition_exprs.copy(),
         partition_columns.copy(),
     )
@@ -1389,7 +1402,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable):
+struct LazyFrame(Copyable, Deinitable, Movable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
@@ -1414,6 +1427,25 @@ struct LazyFrame(Copyable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
+
+    def __init__(out self, *, deinit move: Self):
+        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
+        # whose original query is a LazyFrame. This avoids recursive generated
+        # move inference while preserving all eight existing owner fields.
+        self._nodes = move._nodes^
+        self._frames = move._frames^
+        self._schemas = move._schemas^
+        self._report = move._report^
+        self._origin_rows = move._origin_rows^
+        self._accelerator_settings = move._accelerator_settings^
+        self._schema_memo = move._schema_memo^
+        self._prefetched = move._prefetched^
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -5473,7 +5505,7 @@ struct LazyFrame(Copyable):
             var domains = List[Float64](capacity=n)
             for r in range(n):
                 var table = self._spine_rows(relations[r])
-                var estimated = self._estimated_rows(relations[r])
+                var estimated = self._relation_estimate(relations[r])
                 if estimated < 0:
                     var frame = self._execute(
                         relations[r], False, streaming, batch_size
@@ -5486,7 +5518,25 @@ struct LazyFrame(Copyable):
                     )
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
-            var chosen = order_joins(rows, domains, edges)
+            # Each key column's distinct count, where its relation's table
+            # keeps statistics: DuckDB's estimator then takes a set's
+            # domain as the largest count among its columns.
+            var distinct = Dict[String, Float64]()
+            for e in edges:
+                for i in range(len(e.a_keys)):
+                    for side in range(2):
+                        var rel = e.a if side == 0 else e.b
+                        var name = e.a_keys[i] if side == 0 else e.b_keys[i]
+                        var key = String(rel) + "/" + name
+                        if key in distinct:
+                            continue
+                        var table = self._spine_frame(relations[rel])
+                        if not table:
+                            continue
+                        var count = table.value()._distinct_count(name)
+                        if count > 0:
+                            distinct[key] = Float64(count)
+            var chosen = order_joins(rows, domains, edges, distinct)
             if not chosen:
                 continue
             var tree = chosen.take()
@@ -5848,6 +5898,70 @@ struct LazyFrame(Copyable):
         self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
         trace_path("lazy.probe_largest")
         return True
+
+    def _relation_estimate(self, index: Int) raises -> Int:
+        """Rows a join-graph relation yields, estimated without running it:
+        `_estimated_rows`, else, for a join the order cannot reorder, DuckDB's
+        combination of its inputs' estimates
+        (`CombineStatsOfNonReorderableOperator`): a semi or anti join keeps
+        its left input's rows, any other the larger input's. -1 when an
+        input has no estimate."""
+        var known = self._estimated_rows(index)
+        if known >= 0:
+            return known
+        ref node = self._nodes[index]
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._relation_estimate(node.left)
+        if (
+            node.kind != JOIN
+            or node.how == JOIN_INNER
+            or node.how == JOIN_CROSS
+        ):
+            return -1
+        var left = self._relation_estimate(node.left)
+        if left < 0:
+            return -1
+        if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+            return left
+        var right = self._relation_estimate(node.right)
+        if right < 0:
+            return -1
+        return max(left, right)
+
+    def _spine_frame(self, index: Int) -> Optional[DataFrame]:
+        """The in-memory table under `index`, along the steps
+        `_spine_rows` follows and a left, semi or anti join's left input,
+        whose columns keep their table's statistics; None through anything
+        else."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                return Optional(self._frames[node.offset].copy())
+            if (
+                node.kind == FILTER
+                or node.kind == DROP
+                or (
+                    node.kind == JOIN
+                    and (
+                        node.how == JOIN_INNER
+                        or node.how == JOIN_LEFT
+                        or node.how == JOIN_SEMI
+                        or node.how == JOIN_ANTI
+                    )
+                )
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                cursor = node.left
+                continue
+            return None
+        return None
 
     def _spine_rows(self, index: Int) -> Int:
         """Rows of the table under `index` along steps that keep, drop or

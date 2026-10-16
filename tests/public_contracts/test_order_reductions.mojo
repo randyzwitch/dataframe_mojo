@@ -1,4 +1,6 @@
 """Public positional reductions retain terminal nulls and logical schemas."""
+# contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col
 from tests.support.coverage_compare import assert_value
