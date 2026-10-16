@@ -5505,7 +5505,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var domains = List[Float64](capacity=n)
             for r in range(n):
                 var table = self._spine_rows(relations[r])
-                var estimated = self._estimated_rows(relations[r])
+                var estimated = self._relation_estimate(relations[r])
                 if estimated < 0:
                     var frame = self._execute(
                         relations[r], False, streaming, batch_size
@@ -5899,9 +5899,43 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         trace_path("lazy.probe_largest")
         return True
 
+    def _relation_estimate(self, index: Int) raises -> Int:
+        """Rows a join-graph relation yields, estimated without running it:
+        `_estimated_rows`, else, for a join the order cannot reorder, DuckDB's
+        combination of its inputs' estimates
+        (`CombineStatsOfNonReorderableOperator`): a semi or anti join keeps
+        its left input's rows, any other the larger input's. -1 when an
+        input has no estimate."""
+        var known = self._estimated_rows(index)
+        if known >= 0:
+            return known
+        ref node = self._nodes[index]
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._relation_estimate(node.left)
+        if (
+            node.kind != JOIN
+            or node.how == JOIN_INNER
+            or node.how == JOIN_CROSS
+        ):
+            return -1
+        var left = self._relation_estimate(node.left)
+        if left < 0:
+            return -1
+        if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+            return left
+        var right = self._relation_estimate(node.right)
+        if right < 0:
+            return -1
+        return max(left, right)
+
     def _spine_frame(self, index: Int) -> Optional[DataFrame]:
         """The in-memory table under `index`, along the steps
-        `_spine_rows` follows; None through anything else."""
+        `_spine_rows` follows and a left, semi or anti join's left input,
+        whose columns keep their table's statistics; None through anything
+        else."""
         var cursor = index
         while cursor >= 0:
             ref node = self._nodes[cursor]
@@ -5910,7 +5944,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if (
                 node.kind == FILTER
                 or node.kind == DROP
-                or (node.kind == JOIN and node.how == JOIN_INNER)
+                or (
+                    node.kind == JOIN
+                    and (
+                        node.how == JOIN_INNER
+                        or node.how == JOIN_LEFT
+                        or node.how == JOIN_SEMI
+                        or node.how == JOIN_ANTI
+                    )
+                )
                 or (
                     (node.kind == SELECT or node.kind == WITH_COLUMNS)
                     and _stream_rows(node)
