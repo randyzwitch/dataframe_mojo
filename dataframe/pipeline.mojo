@@ -2247,7 +2247,6 @@ struct _PipelineJob(Job):
     var expressions: List[Expr]
     # Group keys of a grouped reduce sink (none: ungrouped or materialize).
     var keys: List[String]
-    var ordered: Bool
     # Grouped sink: inserted into part tables, or collected for the
     # eager partitioned group-by (the plan decides for every worker).
     var insert: Bool
@@ -2303,7 +2302,6 @@ struct _PipelineJob(Job):
         indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
         expressions: List[Expr],
         keys: List[String],
-        ordered: Bool,
         insert: Bool,
         batch_size: Int,
         top: Int,
@@ -2339,7 +2337,6 @@ struct _PipelineJob(Job):
         self.indexes = indexes.copy()
         self.expressions = expressions.copy()
         self.keys = keys.copy()
-        self.ordered = ordered
         self.insert = insert
         self.filter_only = True
         for step in steps:
@@ -3095,7 +3092,6 @@ def run_pipeline(
                 indexes,
                 expressions,
                 keys,
-                ordered,
                 insert,
                 batch_size,
                 top,

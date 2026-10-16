@@ -21,7 +21,6 @@ comptime _F32_INFINITY_POWER = 255
 comptime _F32_SMALLEST_POWER_OF_TEN = -65
 comptime _F32_LARGEST_POWER_OF_TEN = 38
 comptime _F32_MAX_EXACT_INTEGER = UInt64(1 << 24)
-comptime _DECIMAL_MAX_DIGITS = 768
 
 
 @fieldwise_init
@@ -265,11 +264,6 @@ def _float32_inf(negative: Bool) -> Float32:
     return _float32_from_bits(
         UInt32(0xFF800000) if negative else UInt32(0x7F800000)
     )
-
-
-@always_inline
-def _float32_nan() -> Float32:
-    return _float32_from_bits(UInt32(0x7FC00000))
 
 
 # fast-float2 float.rs fixed tables, kept addressable for its indexed lookup.
@@ -625,11 +619,6 @@ def _float64_inf(negative: Bool) -> Float64:
     return _float64_from_bits(
         UInt64(0xFFF0000000000000) if negative else UInt64(0x7FF0000000000000)
     )
-
-
-@always_inline
-def _float64_nan() -> Float64:
-    return _float64_from_bits(UInt64(0x7FF8000000000000))
 
 
 @always_inline

@@ -3,7 +3,7 @@ from .wkb import _wkb_display
 from std.collections import Optional
 from std.memory import ArcPointer
 
-from .dtype import DataType, NUMERIC_DTYPES
+from .dtype import DataType
 from .nested_column import _Box
 from .string_column import StringColumn, escape_bytes
 from .series import Series
