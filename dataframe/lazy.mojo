@@ -3060,6 +3060,41 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return reduced^
         if self._prefetched and not self._report:
             self._prefetch_breakers(cursor, batch_size)
+        # A computed source (a union, an aggregate, a sort) is run in full
+        # whatever the stream does with it; as an in-memory table its rows
+        # run through the morsel pipelines and the aggregate table on every
+        # worker, as DuckDB's union children sink into their parent's
+        # aggregate. Batched, a grouped reduction over it ran on one thread
+        # (TPC-DS q76's three channels). It is found and run before any
+        # join below builds, so no build is made twice.
+        var first = cursor
+        while first >= 0:
+            ref step = self._nodes[first]
+            if _stream_rows(step):
+                first = step.left
+            elif step.kind == JOIN and step.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
+            ]:
+                first = step.left
+            else:
+                break
+        if (
+            first >= 0
+            and first != index
+            and not _is_scan(self._nodes[first].kind)
+        ):
+            var computed = self._execute(first, False, True, batch_size)
+            var plan = self.copy()
+            plan._frames.append(computed^)
+            plan._schemas.append(Optional[CsvSchema]())
+            plan._nodes[first] = _plan_node(
+                SCAN_FRAME, offset=len(plan._frames) - 1
+            )
+            return plan._execute(index, False, True, batch_size)
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
