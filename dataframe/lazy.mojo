@@ -96,6 +96,7 @@ from .expr import (
     EQ,
     NE,
     NOT,
+    STR_LIKE,
     WHEN,
     LIT_BOOL,
     LIT_FLOAT,
@@ -285,6 +286,68 @@ def _plan_node(
         partition_exprs.copy(),
         partition_columns.copy(),
     )
+
+
+# DuckDB's selectivity of a filter no statistic answers
+# (`RelationStatisticsHelper::DEFAULT_SELECTIVITY`).
+comptime _DEFAULT_SELECTIVITY = 0.2
+
+
+def _scan_estimate(frame: DataFrame, predicate: Expr) raises -> Int:
+    """Rows of `frame` that `predicate` keeps, as DuckDB estimates a
+    filtered table scan (`ExtractGetStats`, `InspectTableFilter`), with no
+    rows read. Each conjunct reading one column is a filter on that column:
+    an equality keeps the rows over the column's distinct count (the
+    table's statistics, `DataFrame._distinct_count`), a NOT LIKE on a
+    column without nulls four fifths, anything else every row; the scan
+    keeps the fewest any of them keeps, or a fifth when none says less.
+    Conjuncts reading several columns stay above the scan and keep a fifth
+    of that."""
+    var base = frame.height()
+    if base == 0:
+        return 0
+    var after = base
+    var column_filters = False
+    var above = False
+    for part in conjuncts(predicate):
+        var reads = _references(part)
+        if not reads:
+            above = True
+            continue
+        var names = List[String]()
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+        if len(names) != 1:
+            above = True
+            continue
+        column_filters = True
+        after = min(after, _column_filter_rows(frame, names[0], part, base))
+    if after == base and column_filters:
+        after = max(Int(Float64(base) * _DEFAULT_SELECTIVITY), 1)
+    if above:
+        after = max(Int(Float64(after) * _DEFAULT_SELECTIVITY), 1)
+    return after
+
+
+def _column_filter_rows(
+    frame: DataFrame, name: String, part: Expr, base: Int
+) raises -> Int:
+    """Rows one column's filter keeps (`InspectTableFilter`)."""
+    ref root = part._nodes[len(part._nodes) - 1]
+    if root.op == EQ:
+        var distinct = frame._distinct_count(name)
+        if distinct > 0:
+            return (base + distinct - 1) // distinct
+        return base
+    if (
+        root.op == NOT
+        and root.left >= 0
+        and part._nodes[root.left].op == STR_LIKE
+        and frame.column(name).null_count() == 0
+    ):
+        return max(Int(Float64(base) * (1.0 - _DEFAULT_SELECTIVITY)), 1)
+    return base
 
 
 def _references(expr: Expr) -> Optional[List[String]]:
@@ -5354,13 +5417,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _selective_on(mut self, scan: Int, keys: Expr) raises -> Bool:
         """Whether `keys` keeps at most one row in eight of the table at
-        node `scan`, estimated on evenly spaced runs of it
-        (`_estimated_rows`). A key set spanning most of the right side's
+        node `scan`, measured on evenly spaced runs of it
+        (`_sampled_rows`). A key set spanning most of the right side's
         keys filters nothing and only moves the join off its better
         build side."""
         var height = self._frames[self._nodes[scan].offset].height()
         self._nodes.append(_plan_node(FILTER, scan, exprs=[keys.copy()]))
-        var estimated = self._estimated_rows(len(self._nodes) - 1)
+        var estimated = self._sampled_rows(len(self._nodes) - 1)
         _ = self._nodes.pop()
         return estimated >= 0 and 8 * estimated <= height
 
@@ -5487,9 +5550,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _estimated_rows(self, index: Int) raises -> Int:
         """Rows node `index` yields, without running it: exact for a table,
-        estimated for one row-local filter over a table by applying the
-        filter to 64 evenly spaced runs of 1,024 rows (every row of a table
-        that small). -1 for anything else. Evenly spaced runs, not a
+        and for one row-local filter over a table what DuckDB estimates
+        for a filtered scan (`_scan_estimate`) when the table keeps
+        statistics, else what the filter keeps of a sample
+        (`_sampled_rows`). -1 for anything else."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.offset].height()
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._estimated_rows(node.left)
+        if node.kind != FILTER or not _row_local(node.exprs):
+            return -1
+        ref source = self._nodes[node.left]
+        if source.kind != SCAN_FRAME:
+            return -1
+        ref frame = self._frames[source.offset]
+        if not frame._statistics:
+            # A frame built in memory keeps no statistics (DuckDB's tables
+            # always do); its rows are here to measure.
+            return self._sampled_rows(index)
+        return _scan_estimate(frame, node.exprs[0])
+
+    def _sampled_rows(self, index: Int) raises -> Int:
+        """Rows node `index` yields, measured on the data: exact for a table,
+        and for one row-local filter over a table the rows the filter keeps
+        of 64 evenly spaced runs of 1,024 rows (every row of a table that
+        small), scaled up. -1 for anything else. For filters made at run
+        time (a join's key set, `_selective_on`), which no statistic
+        describes; a plan's own filters are estimated (`_estimated_rows`). Evenly spaced runs, not a
         prefix: tables are often stored in date or key order, which a
         prefix would misjudge."""
         ref node = self._nodes[index]
@@ -5499,7 +5590,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             (node.kind == SELECT or node.kind == WITH_COLUMNS)
             and _stream_rows(node)
         ):
-            return self._estimated_rows(node.left)
+            return self._sampled_rows(node.left)
         if node.kind != FILTER or not _row_local(node.exprs):
             return -1
         ref source = self._nodes[node.left]
@@ -5715,10 +5806,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         var key = String(rel) + "/" + name
                         if key in distinct:
                             continue
-                        var table = self._spine_frame(relations[rel])
-                        if not table:
+                        var source = self._spine_column(relations[rel], name)
+                        if not source:
                             continue
-                        var count = table.value()._distinct_count(name)
+                        var found = source.take()
+                        var count = found[0]._distinct_count(found[1])
                         if count > 0:
                             distinct[key] = Float64(count)
             var chosen = order_joins(rows, domains, edges, distinct)
@@ -6116,16 +6208,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return -1
         return max(left, right)
 
-    def _spine_frame(self, index: Int) -> Optional[DataFrame]:
-        """The in-memory table under `index`, along the steps
-        `_spine_rows` follows and a left, semi or anti join's left input,
-        whose columns keep their table's statistics; None through anything
-        else."""
+    def _spine_column(
+        self, index: Int, name: String
+    ) raises -> Optional[Tuple[DataFrame, String]]:
+        """The table and column under `index` that column `name` of its
+        output is, through filters, projections and the left input of
+        inner, left, semi and anti joins: a projection that renames a
+        column keeps its statistics, as DuckDB's projection statistics
+        carry a column reference's distinct count; a computed column has
+        none (None)."""
+        var column = name
         var cursor = index
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if node.kind == SCAN_FRAME:
-                return Optional(self._frames[node.offset].copy())
+                return Optional(Tuple(self._frames[node.offset].copy(), column))
+            if (
+                node.kind == SELECT or node.kind == WITH_COLUMNS
+            ) and _stream_rows(node):
+                var made = -1
+                for k in range(len(node.exprs)):
+                    if node.exprs[k]._name == column:
+                        made = k
+                if made >= 0:
+                    ref expr = node.exprs[made]
+                    if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                        return None
+                    column = expr._nodes[0].text
+                elif node.kind == SELECT:
+                    return None
+                cursor = node.left
+                continue
             if (
                 node.kind == FILTER
                 or node.kind == DROP
@@ -6137,10 +6250,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         or node.how == JOIN_SEMI
                         or node.how == JOIN_ANTI
                     )
-                )
-                or (
-                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
-                    and _stream_rows(node)
                 )
             ):
                 cursor = node.left

@@ -262,6 +262,42 @@ def test_table_statistics_are_shared_by_copies_and_redone_for_new_columns() rais
     assert_equal(table._distinct_count("missing"), -1)
 
 
+def test_renamed_join_keys_keep_their_tables_distinct_counts() raises:
+    # A key renamed by a projection is the same column of the same table:
+    # its distinct count is the table's (DuckDB's projection statistics).
+    # Without it a renamed low-cardinality key looked unique, and the
+    # order joined two copies of a table on such keys first.
+    var keys = List[Int64]()
+    var values = List[Int64]()
+    for row in range(5000):
+        keys.append(Int64(row % 7))
+        values.append(Int64(row))
+    var table = DataFrame(
+        [ints("k", keys), ints("v", values)]
+    )._with_statistics()
+    var plan = (
+        table.lazy()
+        .filter(col("v") > lit(Int64(10)))
+        .select_exprs(
+            [
+                col("k").alias("key"),
+                (col("k") + lit(Int64(1))).alias("bumped"),
+                col("v"),
+            ]
+        )
+        .with_columns([col("v").alias("w")])
+    )
+    var top = len(plan._nodes) - 1
+    var key = plan._spine_column(top, "key")
+    assert_true(Bool(key))
+    var found = key.take()
+    assert_equal(found[1], "k")
+    assert_equal(found[0]._distinct_count(found[1]), 7)
+    assert_equal(plan._spine_column(top, "v").value()[1], "v")
+    assert_equal(plan._spine_column(top, "w").value()[1], "v")
+    assert_true(not plan._spine_column(top, "bumped"))
+
+
 def test_joins_over_tables_with_statistics_match_the_written_order() raises:
     var t = tables()
     var fact = t[0].collect()._with_statistics().lazy()
