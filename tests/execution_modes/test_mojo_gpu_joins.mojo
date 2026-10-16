@@ -282,7 +282,9 @@ def test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight() raises:
         var live = Int(
             measured[1].item(row, "retained_intermediate_bytes").int64()
         )
-        assert_true(peak >= local + live)
+        # A region's peak includes the query's peak so far (#740), which
+        # already counts the intermediates retained across it.
+        assert_true(peak >= local and local >= live)
         joined |= (
             measured[1].item(row, "algorithm").string()
             == "mojo_gpu_sorted_join"
