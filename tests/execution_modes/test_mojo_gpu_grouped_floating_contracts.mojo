@@ -45,12 +45,10 @@ def test_mojo_gpu_grouped_floating_exact_values_layouts_and_nulls() raises:
                         )
                         assert_true(fixture[3][group] and not observed[group])
                         observed[group] = True
+                        var expected_units = Int64(fixture[1][group])
+                        var expected_count = Int64(fixture[2][group])
                         check_result(
-                            result,
-                            row,
-                            fixture[1][group],
-                            fixture[2][group],
-                            narrow,
+                            result, row, expected_units, expected_count, narrow
                         )
                     assert_equal(observed, fixture[3])
 
