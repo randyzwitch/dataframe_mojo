@@ -1,4 +1,6 @@
 """Metal-target host metadata for one combined per-partition String domain."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe.accelerator.gpu.residency import Scope
 from dataframe.accelerator.gpu.partition_labels import build
@@ -40,6 +42,7 @@ def _check_literal_labels(
     _ = labels^
 
 
+# requires: mojo_gpu
 def test_partition_qcut_label_domains_literal_mapping_owner_budget_and_guards() raises:
     var words: List[UInt64] = [0x3FF0000000000000, 0x4028000000000000, 0]
     var used: List[UInt32] = [1, 1, 0]

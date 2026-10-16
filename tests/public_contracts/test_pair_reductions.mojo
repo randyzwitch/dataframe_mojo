@@ -1,4 +1,6 @@
 """Public two-input reductions use complete pairs and independently ranked ties."""
+# contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.math import isnan, abs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, corr, cov
@@ -321,13 +323,22 @@ def _decimal_pair_contract(method: String) raises:
                 )
 
 
+# expected-failure: Verified advertised decimal pair input is rejected by
+# expected-failure: numeric binding.
+# expected-diagnostic: expected a numeric column
 def test_decimal_pearson_accepts_advertised_numeric_pairs() raises:
     _decimal_pair_contract("pearson")
 
 
+# expected-failure: Verified advertised decimal pair input is rejected by
+# expected-failure: numeric binding.
+# expected-diagnostic: expected a numeric column
 def test_decimal_spearman_accepts_advertised_numeric_pairs() raises:
     _decimal_pair_contract("spearman")
 
 
+# expected-failure: Verified advertised decimal pair input is rejected by
+# expected-failure: numeric binding.
+# expected-diagnostic: expected a numeric column
 def test_decimal_covariance_accepts_advertised_numeric_pairs() raises:
     _decimal_pair_contract("cov")

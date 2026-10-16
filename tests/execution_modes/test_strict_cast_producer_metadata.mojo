@@ -1,4 +1,6 @@
 """Original strict-cast producer proofs retain AST, prefix and source owners."""
+# contract-group: execution.apple_parity
+# contract-group: execution.strict_cast_producers
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.accelerator.producer_phases import (

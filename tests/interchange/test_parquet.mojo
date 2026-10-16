@@ -1,4 +1,5 @@
 """Parquet interchange against independent files and observed native I/O."""
+# contract-group: io.parquet
 from std.ffi import external_call
 from std.os import getenv, mkdir
 from std.os.path import exists
@@ -397,6 +398,12 @@ def with_independent_field_metadata(frame: DataFrame) raises -> DataFrame:
     return DataFrame(fields^)
 
 
+# expected-failure: Public Parquet read drops arbitrary field metadata
+# expected-failure: independently stored by PyArrow; verified via public Arrow
+# expected-failure: export after read. Writer tested separately with explicit
+# expected-failure: foreign C metadata, and independent consumer verifies its
+# expected-failure: preservation.
+# expected-diagnostic: Parquet arbitrary field metadata must survive import
 def test_parquet_reader_preserves_independent_arbitrary_field_metadata() raises:
     var source = read_parquet(fixture("typed"))
     var expected = packed_metadata(

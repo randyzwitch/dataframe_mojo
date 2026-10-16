@@ -5,6 +5,7 @@ that raises. Every result equals grouping the filtered frame eagerly: string
 and integer keys, nulls, float and decimal computed inputs, a key that only
 dropped rows hold, and a computed input that overflows only on dropped
 rows; one that overflows on a kept row still raises."""
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from tests.support.coverage_compare import assert_frame

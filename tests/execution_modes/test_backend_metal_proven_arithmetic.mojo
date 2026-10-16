@@ -1,4 +1,5 @@
 """Static integer error proofs preserve CPU observations across Metal stages."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from tests.execution_modes.test_backend_metal import require_metal
@@ -88,6 +89,7 @@ def test_integer_proofs_cover_unsigned_product_and_literal_boundaries() raises:
     _ = lower_rows(query, _capabilities())
 
 
+# requires: metal
 def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection() raises:
     _ = require_metal()
     var source = frame()
@@ -165,6 +167,7 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
         )
 
 
+# requires: metal
 def test_native_metal_proven_integer_full_int8_domain_compositions_and_resident_joins() raises:
     _ = require_metal()
     var values = List[Int8]()

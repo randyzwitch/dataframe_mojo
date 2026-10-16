@@ -1,4 +1,6 @@
 """Fixed-zone fields preserve CPU local storage wrapping and negative floors."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe.metal import MetalRuntime
@@ -28,6 +30,7 @@ def _fields() -> List[Expr]:
     ]
 
 
+# requires: metal
 def test_mojo_gpu_fixed_zone_fields_extreme_wrapping_words_and_independent_civil_anchors() raises:
     # Generated independently with arbitrary-integer wrapping and binary
     # search of Gregorian year-start ordinals; no production calendar helper.
@@ -173,6 +176,7 @@ def test_mojo_gpu_fixed_zone_fields_extreme_wrapping_words_and_independent_civil
     assert_equal(at, len(shifted))
 
 
+# requires: metal
 def test_mojo_gpu_fixed_zone_fields_negative_floors_nullable_chunked_empty_and_conversion() raises:
     var runtime = MetalRuntime()
     for unit in ["ms", "us", "ns"]:
@@ -270,6 +274,7 @@ def test_mojo_gpu_fixed_zone_fields_negative_floors_nullable_chunked_empty_and_c
     assert_true(profiled[1].item(0, "kernel_launches").int64() > 0)
 
 
+# requires: metal
 def test_mojo_gpu_fixed_zone_fields_capability_descriptor_and_unsupported_local_operations() raises:
     assert_true(not RowCapabilities().fixed_zone_temporal_fields)
     for zone in ["-23:59", "+00:00", "+05:45"]:

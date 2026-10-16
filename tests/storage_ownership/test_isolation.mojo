@@ -1,4 +1,6 @@
 """Snapshots and nested aliases remain intact when append reassembly detaches."""
+# contract-group: storage.views
+# contract-group: storage.isolation
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from tests.support.reference_model import generated_model, ReferenceTable

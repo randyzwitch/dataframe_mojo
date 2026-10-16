@@ -1,4 +1,5 @@
 """Actual numeric conjunction, sorted-window and selective filter contracts."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col, lit, concat
 from dataframe.fused_compare import (

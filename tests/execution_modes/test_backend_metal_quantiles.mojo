@@ -1,4 +1,5 @@
 """Native binary64 order statistics preserve quantile interpolation semantics."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -104,6 +105,7 @@ def test_quantile_capabilities_private_casts_full_probability_metadata_and_bindi
         )
 
 
+# requires: metal
 def test_native_metal_quantiles_numeric_widths_nulls_groups_and_partitions() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -161,6 +163,7 @@ def test_native_metal_quantiles_numeric_widths_nulls_groups_and_partitions() rai
     )
 
 
+# requires: metal
 def test_native_metal_quantiles_nonfinite_unsigned_extremes_decimal_casts_and_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -227,6 +230,7 @@ def test_native_metal_quantiles_nonfinite_unsigned_extremes_decimal_casts_and_co
     )
 
 
+# requires: metal
 def test_native_metal_quantiles_profiles_cost_budget_and_runtime_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

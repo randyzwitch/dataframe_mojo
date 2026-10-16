@@ -1,4 +1,6 @@
 """Whole-row parallel deduplication preserves every scalar equality class."""
+# contract-group: table.sets_reshape
+# contract-group: kernel.order_keys
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series

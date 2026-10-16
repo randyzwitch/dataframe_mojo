@@ -1,4 +1,5 @@
 """Literal anchors for scalar models; no engine participates in expected answers."""
+# contract-group: reference.anchors
 from std.testing import assert_equal, assert_raises
 from tests.support.reference_statistics import (
     integer_quantile,

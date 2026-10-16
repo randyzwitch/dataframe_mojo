@@ -1,4 +1,5 @@
 """Exact decimal comparisons across scales and physical storage widths."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -80,6 +81,7 @@ def test_decimal_comparison_capability_and_packed_metadata() raises:
     )
 
 
+# requires: metal
 def test_native_metal_decimal_comparisons_width_scale_matrix_and_exact_words() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -155,6 +157,7 @@ def test_native_metal_decimal_comparisons_width_scale_matrix_and_exact_words() r
         same(sliced.collect(accelerator=runtime), sliced.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_decimal_comparisons_resident_consumers_and_conditionals() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -199,6 +202,7 @@ def test_native_metal_decimal_comparisons_resident_consumers_and_conditionals() 
     )
 
 
+# requires: metal
 def test_native_metal_decimal_comparison_overflow_observation_budget_and_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

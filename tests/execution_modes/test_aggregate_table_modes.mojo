@@ -9,6 +9,7 @@ Rounding policy: integer states and keys are exact on every run. A floating
 state sums each worker's partial sums, and which rows a worker reduced
 depends on scheduling, so a repeated run may differ in the last bits; it
 must agree within a relative 1e-12."""
+# contract-group: execution.modes
 from std.testing import assert_equal, assert_true
 
 from dataframe import DataFrame, DataType, Expr, col, lit

@@ -1,4 +1,5 @@
 """The comparator must inspect extended cells and independent model mutations."""
+# contract-group: harness.sensitivity
 from std.testing import assert_raises
 from dataframe import (
     Column,

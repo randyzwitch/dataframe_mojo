@@ -1,4 +1,5 @@
 """Metal shape extensions retain strict preflight and exact row semantics."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
@@ -135,6 +136,7 @@ def test_wide_metal_metadata_and_default_backend_limits() raises:
         )
 
 
+# requires: metal
 def test_native_metal_wide_metal_transport_bitmaps_slices_and_projection() raises:
     _ = require_metal()
     for width in List[Int]([64, 65, 127, 128, 129, 255, 256]):
@@ -153,6 +155,7 @@ def test_native_metal_wide_metal_transport_bitmaps_slices_and_projection() raise
         _ = wide_frame(257).lazy().collect(accelerator=MetalRuntime())
 
 
+# requires: metal
 def test_native_metal_wide_metal_programs_steps_and_resident_consumers() raises:
     _ = require_metal()
     var frame = numeric_frame()
@@ -179,6 +182,7 @@ def test_native_metal_wide_metal_programs_steps_and_resident_consumers() raises:
     check(sorted.head(3))
 
 
+# requires: metal
 def test_native_metal_wide_metal_global_and_grouped_reductions() raises:
     _ = require_metal()
     var frame = numeric_frame()
@@ -207,6 +211,7 @@ def test_native_metal_wide_metal_global_and_grouped_reductions() raises:
     check(frame.slice(0, 0).lazy().group_by("g").agg(aggregates))
 
 
+# requires: metal
 def test_native_metal_wide_metal_join_fields_keys_empty_and_budget() raises:
     _ = require_metal()
     var left = wide_frame(129, 6, "l").slice(1, 4)
@@ -279,6 +284,7 @@ def mixed_wide_frame(columns: Int, prefix: String = "m") raises -> DataFrame:
     return DataFrame(fields^)
 
 
+# requires: metal
 def test_native_metal_256_column_mixed_payloads_physical_words_and_resident_boundaries() raises:
     _ = require_metal()
     var frame = mixed_wide_frame(256)

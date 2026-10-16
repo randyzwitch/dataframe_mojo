@@ -13,7 +13,8 @@ from .cuts import has_cut_materializations
 from .partition_cuts import is_marker as is_partition_cut_marker, marker_capture
 from .capabilities import RowCapabilities
 from .rows import lower_rows
-from . import producer_phases, decimal_feed
+from . import producer_phases, decimal_feed, decimal_group_feed
+from .decimal_prefix import prefix_infallible
 from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
@@ -45,11 +46,12 @@ from dataframe.expr import (
     FLOORDIV,
     POW,
     SUM,
+    COL,
     CAST,
     MOD,
     subtree,
 )
-from dataframe.binding import bind, ROWS
+from dataframe.binding import bind, BoundExpr, ROWS
 from .integer_ranges import proven_integer_nodes
 from . import ordered_rows, implode_ordered
 
@@ -118,12 +120,46 @@ def _decimal_feed_producer(query: LazyFrame, index: Int) raises -> Bool:
     )
 
 
+def _decimal_group_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != AGG or not len(operation.names):
+        return False
+    var possible = False
+    for expression in operation.exprs:
+        for node in expression._nodes:
+            possible |= node.op in [ADD, SUB, MUL]
+    if not possible:
+        return False
+    if not prefix_infallible(query, operation.left):
+        return False
+    for key in operation.window_keys:
+        if (
+            key.dtype.is_categorical()
+            or key.dtype._is_bytes()
+            or key.dtype.is_nested()
+        ):
+            return False
+    ref source = query._nodes[operation.left]
+    for field in source.text_fields:
+        if field.name in operation.names and (
+            field.category or field.dtype._is_bytes() or field.dtype.is_nested()
+        ):
+            return False
+    var schema = schema_frame(query, operation.left)
+    var bounds = List[BoundExpr]()
+    for expression in operation.exprs:
+        bounds.append(bind(expression, schema._columns))
+    return decimal_group_feed.eligible(bounds, schema._columns, operation.names)
+
+
 def has_decimal_consumers(query: LazyFrame) raises -> Bool:
     # A region boundary observes each expression before any later row
     # selection, join, ordering or stateful consumer can suppress its fault.
     for index in range(len(query._nodes)):
-        if _decimal_producer(query, index) or _decimal_feed_producer(
-            query, index
+        if (
+            _decimal_producer(query, index)
+            or _decimal_feed_producer(query, index)
+            or _decimal_group_producer(query, index)
         ):
             return True
     return False
@@ -131,6 +167,21 @@ def has_decimal_consumers(query: LazyFrame) raises -> Bool:
 
 def _mark_decimal_producers(mut query: LazyFrame) raises:
     for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_group_producer(
+            query, index
+        ):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = decimal_group_feed.MATERIALIZATION
+            query._nodes[index].names2 = [
+                decimal_group_feed.MATERIALIZATION,
+                String(query._nodes[index].maintain_order),
+            ]
+            for name in query._nodes[index].names:
+                query._nodes[index].names2.append(name)
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
         if not query._nodes[index].text and _decimal_feed_producer(
             query, index
         ):
@@ -180,16 +231,35 @@ def _checked_scalar_sum(query: LazyFrame, index: Int) raises -> Bool:
         if root.left < 0 or root.right >= 0 or bound.shapes[root.left] != ROWS:
             return False
         var operand = bind(subtree(bound.expr, root.left), schema._columns)
-        if not ordered_rows.eligible(operand):
+        if (
+            not ordered_rows.eligible(operand)
+            or operand.dtypes[len(operand.dtypes) - 1].is_decimal()
+        ):
             return False
         var proven = proven_integer_nodes(bound)
         # CPU completes each aggregate before evaluating the next operand.
         # Preparing infallible operands together cannot reorder checked faults.
         for at in range(top):
             ref node = bound.expr._nodes[at]
-            if bound.dtypes[at].is_decimal() or is_reduction(node.op):
+            if is_reduction(node.op):
                 return False
-            if node.op == CAST and node.integer and not proven[at]:
+            # A Decimal source converted to Float64 is an infallible operand,
+            # while Decimal arithmetic and Decimal reductions keep their own
+            # observation contracts.
+            if bound.dtypes[at].is_decimal() and node.op != COL:
+                return False
+            var float_cast = (
+                node.op == CAST
+                and node.left >= 0
+                and bound.dtypes[at] == DataType.FLOAT64
+                and bound.dtypes[node.left].is_numeric()
+            )
+            if (
+                node.op == CAST
+                and node.integer
+                and not proven[at]
+                and not float_cast
+            ):
                 return False
             if (
                 bound.dtypes[at].is_integer()
@@ -325,6 +395,7 @@ def _observed_marker(text: String) -> Bool:
     return (
         text == DECIMAL_MATERIALIZATION
         or text == decimal_feed.MATERIALIZATION
+        or text == decimal_group_feed.MATERIALIZATION
         or text == INTEGER_MATERIALIZATION
         or text == GROUP_MATERIALIZATION
         or text == SUM_MATERIALIZATION
@@ -979,6 +1050,14 @@ def _task(
         or _observed_marker(query._nodes[root].text)
         or Bool(query._nodes[root].producer_origin)
     )
+    if query._nodes[
+        root
+    ].text == decimal_group_feed.MATERIALIZATION and not prefix_infallible(
+        query, query._nodes[root].left
+    ):
+        capabilities.reject(
+            "decimal group feed", "original infallible prefix changed"
+        )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
         if terminal:

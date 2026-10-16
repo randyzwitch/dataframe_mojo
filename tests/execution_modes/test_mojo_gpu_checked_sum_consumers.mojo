@@ -1,10 +1,13 @@
 """Checked integer scalar totals finish before downstream consumers."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.joins import lower_join_dag, _checked_scalar_sum
 from dataframe.accelerator.rows import lower_rows
+from dataframe.accelerator.aggregates import lower_aggregate_compositions
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
@@ -32,6 +35,7 @@ def _sum_source() raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty() raises:
     var source = _sum_source()
     for frame in [source.copy(), offset_layout(source), chunk_layout(source)]:
@@ -99,6 +103,7 @@ def test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty() raise
         assert_equal(actual.item(0, "u").uint64(), UInt64.MAX)
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() raises:
     var frame = DataFrame([Series("v", Column[Int64]([Int64.MAX, 1]))])
     var producer = frame.lazy().select(col("v").sum().alias("total"))
@@ -177,6 +182,7 @@ def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() r
     )
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_conditional_counts_and_budget() raises:
     var frame = _sum_source()
     var counted = frame.lazy().select_exprs(
@@ -281,3 +287,54 @@ def test_checked_sum_canonical_false_filter_precedes_boundary_capture() raises:
         observed |= node.text == "metal_sum_materialization" and task.terminal
     assert_true(observed)
     assert_equal(query._frames[0].height(), 2)
+
+
+# requires: metal
+def test_mojo_gpu_checked_sum_scalar_when_and_numeric_mean_siblings() raises:
+    # Numeric-to-Float64 casts are infallible siblings of checked SUM. The
+    # scalar state leaves complete before the outer WHEN chooses its branch.
+    for decimal in [False, True]:
+        var columns = List[Series]()
+        columns.append(Series("v", Column[Int64]([2, 4, 6])))
+        columns.append(Series("amount", Column[Int64]([100, 200, 300])))
+        var frame = DataFrame(columns^)
+        if decimal:
+            frame = frame.with_columns(
+                col("amount").cast(DataType.decimal(18, 2))
+            )
+        var selected = (
+            when(col("v") >= 4)
+            .then(col("amount").cast(DataType.FLOAT64))
+            .end()
+            .mean()
+        )
+        var expression = (
+            when(col("v").sum() > 10)
+            .then(selected)
+            .otherwise(lit(Float64(-1)))
+            .alias("answer")
+        )
+        var query = frame.lazy().select(expression)
+        var lowered = lower_aggregate_compositions(query, exact_float32=True)
+        assert_true(_checked_scalar_sum(lowered, 1))
+        for optimize in [False, True]:
+            for gpu in [False, True]:
+                assert_equal(
+                    _collect_sum(query, gpu, optimize)
+                    .item(0, "answer")
+                    .float64(),
+                    Float64(250),
+                )
+        var overflow = frame.with_columns(lit(Int64.MAX).alias("v"))
+        var hidden = overflow.lazy().select(
+            when(lit(False))
+            .then(col("v").sum().cast(DataType.FLOAT64))
+            .otherwise(selected)
+            .alias("answer")
+        )
+        for optimize in [False, True]:
+            for gpu in [False, True]:
+                with assert_raises(contains="overflow"):
+                    _ = _collect_sum(hidden, gpu, optimize)
+                with assert_raises(contains="overflow"):
+                    _ = _collect_sum(hidden.head(0), gpu, optimize)

@@ -3,6 +3,8 @@
 The model describes input cells and stable scalar order before any dataframe
 exists. Logical types are the coverage axis; physical layouts are variations.
 """
+# contract-group: table.filter
+# contract-group: table.sort
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, col, lit
 from tests.support.key_kernel_reference import KeyCell, expected_order

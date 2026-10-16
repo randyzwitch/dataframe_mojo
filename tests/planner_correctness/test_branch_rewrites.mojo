@@ -1,4 +1,5 @@
 """Branch rewrites preserve Boolean implications and each union input's meaning."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col
 

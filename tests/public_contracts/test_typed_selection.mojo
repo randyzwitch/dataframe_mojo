@@ -1,4 +1,6 @@
 """Value selection preserves selected validity and resolves logical result types."""
+# contract-group: expr.null_logic
+# contract-group: types.cast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,

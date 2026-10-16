@@ -7,6 +7,7 @@ result is the same joins over separately collected inputs: a snowflake
 written large-table-last, a nested chain met from its far side (its keys
 swapped, the dropped ones read from their partners), a filter between
 joins, and a plan whose rows' order shows, which keeps its written order."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from dataframe.distinct_statistics import distinct_estimate

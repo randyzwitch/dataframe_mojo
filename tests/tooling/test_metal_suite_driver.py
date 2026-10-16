@@ -13,7 +13,9 @@ spec.loader.exec_module(driver)
 
 
 class MetalSuiteDriver(unittest.TestCase):
-    def test_derivation_preserves_original_queries_and_forces_every_collect(self):
+    def test_derivation_preserves_original_queries_and_forces_every_collect(
+        self,
+    ):
         original = {
             name: (ROOT / "benchmarks/suites" / (name + ".mojo")).read_text()
             for name in ("h2o", "pdsh", "tpcds", "clickbench")
@@ -29,14 +31,42 @@ class MetalSuiteDriver(unittest.TestCase):
                 metal = (destination / f"metal_{name}.mojo").read_text()
                 self.assertNotIn(".collect()", metal)
                 self.assertNotIn('engine="auto"', metal)
-                expected = 15 if name == "h2o" else text.count(".collect()")
+                adapted = manifest["scalar_materialization_proofs"][
+                    "benchmarks/suites/" + name + ".mojo"
+                ]["adapted"]
+                expected = 15 if name == "h2o" else text.count(
+                    ".collect()"
+                ) + len(adapted)
                 self.assertEqual(
-                    metal.count(".collect(accelerator=MetalRuntime())"), expected
+                    metal.count(".collect(accelerator=MetalRuntime())"),
+                    expected,
                 )
                 self.assertEqual(
-                    (ROOT / "benchmarks/suites" / (name + ".mojo")).read_text(), text
+                    (ROOT / "benchmarks/suites" / (name + ".mojo")).read_text(),
+                    text,
                 )
-            self.assertEqual(len(manifest["derived_source_sha256"]), 15)
+            self.assertEqual(len(manifest["derived_source_sha256"]), 16)
+            self.assertEqual(
+                sum(
+                    len(p["adapted"])
+                    for p in manifest["scalar_materialization_proofs"].values()
+                ),
+                1,
+            )
+            for path, proof in manifest[
+                "scalar_materialization_proofs"
+            ].items():
+                self.assertEqual(
+                    proof["canonical_source_sha256"],
+                    manifest["original_source_sha256"][path],
+                )
+                name = Path(path).stem
+                self.assertEqual(
+                    proof["metal_derived_source_sha256"],
+                    manifest["derived_source_sha256"][
+                        "metal_" + name + ".mojo"
+                    ],
+                )
 
     def test_unreviewed_materialization_changes_fail_closed(self):
         with self.assertRaises(ValueError):
@@ -44,7 +74,9 @@ class MetalSuiteDriver(unittest.TestCase):
         text = (ROOT / "benchmarks/suites/h2o.mojo").read_text()
         with self.assertRaises(ValueError):
             driver.derive(
-                text.replace('ref x = t["x"]', "ref x = missing"), "h2o", "metal"
+                text.replace('ref x = t["x"]', "ref x = missing"),
+                "h2o",
+                "metal",
             )
         with self.assertRaises(ValueError):
             driver.derive(
@@ -80,8 +112,12 @@ class MetalSuiteDriver(unittest.TestCase):
             "reference_unsupported",
             "reference_failed",
         ):
-            result = driver.parse(f"coverage\tq6\t{status}\tprecise reason\n", "q6")
-            self.assertEqual(result, dict(status=status, reason="precise reason"))
+            result = driver.parse(
+                f"coverage\tq6\t{status}\tprecise reason\n", "q6"
+            )
+            self.assertEqual(
+                result, dict(status=status, reason="precise reason")
+            )
 
     def test_full_answer_diagnostics_preserve_primary_failure(self):
         output = (
@@ -101,16 +137,18 @@ class MetalSuiteDriver(unittest.TestCase):
         self.assertFalse(facts["cpu_repeat_ordered_equal"])
         self.assertTrue(facts["cpu_metal.schema_equal"])
         self.assertTrue(facts["cpu_metal.column_bags"]["key"])
-        self.assertEqual(facts["cpu_metal.columns"]["mean"]["max_ulp"], (1 << 64) - 1)
-        self.assertEqual(facts["cpu_metal.columns"]["mean"]["max_absolute"], "1e-15")
+        self.assertEqual(
+            facts["cpu_metal.columns"]["mean"]["max_ulp"], (1 << 64) - 1
+        )
+        self.assertEqual(
+            facts["cpu_metal.columns"]["mean"]["max_absolute"], "1e-15"
+        )
         self.assertIsNone(facts["cpu_repeat.columns"]["count"]["max_ulp"])
         self.assertEqual(len(facts["errors"]), 1)
 
     def test_malformed_diagnostics_fail_closed(self):
         prefix = "coverage\tq1\twrong_answer\tdiff\n"
-        numeric = (
-            "column_diagnostic\tcpu_metal\tv\tFloat64\t1\t0\t1\t0\t1\t1e-15\t1e-15\n"
-        )
+        numeric = "column_diagnostic\tcpu_metal\tv\tFloat64\t1\t0\t1\t0\t1\t1e-15\t1e-15\n"
         invalid = [
             "diagnostic\tcpu_metal.schema_equal\tmaybe\n",
             "diagnostic\tunknown.schema_equal\tTrue\n",
@@ -154,16 +192,65 @@ class MetalSuiteDriver(unittest.TestCase):
         for keys in (["id1", "id1"], ["bad\tkey"], "id1"):
             with self.subTest(keys=keys), self.assertRaises(ValueError):
                 driver.case_audit(
-                    {"cases": {"h2o_groupby/q1": dict(entry, alignment_keys=keys)}},
+                    {
+                        "cases": {
+                            "h2o_groupby/q1": dict(entry, alignment_keys=keys)
+                        }
+                    },
                     "h2o_groupby",
                     "base",
                     "q1",
                     {path: "hash"},
                 )
 
+    def test_derived_worker_pin_cannot_certify_another_adapter(self):
+        path = "benchmarks/suites/tpcds.mojo"
+        entry = dict(
+            workload_kind="canonical",
+            execution_boundary="gpu_collects",
+            source_path=path,
+            source_sha256="canonical",
+            metal_derived_source_sha256="adapted",
+            whole_query_gpu_certificate=False,
+            alignment_keys=["key"],
+            order_keys=["key"],
+            audit_reason="Reviewed canonical and derived materialization boundaries",
+        )
+        metadata = {"cases": {"tpcds/q24": entry}}
+        valid = driver.case_audit(
+            metadata,
+            "tpcds",
+            "base",
+            "q24",
+            {path: "canonical"},
+            {"metal_tpcds.mojo": "adapted"},
+        )
+        self.assertEqual(valid["execution_boundary"], "gpu_collects")
+        for derived in (None, {}, {"metal_tpcds.mojo": "old"}):
+            stale = driver.case_audit(
+                metadata, "tpcds", "base", "q24", {path: "canonical"}, derived
+            )
+            self.assertEqual(stale["execution_boundary"], "unknown")
+            self.assertEqual(stale["alignment_keys"], [])
+            self.assertEqual(stale["order_keys"], [])
+            self.assertFalse(stale["whole_query_gpu_certificate"])
+        legacy = dict(entry, execution_boundary="hybrid")
+        legacy.pop("metal_derived_source_sha256")
+        unchanged = driver.case_audit(
+            {"cases": {"tpcds/q24": legacy}},
+            "tpcds",
+            "base",
+            "q24",
+            {path: "canonical"},
+            {"metal_tpcds.mojo": "adapted"},
+        )
+        self.assertEqual(unchanged["execution_boundary"], "hybrid")
+
     def test_diagnostics_do_not_relax_the_exact_comparator(self):
         source = (ROOT / "benchmarks/metal_suite_common.mojo").read_text()
-        self.assertIn("or not actual.sort(actual.columns()).equals(canonical)", source)
+        self.assertIn(
+            "or not actual.sort(actual.columns()).equals(canonical)", source
+        )
         self.assertNotIn("tolerance", source)
 
 

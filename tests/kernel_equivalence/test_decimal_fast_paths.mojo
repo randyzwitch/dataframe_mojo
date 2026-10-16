@@ -4,6 +4,7 @@ both give exactly what the row-by-row arithmetic gives: the same values
 and nulls, a strict cast past the precision raising with the row and
 value, a lenient one giving null, and exact products whether or not the
 overflow check runs."""
+# contract-group: types.cast
 from std.testing import assert_equal, assert_true, assert_raises
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit

@@ -1,6 +1,16 @@
 """Join/aggregate rewrites: fixed CPU executor plus independent row relations."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    LazyFrame,
+    Series,
+    col,
+    lit,
+)
 from tests.support.reference_model import (
     generated_model,
     reference_groups,
@@ -23,6 +33,7 @@ from tests.support.coverage_compare import (
     assert_model,
 )
 from dataframe.lazy import JOIN, FILTER, AGG
+from dataframe.expr import CAST, LIT_INT
 
 
 def _layout(model: ReferenceTable, layout: Int) raises -> DataFrame:
@@ -374,3 +385,54 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
     assert_equal(keys._nodes[len(keys._nodes) - 1].kind, AGG)
     var totals = grouped.filter(col("total") > 0)._optimized()
     assert_equal(totals._nodes[len(totals._nodes) - 1].kind, FILTER)
+
+
+def _casts(plan: LazyFrame) -> Int:
+    var found = 0
+    for node in plan._nodes:
+        for expr in node.exprs:
+            for n in expr._nodes:
+                if n.op == CAST:
+                    found += 1
+    return found
+
+
+def test_casts_of_constants_fold_to_typed_literals_once() raises:
+    # DuckDB's constant folding: a cast of a column-free expression becomes
+    # the literal it evaluates to while the plan is optimized, so no batch
+    # parses it again. The rows are the unfolded plan's.
+    var values = List[Float64]()
+    for i in range(40):
+        values.append(Float64(i) * 0.25)
+    var source = DataFrame([Series("f", Column[Float64](values^))])
+    var money = DataType.decimal(7, 2)
+    var priced = source.lazy().with_columns([col("f").cast(money).alias("d")])
+    var cheap = priced.filter(col("d") > lit("2.50").cast(money))
+    var folded = cheap._optimized()
+    assert_equal(_casts(folded) <= 1, True)
+    var literal = False
+    for node in folded._nodes:
+        for expr in node.exprs:
+            for n in expr._nodes:
+                literal = literal or (
+                    n.op == LIT_INT
+                    and len(n.dtypes) == 1
+                    and n.dtypes[0].value() == money
+                )
+    assert_true(literal, "the decimal constant was not folded")
+    var rows = cheap.collect()
+    assert_equal(rows.height(), 29)
+    var ints = source.lazy().filter(col("f") > lit("7").cast(DataType.FLOAT64))
+    assert_equal(_casts(ints._optimized()), 0)
+    assert_equal(ints.collect().height(), 11)
+    # A cast that cannot succeed stays in the plan and raises when run.
+    var bad = source.lazy().filter(
+        col("f") > lit("not a number").cast(DataType.FLOAT64)
+    )
+    assert_equal(_casts(bad._optimized()), 1)
+    var raised = False
+    try:
+        _ = bad.collect()
+    except:
+        raised = True
+    assert_true(raised, "an invalid constant cast must still raise")

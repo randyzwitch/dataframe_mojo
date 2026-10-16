@@ -1,4 +1,6 @@
 """Terminal primitive IMPLODE keeps GPU operand evaluation and error order."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
@@ -70,6 +72,7 @@ def _check_child(actual: Series, expected: Series) raises:
     assert_false(Bool(actual._field_metadata))
 
 
+# requires: metal
 def test_mojo_gpu_implode_primitive_literals_nulls_layouts_metadata_and_empty() raises:
     var original = _source()
     for variant in range(3):
@@ -168,6 +171,7 @@ def test_mojo_gpu_implode_primitive_literals_nulls_layouts_metadata_and_empty() 
         )
 
 
+# requires: metal
 def test_mojo_gpu_implode_prior_rows_trailing_slices_and_profiles_budget() raises:
     var frame = DataFrame(
         [
@@ -438,6 +442,7 @@ def _check_implode_eager_phases_and_deferred_slices() raises:
                     )
 
 
+# requires: metal
 def test_mojo_gpu_implode_gpu_errors_masks_projection_order_head_and_observer() raises:
     _check_implode_eager_phases_and_deferred_slices()
     var frame = DataFrame(
@@ -507,6 +512,7 @@ def test_mojo_gpu_implode_gpu_errors_masks_projection_order_head_and_observer() 
     assert_true(observed[1].item(0, "kernel_launches").int64() > 0)
 
 
+# requires: metal
 def test_mojo_gpu_implode_explicit_boundaries_and_metadata_only_description() raises:
     var source = _source()
     var query = source.lazy().select((col("n") + 1).implode())

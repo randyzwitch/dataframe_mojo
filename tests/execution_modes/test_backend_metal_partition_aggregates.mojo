@@ -1,4 +1,5 @@
 """GPU partition aggregates preserve null partitions, order and errors."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast, ArcPointer
 from tests.execution_modes.test_backend_metal import require_metal
@@ -95,6 +96,7 @@ def test_partition_aggregate_metadata_preflight() raises:
     )
 
 
+# requires: metal
 def test_native_metal_partition_aggregates_reductions_nulls_order_and_empty() raises:
     _ = require_metal()
     var frame = fixture()
@@ -128,6 +130,7 @@ def test_native_metal_partition_aggregates_reductions_nulls_order_and_empty() ra
         _ = lower_partition_aggregates(invalid)
 
 
+# requires: metal
 def test_native_metal_partition_aggregate_composition_filter_join_and_consumers() raises:
     _ = require_metal()
     var frame = fixture()
@@ -185,6 +188,7 @@ def test_native_metal_partition_aggregate_composition_filter_join_and_consumers(
         )
 
 
+# requires: metal
 def test_native_metal_partition_checked_sum_observation() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -223,6 +227,7 @@ def test_native_metal_partition_checked_sum_observation() raises:
     check(valid.lazy().filter(col("x").sum().over("g") > 5))
 
 
+# requires: metal
 def test_native_metal_partition_aggregate_key_types_slices_and_hash_groups() raises:
     _ = require_metal()
     var keys = List[Float64]()
@@ -304,6 +309,7 @@ def test_native_metal_partition_aggregate_key_types_slices_and_hash_groups() rai
     check(many.lazy().select(col("x").sum().over("w").alias("total")))
 
 
+# requires: metal
 def test_native_metal_partition_window_checked_children_and_bool_reductions() raises:
     _ = require_metal()
     var frame = fixture()
@@ -356,6 +362,7 @@ def test_native_metal_partition_window_checked_children_and_bool_reductions() ra
         _ = ordinary.collect(accelerator=MetalRuntime(), optimize=False)
 
 
+# requires: metal
 def test_native_metal_partition_floating_reduction_bits_and_decimal_sums() raises:
     _ = require_metal()
     for n in List[Int]([513, 196609]):
@@ -398,6 +405,7 @@ def test_native_metal_partition_floating_reduction_bits_and_decimal_sums() raise
     check(decimal.lazy().select(col("d").sum().over("g").alias("total")))
 
 
+# requires: metal
 def test_native_metal_nested_partition_aggregates_composition_consumers_and_nulls() raises:
     _ = require_metal()
     var frame = fixture()
@@ -457,6 +465,7 @@ def test_native_metal_nested_partition_aggregates_composition_consumers_and_null
         )
 
 
+# requires: metal
 def test_native_metal_nested_partition_checked_errors_are_fully_observed() raises:
     _ = require_metal()
     for outer in List[Bool]([False, True]):
@@ -496,6 +505,7 @@ def test_native_metal_nested_partition_checked_errors_are_fully_observed() raise
     )
 
 
+# requires: metal
 def test_native_metal_nested_partition_floating_worker_order() raises:
     _ = require_metal()
     var gs = List[Int32]()
@@ -604,6 +614,7 @@ def test_shared_partition_metadata_preserves_cpu_empty_execution() raises:
         assert_true(counter[] == 0)
 
 
+# requires: metal
 def test_native_metal_deep_shared_partition_metadata_stays_resident() raises:
     _ = require_metal()
     var frame = fixture()

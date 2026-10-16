@@ -1,4 +1,6 @@
 """Decimal arg extrema use exact words and UInt32 logical row ordinals."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from dataframe import col
 from dataframe.metal import MetalRuntime
 from tests.public_contracts.test_decimal_arg_extrema import (
@@ -11,6 +13,7 @@ from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting
 
 
+# requires: metal
 def test_mojo_gpu_decimal_arg_extrema_exact_widths_scale_groups_and_layouts() raises:
     var runtime = MetalRuntime()
     for width in [32, 64, 128]:
@@ -73,6 +76,7 @@ def test_mojo_gpu_decimal_arg_extrema_exact_widths_scale_groups_and_layouts() ra
                 )
 
 
+# requires: metal
 def test_mojo_gpu_decimal_arg_extrema_preserve_high_words_and_first_ties() raises:
     var setting = WorkerSetting(2)
     var runtime = MetalRuntime()

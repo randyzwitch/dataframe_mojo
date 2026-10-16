@@ -1,4 +1,7 @@
 """Sorted duplicates cannot impersonate an untouched full physical chunk."""
+# contract-group: storage.isolation
+# contract-group: storage.chunks
+# contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from dataframe.gather import (

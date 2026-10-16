@@ -1,4 +1,6 @@
 """Direct Mojo temporal fields, duration totals and checked calendar rows."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -63,6 +65,7 @@ def _fields(dtype: DataType) -> List[Expr]:
     return expressions^
 
 
+# requires: metal
 def test_mojo_gpu_temporal_fields_extreme_storage_nullable_layouts_and_metadata() raises:
     var dtypes: List[DataType] = [
         DataType.DATE,
@@ -110,6 +113,7 @@ def test_mojo_gpu_temporal_fields_extreme_storage_nullable_layouts_and_metadata(
             _ = _check(frame.head(0).lazy().select_exprs(_fields(dtype)))
 
 
+# requires: metal
 def test_mojo_gpu_temporal_calendar_offsets_truncation_and_time_wrap() raises:
     var dtypes: List[DataType] = [
         DataType.DATE,
@@ -218,6 +222,7 @@ def test_mojo_gpu_temporal_calendar_offsets_truncation_and_time_wrap() raises:
     )
 
 
+# requires: metal
 def test_mojo_gpu_duration_totals_negative_truncation_wrapping_and_rows() raises:
     var units: List[String] = ["ms", "us", "ns"]
     var targets: List[String] = [
@@ -284,6 +289,7 @@ def test_mojo_gpu_duration_totals_negative_truncation_wrapping_and_rows() raises
     assert_equal(result.column("t").int64()._get(1), Int64(0))
 
 
+# requires: metal
 def test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges() raises:
     var units: List[String] = ["ms", "us", "ns"]
     for unit in units:

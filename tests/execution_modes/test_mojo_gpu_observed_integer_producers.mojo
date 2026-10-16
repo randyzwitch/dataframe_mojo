@@ -1,4 +1,5 @@
 """Checked producers must finish before downstream consumers can hide faults."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Expr, Series, col, lit
 from dataframe.lazy import LazyFrame
@@ -27,6 +28,7 @@ def _collect(query: LazyFrame, gpu: Bool) raises -> DataFrame:
     ) if gpu else query.collect(engine="cpu", streaming=False, optimize=False)
 
 
+# requires: metal
 def test_mojo_gpu_observed_integer_producer_success_and_nested_groups() raises:
     var source = _source()
     var left = (
@@ -56,6 +58,7 @@ def test_mojo_gpu_observed_integer_producer_success_and_nested_groups() raises:
         assert_equal(_collect(grouped.head(0), gpu).height(), 0)
 
 
+# requires: metal
 def test_mojo_gpu_observed_unused_integer_overflow_before_consumers() raises:
     var source = _source(True)
     var producer = (
@@ -94,6 +97,7 @@ def test_mojo_gpu_observed_unused_integer_overflow_before_consumers() raises:
     assert_equal(_collect(_source().lazy().select(col("v")), True).height(), 3)
 
 
+# requires: metal
 def test_mojo_gpu_observed_first_group_overflow_before_regroup_and_head() raises:
     var first = (
         _source(True)
@@ -111,6 +115,7 @@ def test_mojo_gpu_observed_first_group_overflow_before_regroup_and_head() raises
             _ = _collect(first.head(0), gpu)
 
 
+# requires: mojo_gpu
 def test_observed_integer_boundary_signatures_and_original_order() raises:
     var query = (
         _source()
@@ -174,6 +179,7 @@ def test_observed_integer_boundary_signatures_and_original_order() raises:
     assert_true(found)
 
 
+# requires: mojo_gpu
 def test_integer_candidate_scan_preserves_deferred_cut_controls() raises:
     from dataframe import when
     from dataframe.accelerator.cuts import lower_cuts

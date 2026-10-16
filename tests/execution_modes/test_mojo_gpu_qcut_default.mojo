@@ -1,4 +1,6 @@
 """Default QCUT labels remain String across immutable resident text domains."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit, when
@@ -32,6 +34,7 @@ def _source() raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_mojo_gpu_qcut_default_literal_labels_nulls_closure_and_layouts() raises:
     var runtime = MetalRuntime()
     var raw = _source()
@@ -74,6 +77,7 @@ def test_mojo_gpu_qcut_default_literal_labels_nulls_closure_and_layouts() raises
             assert_equal(actual.item().string(), "(-inf, inf]")
 
 
+# requires: metal
 def test_mojo_gpu_qcut_default_downstream_filter_join_and_domain_union() raises:
     var source = _source()
     var runtime = MetalRuntime()
@@ -137,6 +141,7 @@ def test_mojo_gpu_qcut_default_downstream_filter_join_and_domain_union() raises:
     assert_equal(actual.item(3, "other").string(), "(2.25, inf]")
 
 
+# requires: metal
 def test_mojo_gpu_qcut_default_breakpoints_over_keys_and_exact_controls() raises:
     var source = _source()
     var runtime = MetalRuntime()
@@ -191,6 +196,7 @@ def test_mojo_gpu_qcut_default_breakpoints_over_keys_and_exact_controls() raises
     assert_frame(defaults.collect(accelerator=runtime), d[0])
 
 
+# requires: metal
 def test_mojo_gpu_qcut_default_duplicates_signed_zero_and_ordered_failures() raises:
     var runtime = MetalRuntime()
     var source = DataFrame([Series("x", Column[Float64]([0, 0, 0, 1]))])
