@@ -350,7 +350,8 @@ def test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight() raises:
         .join(right.lazy(), on="k", how="left")
         .head(0)
     )
-    with assert_raises(contains="checked integer arithmetic"):
+    # The checked projection is admitted and observed before the join.
+    with assert_raises(contains="overflow"):
         _ = overflowing.collect(accelerator=MetalRuntime(), engine="accel")
     var unsupported = left.lazy().join(
         right.lazy().with_columns(col("y").cast(DataType.STRING).alias("y")),
