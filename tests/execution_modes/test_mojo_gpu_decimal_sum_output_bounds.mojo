@@ -322,3 +322,10 @@ def _guarded_prefix_cases() raises:
     assert_true(
         not decimal_sum_receipts.matches(origin[], changed_transport, mapped)
     )
+    var changed_transport_metadata = projected.copy()
+    changed_transport_metadata._nodes[transport].code_domain = DataType.INT32
+    assert_true(
+        not decimal_sum_receipts.matches(
+            origin[], changed_transport_metadata, mapped
+        )
+    )

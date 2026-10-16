@@ -17,6 +17,7 @@ from dataframe.lazy import (
     SELECT,
     FILTER,
     WITH_COLUMNS,
+    _plan_node,
 )
 from . import decimal_sum_bounds as raw
 from . import decimal_group_feed
@@ -381,7 +382,7 @@ def _plain_transport(node: PlanNode) -> Bool:
     return True
 
 
-def _original_edge(origin: Origin, query: LazyFrame, child: Int) -> Int:
+def _original_edge(origin: Origin, query: LazyFrame, child: Int) raises -> Int:
     if child == -1:
         return -1
     # Projection pruning inserts unanchored plain column transports and can
@@ -394,7 +395,7 @@ def _original_edge(origin: Origin, query: LazyFrame, child: Int) -> Int:
         for at in range(len(origin.prefix_nodes)):
             if _same_anchor(node, origin.prefix_nodes[at]):
                 return origin.prefix_indices[at]
-        if not _plain_transport(node):
+        if not _transport_matches(query, child):
             return -2
         child = node.left
     return -2
@@ -414,7 +415,7 @@ def prefix_matches(origin: Origin, query: LazyFrame, group: Int) raises -> Bool:
         var anchored = False
         for original in origin.prefix_nodes:
             anchored |= _same_anchor(query._nodes[at], original)
-        if not anchored and not _plain_transport(query._nodes[at]):
+        if not anchored and not _transport_matches(query, at):
             return False
     var staged = query.copy()
     var source_slot = 0
@@ -501,3 +502,29 @@ def needs_bounds(query: LazyFrame, group: Int) raises -> Bool:
                 ):
                     return True
     return False
+
+
+def _transport_matches(query: LazyFrame, at: Int) raises -> Bool:
+    ref node = query._nodes[at]
+    if not _plain_transport(node) or node.left >= len(query._nodes):
+        return False
+    var fields = List[TextField]()
+    var names = List[String]()
+    for expression in node.exprs:
+        names.append(expression._nodes[0].text)
+    for field in query._nodes[node.left].text_fields:
+        if field.name in names:
+            fields.append(field.copy())
+    # Replay only the documented pruning adapter, from the guarded child:
+    # exact column ASTs plus unchanged selected text owners/code domain and
+    # default controls. Metadata cannot introduce a new interpretation.
+    var expected = _plan_node(
+        SELECT,
+        node.left,
+        exprs=node.exprs,
+        code_domain=query._nodes[node.left].code_domain,
+        text_fields=fields^,
+    )
+    var staged = query.copy()
+    staged._nodes[at] = expected^
+    return _prefix_signature(query, at) == _prefix_signature(staged, at)
