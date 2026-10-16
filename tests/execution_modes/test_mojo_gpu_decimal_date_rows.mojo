@@ -57,7 +57,7 @@ def _source(nullable: Bool = False, bad: Bool = False) raises -> DataFrame:
     )
 
 
-def _expressions() -> List[Expr]:
+def _expressions() raises -> List[Expr]:
     return [
         col("d").dt().year().alias("y"),
         (
