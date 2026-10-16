@@ -1301,9 +1301,11 @@ def lower_rows(
         var ordered_producer = Bool(node.producer_origin)
         if ordered_producer:
             producer_phases.validate_region(query, node)
-            if (
-                node.producer_origin.value()[].phase
-                != producer_phases.OBSERVED_IANA
+            if node.producer_origin.value()[].phase not in List[Int](
+                [
+                    producer_phases.OBSERVED_IANA,
+                    producer_phases.OBSERVED_STRICT_CAST,
+                ]
             ):
                 capabilities.reject(
                     "observed temporal", "unknown producer phase"
@@ -1683,6 +1685,7 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
+                    and not ordered_producer
                     and not (
                         capabilities.proven_integer_operations
                         and proven[part_index]
@@ -2919,7 +2922,7 @@ def lower_rows(
             )
     var capsule_peak = 0
     var zone_words = List[UInt64]()
-    if len(capsule.descriptors):
+    if len(capsule.words):
         for step in steps:
             for node in range(step.start, step.start + step.nodes):
                 var op = code[4 * node]

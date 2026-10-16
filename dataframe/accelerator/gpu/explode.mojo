@@ -208,10 +208,28 @@ def execute(
                 .renamed(field.prototype.name())
             )
         else:
-            prototypes.append(field.prototype.copy())
+            prototypes.append(
+                field.table.value()
+                .schema._columns[0]
+                .renamed(field.prototype.name())
+            )
     var schema = DataFrame(prototypes^)
     if not frame.rows:
-        return Table.empty(schema^)
+        var result = Table.empty(schema^)
+        for index in range(len(frame.fields)):
+            ref field = frame.fields[index]
+            if field.table:
+                result.text[index] = field.table.value().text[0].copy()
+                result.categories[index] = (
+                    field.table.value().categories[0].copy()
+                )
+                result.category_leases.extend(
+                    field.table.value().category_leases.copy()
+                )
+                result.grouped_keys[index] = (
+                    field.table.value().grouped_keys[0].copy()
+                )
+        return result^
     if len(frame.fields) > 256:
         raise Error("Resident EXPLODE exceeds 256 primitive output columns")
     var scratch = checked_add(checked_mul(frame.rows, 16), 8 + 32)
@@ -477,8 +495,13 @@ def execute(
         ref field = frame.fields[index]
         if field.table and len(field.table.value().text):
             result.text[index] = field.table.value().text[0].copy()
+        if field.table:
             result.categories[index] = field.table.value().categories[0].copy()
             result.category_leases.extend(
                 field.table.value().category_leases.copy()
+            )
+        if field.table and len(field.table.value().grouped_keys):
+            result.grouped_keys[index] = (
+                field.table.value().grouped_keys[0].copy()
             )
     return result^
