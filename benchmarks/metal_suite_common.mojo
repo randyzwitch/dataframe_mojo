@@ -11,6 +11,7 @@ from std.time import perf_counter_ns
 from dataframe import DataFrame
 from suite_common import load_tables
 from metal_suite_diagnostics import emit_comparison, environment_keys
+from metal_suite_answer_exports import export_answer
 
 
 def clean(message: String) -> String:
@@ -43,13 +44,14 @@ def run[
             + reason
         )
         return
+    export_answer(expected, "cpu", 0)
     var ordered_equal = True
     # Suite outputs can leave group/tie order unspecified. Canonical sorting
     # compares complete row multisets, preserving duplicates; also record the
     # stricter original-order comparison instead of silently discarding it.
     var canonical = expected.sort(expected.columns())
     var elapsed = 0
-    for _ in range(repetitions):
+    for repetition in range(repetitions):
         var actual: DataFrame
         try:
             var start = perf_counter_ns()
@@ -70,6 +72,7 @@ def run[
                 + reason
             )
             return
+        export_answer(actual, "metal", repetition)
         ordered_equal &= actual.equals(expected)
         if (
             actual.columns() != expected.columns()
@@ -100,6 +103,7 @@ def run[
             # Repeat the CPU query without excusing either kind of difference.
             try:
                 var repeated = reference(name, tables)
+                export_answer(repeated, "cpu_repeat", 0)
                 print("cpu_repeat_equal\t" + String(repeated.equals(expected)))
                 emit_comparison(
                     expected, repeated, "cpu_repeat", alignment_keys, order_keys
