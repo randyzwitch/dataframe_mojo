@@ -2024,6 +2024,12 @@ struct DataFrame(Copyable, Sized, Writable):
             var right_rows = List[Int]()
             var direct = False
             var direct_identity = False
+            # Every route returns the pairs in left row order except a
+            # left build whose caller ignores order, which returns them in
+            # the order the right side probed.
+            var left_ascending = (
+                not build_left or keep_order or how != JOIN_INNER
+            )
             if build_left:
                 var pairs = _smaller_build_join_rows(
                     left_sources,
@@ -2069,7 +2075,9 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_identity = False
                             break
                 if not left_identity:
-                    var ordered_chunks = how == JOIN_INNER
+                    # The chunk-by-chunk gather reads left rows in ascending
+                    # order only.
+                    var ordered_chunks = how == JOIN_INNER and left_ascending
                     for column in columns:
                         if (
                             not column.is_chunked()

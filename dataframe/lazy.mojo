@@ -5232,13 +5232,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _selective_on(mut self, scan: Int, keys: Expr) raises -> Bool:
         """Whether `keys` keeps at most one row in eight of the table at
-        node `scan`, estimated on evenly spaced runs of it
-        (`_estimated_rows`). A key set spanning most of the right side's
+        node `scan`, measured on evenly spaced runs of it
+        (`_sampled_rows`). A key set spanning most of the right side's
         keys filters nothing and only moves the join off its better
         build side."""
         var height = self._frames[self._nodes[scan].offset].height()
         self._nodes.append(_plan_node(FILTER, scan, exprs=[keys.copy()]))
-        var estimated = self._estimated_rows(len(self._nodes) - 1)
+        var estimated = self._sampled_rows(len(self._nodes) - 1)
         _ = self._nodes.pop()
         return estimated >= 0 and 8 * estimated <= height
 
@@ -5381,6 +5381,53 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if source.kind != SCAN_FRAME:
             return -1
         return _scan_estimate(self._frames[source.offset], node.exprs[0])
+
+    def _sampled_rows(self, index: Int) raises -> Int:
+        """Rows node `index` yields, measured on the data: exact for a table,
+        and for one row-local filter over a table the rows the filter keeps
+        of 64 evenly spaced runs of 1,024 rows (every row of a table that
+        small), scaled up. -1 for anything else. For filters made at run
+        time (a join's key set, `_selective_on`), which no statistic
+        describes; a plan's own filters are estimated (`_estimated_rows`). Evenly spaced runs, not a
+        prefix: tables are often stored in date or key order, which a
+        prefix would misjudge."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.offset].height()
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._sampled_rows(node.left)
+        if node.kind != FILTER or not _row_local(node.exprs):
+            return -1
+        ref source = self._nodes[node.left]
+        if source.kind != SCAN_FRAME:
+            return -1
+        var height = self._frames[source.offset].height()
+        var runs = 64
+        var run = 1024
+        # Only the columns the filter reads.
+        var reads = _references(node.exprs[0])
+        if not reads:
+            return -1
+        var names = List[String]()
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+        var sample = self._frames[source.offset].select(names)
+        if height > runs * run:
+            var picked = List[Int](capacity=runs * run)
+            for k in range(runs):
+                var first = k * (height // runs)
+                for i in range(run):
+                    picked.append(first + i)
+            # Gathered within each stored chunk, so no column is merged first.
+            sample = sample._filter_rows(picked^)
+        var kept = sample.filter(node.exprs[0]).height()
+        if height <= runs * run:
+            return kept
+        return Int(Float64(kept) / Float64(runs * run) * Float64(height))
 
     def _progression_key(self, index: Int, keys: List[String]) raises -> Bool:
         """Whether a join building on node `index` with these keys needs no
