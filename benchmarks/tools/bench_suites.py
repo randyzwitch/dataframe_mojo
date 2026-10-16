@@ -4,12 +4,13 @@ See docs/benchmarks.md for the rules these measurements serve. Run under the
 oracle environment, after building libdfparquet (pixi run -e native
 build-dfparquet):
 
-    # A code change, in minutes: development suites at 1M rows, this build
-    # against main, Polars/DuckDB from the reference cache.
+    # A code change, in minutes: development suites (H2O at 1M rows, PDS-H
+    # and TPC-DS at scale factor 0.1), this build against main, Polars/DuckDB
+    # from the reference cache.
     pixi run -e oracle python3 benchmarks/tools/bench_suites.py --baseline main
 
     # A report: 10M rows, three rounds, fast-path coverage, development and
-    # held-out suites (TPC-DS and ClickBench).
+    # held-out suites (ClickBench).
     pixi run -e oracle python3 benchmarks/tools/bench_suites.py --tier full --all-suites
 
 One worker process per (suite, variant, engine, round) loads the tables once
@@ -48,7 +49,10 @@ ENGINES = ("mojo", "polars", "duckdb")
 
 # Keep tuning and validation separate. PDS-H was held out until 2026-10-05,
 # when it became a development suite and TPC-DS took its place: nothing in
-# development covered multi-join plans, the one area behind Polars.
+# development covered multi-join plans, the one area behind Polars. TPC-DS
+# was held out until 2026-10-15, when it became a development suite too:
+# every development query was within 1.5x of Polars and DuckDB but one, and
+# most of the queries still outside were TPC-DS. ClickBench stays held out.
 SUITES = {
     "h2o_groupby": {
         "role": "dev",
@@ -69,7 +73,7 @@ SUITES = {
         "source": "PDS-H (pola-rs/polars-benchmark), TPC-H derived",
     },
     "tpcds": {
-        "role": "heldout",
+        "role": "dev",
         "runner": "tpcds",
         "queries": [f"q{i}" for i in range(1, 100)],
         "source": "TPC-DS (DuckDB tpcds extension: dsdgen, tpcds_queries)",
@@ -112,12 +116,13 @@ SCALES = {
 }
 
 # Two tiers (docs/benchmarks.md). `quick` is for checking a code change in
-# minutes: development suites at 1M rows, every data variant, one round, and
+# minutes: development suites at the "dev" scale (H2O at 1M rows, PDS-H and
+# TPC-DS at scale factor 0.1), every data variant, three rounds, and
 # Polars/DuckDB outcomes reused from the reference cache, since their code
 # does not change when this library does. `full` is for reports.
 TIERS = {
     "quick": {
-        "suites": "h2o_groupby,h2o_join,pdsh",
+        "suites": ",".join(n for n, s in SUITES.items() if s["role"] == "dev"),
         "scale": "dev",
         "rounds": 3,
         "reps": 3,
@@ -1160,7 +1165,7 @@ def main():
     parser.add_argument(
         "--heldout",
         action="store_true",
-        help="also run the TPC-DS and ClickBench held-out suites",
+        help="also run the held-out suites (ClickBench)",
     )
     parser.add_argument("--engines", default="mojo,polars,duckdb")
     parser.add_argument("--queries", default="", help="comma-separated subset")
@@ -1228,7 +1233,9 @@ def main():
     if args.all_suites:
         args.suites = ",".join(SUITES)
     if args.heldout:
-        args.suites += ",tpcds,clickbench"
+        args.suites += "".join(
+            "," + n for n, s in SUITES.items() if s["role"] == "heldout"
+        )
     args.suites = ",".join(dict.fromkeys(args.suites.split(",")))
     if args.report_from:
         result = json.loads(args.report_from.read_text())
