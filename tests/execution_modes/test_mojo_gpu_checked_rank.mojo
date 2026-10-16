@@ -183,12 +183,16 @@ def test_mojo_gpu_checked_rank_operand_batch_when_errors_and_reuse() raises:
         var invalid = (
             _rank_source().lazy().select((col("x") % lit(Int64(0))).rank("min"))
         )
-        with assert_raises(contains="zero"):
-            _ = invalid.collect(
-                accelerator=runtime, streaming=False, optimize=False
-            ) if gpu else invalid.collect(
-                engine="cpu", streaming=False, optimize=False
-            )
+        # Integer modulo by zero is null, so every rank remains null.
+        var actual_nulls = invalid.collect(
+            accelerator=runtime, streaming=False, optimize=False
+        ) if gpu else invalid.collect(
+            engine="cpu", streaming=False, optimize=False
+        )
+        assert_equal(actual_nulls.height(), 5)
+        assert_equal(actual_nulls.column("x").dtype(), DataType.INT64)
+        for row in range(5):
+            assert_true(actual_nulls.item(row, "x").is_null())
     var bad_cast = (
         DataFrame([Series("x", Column[Int64]([Int64.MAX, 1]))])
         .lazy()

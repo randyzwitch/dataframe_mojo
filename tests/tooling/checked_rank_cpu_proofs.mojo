@@ -126,4 +126,15 @@ def test_cpu_checked_rank_literal_methods_ties_nulls_partitions() raises:
         assert_equal(actual.item(row, "ordinal").int64(), ordinal[row])
         assert_equal(actual.item(row, "partitioned").int64(), partitioned[row])
         assert_equal(actual.item(row, "average").float64(), average[row])
+    # Independently anchor the operand nulls before ranking them. Integer
+    # zero divisors null valid rows and preserve existing input nulls.
+    var null_operand = frame.select((col("x") % lit(Int64(0))).alias("zero"))
+    var null_rank = frame.select(
+        (col("x") % lit(Int64(0))).rank("min").alias("r")
+    )
+    assert_equal(null_operand.height(), 5)
+    assert_equal(null_rank.height(), 5)
+    for row in range(5):
+        assert_true(null_operand.item(row, "zero").is_null())
+        assert_true(null_rank.item(row, "r").is_null())
     _ = setting^
