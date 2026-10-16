@@ -98,7 +98,16 @@ def _selection_branch(bound: BoundExpr, child: Int, target: DataType) -> Bool:
     # CPU casts both valid branches before selecting, even when unchosen.
     # A canonical signed64 literal at the same scale needs no word rescale
     # and cannot raise if its exact raw value fits the target precision.
-    var raw = Int128(bound.expr._nodes[child].integer)
+    ref node = bound.expr._nodes[child]
+    if node.text2.byte_length() and node.text2 != String(
+        -1 if node.integer < 0 else 0
+    ):
+        return False
+    var raw = Int128(node.integer)
+    if (source.decimal_width() == 32 or target.decimal_width() == 32) and (
+        raw < Int128(Int32.MIN) or raw > Int128(Int32.MAX)
+    ):
+        return False
     var limit = pow10(target.precision())
     return raw > -limit and raw < limit
 

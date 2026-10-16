@@ -100,6 +100,22 @@ def test_decimal_same_scale_selection_literals_and_cast_refusals() raises:
             forged_high, 0, DataType.decimal(3, 2, 32)
         )
     )
+    var forged32 = value.copy()
+    forged32.dtypes[0] = DataType.decimal(3, 2, 32)
+    forged32.expr._nodes[0].integer = 3000000000
+    assert_true(
+        not decimal_group_feed._selection_branch(
+            forged32, 0, DataType.decimal(10, 2, 64)
+        )
+    )
+    var forged64 = value.copy()
+    forged64.dtypes[0] = DataType.decimal(3, 2, 64)
+    forged64.expr._nodes[0].text2 = "1"
+    assert_true(
+        not decimal_group_feed._selection_branch(
+            forged64, 0, DataType.decimal(4, 2, 64)
+        )
+    )
     # A raw source column is not a constant, and its declared precision is
     # not a checked value bound. CPU's unchosen common-type cast still fails.
     var raw = DataFrame(
