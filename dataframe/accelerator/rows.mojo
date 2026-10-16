@@ -2902,7 +2902,7 @@ def lower_rows(
             )
     var capsule_peak = 0
     var zone_words = List[UInt64]()
-    if len(capsule.descriptors):
+    if len(capsule.words):
         for step in steps:
             for node in range(step.start, step.start + step.nodes):
                 var op = code[4 * node]
