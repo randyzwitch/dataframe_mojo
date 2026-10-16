@@ -4,7 +4,7 @@ mojo run -I . -I benchmarks/suites tests/tooling/mojo_cpu_pdsh_decimal_routes_pr
 The table arguments are exactly the baseline worker's arguments.
 """
 from std.sys import argv
-from dataframe import StringColumn
+from dataframe import DataType, StringColumn
 from dataframe.binding import bind
 from dataframe.expr import ADD, SUB, MUL, LIT_INT, CAST
 from dataframe.lazy import AGG, WITH_COLUMNS
@@ -30,7 +30,11 @@ def main() raises:
             for chunk in column.chunks():
                 if chunk._data.isa[StringColumn]():
                     coded |= Bool(chunk._data[StringColumn]._codes)
-            if dtype.is_decimal() or dtype.is_date() or dtype.is_string():
+            if (
+                dtype.is_decimal()
+                or dtype.is_date()
+                or dtype == DataType.STRING
+            ):
                 print(
                     "FIELD",
                     column.name(),
