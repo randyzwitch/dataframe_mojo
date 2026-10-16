@@ -202,9 +202,11 @@ keywords, one list entry per key: `sort(["a", "b"], descending=[False, True],
 nulls_last=[True, False])`. An empty key list or a length mismatch raises.
 
 Sorting is stable: rows with equal keys keep input order, in either direction.
-Null placement is independent of direction and defaults to last. NaNs follow
-all non-null non-NaN numeric values in either direction; nulls remain first or
-last according to the option. `-0.0` and `0.0` are equal keys. Strings use
+Null placement is independent of direction and defaults to last. NaN is the
+largest value, as in Polars and DuckDB: it follows every number in an ascending
+sort and precedes every number in a descending one, so `[2.0, NaN, null, 1.0]`
+sorts descending to `NaN, 2.0, 1.0, null`. Nulls remain first or last according
+to the option. `-0.0` and `0.0` are equal keys. Strings use
 Mojo's byte-lexicographic comparison, without locale collation. Boolean false
 sorts before true in ascending order.
 
