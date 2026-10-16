@@ -1017,6 +1017,7 @@ def estimate_resources(
             or plan.ordered_mode == 4
             or plan.ordered_mode == 5
             or plan.ordered_mode == 6
+            or plan.ordered_mode == 7
             or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
         ):
             peak = _checked_add(
@@ -1132,8 +1133,13 @@ def estimate_resources(
             plan.ordered_mode == 3
             or plan.ordered_mode == 4
             or plan.ordered_mode == 6
+            or plan.ordered_mode == 7
             or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
         )
+        if plan.ordered_mode == 7:
+            observations = 1  # Input-zero proof precedes all original operands.
+            for step in plan.steps:
+                observations += Int(not step.grouped and not step.order)
         launches = _checked_add(
             launches,
             observations
@@ -1143,6 +1149,7 @@ def estimate_resources(
                 or plan.ordered_mode == 4
                 or plan.ordered_mode == 5
                 or plan.ordered_mode == 6
+                or plan.ordered_mode == 7
                 or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT else 1
             ),
         )
@@ -1374,7 +1381,8 @@ def execute_plan(
         or observed_producer
         or observed_rank
     )
-    var ordered = ordered_scalar or ordered_rows
+    var ordered_group = plan.ordered_mode == 7
+    var ordered = ordered_scalar or ordered_rows or ordered_group
     if observed_rank:
         if len(plan.iana_mask_bases) != len(plan.steps):
             raise Error("Checked rank certificate step geometry changed")
@@ -1392,6 +1400,23 @@ def execute_plan(
             raise Error("Checked rank requires one isolated input phase")
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
+    if ordered_group:
+        var groups = 0
+        for step in plan.steps:
+            if step.filter or (step.order and not groups):
+                raise Error(
+                    "Mojo GPU narrow Decimal group cannot move source rows"
+                )
+            groups += Int(step.grouped)
+        if (
+            not terminal_boundary
+            or plan.limit >= 0
+            or plan.reductions
+            or groups != 1
+            or rows > Int(UInt32.MAX)
+            or len(plan.ordered_ranks[]) != len(plan.literals)
+        ):
+            raise Error("Mojo GPU narrow Decimal group certificate changed")
     if ordered_rows and not observed_rank:
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
@@ -1654,7 +1679,7 @@ def execute_plan(
                             iana_active_scratch = ctx.enqueue_create_buffer[
                                 DType.uint8
                             ](iana_scalar_resources.scratch_bytes)
-                    if ordered_rows:
+                    if ordered_rows or ordered_group:
                         ordered_partials = ctx.enqueue_create_buffer[
                             DType.uint32
                         ](2 * fault_groups)
@@ -1682,6 +1707,7 @@ def execute_plan(
                         ordered_private
                         or ordered_decimal
                         or observed_producer
+                        or ordered_group
                         or observed_rank
                     ):
                         # Input cells are ordinary flags from an already
@@ -2476,7 +2502,30 @@ def execute_plan(
                                 grid_dim=(current_rows + 255) // 256,
                                 block_dim=256,
                             )
-                        if ordered_rows:
+                        if ordered_group:
+                            ctx.enqueue_function[
+                                ordered_faults.observe_precision_partials
+                            ](
+                                device_errors.unsafe_ptr(),
+                                ordered_partials.value().unsafe_ptr(),
+                                UInt32(step.slot),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(fault_groups),
+                                grid_dim=(fault_groups + 127) // 128,
+                                block_dim=128,
+                            )
+                            ctx.enqueue_function[
+                                ordered_faults.observe_precision_finish
+                            ](
+                                ordered_partials.value().unsafe_ptr(),
+                                ordered_control.value().unsafe_ptr(),
+                                UInt32(fault_groups),
+                                grid_dim=1,
+                                block_dim=1,
+                            )
+                            submissions += 2
+                        elif ordered_rows:
                             ctx.enqueue_function[
                                 ordered_faults.observe_partials
                             ](
@@ -2516,6 +2565,10 @@ def execute_plan(
                         waits += 1
                         if fault[0]:
                             var category = ordered_faults.category(fault[0])
+                            if ordered_group and category != 8:
+                                raise Error(
+                                    "Mojo GPU narrow Decimal precision proof was violated"
+                                )
                             if iana_certified and category > 64:
                                 var mask_base = -1
                                 for at in range(len(plan.steps)):
