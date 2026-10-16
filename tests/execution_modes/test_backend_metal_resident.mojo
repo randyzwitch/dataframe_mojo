@@ -1,4 +1,5 @@
 """Resident union, distinct and slicing obey independently selected positions."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -160,6 +161,7 @@ def union_and_slice_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_nested_union_and_extreme_slices_preserve_all_typed_payloads_and_order() raises:
     union_and_slice_cases(require_metal(), True)
 
@@ -244,6 +246,7 @@ def distinct_cases(runtime: MetalRuntime, native: Bool) raises:
         assert_frame(result, resident_rows(ids))
 
 
+# requires: metal
 def test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions() raises:
     distinct_cases(require_metal(), True)
 

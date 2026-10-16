@@ -1,4 +1,5 @@
 """Settings reach existing providers without changing their interfaces."""
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col

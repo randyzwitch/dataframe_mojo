@@ -1,4 +1,6 @@
 """Primitive source Struct fields retain child owners across row accumulators."""
+# contract-group: public.accelerator_staging
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (

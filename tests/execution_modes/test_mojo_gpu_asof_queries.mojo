@@ -1,4 +1,6 @@
 """Public as-of queries keep CPU cursor rules on resident Mojo GPU tables."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import AnyValue, Column, DataFrame, DataType, Series, col
@@ -79,6 +81,7 @@ def _directions[D: DType](runtime: MetalRuntime) raises:
             at += 1
 
 
+# requires: metal
 def test_mojo_gpu_asof_public_directions_nullable_chunks_duplicate_runs() raises:
     var runtime = MetalRuntime()
     comptime types = (
@@ -97,6 +100,7 @@ def test_mojo_gpu_asof_public_directions_nullable_chunks_duplicate_runs() raises
         _directions[types[index]](runtime)
 
 
+# requires: metal
 def test_mojo_gpu_asof_public_grouped_dictionary_ieee_keys_and_wide_payloads() raises:
     var runtime = MetalRuntime()
     var lf = List[Float64]()
@@ -167,6 +171,7 @@ def test_mojo_gpu_asof_public_grouped_dictionary_ieee_keys_and_wide_payloads() r
         assert_frame(actual, query.collect(engine="cpu", streaming=False))
 
 
+# requires: metal
 def test_mojo_gpu_asof_public_complete_sortedness_producer_errors_and_recovery() raises:
     var runtime = MetalRuntime()
     var left = DataFrame(
@@ -261,6 +266,7 @@ def test_mojo_gpu_asof_public_complete_sortedness_producer_errors_and_recovery()
     assert_frame(good.collect(accelerator=runtime), good.collect(engine="cpu"))
 
 
+# requires: metal
 def test_mojo_gpu_asof_public_resident_consumers_profiles_and_exact_budget() raises:
     var left = DataFrame(
         [
@@ -343,6 +349,7 @@ def test_mojo_gpu_asof_public_resident_consumers_profiles_and_exact_budget() rai
     assert_equal(output.item(0, "n").int64(), Int64(2))
 
 
+# requires: metal
 def test_mojo_gpu_asof_public_tolerance_temporal_identity_and_optional_capability() raises:
     var runtime = MetalRuntime()
     var left = DataFrame([Series("k", Column[UInt64]([0, UInt64.MAX]))])

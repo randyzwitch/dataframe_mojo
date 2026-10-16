@@ -1,4 +1,5 @@
 """Arrow contracts against independently authored C buffers and byte consumers."""
+# contract-group: io.arrow
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true
 from dataframe import (
@@ -179,6 +180,9 @@ def test_arrow_dictionary_import_accepts_each_integer_index_width_and_duplicate_
             assert_equal(result.get(3).string(), "red" if duplicate else "blue")
 
 
+# expected-failure: Valid Arrow dictionary indices that refer to null
+# expected-failure: dictionary values raise instead of yielding null cells.
+# expected-diagnostic: Cannot read a null value
 def test_arrow_dictionary_null_values_decode_as_null_cells() raises:
     var producer = pyarrow_producer(4)
     var result = import_arrow_series(
@@ -406,6 +410,9 @@ def test_arrow_temporal_formats_scale_units_and_retain_timezone_metadata() raise
         schema_release(schema)
 
 
+# expected-failure: Null second-unit temporal payloads are rescaled and
+# expected-failure: overflow instead of remaining null.
+# expected-diagnostic: Arrow seconds value overflows milliseconds
 def test_arrow_null_seconds_payload_does_not_overflow_unit_conversion() raises:
     for format in ["tss:UTC", "tDs"]:
         var producer = fixed_foreign(
@@ -476,6 +483,10 @@ def test_arrow_malformed_formats_children_dictionaries_and_overflow_release_ever
     )
 
 
+# expected-failure: Malformed empty Int64 C layout with one buffer slot is
+# expected-failure: accepted instead of rejected.
+# expected-diagnostic: Arrow numeric layout must reject missing required
+# expected-diagnostic: buffer slot
 def test_arrow_empty_numeric_array_rejects_missing_required_buffer_slot() raises:
     var producer = ForeignArrow(1)
     producer.nodes[0].describe("l", "empty", 0)

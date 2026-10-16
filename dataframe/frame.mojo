@@ -19,6 +19,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _pack_bits
 from .string_column import StringColumn
 from .series import Series, sort_indices, smallest_indices
+from .distinct_statistics import TableStatistics
 from .fused_compare import (
     SelectionTree,
     fused_comparisons,
@@ -284,11 +285,37 @@ struct Field(Copyable):
     var dtype: DataType
 
 
+# Up to this many columns, names are checked pair by pair: no dictionary is
+# built for a frame of a few columns, and frames are built for every step.
+comptime _PAIRWISE_NAMES = 32
+
+
+def _check_unique_names(columns: List[Series]) raises:
+    """Raise on a repeated column name."""
+    var n = len(columns)
+    if n <= _PAIRWISE_NAMES:
+        for i in range(1, n):
+            ref name = columns[i]._name
+            for j in range(i):
+                if columns[j]._name == name:
+                    raise Error("Duplicate column name: " + name)
+        return
+    var names = Dict[String, Bool]()
+    for column in columns:
+        var name = column.name()
+        if name in names:
+            raise Error("Duplicate column name: " + name)
+        names[name] = True
+
+
 struct DataFrame(Copyable, Sized, Writable):
     """Own equal-length, uniquely named columns; transformations copy storage."""
 
     var _columns: List[Series]
     var _height: Int
+    # A loaded table's distinct-count statistics, shared by its copies
+    # (`read_parquet`, `read_csv`); none for a frame made any other way.
+    var _statistics: Optional[ArcPointer[TableStatistics]]
 
     def __init__(
         out self, var columns: List[Series], *, height: Int = -1
@@ -302,16 +329,31 @@ struct DataFrame(Copyable, Sized, Writable):
             inferred = height
         if height >= 0 and inferred != height:
             raise Error("Explicit height does not match columns")
-        var names = Dict[String, Bool]()
         for column in columns:
             if len(column) != inferred:
                 raise Error("DataFrame columns must have equal lengths")
-            var name = column.name()
-            if name in names:
-                raise Error("Duplicate column name: " + name)
-            names[name] = True
+        _check_unique_names(columns)
         self._columns = columns^
         self._height = inferred
+        self._statistics = None
+
+    def _with_statistics(var self) -> Self:
+        """This frame as a loaded table: its columns' distinct counts are
+        estimated on first request and kept for every copy (DuckDB keeps
+        them with each table it stores)."""
+        self._statistics = Optional(ArcPointer(TableStatistics()))
+        return self^
+
+    def _distinct_count(self, name: String) raises -> Int:
+        """Column `name`'s estimated distinct count from the table's
+        statistics, or -1 when this frame has none or no such column."""
+        if not self._statistics:
+            return -1
+        for column in self._columns:
+            if column.name() == name:
+                var box = self._statistics.value()
+                return box[].distinct(column)
+        return -1
 
     def rechunk(self) raises -> Self:
         """Return one contiguous array per column, copying only chunked
@@ -3589,9 +3631,15 @@ def _smaller_build_join_rows(
     # list-indexed three passes before cost 19 ns a pair (PDS-H q2, 159K
     # pairs, 3 ms on one thread).
     var count = len(left[0])
+    var n = len(pairs[0])
+    # On several workers when there are at least as many pairs a worker
+    # as left rows: each worker keeps a count per left row, so more
+    # workers than that would count more than they scatter.
+    var lanes = min(worker_count(n), max(1, n // max(count, 1)))
+    if lanes > 1 and not include_unmatched:
+        return _parallel_left_major(pairs[1], pairs[0], count, lanes)
     var pairs_left = pairs[1].unsafe_ptr()
     var pairs_right = pairs[0].unsafe_ptr()
-    var n = len(pairs[0])
     var starts = _group_index(pairs[1], count)
     var cursor = starts.copy()
     var unmatched = 0
@@ -3640,6 +3688,153 @@ def _smaller_build_join_rows(
         fill[unsafe_offset=i] = position + 1
         out_left[unsafe_offset=position] = i
         out_right[unsafe_offset=position] = pairs_right[unsafe_offset=k]
+    return (left_rows^, right_rows^)
+
+
+struct _OrderCountJob(Job):
+    """Rows of each left id among pairs [lo, hi)."""
+
+    var ids: Int
+    var lo: Int
+    var hi: Int
+    var counts: List[Int]
+
+    def __init__(out self, ids: Int, lo: Int, hi: Int, count: Int):
+        self.ids = ids
+        self.lo = lo
+        self.hi = hi
+        self.counts = List[Int](length=count, fill=0)
+
+    def run(mut self) raises:
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var counts = self.counts.unsafe_ptr()
+        for k in range(self.lo, self.hi):
+            counts[unsafe_offset=ids[unsafe_offset=k]] += 1
+
+
+struct _OrderScatterJob(Job):
+    """Pairs [lo, hi) to their left id's group, each id's next position
+    in `cursor` (this range's own, after earlier ranges' rows)."""
+
+    var ids: Int
+    var rows: Int
+    var out: Int
+    var lo: Int
+    var hi: Int
+    var cursor: List[Int]
+
+    def __init__(
+        out self,
+        ids: Int,
+        rows: Int,
+        out_rows: Int,
+        lo: Int,
+        hi: Int,
+        var cursor: List[Int],
+    ):
+        self.ids = ids
+        self.rows = rows
+        self.out = out_rows
+        self.lo = lo
+        self.hi = hi
+        self.cursor = cursor^
+
+    def run(mut self) raises:
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
+        var at = self.cursor.unsafe_ptr()
+        for k in range(self.lo, self.hi):
+            var id = ids[unsafe_offset=k]
+            var position = at[unsafe_offset=id]
+            at[unsafe_offset=id] = position + 1
+            out[unsafe_offset=position] = rows[unsafe_offset=k]
+
+
+struct _OrderFillJob(Job):
+    """Each output position of left ids [lo, hi) given its id."""
+
+    var starts: Int
+    var out: Int
+    var lo: Int
+    var hi: Int
+
+    def __init__(out self, starts: Int, out_ids: Int, lo: Int, hi: Int):
+        self.starts = starts
+        self.out = out_ids
+        self.lo = lo
+        self.hi = hi
+
+    def run(mut self) raises:
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
+        for id in range(self.lo, self.hi):
+            for position in range(
+                starts[unsafe_offset=id], starts[unsafe_offset=id + 1]
+            ):
+                out[unsafe_offset=position] = id
+
+
+def _parallel_left_major(
+    ids: List[Int], rows: List[Int], count: Int, lanes: Int
+) raises -> Tuple[List[Int], List[Int]]:
+    """`_smaller_build_join_rows`' stable counting sort of pairs by left id,
+    on `lanes` workers: each counts its contiguous range of pairs per id,
+    one pass turns the counts into each range's own write positions (after
+    the earlier ranges' rows of the same id), and each scatters its range
+    there, as a parallel radix sort's scatter does. Ranges follow probe
+    order, so every group keeps its pairs in probe order, as the serial
+    sort does."""
+    var n = len(ids)
+    var bounds = partitions(n, lanes, 1)
+    var counting = List[_OrderCountJob](capacity=lanes)
+    for j in range(lanes):
+        counting.append(
+            _OrderCountJob(
+                Int(ids.unsafe_ptr()), bounds[j], bounds[j + 1], count
+            )
+        )
+    run_jobs(counting)
+    var starts = List[Int](unsafe_uninit_length=count + 1)
+    var total = 0
+    for id in range(count):
+        starts[id] = total
+        for j in range(lanes):
+            var c = counting[j].counts[id]
+            counting[j].counts[id] = total
+            total += c
+    starts[count] = total
+    var left_rows = List[Int](unsafe_uninit_length=n)
+    var right_rows = List[Int](unsafe_uninit_length=n)
+    var scatter = List[_OrderScatterJob](capacity=lanes)
+    for j in range(lanes):
+        var cursor = List[Int]()
+        swap(cursor, counting[j].counts)
+        scatter.append(
+            _OrderScatterJob(
+                Int(ids.unsafe_ptr()),
+                Int(rows.unsafe_ptr()),
+                Int(right_rows.unsafe_ptr()),
+                bounds[j],
+                bounds[j + 1],
+                cursor^,
+            )
+        )
+    run_jobs(scatter)
+    var id_bounds = partitions(count, lanes, 1)
+    var fill = List[_OrderFillJob](capacity=lanes)
+    for j in range(lanes):
+        if id_bounds[j] < id_bounds[j + 1]:
+            fill.append(
+                _OrderFillJob(
+                    Int(starts.unsafe_ptr()),
+                    Int(left_rows.unsafe_ptr()),
+                    id_bounds[j],
+                    id_bounds[j + 1],
+                )
+            )
+    run_jobs(fill)
+    _ = starts^
     return (left_rows^, right_rows^)
 
 

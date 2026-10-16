@@ -10,6 +10,7 @@ from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN
 from dataframe.accelerator.gpu.join_runtime import preflight as join_preflight
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_resident_cardinality_metadata_bounds() raises:
     var metadata = DataFrame([Series("x", Column[Int64](List[Int64]()))])
     var query = metadata.lazy().select_exprs([col("x")])

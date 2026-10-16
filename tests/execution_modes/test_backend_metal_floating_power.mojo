@@ -1,4 +1,5 @@
 """Compensated floating power preserves exceptional values and boundary accuracy."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import isnan, isfinite
@@ -108,6 +109,7 @@ def anchor[D: DType](runtime: MetalRuntime) raises:
     check(DataFrame([x^, y^]).lazy().select(col("x").pow(col("y"))), runtime)
 
 
+# requires: metal
 def test_native_metal_floating_power_independent_ieee_anchors_widths_nulls_chunks_and_empty() raises:
     var runtime = require_metal()
     anchor[DType.float32](runtime)
@@ -125,6 +127,7 @@ def test_native_metal_floating_power_independent_ieee_anchors_widths_nulls_chunk
         check(near_one.lazy().select(col("x").pow(lit(exponent))), runtime)
 
 
+# requires: metal
 def test_native_metal_floating_power_resident_filters_reductions_windows_and_conditional_scopes() raises:
     var runtime = require_metal()
     var frame = fixture().with_columns(col("x").cast(DataType.FLOAT64))
@@ -165,6 +168,7 @@ def test_native_metal_floating_power_resident_filters_reductions_windows_and_con
     )
 
 
+# requires: metal
 def test_native_metal_floating_power_profile_family_exact_budget_and_runtime_reuse() raises:
     var runtime = require_metal()
     for dtype in [DataType.FLOAT32, DataType.FLOAT64]:

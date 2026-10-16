@@ -1,4 +1,5 @@
 """Public logical type identity, parsing, physical storage and sum result rules."""
+# contract-group: types.dtype
 from std.sys import size_of
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import AnyValue, DataType

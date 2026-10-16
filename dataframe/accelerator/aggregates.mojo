@@ -150,6 +150,39 @@ def _conditional_leaf(
             )
 
 
+def _conditional_reductions(expression: Expr) -> List[Bool]:
+    """Identify reductions reached through a conditional ancestor.
+
+    A WHEN inside a reduction remains part of its intact operand. Keep the
+    existing scalar-conditional restriction only for ancestor WHEN nodes.
+    Shared nodes retain that restriction if any original path is conditional.
+    """
+    var result = List[Bool](length=len(expression._nodes), fill=False)
+    var visited = List[Bool](length=2 * len(expression._nodes), fill=False)
+    var pending = List[Tuple[Int, Bool]]()
+    if len(expression._nodes):
+        pending.append((len(expression._nodes) - 1, False))
+    while len(pending):
+        var visit = pending.pop()
+        var index = visit[0]
+        var conditional = visit[1]
+        var slot = 2 * index + Int(conditional)
+        if visited[slot]:
+            continue
+        visited[slot] = True
+        ref node = expression._nodes[index]
+        if is_reduction(node.op):
+            result[index] |= conditional
+        var child_conditional = conditional or node.op == WHEN
+        if node.left >= 0:
+            pending.append((node.left, child_conditional))
+        if node.right >= 0:
+            pending.append((node.right, child_conditional))
+        if node.extra >= 0:
+            pending.append((node.extra, child_conditional))
+    return result^
+
+
 def lower_aggregate_compositions(
     query: LazyFrame, *, exact_float32: Bool = False
 ) raises -> LazyFrame:
@@ -210,9 +243,7 @@ def lower_aggregate_compositions(
                         " and windows"
                     )
             var bound = bind(expression, schema._columns)
-            var conditional = False
-            for node in bound.expr._nodes:
-                conditional |= node.op == WHEN
+            var conditional = _conditional_reductions(bound.expr)
             var positions = List[Int](length=len(bound.expr._nodes), fill=-1)
             var rewritten = List[Node]()
             for n in range(len(bound.expr._nodes)):
@@ -225,7 +256,7 @@ def lower_aggregate_compositions(
                         name += "_"
                     names[name] = True
                     var leaf = subtree(bound.expr, n).alias(name)
-                    if conditional:
+                    if conditional[n]:
                         _conditional_leaf(leaf, schema, exact_float32)
                     leaves.append(leaf^)
                     leaf_names.append(name)

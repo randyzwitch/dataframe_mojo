@@ -7,6 +7,158 @@
       "audit_reason": "After the explicit ssales collect, DataFrame.select(mean).item executes an eager CPU aggregate before the final LazyFrame collect. Applies to both data variants, including empty outputs.",
       "source_path": "benchmarks/suites/tpcds.mojo",
       "source_sha256": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68"
+    },
+    "h2o_groupby/q1": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id1"
+      ]
+    },
+    "h2o_groupby/q2": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id1",
+        "id2"
+      ]
+    },
+    "h2o_groupby/q3": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id3"
+      ]
+    },
+    "h2o_groupby/q4": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id4"
+      ]
+    },
+    "h2o_groupby/q5": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id6"
+      ]
+    },
+    "h2o_groupby/q6": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id4",
+        "id5"
+      ]
+    },
+    "h2o_groupby/q7": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id3"
+      ]
+    },
+    "h2o_groupby/q9": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id2",
+        "id4"
+      ]
+    },
+    "h2o_groupby/q10": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/h2o.mojo",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "alignment_keys": [
+        "id1",
+        "id2",
+        "id3",
+        "id4",
+        "id5",
+        "id6"
+      ]
+    },
+    "pdsh/q1": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/pdsh.mojo",
+      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "alignment_keys": [
+        "l_returnflag",
+        "l_linestatus"
+      ]
+    },
+    "pdsh/q5": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/pdsh.mojo",
+      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "alignment_keys": [
+        "n_name"
+      ]
+    },
+    "pdsh/q7": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/pdsh.mojo",
+      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "alignment_keys": [
+        "supp_nation",
+        "cust_nation",
+        "l_year"
+      ]
+    },
+    "pdsh/q9": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/pdsh.mojo",
+      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "alignment_keys": [
+        "nation",
+        "o_year"
+      ]
+    },
+    "pdsh/q15": {
+      "workload_kind": "canonical",
+      "execution_boundary": "gpu_collects",
+      "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
+      "source_path": "benchmarks/suites/pdsh.mojo",
+      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "alignment_keys": [
+        "s_suppkey"
+      ]
     }
   }
 }

@@ -1,4 +1,6 @@
 """Grouped Lists cross public DAG regions as GPU descriptor/child owners."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
@@ -18,6 +20,7 @@ from tests.support.resident_grouped_publication_reference import (
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_grouped_explode_layouts_metadata_stable_children_and_retained_producer() raises:
     var original = _source()
     for variant in range(3):
@@ -78,6 +81,7 @@ def test_mojo_gpu_grouped_explode_layouts_metadata_stable_children_and_retained_
         )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_explode_resident_row_join_group_slices_and_source_failure() raises:
     var source = _source()
     var grouped = (
@@ -165,6 +169,7 @@ def test_mojo_gpu_grouped_explode_resident_row_join_group_slices_and_source_fail
         )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_explode_original_phase_errors_empty_observer_and_exact_budget() raises:
     var source = _source()
     var query = (
@@ -287,6 +292,7 @@ def test_mojo_gpu_grouped_explode_original_phase_errors_empty_observer_and_exact
         _ = execute_dag(uncertified, 999999, 0, False, capabilities())
 
 
+# requires: metal
 def test_mojo_gpu_grouped_publication_layouts_slices_mixed_siblings_and_resident_consumers() raises:
     from tests.support.resident_grouped_publication_reference import (
         layouts_slices_mixed_siblings_and_resident_consumers,
@@ -295,6 +301,7 @@ def test_mojo_gpu_grouped_publication_layouts_slices_mixed_siblings_and_resident
     layouts_slices_mixed_siblings_and_resident_consumers()
 
 
+# requires: metal
 def test_mojo_gpu_grouped_publication_empty_foreign_owner_checked_phase_order_and_exact_budget() raises:
     from tests.support.resident_grouped_publication_reference import (
         empty_foreign_owner_checked_phase_order_and_exact_budget,

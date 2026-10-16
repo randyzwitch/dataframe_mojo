@@ -1,4 +1,5 @@
 """Batch boundaries and worker policy may not change deterministic results."""
+# contract-group: execution.modes
 from dataframe import col
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.coverage_generators import generated_frame, chunk_layout

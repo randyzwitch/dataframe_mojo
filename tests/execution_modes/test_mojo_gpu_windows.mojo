@@ -63,6 +63,7 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
     assert_equal(actual.column("shift_max").null_count(), n)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_windows_integer_layouts_partitions_directions_shifts_and_fills() raises:
     comptime types = (
         DType.int8,
@@ -111,6 +112,7 @@ def test_mojo_gpu_windows_integer_layouts_partitions_directions_shifts_and_fills
     assert_equal(result.item(3, "backward").int64(), Int64(3))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_windows_float_encodings_logical_metadata_and_empty_nulls() raises:
     var tiny = bitcast[DType.float64](UInt64(1))
     var source = Series(
@@ -205,6 +207,7 @@ def test_mojo_gpu_windows_float_encodings_logical_metadata_and_empty_nulls() rai
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_windows_compositions_checked_prefix_errors_budget_and_recovery() raises:
     var runtime = MetalRuntime()
     var overflow = DataFrame([Series("x", Column[Int64]([Int64.MAX, 1, -1]))])

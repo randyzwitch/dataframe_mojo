@@ -1,4 +1,5 @@
 """Public category activation and exact per-key decoded OVER certificates."""
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Series, col
@@ -29,6 +30,7 @@ def _coded(category: Series) raises -> Series:
     return result^
 
 
+# requires: mojo_gpu
 def test_categorical_activation_requires_reachable_logical_or_code_owners() raises:
     var category = _cat(
         "k", _dtype(["dup", "dup", "unused"]), [0, 1, 0], [True, True, True]
@@ -67,6 +69,7 @@ def test_categorical_activation_requires_reachable_logical_or_code_owners() rais
     assert_true(has_category_transport(resident))
 
 
+# requires: metal
 def test_mojo_gpu_category_activation_preserves_original_public_code_owners() raises:
     var category = _cat(
         "k", _dtype(["dup", "dup", "unused"]), [0, 1, 0], [True, True, True]
@@ -118,6 +121,7 @@ def test_mojo_gpu_category_activation_preserves_original_public_code_owners() ra
     assert_true(numbers.equals(numeric))
 
 
+# requires: metal
 def test_mojo_gpu_categorical_self_key_over_decodes_only_captured_string_keys() raises:
     var dtype = _dtype(["dup", "dup"])
     var source = DataFrame(

@@ -1,4 +1,5 @@
 """Scaled decimal means preserve the CPU quotient/remainder rounding."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -126,6 +127,7 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
     assert_true("unsupported" not in runtime.describe(query))
 
 
+# requires: metal
 def test_native_metal_decimal_mean_all_scales_signs_and_grouped_rounding() raises:
     _ = require_metal()
     for scale in range(19):
@@ -157,6 +159,7 @@ def test_native_metal_decimal_mean_all_scales_signs_and_grouped_rounding() raise
             )
 
 
+# requires: metal
 def test_native_metal_decimal_mean_empty_nulls_partial_boundaries_and_resident_rows() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 4097, 65537]):
@@ -208,6 +211,7 @@ def test_native_metal_decimal_mean_empty_nulls_partial_boundaries_and_resident_r
     check(cancel.lazy().select(col("a").mean()))
 
 
+# requires: metal
 def test_native_metal_decimal_mean_broadcast_conditionals_join_and_group_consumers() raises:
     _ = require_metal()
     var frame = fixture(8193, 18)
@@ -258,6 +262,7 @@ def test_native_metal_decimal_mean_broadcast_conditionals_join_and_group_consume
     )
 
 
+# requires: metal
 def test_native_metal_decimal_mean_profile_cost_budget_and_recovery() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

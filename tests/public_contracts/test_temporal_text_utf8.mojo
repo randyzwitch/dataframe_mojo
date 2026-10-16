@@ -1,4 +1,5 @@
 """Independent literals for temporal percent escapes and UTF8 pattern bytes."""
+# contract-group: expr.temporal
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.temporal import format, parse

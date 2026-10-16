@@ -50,6 +50,7 @@ def check(query: LazyFrame) raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_normalization_dictionary_unicode_operations_and_selectors() raises:
     var frame = fixture()
     var expressions: List[Expr] = [
@@ -115,6 +116,7 @@ def test_mojo_gpu_normalization_dictionary_unicode_operations_and_selectors() ra
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_normalization_union_distinct_nulls_and_row_order() raises:
     var frame = fixture()
     var query = (
@@ -141,6 +143,7 @@ def test_mojo_gpu_normalization_union_distinct_nulls_and_row_order() raises:
     assert_equal(singleton.item(0, "id").int32(), Int32(4))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_normalization_distinct_counts_partition_and_aggregate_compositions() raises:
     var frame = fixture()
     check(
@@ -182,6 +185,7 @@ def test_mojo_gpu_normalization_distinct_counts_partition_and_aggregate_composit
     check(frame.head(0).lazy().select(col("s").n_unique()))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_normalization_scalar_literals_text_parsing_and_empty_shapes() raises:
     var frame = fixture()
     for rows in [0, 1, frame.height()]:

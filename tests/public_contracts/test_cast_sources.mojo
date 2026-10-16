@@ -1,4 +1,5 @@
 """Source-side casts preserve every row, validity, and destination metadata."""
+# contract-group: types.cast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES

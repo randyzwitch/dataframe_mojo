@@ -1,4 +1,5 @@
 """As-of sortedness is a validated input contract, including zero-row results."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from tests.support.coverage_generators import offset_layout, chunk_layout

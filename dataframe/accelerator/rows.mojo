@@ -12,6 +12,10 @@ from . import (
     iana_mutations,
     iana_certificate,
     producer_phases,
+    checked_rank,
+    decimal_feed,
+    decimal_group_feed,
+    decimal_scalar_feed,
 )
 from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
@@ -259,6 +263,8 @@ struct RowPlan(Movable):
     var iana_diagnostics: List[String]
     var iana_construction_peak_bytes: Int
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Exact eager operand batches for checked scalar Decimal SUM replay.
+    var decimal_feed_batch_rows: Int
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -1081,6 +1087,7 @@ def lower_rows(
     var reduced = False
     var reused_columns = False
     var ordered_ranks = List[UInt32]()
+    var decimal_feed_batch_rows = 0
     var ordered_mode = 0
     var producer_region = Optional[ArcPointer[RegionProof]]()
     for k in range(len(chain) - 1, -1, -1):
@@ -1273,7 +1280,47 @@ def lower_rows(
                     "ordered decimal", "invalid observed producer"
                 )
             ordered_mode = 4
-        var observed_group = node.text == "metal_group_materialization"
+        var observed_sum = node.text == "metal_sum_materialization"
+        if observed_sum:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != SELECT
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject("observed sum", "invalid observed producer")
+        var sum_expression = 0
+        var scalar_precision = node.text == decimal_scalar_feed.MATERIALIZATION
+        var ordered_group = (
+            node.text == decimal_group_feed.MATERIALIZATION or scalar_precision
+        )
+        if scalar_precision:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != SELECT
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject(
+                    "decimal scalar feed", "invalid original SUM projection"
+                )
+            var original_bounds = List[BoundExpr]()
+            for expression in node.exprs:
+                original_bounds.append(bind(expression, schema))
+            if not decimal_scalar_feed.eligible(original_bounds, schema):
+                capabilities.reject(
+                    "decimal scalar feed",
+                    "original operand/state proof changed",
+                )
+            ordered_mode = decimal_scalar_feed.ORDERED_MODE
+        var observed_group = (
+            node.text == "metal_group_materialization"
+            or node.text == decimal_group_feed.MATERIALIZATION
+        )
         if observed_group:
             if (
                 len(chain) != 1
@@ -1292,14 +1339,43 @@ def lower_rows(
             for at in range(len(node.names)):
                 if node.names2[2 + at] != node.names[at]:
                     capabilities.reject("observed group", "group key changed")
+        if ordered_group and not scalar_precision:
+            for field in query._nodes[node.left].text_fields:
+                if field.name in node.names and field.category:
+                    # Only dictionary normalization can issue this owner.
+                    # Bare coded String GROUP compares its certified HIGH
+                    # original codes; visible output is plain String again.
+                    if (
+                        field.dtype != DataType.STRING
+                        or not field.category.value().string_codes
+                        or not field.category.value()
+                        .owner[]
+                        .dtype.is_categorical()
+                    ):
+                        capabilities.reject(
+                            "decimal group feed",
+                            "original code key lacks a coded String owner",
+                        )
+            var original_bounds = List[BoundExpr]()
+            for expression in node.exprs:
+                original_bounds.append(bind(expression, schema))
+            if not decimal_group_feed.eligible(
+                original_bounds, schema, node.names
+            ):
+                capabilities.reject(
+                    "decimal group feed", "original whole-group proof changed"
+                )
+            ordered_mode = decimal_group_feed.ORDERED_MODE
         var grouped_expression = 0
         var decimal_expression = 0
         var ordered_producer = Bool(node.producer_origin)
         if ordered_producer:
             producer_phases.validate_region(query, node)
-            if (
-                node.producer_origin.value()[].phase
-                != producer_phases.OBSERVED_IANA
+            if node.producer_origin.value()[].phase not in List[Int](
+                [
+                    producer_phases.OBSERVED_IANA,
+                    producer_phases.OBSERVED_STRICT_CAST,
+                ]
             ):
                 capabilities.reject(
                     "observed temporal", "unknown producer phase"
@@ -1338,6 +1414,24 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if scalar_precision:
+                if node.names2[
+                    1 + decimal_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "decimal scalar feed",
+                        "producer AST or logical metadata changed",
+                    )
+                decimal_expression += 1
+            if observed_sum:
+                if node.names2[1 + sum_expression] != implode_ordered.signature(
+                    bound
+                ):
+                    capabilities.reject(
+                        "observed sum",
+                        "producer AST or logical metadata changed",
+                    )
+                sum_expression += 1
             if observed_group:
                 if node.names2[
                     2 + len(node.names) + grouped_expression
@@ -1347,6 +1441,22 @@ def lower_rows(
                         "producer AST or logical metadata changed",
                     )
                 grouped_expression += 1
+            if node.text == decimal_feed.MATERIALIZATION:
+                if (
+                    len(chain) != 1
+                    or not terminal_boundary
+                    or limit >= 0
+                    or node.kind != SELECT
+                    or len(node.exprs) != 1
+                    or len(node.names2) != 2
+                    or node.names2[0] != node.text
+                    or node.names2[1] != implode_ordered.signature(bound)
+                    or not decimal_feed.eligible(bound, schema)
+                ):
+                    capabilities.reject(
+                        "decimal feed", "original scalar producer changed"
+                    )
+                decimal_feed_batch_rows = decimal_feed.BATCH_ROWS
             if ordered_decimal:
                 if not ordered_rows.eligible(bound) or node.names2[
                     1 + decimal_expression
@@ -1366,6 +1476,7 @@ def lower_rows(
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
@@ -1612,6 +1723,7 @@ def lower_rows(
                         and (part.op == MUL or part.op == DIV)
                     )
                     and not proven[part_index]
+                    and not ordered_group
                     and (
                         not terminal_boundary
                         or k != 0
@@ -1663,6 +1775,7 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
+                    and not ordered_producer
                     and not (
                         capabilities.proven_integer_operations
                         and proven[part_index]
@@ -1895,6 +2008,7 @@ def lower_rows(
                 )
                 if capabilities.proven_integer_operations:
                     child_proven = proven_integer_nodes(child)
+                var checked_rank_input = False
                 for c in range(len(child.expr._nodes)):
                     var operation = child.expr._nodes[c].op
                     if not child_proven[c] and (
@@ -1907,14 +2021,55 @@ def lower_rows(
                             or operation == ABS
                             or operation == FLOORDIV
                             or operation == POW
+                            or (operation == MOD and window_op == RANK)
                         )
                         or operation == CAST
                         and child.expr._nodes[c].integer
                         and not child.dtypes[c].is_float()
                     ):
-                        capabilities.reject(
-                            "plan", "checked rank inputs require CPU execution"
+                        checked_rank_input = True
+                if checked_rank_input:
+                    if (
+                        not capabilities.observed_rank_inputs
+                        or (
+                            node.kind != SELECT
+                            and node.kind != WITH_COLUMNS
+                            and node.kind != FILTER
                         )
+                        or window_op != RANK
+                        or ordered_mode != 0
+                        or not ordered_rows.eligible(child)
+                        or not checked_rank.isolated(node.exprs, schema)
+                        or (
+                            len(partitions)
+                            and not checked_rank.row_order_over(
+                                source_count, configured_workers()
+                            )
+                        )
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked rank inputs require CPU execution: phase is not certified",
+                        )
+                    var certified_child = iana_certificate.prepare(
+                        child, capabilities.max_nodes
+                    )
+                    child = certified_child.bound.copy()
+                    ordered_mode = checked_rank.ORDERED_RANK_INPUT
+                    while len(iana_mask_bases) < len(steps):
+                        iana_mask_bases.append(-1)
+                    iana_mask_bases.append(len(capsule.words))
+                    capsule.construction_peak_bytes = max(
+                        capsule.construction_peak_bytes,
+                        checked_add(
+                            checked_mul(capsule.words.capacity(), 8),
+                            checked_mul(certified_child.words.capacity(), 16),
+                        ),
+                    )
+                    while len(ordered_ranks) < len(literals):
+                        ordered_ranks.append(UInt32(0))
+                    ordered_ranks.extend(certified_child.ranks.copy())
+                    capsule.words.extend(certified_child.words.copy())
                 if (
                     1 + Int(duration) + len(partitions) > capabilities.max_nodes
                     or next_slot + 2 + Int(coordinate or duration)
@@ -2539,16 +2694,25 @@ def lower_rows(
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
-                ordered_ranks.extend(expression_ranks.copy())
+                if ordered_group:
+                    # Scalar SUM and AGG strip the reduction root before
+                    # emitting its intact original operand.
+                    # Preserve precisely those original occurrence ranks.
+                    for at in range(count):
+                        ordered_ranks.append(expression_ranks[at])
+                else:
+                    ordered_ranks.extend(expression_ranks.copy())
             if (
                 ordered_scalar
                 or ordered_terminal
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
@@ -2835,6 +2999,16 @@ def lower_rows(
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
+    if ordered_mode == checked_rank.ORDERED_RANK_INPUT:
+        while len(ordered_ranks) < len(literals):
+            ordered_ranks.append(UInt32(0))
+        while len(iana_mask_bases) < len(steps):
+            iana_mask_bases.append(-1)
+        for at in range(len(steps)):
+            if iana_mask_bases[at] >= 0:
+                iana_certificate.validate(
+                    capsule.words, iana_mask_bases[at], steps[at].nodes
+                )
     if ordered_mode == 1 and (
         len(steps) != 1
         or steps[0].filter
@@ -2873,6 +3047,43 @@ def lower_rows(
                 capabilities.reject(
                     "ordered rows", "requires direct terminal row projections"
                 )
+    if ordered_mode == decimal_group_feed.ORDERED_MODE:
+        # Header/key/reducer descriptors are not evaluated row occurrences.
+        while len(ordered_ranks) < len(literals):
+            ordered_ranks.append(UInt32(0))
+        var grouped_steps = 0
+        for step in steps:
+            if step.filter or (step.order and not grouped_steps):
+                capabilities.reject(
+                    "decimal group feed", "row movement escaped original AGG"
+                )
+            grouped_steps += Int(step.grouped)
+        if grouped_steps != (0 if reduced else 1) or len(ordered_ranks) != len(
+            literals
+        ):
+            capabilities.reject(
+                "decimal group feed", "invalid original AGG geometry"
+            )
+        if reduced:
+            var floating_sum = False
+            for output in outputs:
+                var input_type = slot_dtypes[output.slot]
+                if output.reduction != SUM:
+                    capabilities.reject(
+                        "decimal scalar feed", "requires original SUM states"
+                    )
+                if input_type == DataType.FLOAT64:
+                    floating_sum = True
+                elif not decimal_group_feed.infallible_sum(
+                    input_type, Int(UInt32.MAX)
+                ):
+                    capabilities.reject(
+                        "decimal scalar feed", "state exception bound changed"
+                    )
+            if not floating_sum:
+                capabilities.reject(
+                    "decimal scalar feed", "missing original Float64 SUM"
+                )
     for step_index in range(len(steps)):
         ref step = steps[step_index]
         for occurrence in range(step.start, step.start + step.nodes):
@@ -2899,7 +3110,7 @@ def lower_rows(
             )
     var capsule_peak = 0
     var zone_words = List[UInt64]()
-    if len(capsule.descriptors):
+    if len(capsule.words):
         for step in steps:
             for node in range(step.start, step.start + step.nodes):
                 var op = code[4 * node]
@@ -2983,4 +3194,5 @@ def lower_rows(
         capsule.diagnostics.copy(),
         capsule_peak,
         producer_region,
+        decimal_feed_batch_rows,
     )

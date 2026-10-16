@@ -5,6 +5,7 @@ chunks, gives views. The kernels read both layouts through one accessor and must
 equality and inequality against a literal (values sharing a length and first
 four bytes, inline and long), membership, prefixes, sorting, single-key
 joins (inner, semi, anti) and grouping, with nulls."""
+# contract-group: storage.views
 from std.testing import assert_equal, assert_true
 
 from dataframe import (

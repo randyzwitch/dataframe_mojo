@@ -1,4 +1,5 @@
 """Prepared hash, bounded membership and physical build routes retain typed rows."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
@@ -12,6 +13,8 @@ from dataframe.join_hash import (
     prefer_left_build,
     prepare_progression_index,
 )
+from dataframe.parallel import worker_count
+from tests.support.lifecycle_jobs import WorkerSetting
 from dataframe.frame import (
     _join_range_rows,
     _smaller_build_join_rows,
@@ -596,3 +599,26 @@ def test_eager_join_builds_on_the_side_of_fewer_rows_times_columns() raises:
             assert_equal(actual.item(row, "r").is_null(), j < 0)
             if j >= 0:
                 assert_equal(actual.item(row, "r").int64(), Int64(j))
+
+
+def test_parallel_left_major_restore_matches_the_serial_order() raises:
+    # Many pairs a left row: the restore counts and scatters on several
+    # workers, and every left group keeps its pairs in probe order, as the
+    # serial counting sort does. Duplicate keys on both sides.
+    var left_keys = List[Int64]()
+    for i in range(500):
+        left_keys.append(Int64(i % 400))
+    var right_keys = List[Int64]()
+    for j in range(300_000):
+        right_keys.append(Int64((j * 7919) % 450))
+    var left: List[Series] = [Series("k", Column[Int64](left_keys^))]
+    var right: List[Series] = [Series("k", Column[Int64](right_keys^))]
+    var one = WorkerSetting(1)
+    var serial = _smaller_build_join_rows(left, right, False)
+    _ = one^
+    var four = WorkerSetting(4)
+    assert_true(worker_count(len(serial[0])) > 1)
+    var parallel = _smaller_build_join_rows(left, right, False)
+    _ = four^
+    assert_equal(parallel[0], serial[0])
+    assert_equal(parallel[1], serial[1])

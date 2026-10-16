@@ -187,3 +187,58 @@ def observe_input_finish(
             break
     result[unsafe_offset=0] = failure
     result[unsafe_offset=1] = UInt32(0)
+
+
+def _precision_winner(left: UInt32, right: UInt32) -> Bool:
+    return Bool(left) and (
+        not right or category(left) != 8 and category(right) == 8
+    )
+
+
+def observe_precision_partials(
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    partials: Pointer[UInt32, MutAnyOrigin],
+    target: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    groups: UInt32,
+):
+    """Bound each lane's scan under the whole SUM/AGG precision-only proof.
+
+    No invented batch/worker ordering: every admitted fault has the same
+    public category. Unexpected categories win so the host rejects a broken
+    certificate rather than silently reinterpreting a foreign error.
+    """
+    var group = global_idx.x
+    if group >= Int(groups):
+        return
+    var width = (Int(rows) + Int(groups) - 1) // Int(groups)
+    var begin = group * width
+    var end = min(Int(rows), begin + width)
+    var winner = UInt32(0)
+    var winner_row = UInt32.MAX
+    for row in range(begin, end):
+        var error = errors[unsafe_offset=Int(target) * Int(stride) + row]
+        if _precision_winner(error, winner):
+            winner = error
+            winner_row = UInt32(row)
+    partials[unsafe_offset=2 * group] = winner
+    partials[unsafe_offset=2 * group + 1] = winner_row
+
+
+def observe_precision_finish(
+    partials: Pointer[UInt32, ImmutAnyOrigin],
+    result: Pointer[UInt32, MutAnyOrigin],
+    groups: UInt32,
+):
+    if global_idx.x != 0:
+        return
+    var winner = UInt32(0)
+    var winner_row = UInt32.MAX
+    for group in range(Int(groups)):
+        var error = partials[unsafe_offset=2 * group]
+        if _precision_winner(error, winner):
+            winner = error
+            winner_row = partials[unsafe_offset=2 * group + 1]
+    result[unsafe_offset=0] = winner
+    result[unsafe_offset=1] = winner_row

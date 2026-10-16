@@ -1,4 +1,6 @@
 """Scalar GPU mode has independently anchored typed, ordered winners."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import (
@@ -26,6 +28,7 @@ from tests.support.coverage_compare import assert_frame, assert_value
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_scalar_mode_typed_winners_nulls_empty_and_scalar_siblings() raises:
     for source in mode_sources():
         var raw = DataFrame([source.copy()])
@@ -82,6 +85,7 @@ def test_mojo_gpu_scalar_mode_typed_winners_nulls_empty_and_scalar_siblings() ra
             assert_equal(empty_siblings.height(), 0)
 
 
+# requires: metal
 def test_mojo_gpu_scalar_mode_float_equality_first_bits_and_budget() raises:
     for single in [False, True]:
         var source = float_mode_source(single)
@@ -119,6 +123,7 @@ def test_mojo_gpu_scalar_mode_float_equality_first_bits_and_budget() raises:
                     )
 
 
+# requires: metal
 def test_mojo_gpu_scalar_mode_reports_remaining_alignment_and_literal_shape() raises:
     var frame = DataFrame([Series("x", Column[Int64]([3, 1, 3, 1]))])
     with assert_raises(contains="intermediate value_counts struct consumers"):
@@ -140,6 +145,7 @@ def test_mojo_gpu_scalar_mode_reports_remaining_alignment_and_literal_shape() ra
             _ = query.collect(accelerator=MetalRuntime(), engine="accel")
 
 
+# requires: metal
 def test_mojo_gpu_multiple_modes_zip_exact_ordinals_and_cardinality() raises:
     var magnitude = Int128(1) << 90
     var valid: List[Bool] = [True, True, True, True, False, False]
@@ -281,6 +287,7 @@ def _counts_expected(
     return DataFrame([Series("counts", StructColumn([values^, tally^]))])
 
 
+# requires: metal
 def test_mojo_gpu_value_counts_typed_counts_sort_proportions_empty_and_null_categories() raises:
     var serial = 0
     for source in mode_sources():
@@ -338,6 +345,7 @@ def test_mojo_gpu_value_counts_typed_counts_sort_proportions_empty_and_null_cate
                     )
 
 
+# requires: metal
 def test_mojo_gpu_mixed_mode_value_counts_zip_scalar_broadcast_and_mismatches() raises:
     var source = Series(
         "x",
@@ -410,6 +418,7 @@ def test_mojo_gpu_mixed_mode_value_counts_zip_scalar_broadcast_and_mismatches() 
         _ = unequal.collect(accelerator=MetalRuntime(), engine="accel")
 
 
+# requires: metal
 def test_mojo_gpu_value_counts_float_nan_zero_first_representations() raises:
     for single in [False, True]:
         var source = float_mode_source(single)
@@ -441,6 +450,7 @@ def test_mojo_gpu_value_counts_float_nan_zero_first_representations() raises:
                 assert_float_mode_bits(DataFrame([field^]), single)
 
 
+# requires: metal
 def test_mojo_gpu_float32_distributions_quiet_valid_signaling_nan_first_occurrence() raises:
     var signaling: List[UInt32] = [0x7F800042, 0xFF800073]
     var quiet: List[UInt32] = [0x7FC00042, 0xFFC00073]
@@ -500,6 +510,7 @@ def test_mojo_gpu_float32_distributions_quiet_valid_signaling_nan_first_occurren
                 )
 
 
+# requires: metal
 def test_mojo_gpu_distributions_observe_all_original_producers_before_cardinality() raises:
     var amount = Int128(6) * pow10(37)
     var frame = DataFrame(
