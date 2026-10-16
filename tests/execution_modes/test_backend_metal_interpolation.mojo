@@ -1,4 +1,5 @@
 """Linear and nearest interpolation follow original partition row order."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -90,6 +91,7 @@ def test_interpolation_capability_private_types_partition_metadata_and_errors() 
         )
 
 
+# requires: metal
 def test_native_metal_interpolation_numeric_widths_decimals_null_partitions_slices_and_chunks() raises:
     var runtime = require_metal()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -155,6 +157,7 @@ def test_native_metal_interpolation_numeric_widths_decimals_null_partitions_slic
     check(wide.lazy().select(col("x").interpolate("nearest")), runtime, True)
 
 
+# requires: metal
 def test_native_metal_interpolation_independent_gaps_payloads_and_resident_consumers() raises:
     var runtime = require_metal()
     var source = DataFrame(
@@ -252,6 +255,7 @@ def test_native_metal_interpolation_independent_gaps_payloads_and_resident_consu
     check(empty.lazy().select(col("x").interpolate("nearest")), runtime, True)
 
 
+# requires: metal
 def test_native_metal_interpolation_profile_budget_family_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = fixture(513).lazy().select(col("x").interpolate().over("k"))

@@ -1,4 +1,5 @@
 """Complete typed grouped results independent of unspecified output order."""
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.reduction_types_reference import (

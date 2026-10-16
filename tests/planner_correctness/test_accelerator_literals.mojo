@@ -1,4 +1,5 @@
 """Literal temporal parsing and safe rejection before dictionary encoding."""
+# contract-group: planner.routing
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import (
     DataFrame,

@@ -1,4 +1,6 @@
 """Batch boundaries cannot reset order-dependent or partition-local state."""
+# contract-group: expr.order_windows
+# contract-group: execution.modes
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.coverage_generators import offset_layout, chunk_layout

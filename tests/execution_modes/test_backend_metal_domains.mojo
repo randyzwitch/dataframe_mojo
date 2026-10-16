@@ -3,6 +3,7 @@
 Public tests require the real Metal capability. CPU model verification is a
 separate callable fixture audit; it is never reported as native execution.
 """
+# contract-group: execution.backends
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.gpu.runtime import capabilities as gpu_capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -169,6 +170,7 @@ def numeric_reductions(runtime: MetalRuntime, native: Bool) raises:
                 )
 
 
+# requires: metal
 def test_native_metal_grouped_and_global_reductions_match_scalar_memberships_all_widths() raises:
     numeric_reductions(require_metal(), True)
 
@@ -260,6 +262,7 @@ def composition_cases(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_aggregate_compositions_and_consumers_stay_resident() raises:
     composition_cases(require_metal(), True)
 
@@ -333,6 +336,7 @@ def bool_and_float_cases(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_boolean_kleene_and_float_extrema_keep_null_nan_zero_and_subnormal_rules() raises:
     bool_and_float_cases(require_metal(), True)
 
@@ -449,6 +453,7 @@ def wide_sum_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_wide_sum_proofs_exact_cancellation_and_error_recovery() raises:
     wide_sum_cases(require_metal(), True)
 
@@ -608,6 +613,7 @@ def integer_numeric_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_integer_operators_membership_and_cast_matrix_keep_exact_native_words() raises:
     integer_numeric_cases(require_metal(), True)
 
@@ -784,6 +790,7 @@ def masked_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_branch_observation_masks_and_precision_errors_leave_runtime_reusable() raises:
     masked_cases(require_metal(), True)
 
@@ -1072,6 +1079,7 @@ def float_value_cases(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_float32_encodings_and_separate_operator_rounding_match_literal_results() raises:
     float_value_cases(require_metal(), True)
 
@@ -1117,6 +1125,7 @@ def checked_boundary_preflight() raises:
     )
 
 
+# requires: metal
 def test_native_metal_checked_operation_boundaries_reject_before_device_initialization() raises:
     _ = require_metal()
     checked_boundary_preflight()

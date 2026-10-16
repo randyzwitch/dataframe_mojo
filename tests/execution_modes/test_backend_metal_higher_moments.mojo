@@ -1,4 +1,5 @@
 """Third and fourth central moments through native Metal reductions."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt
@@ -65,6 +66,7 @@ def test_higher_moments_capability_flags_private_casts_and_precision() raises:
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_partitions() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
@@ -130,6 +132,7 @@ def test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_parti
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_higher_moments_nonfinite_constants_full_unsigned_and_decimal_casts() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -167,6 +170,7 @@ def test_native_metal_higher_moments_nonfinite_constants_full_unsigned_and_decim
     check(decimals.select_exprs(expressions("x")), runtime)
 
 
+# requires: metal
 def test_native_metal_higher_moments_workers_compositions_cost_budget_and_runtime_reuse() raises:
     _ = require_metal()
     var setting = WorkerSetting(8)

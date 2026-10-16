@@ -3,6 +3,7 @@ by `key - least` (DuckDB's perfect hash join): inner, left, semi and anti
 joins against a scalar model, with null probe keys, probe keys outside
 the span, a build whose keys repeat (which keeps the hash table), and
 probes where every row matches once."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series, col

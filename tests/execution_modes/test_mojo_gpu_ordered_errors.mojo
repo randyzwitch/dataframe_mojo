@@ -1,4 +1,6 @@
 """Direct terminal ROWS faults follow projection, batch, AST and row order."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
@@ -41,6 +43,7 @@ def _fails(query: LazyFrame, cpu: String, gpu: String) raises:
         )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_rows_cross_row_batch_projection_and_workers() raises:
     var raw = _source([0, Int64.MAX], [128, 0])
     for variant in range(3):
@@ -103,6 +106,7 @@ def test_mojo_gpu_ordered_rows_cross_row_batch_projection_and_workers() raises:
         _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_ordered_rows_masks_nulls_empty_and_mixed_numeric_faults() raises:
     var frame = _source([0, Int64.MAX], [128, 0]).with_column(
         Series("keep", Column[Bool]([False, True]))
@@ -237,6 +241,7 @@ def test_mojo_gpu_ordered_rows_masks_nulls_empty_and_mixed_numeric_faults() rais
     )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_rows_profile_budget_estimate_and_provenance() raises:
     var frame = _source([-1, 0, 1], [-2, 0, 2])
     var query = frame.lazy().select((_time() + _cast()).alias("v"))

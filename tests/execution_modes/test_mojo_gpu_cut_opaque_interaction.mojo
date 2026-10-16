@@ -1,4 +1,6 @@
 """CUT and opaque byte normalization share labels, fault order and budgets."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.metal import MetalRuntime
@@ -10,6 +12,7 @@ from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_frame
 
 
+# requires: metal
 def test_mojo_gpu_cut_and_opaque_transport_preserve_labels_errors_and_budgets() raises:
     var binary = _binary()
     var values = List[Float64]()

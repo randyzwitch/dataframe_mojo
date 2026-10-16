@@ -1,4 +1,6 @@
 """Isolated public fixed-width source Struct query contracts."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
@@ -130,6 +132,7 @@ def _check_values(actual: DataFrame, offset: Int) raises:
         assert_equal(actual.item(local, "flag").is_null(), row == 1)
 
 
+# requires: metal
 def test_mojo_gpu_source_struct_fields_nullable_layouts_literal_values_and_metadata() raises:
     var original = _source()
     var child = original.column("record").struct_column().field("n")
@@ -174,6 +177,7 @@ def test_mojo_gpu_source_struct_fields_nullable_layouts_literal_values_and_metad
     assert_false(child.int64()._valid(2))
 
 
+# requires: metal
 def test_mojo_gpu_source_struct_errors_masks_profile_budget_and_recovery() raises:
     _check_missing_file_prefix_and_error_only_observation()
     var frame = _source(True)
@@ -305,6 +309,7 @@ def _check_missing_file_prefix_and_error_only_observation() raises:
     run_command(["rm", "-r", work])
 
 
+# requires: metal
 def test_mojo_gpu_source_struct_refusals_and_explanation_remain_metadata_only() raises:
     var frame = _source()
     var runtime = MetalRuntime(device_id=999999)
@@ -361,6 +366,7 @@ def test_mojo_gpu_source_struct_refusals_and_explanation_remain_metadata_only() 
         )
 
 
+# requires: metal
 def test_mojo_gpu_source_struct_identity_cast_field_metadata_and_masks() raises:
     var original = _source()
     var child = original.column("record").struct_column().field("n")

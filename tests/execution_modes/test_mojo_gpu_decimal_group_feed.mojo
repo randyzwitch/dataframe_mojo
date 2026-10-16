@@ -1,4 +1,6 @@
 """Physical-width proof for checked narrow Decimal GROUP operands."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -266,6 +268,7 @@ def _money_and_prefix_certificates() raises:
         )
 
 
+# requires: mojo_gpu
 def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
     _money_and_prefix_certificates()
     var source = _source()
@@ -350,6 +353,7 @@ def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
             _ = lower_join_dag(unsupported, capabilities())
 
 
+# requires: metal
 def test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks() raises:
     var workers = WorkerSetting(1)
     for nullable in [False, True]:
@@ -428,6 +432,7 @@ def test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks() raises:
     _ = workers^
 
 
+# requires: metal
 def test_mojo_gpu_decimal_group_feed_stream_workers_and_precision_faults() raises:
     var rows = 131072
     var groups = List[Int32](length=rows, fill=0)
@@ -534,6 +539,7 @@ def test_mojo_gpu_decimal_group_feed_stream_workers_and_precision_faults() raise
         _ = workers^
 
 
+# requires: metal
 def test_mojo_gpu_decimal_group_feed_budget_precedes_device() raises:
     var query = (
         _source()

@@ -1,4 +1,5 @@
 """As-of matching is a barrier to later filtering, projection and row limits."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col
 from tests.support.asof_reference import reference_asof

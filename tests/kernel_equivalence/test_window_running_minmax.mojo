@@ -3,6 +3,7 @@ storage, decimal32, decimal64 and decimal128 and dates included, and keep
 the input's type. Several window expressions over one partition key, in a
 select or nested in another over(), share one partition layout. Each
 against a scalar model, with nulls, many partitions, forward and reverse."""
+# contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit, when

@@ -1,4 +1,5 @@
 """Lazy nested shape changes retain hidden dependencies and row boundaries."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,

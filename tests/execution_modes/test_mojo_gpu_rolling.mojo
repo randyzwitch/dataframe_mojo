@@ -280,6 +280,7 @@ def _failure_cases() raises -> List[Tuple[LazyFrame, String]]:
     return cases^
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rolling_numeric_layouts_thresholds_and_interpolation() raises:
     for query in _rolling_cases():
         near(
@@ -288,6 +289,7 @@ def test_mojo_gpu_rolling_numeric_layouts_thresholds_and_interpolation() raises:
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rolling_duration_bounds_calendar_zones_and_unsigned_storage() raises:
     for query in _duration_cases():
         near(
@@ -303,6 +305,7 @@ def test_mojo_gpu_rolling_duration_bounds_calendar_zones_and_unsigned_storage() 
     assert_equal(result.column("x").int64()._get(3), Int64(14))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association() raises:
     for query in _floating_cases():
         near(
@@ -331,6 +334,7 @@ def test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association() 
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery() raises:
     var runtime = MetalRuntime()
     for pair in _failure_cases():

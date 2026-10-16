@@ -77,6 +77,7 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
             assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_ordering_integer_layouts_nulls_mixed_keys_and_stability() raises:
     comptime types = (
         DType.int8,
@@ -200,6 +201,7 @@ def _floating_case[D: DType](chunked: Bool) raises:
                     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_ordering_float_encodings_nan_zero_subnormal_and_nulls() raises:
     _floating_case[DType.float32](False)
     _floating_case[DType.float32](True)
@@ -207,6 +209,7 @@ def test_mojo_gpu_ordering_float_encodings_nan_zero_subnormal_and_nulls() raises
     _floating_case[DType.float64](True)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
     for dtype in [
         DataType.DATE,
