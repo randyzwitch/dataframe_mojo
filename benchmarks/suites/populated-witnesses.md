@@ -5,8 +5,11 @@ smoke-scale answers were empty. They are separate workloads, not a replacement
 for official generated data or a change to the 345-case canonical denominator.
 The tracked backlog contains all 49 prior nonhybrid empty matches. This increment
 selects eight: TPC-DS q3/q19/q82 in base and decimal, and ClickBench q19/q41 in
-base. The other 41 remain unresolved. Two additional TPC-DS q24 variants retain
-their known GPU → eager CPU mean/item → GPU boundary and are labeled hybrid.
+base. The other 41 remain unresolved. Two additional TPC-DS q24 variants have a canonical GPU → eager CPU mean/item
+→ GPU boundary. The generated canonical metadata preserves that hybrid label.
+In the integrated staged Metal worker, the generic scalar materialization
+adapter forces the unchanged mean expression through another Metal collect;
+that derived boundary needs its own source-pinned metadata and target proof.
 
 Generate using the oracle environment and an existing official data root:
 
@@ -47,7 +50,9 @@ answer boundary.
 ## Target validation recipe
 
 The measurement owner stages forced CPU/Metal query modules with the unchanged
-`benchmarks/tools/bench_metal_suites.py` source derivation. Compile the existing
+`benchmarks/tools/bench_metal_suites.py` source derivation, including its generic
+scalar SELECT/item adapter. Keep the staging manifest with canonical and derived
+worker hashes. Compile the existing
 suite workers and `benchmarks/suites/populated_witness_oracle.mojo` with the
 repository and staged source directory in their include paths. The latter
 imports the staged query functions; it does not reimplement query expressions.
@@ -80,6 +85,7 @@ checks separately. Missing runs stay untested. Existing `collection_ns` is
 retained only as a diagnostic GPU duration; no CPU timing is guessed and no
 performance evidence is claimed. The measurement owner's performance collector
 must record complete cold/warm collection samples for each engine, round and
-repetition on the same fixture files and thread settings. Hybrid q24 timing must
-include its eager CPU mean/item stage. Canonical and supplementary population
+repetition on the same fixture files and thread settings. Historical hybrid q24 timing includes its eager CPU mean/item stage. New staged
+worker timing must include the forced mean collection and scalar readback. Do
+not apply the new worker boundary audit to an old worker hash. Canonical and supplementary population
 counts are not a speedup comparison across different datasets.
