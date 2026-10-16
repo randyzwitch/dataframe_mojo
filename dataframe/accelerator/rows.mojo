@@ -16,6 +16,7 @@ from . import (
     decimal_feed,
     decimal_group_feed,
     decimal_scalar_feed,
+    decimal_row_feed,
 )
 from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
@@ -1292,6 +1293,27 @@ def lower_rows(
             ):
                 capabilities.reject("observed sum", "invalid observed producer")
         var sum_expression = 0
+        var precision_rows = node.text == decimal_row_feed.MATERIALIZATION
+        if precision_rows:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or (node.kind != SELECT and node.kind != WITH_COLUMNS)
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject(
+                    "decimal date rows", "invalid original ROW producer"
+                )
+            var original_bounds = List[BoundExpr]()
+            for expression in node.exprs:
+                original_bounds.append(bind(expression, schema))
+            if not decimal_row_feed.eligible(original_bounds):
+                capabilities.reject(
+                    "decimal date rows", "original whole-ROW proof changed"
+                )
+            ordered_mode = decimal_row_feed.ORDERED_MODE
         var scalar_precision = node.text == decimal_scalar_feed.MATERIALIZATION
         var ordered_group = (
             node.text == decimal_group_feed.MATERIALIZATION or scalar_precision
@@ -1432,6 +1454,15 @@ def lower_rows(
                         "producer AST or logical metadata changed",
                     )
                 sum_expression += 1
+            if precision_rows:
+                if node.names2[
+                    1 + decimal_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "decimal date rows",
+                        "producer AST or logical metadata changed",
+                    )
+                decimal_expression += 1
             if observed_group:
                 if node.names2[
                     2 + len(node.names) + grouped_expression
@@ -1477,6 +1508,7 @@ def lower_rows(
                 or ordered_decimal
                 or ordered_producer
                 or ordered_group
+                or precision_rows
             ):
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
@@ -2695,6 +2727,7 @@ def lower_rows(
                 or ordered_decimal
                 or ordered_producer
                 or ordered_group
+                or precision_rows
             ):
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
@@ -2713,6 +2746,7 @@ def lower_rows(
                 or ordered_decimal
                 or ordered_producer
                 or ordered_group
+                or precision_rows
             ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
@@ -3037,6 +3071,7 @@ def lower_rows(
         or ordered_mode == 4
         or ordered_mode == 5
         or ordered_mode == 6
+        or ordered_mode == decimal_row_feed.ORDERED_MODE
     ):
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(

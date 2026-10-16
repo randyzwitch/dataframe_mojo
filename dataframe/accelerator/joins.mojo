@@ -18,6 +18,7 @@ from . import (
     decimal_feed,
     decimal_group_feed,
     decimal_scalar_feed,
+    decimal_row_feed,
 )
 from .decimal_prefix import prefix_infallible
 from .explodes import schema as explode_schema
@@ -51,6 +52,7 @@ from dataframe.expr import (
     FLOORDIV,
     POW,
     SUM,
+    DT_YEAR,
     COL,
     CAST,
     MOD,
@@ -97,6 +99,25 @@ def _decimal_producer(query: LazyFrame, index: Int) raises -> Bool:
     return checked
 
 
+def _decimal_date_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
+        return False
+    var year = False
+    for expression in operation.exprs:
+        for part in expression._nodes:
+            year |= part.op == DT_YEAR
+    if not year or not prefix_infallible(query, operation.left):
+        return False
+    if not decimal_row_feed.consumers_infallible(query, index):
+        return False
+    var schema = schema_frame(query, operation.left)
+    var bounds = List[BoundExpr]()
+    for expression in operation.exprs:
+        bounds.append(bind(expression, schema._columns))
+    return decimal_row_feed.eligible(bounds)
+
+
 def _decimal_feed_producer(query: LazyFrame, index: Int) raises -> Bool:
     ref operation = query._nodes[index]
     # Eager SELECT uses frame.select_exprs' 8192-row operand batches. Streaming
@@ -135,6 +156,7 @@ def has_decimal_consumers(query: LazyFrame) raises -> Bool:
     for index in range(len(query._nodes)):
         if (
             _decimal_producer(query, index)
+            or _decimal_date_producer(query, index)
             or _decimal_feed_producer(query, index)
             or _decimal_group_producer(query, index)
             or _decimal_scalar_producer(query, index)
@@ -160,6 +182,22 @@ def _decimal_scalar_producer(query: LazyFrame, index: Int) raises -> Bool:
     for expression in operation.exprs:
         bounds.append(bind(expression, schema._columns))
     return decimal_scalar_feed.eligible(bounds, schema._columns)
+
+
+def _mark_decimal_date_producers(mut query: LazyFrame) raises:
+    # Issue this proof on the retained original graph before input pruning can
+    # replace a JOIN arm with a synthetic selected/normalized source region.
+    for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_date_producer(
+            query, index
+        ):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = decimal_row_feed.MATERIALIZATION
+            query._nodes[index].names2 = [decimal_row_feed.MATERIALIZATION]
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
 
 
 def _mark_decimal_producers(mut query: LazyFrame) raises:
@@ -404,6 +442,7 @@ def _observed_marker(text: String) -> Bool:
         or text == decimal_feed.MATERIALIZATION
         or text == decimal_group_feed.MATERIALIZATION
         or text == decimal_scalar_feed.MATERIALIZATION
+        or text == decimal_row_feed.MATERIALIZATION
         or text == INTEGER_MATERIALIZATION
         or text == GROUP_MATERIALIZATION
         or text == SUM_MATERIALIZATION
@@ -444,6 +483,7 @@ def prepare_temporal_prefix(
     """Finalize existing CPU-equivalent bridges before temporal signatures."""
     var result = query.copy()
     _optimize_scalar_sums(result, optimize)
+    _mark_decimal_date_producers(result)
     if optimize:
         result._push_slices()
         prune_projections(result)
@@ -1061,9 +1101,18 @@ def _task(
     if query._nodes[root].text in [
         decimal_group_feed.MATERIALIZATION,
         decimal_scalar_feed.MATERIALIZATION,
+        decimal_row_feed.MATERIALIZATION,
     ] and not prefix_infallible(query, query._nodes[root].left):
         capabilities.reject(
             "decimal group feed", "original infallible prefix changed"
+        )
+    if query._nodes[
+        root
+    ].text == decimal_row_feed.MATERIALIZATION and not decimal_row_feed.consumers_infallible(
+        query, root
+    ):
+        capabilities.reject(
+            "decimal date rows", "original infallible consumers changed"
         )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
@@ -1322,6 +1371,7 @@ def lower_join_dag(
             if projected._nodes[index].producer_origin:
                 producer_phases.validate_prefix(projected, index)
     else:
+        _mark_decimal_date_producers(projected)
         if (
             optimize
             and not has_cut_materializations(projected)

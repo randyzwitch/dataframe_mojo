@@ -104,6 +104,14 @@ certificates require an infallible original input prefix and accept canonical
 sign-extended Int64 literals with a Decimal128 dtype; arbitrary Decimal128
 source words and implicit WHEN common-type casts retain separate guards.
 
+The same grouped proof accepts Float64 SUM/MEAN states after infallible
+Float64 ADD/SUB/MUL/DIV, including a checked Decimal operand converted to
+Float64. IEEE infinities and NaNs affect values rather than introducing another
+exception category; the existing Float64 reassociation contract applies.
+Original checked Decimal operands still finish their observations before
+`min_count`, heads or later consumers. Float32 operations and foreign checked
+casts remain outside this proof.
+
 Grouped WHEN/FILL_NULL operands may also select a canonical signed64 Decimal
 literal with a different precision or storage width when its scale already
 matches and its exact raw value fits the common result precision. These
