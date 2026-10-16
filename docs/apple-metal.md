@@ -74,6 +74,13 @@ than device Int128 instructions. Decimal sums/means preserve precision checks,
 ordered worker-prefix behavior, cancellation and scaled conversion semantics.
 Moving, sorting, ranking, joining and arg min/max on decimals retain both words.
 
+An eager scalar SUM with one checked Decimal arithmetic occurrence can remain
+resident through later filters, joins and heads. Its replay observes each
+8192-row operand batch before that batch's sum prefix, checks worker failures
+before merging partials, and keeps the original nulls and result dtype. This
+certificate does not cover streaming morsels, grouped/OVER feeds, multiple
+fallible operand occurrences or fallible sibling expressions.
+
 Sorts preserve source order on ties, configured per-key null placement, and
 original value encodings. Nulls, NaNs and signed zeros retain the CPU grouping
 and join equivalence rules. Rank direction follows the CPU rank contract,

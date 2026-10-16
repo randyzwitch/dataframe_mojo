@@ -10,7 +10,7 @@ from .qcuts import is_qcut_marker, controls as qcut_controls
 from .cuts import has_cut_materializations
 from .capabilities import RowCapabilities
 from .rows import lower_rows
-from . import producer_phases
+from . import producer_phases, decimal_feed
 from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
@@ -84,17 +84,58 @@ def _decimal_producer(query: LazyFrame, index: Int) raises -> Bool:
     return checked
 
 
+def _decimal_feed_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    # Eager SELECT uses frame.select_exprs' 8192-row operand batches. Streaming
+    # morsels and group/OVER feeds require their own captured phase geometry.
+    if (
+        operation.kind != SELECT
+        or len(operation.exprs) != 1
+        or not query._accelerator_settings
+        or query._accelerator_settings.value().streaming
+    ):
+        return False
+    if (
+        not len(operation.exprs[0]._nodes)
+        or operation.exprs[0]._nodes[len(operation.exprs[0]._nodes) - 1].op
+        != SUM
+    ):
+        return False
+    var possible = False
+    for node in operation.exprs[0]._nodes:
+        possible |= node.op in [ADD, SUB, MUL, DIV, NEG, ABS]
+    if not possible:
+        return False
+    var schema = schema_frame(query, operation.left)
+    return decimal_feed.eligible(
+        bind(operation.exprs[0], schema._columns), schema._columns
+    )
+
+
 def has_decimal_consumers(query: LazyFrame) raises -> Bool:
     # A region boundary observes each expression before any later row
     # selection, join, ordering or stateful consumer can suppress its fault.
     for index in range(len(query._nodes)):
-        if _decimal_producer(query, index):
+        if _decimal_producer(query, index) or _decimal_feed_producer(
+            query, index
+        ):
             return True
     return False
 
 
 def _mark_decimal_producers(mut query: LazyFrame) raises:
     for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_feed_producer(
+            query, index
+        ):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = decimal_feed.MATERIALIZATION
+            query._nodes[index].names2 = [
+                decimal_feed.MATERIALIZATION,
+                implode_ordered.signature(
+                    bind(query._nodes[index].exprs[0], schema._columns)
+                ),
+            ]
         if not query._nodes[index].text and _decimal_producer(query, index):
             var schema = schema_frame(query, query._nodes[index].left)
             query._nodes[index].text = DECIMAL_MATERIALIZATION
@@ -193,6 +234,7 @@ def has_checked_integer_consumers(query: LazyFrame) raises -> Bool:
 def _observed_marker(text: String) -> Bool:
     return (
         text == DECIMAL_MATERIALIZATION
+        or text == decimal_feed.MATERIALIZATION
         or text == INTEGER_MATERIALIZATION
         or text == GROUP_MATERIALIZATION
     )

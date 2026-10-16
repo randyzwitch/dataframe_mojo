@@ -16,6 +16,7 @@ from std.memory import bitcast, ArcPointer, Pointer
 from std.time import perf_counter_ns
 from std.sys import size_of
 from max.gpu.host import DeviceBuffer
+from dataframe.parallel import configured_workers
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.binding import temporal_result
@@ -1315,6 +1316,21 @@ def execute_plan(
         resident_input.value().rows if resident_input else plan.source.height()
     )
     var ordered_scalar = plan.ordered_mode == 1
+    if plan.decimal_feed_batch_rows:
+        if (
+            plan.decimal_feed_batch_rows != 8192
+            or configured_workers() > 65535
+            or len(plan.outputs) != 1
+            or plan.outputs[0].reduction != SUM
+            or not plan.slot_dtypes[plan.outputs[0].slot].is_decimal()
+            or not plan.reductions
+            or plan.limit >= 0
+            or not terminal_boundary
+        ):
+            raise Error("Mojo GPU checked Decimal feed certificate changed")
+        for step in plan.steps:
+            if step.filter or step.order or step.grouped:
+                raise Error("Mojo GPU checked Decimal feed cannot move rows")
     var observed_producer = plan.ordered_mode == 6
     var iana_certified = plan.ordered_mode == 5 or observed_producer
     var ordered_terminal = plan.ordered_mode == 2 or plan.ordered_mode == 5

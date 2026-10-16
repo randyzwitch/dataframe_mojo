@@ -35,6 +35,7 @@ from .rows import integer_fits, unsigned_type
 from . import floating as f
 from . import decimal
 from .decimal_descriptors import DECIMAL_SUM, DECIMAL_MEAN
+from dataframe.accelerator.decimal_feed import BATCH_ROWS, DESCRIPTOR_FLAG
 
 comptime STATE_WORDS = 8
 comptime DESCRIPTOR_WORDS = 5
@@ -340,6 +341,48 @@ struct State(Copyable):
         return state^
 
 
+def _decimal_feed_worker(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    slot: Int,
+    stride: Int,
+    slots: Int,
+    start: Int,
+    end: Int,
+    op: Int64,
+    dtype: Int64,
+    parameter: Int64,
+) -> State:
+    var partial = State()
+    for offset in range(start, end, BATCH_ROWS):
+        var stop = min(end, offset + BATCH_ROWS)
+        # CPU _feed evaluates the whole operand batch before reducer.update.
+        # The certificate permits exactly one fallible arithmetic occurrence,
+        # so the first failing row is an unambiguous operand observation.
+        for row in range(offset, stop):
+            var error = errors[unsafe_offset=slot * stride + row]
+            if error:
+                partial.error = UInt64(error)
+                return partial
+        for row in range(offset, stop):
+            var at = slot * stride + row
+            partial.add(
+                words[unsafe_offset=at],
+                validity[unsafe_offset=at] != 0,
+                0,
+                UInt64(row),
+                op,
+                dtype,
+                words[unsafe_offset=stride * slots + at] if dtype
+                == 12 else UInt64(0),
+                parameter,
+            )
+            if partial.error:
+                return partial
+    return partial
+
+
 def reduce_partials(
     words: Pointer[UInt64, ImmutAnyOrigin],
     validity: Pointer[UInt8, ImmutAnyOrigin],
@@ -383,6 +426,47 @@ def reduce_partials(
             var step = (
                 ((Int(rows) + workers - 1) // workers + 8191) // 8192 * 8192
             )
+            if UInt64(parameter) & DESCRIPTOR_FLAG:
+                # CPU joins every worker, observing worker failures in order,
+                # before it merges any successful partials. A separate replay
+                # pass preserves that precedence without another allocation.
+                for worker in range(workers):
+                    var partial = _decimal_feed_worker(
+                        words,
+                        validity,
+                        errors,
+                        slot,
+                        Int(stride),
+                        Int(slots),
+                        min(Int(rows), worker * step),
+                        min(Int(rows), (worker + 1) * step),
+                        op,
+                        dtype,
+                        parameter,
+                    )
+                    if partial.error:
+                        partial.store(partials, work * STATE_WORDS)
+                        return
+                for worker in range(workers):
+                    var partial = _decimal_feed_worker(
+                        words,
+                        validity,
+                        errors,
+                        slot,
+                        Int(stride),
+                        Int(slots),
+                        min(Int(rows), worker * step),
+                        min(Int(rows), (worker + 1) * step),
+                        op,
+                        dtype,
+                        parameter,
+                    )
+                    state.merge(partial, op, dtype, parameter)
+                    if state.error:
+                        state.store(partials, work * STATE_WORDS)
+                        return
+                state.store(partials, work * STATE_WORDS)
+                return
             for worker in range(workers):
                 var partial = State()
                 for row in range(
