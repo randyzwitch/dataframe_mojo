@@ -3184,6 +3184,19 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_sum_output_bounds.mojo::test_mojo_gpu_sum_output_bounds_scaled_literal_nulls_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_sum_output_bounds.mojo::test_mojo_gpu_sum_output_bounds_preserve_producer_fault_and_budget",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -3243,6 +3256,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_sum_output_bounds.mojo",
                 "tests/execution_modes/test_decimal_scalar_feed_metadata.mojo",
                 "tests/execution_modes/test_conditional_decimal_aggregate_planning.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
@@ -3705,6 +3719,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_sum_output_bounds.mojo",
                 "tests/execution_modes/test_decimal_scalar_feed_metadata.mojo",
                 "tests/execution_modes/test_conditional_decimal_aggregate_planning.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
