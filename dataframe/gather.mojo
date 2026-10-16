@@ -18,8 +18,7 @@ partially built column.
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn, _bits64
-from .column import Column, _bit, _validity_bit
-from .dtype import DataType, NUMERIC_DTYPES
+from .column import Column
 
 # Fixed-width payloads a gather copies: the numeric types plus Int128, the
 # storage of decimal columns, which joins used to return as nulls.
@@ -36,7 +35,7 @@ comptime GATHER_DTYPES: Array[DType, 11] = [
     DType.float32,
     DType.int128,
 ]
-from .expr import GT, LT, GE, LE, EQ, NE
+from .expr import GT, LT, GE, LE, EQ
 from .parallel import (
     _performance_core_count,
     Job,
@@ -772,9 +771,6 @@ struct _GatherJob(Job):
                         out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(
                             k % 8
                         )
-
-    def into_piece(deinit self) -> Series:
-        return self.piece^
 
 
 struct _RechunkJob(Job):

@@ -3,15 +3,20 @@
 import hashlib
 import json
 
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 POLICY_NOTE = (
-    "Tune on H2O, PDS-H and mechanism benchmarks; use TPC-DS and ClickBench "
-    "as held-out validation. PDS-H was held out until 2026-10-05, when "
-    "TPC-DS replaced it. Some earlier optimization work used ClickBench "
-    "results; no TPC-DS result has been used to choose an optimization."
+    "Tune on H2O, PDS-H, TPC-DS and mechanism benchmarks; use ClickBench as "
+    "held-out validation. PDS-H was held out until 2026-10-05 and TPC-DS "
+    "until 2026-10-15. Some earlier optimization work used ClickBench results."
 )
 # Reports recorded under an earlier policy keep the note they were made under.
 EARLIER_NOTES = {
+    3: (
+        "Tune on H2O, PDS-H and mechanism benchmarks; use TPC-DS and ClickBench "
+        "as held-out validation. PDS-H was held out until 2026-10-05, when "
+        "TPC-DS replaced it. Some earlier optimization work used ClickBench "
+        "results; no TPC-DS result has been used to choose an optimization."
+    ),
     2: (
         "Tune on H2O and mechanism benchmarks; use PDS-H and ClickBench as "
         "held-out validation. Some prior optimization work used holdout results; "
@@ -28,7 +33,7 @@ EXPOSURE_EVIDENCE = {
     "h2o_groupby": "docs/benchmarks.md already designates H2O as development",
     "h2o_join": "docs/benchmarks.md already designates H2O as development",
     "pdsh": "dataframe/lazy.mojo join ordering and streaming policy cite PDS-H queries; development since 2026-10-05",
-    "tpcds": "added 2026-10-05 as the held-out replacement for PDS-H; no engine change cites it",
+    "tpcds": "held out from 2026-10-05; development since 2026-10-15",
     "clickbench": "dataframe/lazy.mojo group-by policy cites ClickBench per-query timings",
 }
 
@@ -36,7 +41,6 @@ EXPOSURE_EVIDENCE = {
 # What a held-out suite's results have been used for before now.
 PRIOR_EXPOSURE = {
     "clickbench": "some_prior_optimization_use",
-    "tpcds": "none_recorded",
 }
 
 
@@ -60,7 +64,7 @@ def record(root, selected, suites):
     return {
         "policy_version": POLICY_VERSION,
         "policy": "development_tuning_holdout_validation",
-        "policy_effective": "2026-10-05",
+        "policy_effective": "2026-10-15",
         "suites": {
             name: {
                 "role": "development" if suites[name]["role"]

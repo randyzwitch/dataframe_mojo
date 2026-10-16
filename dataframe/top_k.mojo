@@ -22,7 +22,7 @@ from .binding import BoundExpr
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
-from .expr import COL, LE, LIT_INT, LT, OVER, RANK, SEP, split_names
+from .expr import COL, LE, LIT_INT, LT, OVER, RANK, split_names
 from .aggregate_table import TOP_ROWS_INLINE, aggregate_top_rows, key_supported
 from .hashing import encode_rows, encode_rows_parallel
 from .parallel import Job, run_jobs, worker_count

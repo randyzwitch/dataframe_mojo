@@ -10,11 +10,9 @@ execution per input without timing; the times are for finding where a
 query spends its time, as Polars' and DuckDB's profiles show.
 Without a report attached, the executors only test a flag.
 """
-from std.memory import ArcPointer
 
 from ._build_identity import CPU_BUILD_ID
 from .column import Column
-from .dtype import DataType
 from .frame import DataFrame
 from .series import Series
 
@@ -156,20 +154,3 @@ struct ExecutionReport(Movable):
                 Series("wall_ms", Column[Float64](wall^)),
             ]
         )
-
-    def lines(self) raises -> List[String]:
-        """Tab-separated rows for a trace, in node order."""
-        var table = self.frame()
-        var out = List[String]()
-        for r in range(table.height()):
-            var parts = List[String]()
-            for name in table.columns():
-                var cell = table.item(r, name)
-                if cell.dtype() == DataType.INT64:
-                    parts.append(String(cell.int64()))
-                elif cell.dtype() == DataType.FLOAT64:
-                    parts.append(String(round(cell.float64(), 3)))
-                else:
-                    parts.append(cell.string())
-            out.append(String("\t").join(parts))
-        return out^

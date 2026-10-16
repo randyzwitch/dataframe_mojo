@@ -82,7 +82,6 @@ struct StringViewStorage(Copyable, Sized):
     var _buffers: ArcPointer[List[ArcPointer[List[UInt8]]]]
     var _bits: ArcPointer[List[UInt8]]
     var _length: Int
-    var _total_bytes: Int
     var _total_buffer_bytes: Int
 
     def __init__(
@@ -91,14 +90,12 @@ struct StringViewStorage(Copyable, Sized):
         var buffers: List[ArcPointer[List[UInt8]]],
         var bits: List[UInt8],
         length: Int,
-        total_bytes: Int,
         total_buffer_bytes: Int,
     ):
         self._views = ArcPointer(views^)
         self._buffers = ArcPointer(buffers^)
         self._bits = ArcPointer(bits^)
         self._length = length
-        self._total_bytes = total_bytes
         self._total_buffer_bytes = total_buffer_bytes
 
     def __len__(self) -> Int:
@@ -112,9 +109,6 @@ struct StringViewStorage(Copyable, Sized):
 
     def validity_arc(self) -> ArcPointer[List[UInt8]]:
         return self._bits.copy()
-
-    def total_bytes(self) -> Int:
-        return self._total_bytes
 
     def total_buffer_bytes(self) -> Int:
         return self._total_buffer_bytes
@@ -193,7 +187,6 @@ struct StringViewStorage(Copyable, Sized):
         buffers: ArcPointer[List[ArcPointer[List[UInt8]]]],
         var bits: List[UInt8],
         length: Int,
-        total_bytes: Int,
         total_buffer_bytes: Int,
     ) -> Self:
         """Storage over `views` that shares an existing buffer list."""
@@ -202,7 +195,6 @@ struct StringViewStorage(Copyable, Sized):
             List[ArcPointer[List[UInt8]]](),
             bits^,
             length,
-            total_bytes,
             total_buffer_bytes,
         )
         result._buffers = buffers.copy()
@@ -230,7 +222,6 @@ struct StringViewStorage(Copyable, Sized):
             length=(count + 7) // 8 if (nulls or allow_missing) else 0, fill=0
         )
         var missing = False
-        var total_bytes = 0
         var total_buffer_bytes = 0
         var rows = indices.unsafe_ptr().unsafe_offset(first)
         var limit = self._length - offset
@@ -263,7 +254,6 @@ struct StringViewStorage(Copyable, Sized):
             var word = source[unsafe_offset=offset + index]
             target[unsafe_offset=k] = word
             var length = Int(word[0])
-            total_bytes += length
             if length > STRING_VIEW_INLINE_BYTES:
                 total_buffer_bytes += length
         if len(bits) > 0:
@@ -280,7 +270,6 @@ struct StringViewStorage(Copyable, Sized):
             self._buffers,
             bits^,
             count,
-            total_bytes,
             total_buffer_bytes,
         )
 
@@ -303,7 +292,6 @@ struct StringViewStorage(Copyable, Sized):
         for buffer in other._buffers[]:
             buffers.append(buffer.copy())
         var bits = List[UInt8]()
-        var total_bytes = 0
         var total_buffer_bytes = 0
         for i in range(self_length):
             var source = self_offset + i
@@ -314,7 +302,6 @@ struct StringViewStorage(Copyable, Sized):
                 _validity_bit(self._bits[], source),
                 self_length + other_length,
             )
-            total_bytes += Int(view.length)
             if not view.is_inline():
                 total_buffer_bytes += Int(view.length)
             views.append(view^)
@@ -329,7 +316,6 @@ struct StringViewStorage(Copyable, Sized):
                 _validity_bit(other._bits[], source),
                 self_length + other_length,
             )
-            total_bytes += Int(view.length)
             if not view.is_inline():
                 total_buffer_bytes += Int(view.length)
             views.append(view^)
@@ -338,7 +324,6 @@ struct StringViewStorage(Copyable, Sized):
             buffers^,
             bits^,
             self_length + other_length,
-            total_bytes,
             total_buffer_bytes,
         )
 
@@ -383,7 +368,6 @@ struct StringViewStorage(Copyable, Sized):
         var bits = List[UInt8](
             length=(rows + 7) // 8 if any_nulls else 0, fill=0
         )
-        var total_bytes = 0
         var total_buffer_bytes = 0
         var row = 0
         for p in range(len(parts)):
@@ -424,16 +408,13 @@ struct StringViewStorage(Copyable, Sized):
                         out.unsafe_offset(row + i)[] = moved^
                 elif not identity:
                     out.unsafe_offset(row + i)[] = view.copy()
-                total_bytes += length
                 if any_nulls and (
                     not nulls or _validity_bit(storage._bits[], offsets[p] + i)
                 ):
                     var at = row + i
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
             row += count
-        return Self(
-            views^, buffers^, bits^, rows, total_bytes, total_buffer_bytes
-        )
+        return Self(views^, buffers^, bits^, rows, total_buffer_bytes)
 
 
 struct StringViewBuilder(Movable):
@@ -443,7 +424,6 @@ struct StringViewBuilder(Movable):
     var _completed_buffers: List[ArcPointer[List[UInt8]]]
     var _in_progress: List[UInt8]
     var _bits: List[UInt8]
-    var _total_bytes: Int
     var _total_buffer_bytes: Int
 
     def __init__(out self, capacity: Int = 0):
@@ -451,7 +431,6 @@ struct StringViewBuilder(Movable):
         self._completed_buffers = List[ArcPointer[List[UInt8]]]()
         self._in_progress = List[UInt8]()
         self._bits = List[UInt8]()
-        self._total_bytes = 0
         self._total_buffer_bytes = 0
 
     def __len__(self) -> Int:
@@ -503,7 +482,6 @@ struct StringViewBuilder(Movable):
         _append_validity_bit(
             self._bits, len(self._views), True, self._views.capacity()
         )
-        self._total_bytes += len(bytes)
         self._views.append(self._push_value_into_buffer(bytes))
 
     def append_null(mut self):
@@ -520,6 +498,5 @@ struct StringViewBuilder(Movable):
             self._completed_buffers^,
             self._bits^,
             length,
-            self._total_bytes,
             self._total_buffer_bytes,
         )

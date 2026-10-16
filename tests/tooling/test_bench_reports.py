@@ -73,23 +73,28 @@ class BenchmarkReports(unittest.TestCase):
                 for name, spec in bench.SUITES.items()
                 if spec["role"] == "heldout"
             },
-            {"tpcds", "clickbench"},
+            {"clickbench"},
         )
-        # PDS-H is development since 2026-10-05, and the quick tier runs it.
+        # PDS-H is development since 2026-10-05 and TPC-DS since 2026-10-15;
+        # the quick tier runs every development suite and no held-out one.
         self.assertEqual(bench.SUITES["pdsh"]["role"], "dev")
-        self.assertIn("pdsh", bench.TIERS["quick"]["suites"].split(","))
-        self.assertNotIn("tpcds", bench.TIERS["quick"]["suites"].split(","))
+        self.assertEqual(bench.SUITES["tpcds"]["role"], "dev")
+        self.assertEqual(
+            bench.TIERS["quick"]["suites"].split(","),
+            ["h2o_groupby", "h2o_join", "pdsh", "tpcds"],
+        )
         info = bench_policy.record(ROOT, bench.SUITES, bench.SUITES)
         self.assertEqual(
             info["policy"], "development_tuning_holdout_validation"
         )
-        self.assertEqual(info["policy_version"], 3)
+        self.assertEqual(info["policy_version"], 4)
         self.assertEqual(info["suites"]["pdsh"]["intended_use"], "tuning")
+        self.assertEqual(info["suites"]["tpcds"]["intended_use"], "tuning")
         self.assertEqual(
-            info["suites"]["tpcds"]["intended_use"], "validation_only"
+            info["suites"]["tpcds"]["prior_exposure"], "used_for_development"
         )
         self.assertEqual(
-            info["suites"]["tpcds"]["prior_exposure"], "none_recorded"
+            info["suites"]["clickbench"]["intended_use"], "validation_only"
         )
         self.assertEqual(
             info["suites"]["clickbench"]["prior_exposure"],
@@ -127,7 +132,7 @@ class BenchmarkReports(unittest.TestCase):
             len(re.findall(r'<td class="q">q\d+</td>', page)), 179
         )
         self.assertIn("held-out validation", page)
-        self.assertIn("TPC-DS replaced it", page)
+        self.assertIn("TPC-DS until 2026-10-15", page)
         self.assertIn('<th class="num">Distinct queries</th>', page)
         self.assertIn('<th class="num">Query/variant cases</th>', page)
         self.assertRegex(
@@ -233,7 +238,12 @@ class BenchmarkReports(unittest.TestCase):
         result["provenance"]["evaluation"] = bench_policy.record(
             ROOT, bench.SUITES, bench.SUITES
         )
-        self.assertIn("TPC-DS and ClickBench", bench_policy.report_note(result))
+        self.assertIn(
+            "use ClickBench as held-out", bench_policy.report_note(result)
+        )
+        result["provenance"]["evaluation"]["policy_version"] = 3
+        earlier = bench_policy.report_note(result)
+        self.assertIn("use TPC-DS and ClickBench as held-out", earlier)
         result["provenance"]["evaluation"]["policy_version"] = 2
         earlier = bench_policy.report_note(result)
         self.assertIn("PDS-H and ClickBench as held-out", earlier)

@@ -12,8 +12,8 @@ from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .huge_pages import huge_list
-from .dtype import DataType, NUMERIC_DTYPES
-from .string_column import StringColumn, StringBuilder
+from .dtype import NUMERIC_DTYPES
+from .string_column import StringColumn
 from .series import Series
 from .parallel import Job, partitions, run_jobs
 
@@ -237,15 +237,6 @@ struct _InlineStringCodes(Movable):
                     self.fallback[self.keys[i]] = self.codes[i]
             self.use_fallback = True
         return next_id
-
-
-def _inline_view_key(value: StringSlice[ImmutAnyOrigin]) -> UInt128:
-    """Pack legacy short strings into the same key as inline views."""
-    var bytes = value.as_bytes()
-    var key = UInt128(len(bytes))
-    for i in range(len(bytes)):
-        key |= UInt128(bytes[i]) << UInt128((i + 4) * 8)
-    return key
 
 
 def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:

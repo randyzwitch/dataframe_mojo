@@ -5,8 +5,8 @@ No benchmark executes without --collect. Use a provider-enabled identified
 package directory and a prebuilt bench_accelerator_cost binary. The same runner
 and fitting code serve any provider implementing the estimate/identity hooks.
 Named mechanisms have prior development exposure and are query-held-out from
-this fit; they are not an external-suite holdout claim. TPC-DS and ClickBench
-remain validation-only under bench_policy.py. Failed and unsupported cases are
+this fit; they are not an external-suite holdout claim. ClickBench remains
+validation-only under bench_policy.py. Failed and unsupported cases are
 retained. No held-out observation changes coefficients or residual envelopes.
 """
 from __future__ import annotations
@@ -322,7 +322,7 @@ def main():
              and (c["workload"] if c["workload"] in ("sum", "count", "extrema") else c["reduction"]) not in args.exclude_reductions]
     if not cases:
         parser.error("selected calibration matrix is empty")
-    provenance = dict(recorded_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(), driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), runner_sha256=hashlib.sha256((ROOT / "benchmarks/bench_accelerator_cost.mojo").read_bytes()).hexdigest(), exposure="generated training; named mechanisms held out from this fit but previously exposed during development", external_holdout_policy="benchmarks/tools/bench_policy.py: TPC-DS and ClickBench validation only", method="fresh process per case; one explicit runtime; cold context cost retained; alternating warm CPU/accelerator pairs; parity outside timings; full preflight overhead measured separately and added to accelerator cost; CPU lower and accelerator upper residual envelopes fitted on training only")
+    provenance = dict(recorded_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(), driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), runner_sha256=hashlib.sha256((ROOT / "benchmarks/bench_accelerator_cost.mojo").read_bytes()).hexdigest(), exposure="generated training; named mechanisms held out from this fit but previously exposed during development", external_holdout_policy="benchmarks/tools/bench_policy.py: ClickBench validation only", method="fresh process per case; one explicit runtime; cold context cost retained; alternating warm CPU/accelerator pairs; parity outside timings; full preflight overhead measured separately and added to accelerator cost; CPU lower and accelerator upper residual envelopes fitted on training only")
     (args.output / "manifest.json").write_text(json.dumps(dict(provenance=provenance, cases=cases), indent=2) + "\n")
     if not args.collect:
         print("Wrote case manifest only; pass --collect with an identified provider binary to measure.")

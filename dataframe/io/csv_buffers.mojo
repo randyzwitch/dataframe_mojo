@@ -5,7 +5,6 @@ append. Variant payloads are swapped out at finish, transferring ownership.
 Strings use 16-byte views with inline short values and retained blocks.
 """
 from std.collections import Dict
-from std.memory import ArcPointer
 from std.utils import Variant
 from ..column import Column, _append_validity_bit
 from ..bool_column import BoolColumn

@@ -96,11 +96,6 @@ comptime _RTLD_NOW = Int32(2)
 comptime _ReadFn = def(Int, Int32, Int, Int32, Int, Int32, Int, Int) thin abi(
     "C"
 ) -> Int32
-# int dfq_read_parquet_dict(path, threads, columns, n_columns, row_groups,
-#     n_row_groups, out_array, out_schema, error_out)
-comptime _ReadDictFn = def(
-    Int, Int32, Int, Int32, Int, Int32, Int, Int, Int
-) thin abi("C") -> Int32
 comptime _StreamGet = def(Int, Int) thin abi("C") -> Int32
 comptime _StreamError = def(Int) thin abi("C") -> Int
 comptime _StreamRelease = def(Int) thin abi("C") -> None
