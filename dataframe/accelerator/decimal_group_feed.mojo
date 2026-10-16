@@ -25,6 +25,7 @@ from dataframe.expr import (
     ADD,
     SUB,
     MUL,
+    DIV,
     CAST,
     WHEN,
     IS_NULL,
@@ -121,6 +122,17 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
             ):
                 return (False, False)
             continue
+        if node.op in [ADD, SUB, MUL, DIV] and dtype == DataType.FLOAT64:
+            # IEEE Float64 arithmetic cannot introduce an exception category.
+            # Keep Float32, integer division and logical conversions excluded.
+            if (
+                node.left < 0
+                or node.right < 0
+                or bound.dtypes[node.left] != DataType.FLOAT64
+                or bound.dtypes[node.right] != DataType.FLOAT64
+            ):
+                return (False, False)
+            continue
         if node.op not in [ADD, SUB, MUL] or not dtype.is_decimal():
             return (False, False)
         if dtype.decimal_width() > 64 or dtype.scale() > 18:
@@ -166,8 +178,11 @@ def eligible(
             return False
         checked |= proof[1]
         if root.op == SUM or root.op == MEAN:
-            if not infallible_sum(
-                input.dtypes[len(input.dtypes) - 1], Int(UInt32.MAX)
+            var dtype = input.dtypes[len(input.dtypes) - 1]
+            # Float64 SUM/MEAN follows the existing reassociation contract;
+            # overflow/NaN affects values, never the operand exception order.
+            if dtype != DataType.FLOAT64 and not infallible_sum(
+                dtype, Int(UInt32.MAX)
             ):
                 return False
     return checked
