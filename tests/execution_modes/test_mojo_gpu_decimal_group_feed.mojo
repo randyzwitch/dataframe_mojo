@@ -15,6 +15,7 @@ from dataframe.lazy import LazyFrame
 from dataframe.accelerator import decimal_group_feed
 from dataframe.accelerator.decimal_prefix import prefix_infallible
 from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
 from dataframe.binding import bind
 from dataframe.accelerator.joins import lower_join_dag
 from dataframe.accelerator.gpu.runtime import capabilities
@@ -193,7 +194,12 @@ def _money_and_prefix_certificates() raises:
     var normalized = fold_literal_text_parsing(
         grouped
     )._with_accelerator_settings(False, True, 65536)
-    var dag = lower_join_dag(normalized, capabilities())
+    # The public route encodes String fields before numeric DAG lowering.
+    # DATE retains its original Int64 logical/physical representation; the
+    # fresh String segment is the only carrier normalization needed here.
+    var dictionary = DictionaryCodes(normalized)
+    var encoded = encode_query(normalized, dictionary)
+    var dag = lower_join_dag(encoded, capabilities())
     var observed = 0
     for task in dag.tasks:
         for node in task.query._nodes:
