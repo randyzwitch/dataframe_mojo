@@ -262,9 +262,9 @@ def test_mojo_gpu_decimal_date_rows_precision_before_group_and_join() raises:
                         with assert_raises(contains="decimal precision"):
                             _ = _collect(query, gpu, streaming, batch)
         _ = workers^
-    # Cross the real CPU streaming worker threshold, with a precision site
-    # after two65536-row morsels. WorkerSetting alone on six rows would not
-    # exercise parallel CPU geometry.
+    # Keep three source morsels at batch65536 and place a precision site
+    # after the first two. Configured workers1/2 are controlled; no selected
+    # CPU route or worker schedule is inferred from row count alone.
     var n_rows = 131073
     for count in [1, 2]:
         var workers = WorkerSetting(count)
