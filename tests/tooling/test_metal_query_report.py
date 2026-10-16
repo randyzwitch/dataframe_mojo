@@ -151,6 +151,24 @@ class MetalQueryReport(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absent from the translated"):
             report.summarize({report.key(c): c}, definitions(), {}, {})
 
+    def test_supplemental_witness_cannot_inflate_canonical_grid(self):
+        c = case("q1")
+        metadata = {
+            "cases": {
+                "example/q1": {
+                    "workload_kind": "supplemental",
+                    "execution_boundary": "gpu_collects",
+                    "source_path": "query.mojo",
+                    "source_sha256": "source",
+                    "audit_reason": "supplemental data",
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "Supplemental witnesses"):
+            report.summarize(
+                {report.key(c): c}, definitions(), {"query.mojo": "source"}, metadata
+            )
+
     def test_cli_cannot_overwrite_immutable_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "input.json"

@@ -213,9 +213,12 @@ def summarize(cases, definitions, source_hashes, metadata):
         )
     enriched = []
     for case_key, case in cases.items():
-        enriched.append(
-            dict(case, execution_audit=execution_audit(case, source_hashes, metadata))
-        )
+        audit = execution_audit(case, source_hashes, metadata)
+        if audit.get("workload_kind") == "supplemental":
+            raise ValueError(
+                "Supplemental witnesses cannot count as canonical catalog coverage"
+            )
+        enriched.append(dict(case, execution_audit=audit))
 
     def counts(rows, excluded=False):
         available = {key(c): c for c in rows}
