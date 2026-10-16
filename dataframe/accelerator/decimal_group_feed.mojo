@@ -59,6 +59,25 @@ def infallible_sum(dtype: DataType, rows: Int) -> Bool:
     return Int128(rows) <= (pow10(38) - 1) // maximum
 
 
+def narrow_value(bound: BoundExpr, at: Int) -> Bool:
+    """Physical64 storage or one exact sign-extended signed64 literal.
+
+    money() deliberately has Arrow Decimal128 dtype. Literal folding retains
+    that dtype and its high word, so precision alone is never a value bound.
+    Only a canonical sign extension proves the same physical64 magnitude.
+    """
+    var dtype = bound.dtypes[at]
+    if not dtype.is_decimal() or dtype.scale() > 18:
+        return False
+    if dtype.decimal_width() <= 64:
+        return True
+    ref node = bound.expr._nodes[at]
+    return node.op == LIT_INT and (
+        not node.text2.byte_length()
+        or node.text2 == String(-1 if node.integer < 0 else 0)
+    )
+
+
 def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
     if not ordered_rows.eligible(bound):
         return (False, False)
@@ -68,9 +87,7 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
         ref node = bound.expr._nodes[at]
         var dtype = bound.dtypes[at]
         if node.op in [COL, LIT_INT, LIT_FLOAT, LIT_BOOL, LIT_NULL]:
-            if dtype.is_decimal() and (
-                dtype.decimal_width() > 64 or dtype.scale() > 18
-            ):
+            if dtype.is_decimal() and not narrow_value(bound, at):
                 return (False, False)
             continue
         if node.op == CAST and proven[at]:
@@ -103,10 +120,7 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
         for child in [node.left, node.right]:
             if child < 0 or not bound.dtypes[child].is_decimal():
                 return (False, False)
-            if (
-                bound.dtypes[child].decimal_width() > 64
-                or bound.dtypes[child].scale() > 18
-            ):
+            if not narrow_value(bound, child):
                 return (False, False)
         checked |= not proven[at]
     return (True, checked)
