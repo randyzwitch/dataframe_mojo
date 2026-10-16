@@ -1001,6 +1001,7 @@ def estimate_resources(
             or plan.ordered_mode == 5
             or plan.ordered_mode == 6
             or plan.ordered_mode == 7
+            or plan.ordered_mode == 8
         ):
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
@@ -1110,8 +1111,9 @@ def estimate_resources(
             or plan.ordered_mode == 4
             or plan.ordered_mode == 6
             or plan.ordered_mode == 7
+            or plan.ordered_mode == 8
         )
-        if plan.ordered_mode == 7:
+        if plan.ordered_mode == 7 or plan.ordered_mode == 8:
             observations = 1  # Input-zero proof precedes all original operands.
             for step in plan.steps:
                 observations += Int(not step.grouped and not step.order)
@@ -1124,7 +1126,8 @@ def estimate_resources(
                 or plan.ordered_mode == 4
                 or plan.ordered_mode == 5
                 or plan.ordered_mode == 6
-                or plan.ordered_mode == 7 else 1
+                or plan.ordered_mode == 7
+                or plan.ordered_mode == 8 else 1
             ),
         )
         waits = _checked_add(waits, observations)
@@ -1351,7 +1354,9 @@ def execute_plan(
         or observed_producer
     )
     var ordered_group = plan.ordered_mode == 7
-    var ordered = ordered_scalar or ordered_rows or ordered_group
+    var precision_rows = plan.ordered_mode == 8
+    var ordered_precision = ordered_group or precision_rows
+    var ordered = ordered_scalar or ordered_rows or ordered_precision
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
     if ordered_group:
@@ -1391,6 +1396,20 @@ def execute_plan(
             if step.filter or step.order or step.grouped:
                 raise Error(
                     "Mojo GPU ordered ROWS cannot feed row movement or state phases"
+                )
+    if precision_rows:
+        if (
+            not terminal_boundary
+            or plan.limit >= 0
+            or plan.reductions
+            or rows > Int(UInt32.MAX)
+            or len(plan.ordered_ranks[]) != len(plan.literals)
+        ):
+            raise Error("Mojo GPU narrow Decimal ROW certificate changed")
+        for step in plan.steps:
+            if step.filter or step.order or step.grouped:
+                raise Error(
+                    "Mojo GPU narrow Decimal ROW producer cannot move rows"
                 )
     if ordered_terminal and (
         Bool(resident_input)
@@ -1645,7 +1664,7 @@ def execute_plan(
                             iana_active_scratch = ctx.enqueue_create_buffer[
                                 DType.uint8
                             ](iana_scalar_resources.scratch_bytes)
-                    if ordered_rows or ordered_group:
+                    if ordered_rows or ordered_precision:
                         ordered_partials = ctx.enqueue_create_buffer[
                             DType.uint32
                         ](2 * fault_groups)
@@ -1673,7 +1692,7 @@ def execute_plan(
                         ordered_private
                         or ordered_decimal
                         or observed_producer
-                        or ordered_group
+                        or ordered_precision
                     ):
                         # Input cells are ordinary flags from an already
                         # observed producer. Prove every staged source cell is
@@ -2458,7 +2477,7 @@ def execute_plan(
                                 grid_dim=(current_rows + 255) // 256,
                                 block_dim=256,
                             )
-                        if ordered_group:
+                        if ordered_precision:
                             ctx.enqueue_function[
                                 ordered_faults.observe_precision_partials
                             ](
@@ -2521,7 +2540,7 @@ def execute_plan(
                         waits += 1
                         if fault[0]:
                             var category = ordered_faults.category(fault[0])
-                            if ordered_group and category != 8:
+                            if ordered_precision and category != 8:
                                 raise Error(
                                     "Mojo GPU narrow Decimal precision proof was violated"
                                 )
