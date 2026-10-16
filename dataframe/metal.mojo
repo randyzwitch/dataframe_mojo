@@ -100,6 +100,7 @@ from .accelerator.joins import (
     prepare_temporal_prefix,
 )
 from .accelerator import producer_phases
+from .accelerator import nested_transport
 from .accelerator.explodes import has_explode
 from .lazy import AcceleratorBackend, LazyFrame
 from .column import Column
@@ -295,7 +296,12 @@ struct MetalRuntime(AcceleratorBackend):
         return configured^
 
     def _run(
-        self, query: LazyFrame, profiling: Bool, *, original_entry: Bool = True
+        self,
+        query: LazyFrame,
+        profiling: Bool,
+        *,
+        original_entry: Bool = True,
+        nested_general: Bool = True,
     ) raises -> Tuple[DataFrame, DataFrame]:
         from .accelerator.gpu.runtime import execute, capabilities
         from .accelerator.gpu.dag_runtime import execute as execute_dag
@@ -315,6 +321,27 @@ struct MetalRuntime(AcceleratorBackend):
         )
         from .parallel import configured_workers
 
+        if original_entry and nested_general:
+            var functions = nested_transport.lower_functions(query)
+            var prepared = (
+                functions.value().copy() if functions else query.copy()
+            )
+            if nested_transport.applies(prepared):
+                if functions and nested_transport.direct_projection(query):
+                    # The resident List/Struct routes own direct projections.
+                    try:
+                        return self._run(query, profiling, nested_general=False)
+                    except error:
+                        if "unsupported" not in String(error):
+                            raise error^
+                # Nested functions were evaluated while staging; nested
+                # columns that are only moved travel as row ids.
+                var transport = nested_transport.lower(prepared)
+                var executed = self._run(transport.query, profiling)
+                return (
+                    nested_transport.restore(executed[0], transport),
+                    executed[1].copy(),
+                )
         var float_started = Int(perf_counter_ns())
         var float_route = candidate(
             query,
@@ -1101,6 +1128,24 @@ struct MetalRuntime(AcceleratorBackend):
         from .parallel import configured_workers
 
         try:
+            if original_entry:
+                var functions = nested_transport.lower_functions(
+                    query, metadata_only=True
+                )
+                var prepared = (
+                    functions.value().copy() if functions else query.copy()
+                )
+                if nested_transport.applies(prepared) and not (
+                    functions and nested_transport.direct_projection(query)
+                ):
+                    return (
+                        "Metal nested columns carried as row ids; List/Struct"
+                        " functions evaluated while staging; host owners"
+                        " rebuild nested outputs\n"
+                        + self._describe(
+                            nested_transport.lower(prepared).query, True
+                        )
+                    )
             var float_route = candidate(
                 query,
                 configured_workers(),
