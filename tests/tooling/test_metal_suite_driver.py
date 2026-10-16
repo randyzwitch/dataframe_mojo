@@ -31,7 +31,12 @@ class MetalSuiteDriver(unittest.TestCase):
                 metal = (destination / f"metal_{name}.mojo").read_text()
                 self.assertNotIn(".collect()", metal)
                 self.assertNotIn('engine="auto"', metal)
-                expected = 15 if name == "h2o" else text.count(".collect()")
+                adapted = manifest["scalar_materialization_proofs"][
+                    "benchmarks/suites/" + name + ".mojo"
+                ]["adapted"]
+                expected = 15 if name == "h2o" else text.count(
+                    ".collect()"
+                ) + len(adapted)
                 self.assertEqual(
                     metal.count(".collect(accelerator=MetalRuntime())"),
                     expected,
@@ -41,6 +46,27 @@ class MetalSuiteDriver(unittest.TestCase):
                     text,
                 )
             self.assertEqual(len(manifest["derived_source_sha256"]), 16)
+            self.assertEqual(
+                sum(
+                    len(p["adapted"])
+                    for p in manifest["scalar_materialization_proofs"].values()
+                ),
+                1,
+            )
+            for path, proof in manifest[
+                "scalar_materialization_proofs"
+            ].items():
+                self.assertEqual(
+                    proof["canonical_source_sha256"],
+                    manifest["original_source_sha256"][path],
+                )
+                name = Path(path).stem
+                self.assertEqual(
+                    proof["metal_derived_source_sha256"],
+                    manifest["derived_source_sha256"][
+                        "metal_" + name + ".mojo"
+                    ],
+                )
 
     def test_unreviewed_materialization_changes_fail_closed(self):
         with self.assertRaises(ValueError):
@@ -176,6 +202,49 @@ class MetalSuiteDriver(unittest.TestCase):
                     "q1",
                     {path: "hash"},
                 )
+
+    def test_derived_worker_pin_cannot_certify_another_adapter(self):
+        path = "benchmarks/suites/tpcds.mojo"
+        entry = dict(
+            workload_kind="canonical",
+            execution_boundary="gpu_collects",
+            source_path=path,
+            source_sha256="canonical",
+            metal_derived_source_sha256="adapted",
+            whole_query_gpu_certificate=False,
+            alignment_keys=["key"],
+            order_keys=["key"],
+            audit_reason="Reviewed canonical and derived materialization boundaries",
+        )
+        metadata = {"cases": {"tpcds/q24": entry}}
+        valid = driver.case_audit(
+            metadata,
+            "tpcds",
+            "base",
+            "q24",
+            {path: "canonical"},
+            {"metal_tpcds.mojo": "adapted"},
+        )
+        self.assertEqual(valid["execution_boundary"], "gpu_collects")
+        for derived in (None, {}, {"metal_tpcds.mojo": "old"}):
+            stale = driver.case_audit(
+                metadata, "tpcds", "base", "q24", {path: "canonical"}, derived
+            )
+            self.assertEqual(stale["execution_boundary"], "unknown")
+            self.assertEqual(stale["alignment_keys"], [])
+            self.assertEqual(stale["order_keys"], [])
+            self.assertFalse(stale["whole_query_gpu_certificate"])
+        legacy = dict(entry, execution_boundary="hybrid")
+        legacy.pop("metal_derived_source_sha256")
+        unchanged = driver.case_audit(
+            {"cases": {"tpcds/q24": legacy}},
+            "tpcds",
+            "base",
+            "q24",
+            {path: "canonical"},
+            {"metal_tpcds.mojo": "adapted"},
+        )
+        self.assertEqual(unchanged["execution_boundary"], "hybrid")
 
     def test_diagnostics_do_not_relax_the_exact_comparator(self):
         source = (ROOT / "benchmarks/metal_suite_common.mojo").read_text()

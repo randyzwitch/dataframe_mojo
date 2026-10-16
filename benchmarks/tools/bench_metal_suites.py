@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_suites as suites
 import bench_policy
 import metal_query_report
+from metal_materialization_adapter import lift_scalar_selects
 from metal_answer_exports import parse_export, collect_exports
 
 
@@ -47,6 +48,7 @@ def derive(source, name, engine):
         )
     if engine == "cpu":
         return source.replace(".collect()", '.collect(engine="cpu")')
+    source, _ = lift_scalar_selects(source)
     source = source.replace(
         ".collect()", ".collect(accelerator=MetalRuntime())"
     )
@@ -104,9 +106,16 @@ def derive(source, name, engine):
 def stage_sources(destination):
     destination.mkdir(parents=True, exist_ok=True)
     copied = {}
+    materialization_proofs = {}
     for name in ("h2o", "pdsh", "tpcds", "clickbench"):
         original = ROOT / "benchmarks/suites" / (name + ".mojo")
         copied[str(original.relative_to(ROOT))] = sha(original)
+        _, proof = lift_scalar_selects(original.read_text())
+        proof["canonical_source_sha256"] = sha(original)
+        proof["metal_derived_source_sha256"] = hashlib.sha256(
+            derive(original.read_text(), name, "metal").encode()
+        ).hexdigest()
+        materialization_proofs[str(original.relative_to(ROOT))] = proof
         for engine in ("cpu", "metal"):
             (destination / f"{engine}_{name}.mojo").write_text(
                 derive(original.read_text(), name, engine)
@@ -142,10 +151,14 @@ def main() raises:
         copied[str(original.relative_to(ROOT))] = sha(original)
     return {
         "original_source_sha256": copied,
+        "scalar_materialization_proofs": materialization_proofs,
+        "scalar_materialization_adapter_sha256": sha(
+            Path(__file__).with_name("metal_materialization_adapter.py")
+        ),
         "derived_source_sha256": {
             p.name: sha(p) for p in destination.glob("*.mojo")
         },
-        "derivation": "Only materialization boundaries changed; H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
+        "derivation": "Only materialization boundaries changed; token-reviewed scalar SELECT/item after collected DataFrames gains lazy/forced-collect boundaries, with exact expression hashes. H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
     }
 
 
@@ -275,7 +288,9 @@ def parse(output, query):
     return result
 
 
-def case_audit(metadata, suite, variant, query, source_hashes):
+def case_audit(
+    metadata, suite, variant, query, source_hashes, derived_source_hashes=None
+):
     entry = metadata.get("cases", {}).get(suite + "/" + variant + "/" + query)
     if entry is None:
         entry = metadata.get("cases", {}).get(suite + "/" + query)
@@ -296,12 +311,27 @@ def case_audit(metadata, suite, variant, query, source_hashes):
         }
     )
     result = dict(entry)
-    if source_hashes.get(entry["source_path"]) != entry["source_sha256"]:
+    module = suites.SUITES[suite]["runner"]
+    derived_path = "metal_" + module + ".mojo"
+    canonical_matches = (
+        source_hashes.get(entry["source_path"]) == entry["source_sha256"]
+    )
+    derived_pin = entry.get("metal_derived_source_sha256")
+    if derived_pin is not None and (
+        not isinstance(derived_pin, str) or not derived_pin
+    ):
+        raise ValueError("Invalid derived worker source pin")
+    derived_matches = derived_pin is None or (
+        derived_source_hashes is not None
+        and derived_source_hashes.get(derived_path) == derived_pin
+    )
+    if not canonical_matches or not derived_matches:
         result.update(
             execution_boundary="unknown",
             alignment_keys=[],
             order_keys=[],
-            audit_reason="Case audit source hash does not match current workload.",
+            whole_query_gpu_certificate=False,
+            audit_reason="Case audit canonical or derived worker source hash does not match current workload.",
         )
     for field in ("alignment_keys", "order_keys"):
         keys = result.get(field, [])
@@ -445,6 +475,7 @@ def main():
                     variant,
                     query,
                     provenance["original_source_sha256"],
+                    provenance["derived_source_sha256"],
                 )
                 case["execution_audit"] = audit
                 env = os.environ.copy()
