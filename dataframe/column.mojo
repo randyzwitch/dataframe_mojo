@@ -27,10 +27,15 @@ struct _BufferFacts(Movable):
     # integer columns: a zone map, found once before a pipeline reads the
     # buffer (`pipeline._ensure_zones`). Empty until then.
     var zones: List[Int64]
+    # Whether every slot of the buffer is valid and each value exceeds the
+    # one before by the same positive step, for 64-bit integer columns: 0
+    # not yet known, 1 a progression, 2 not (`join_hash.int64_progression`).
+    var progression: Int
 
     def __init__(out self):
         self.order = 0
         self.zones = List[Int64]()
+        self.progression = 0
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):

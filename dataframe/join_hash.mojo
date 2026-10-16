@@ -1290,6 +1290,11 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
     each key must exceed the previous one by the same amount, so row r holds
     base + r * step. Sorted sequential IDs and calendar grids have this
     shape. The scan stops at the first null or irregular step.
+
+    Whether a whole buffer is one is found once and kept with it
+    (`_BufferFacts.progression`), as DuckDB plans with the statistics it
+    keeps for a table: a window onto a known progression is checked only
+    where it meets the chunk before.
     """
     if len(key) == 0:
         return (False, Int64(0), UInt64(1))
@@ -1302,13 +1307,22 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
         var n = len(column)
         if n == 0:
             continue
-        if len(column._bits[]) > 0 and column.null_count() > 0:
+        var known = column._facts[].progression
+        if (
+            known == 0
+            and column._offset == 0
+            and column._length == len(column._data[])
+        ):
+            # The window is the whole buffer: what it finds holds for
+            # every later window onto it.
+            known = 1 if _progression_scan(column)[0] else 2
+            column._facts[].progression = known
+            if known == 2:
+                return (False, Int64(0), UInt64(1))
+        if known != 1 and len(column._bits[]) > 0 and column.null_count() > 0:
             # Every row must be valid (a Parquet column carries a bitmap
             # even when none is null; it is counted, not read per row).
             return (False, Int64(0), UInt64(1))
-        # The values read straight from storage, checked a block at a
-        # time: the per-row checked reads took 8.4 ms over TPC-DS's 1.9M
-        # customer_demographics keys, the whole cost of q84's join on them.
         var values = column.unsafe_values()
         var start = 0
         if row == 0:
@@ -1320,6 +1334,24 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
             if first <= previous:
                 return (False, Int64(0), UInt64(1))
             stride = UInt64(first) - UInt64(previous)
+        if known == 1:
+            # A window onto a progression: one step throughout, so only
+            # where it meets the chunk before and its own step are read.
+            var first = values.unsafe_load(0)
+            if start == 0 and (
+                first <= previous or UInt64(first) - UInt64(previous) != stride
+            ):
+                return (False, Int64(0), UInt64(1))
+            if n >= 2 and (
+                UInt64(values.unsafe_load(1)) - UInt64(first) != stride
+            ):
+                return (False, Int64(0), UInt64(1))
+            previous = values.unsafe_load(n - 1)
+            row += n
+            continue
+        # The values read straight from storage, checked a block at a
+        # time: the per-row checked reads took 8.4 ms over TPC-DS's 1.9M
+        # customer_demographics keys, the whole cost of q84's join on them.
         var i = start
         while i < n:
             var stop = min(n, i + 1024)
@@ -1339,6 +1371,38 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
             i = stop
         row += n
     return (True, base, max(stride, UInt64(1)))
+
+
+def _progression_scan(column: Column[Int64]) -> Tuple[Bool, UInt64]:
+    """Whether the column's rows are valid and ascend by one positive step,
+    and the step (1 for a single row)."""
+    var n = len(column)
+    if len(column._bits[]) > 0 and column.null_count() > 0:
+        return (False, UInt64(1))
+    if n < 2:
+        return (n == 1, UInt64(1))
+    var values = column.unsafe_values()
+    var previous = values.unsafe_load(0)
+    var first = values.unsafe_load(1)
+    if first <= previous:
+        return (False, UInt64(1))
+    var stride = UInt64(first) - UInt64(previous)
+    var i = 1
+    while i < n:
+        var stop = min(n, i + 1024)
+        var bad = False
+        for k in range(i, stop):
+            var value = values.unsafe_load(k)
+            bad = (
+                bad
+                | (value <= previous)
+                | (UInt64(value) - UInt64(previous) != stride)
+            )
+            previous = value
+        if bad:
+            return (False, UInt64(1))
+        i = stop
+    return (True, stride)
 
 
 def _l2_cache_bytes() -> Int:

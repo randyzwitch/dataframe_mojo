@@ -10,6 +10,7 @@ from dataframe.frame import (
     _parallel_join_rows,
     _JoinCountJob,
 )
+from dataframe.join_hash import int64_progression
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -86,6 +87,48 @@ def test_dense_join_progression_eligibility_nullable_chunk_probes_and_integer_ed
     var probe = Series("k", Column[Int64]([0, 1, 2]))
     var dates = probe.with_dtype(DataType.DATE)
     assert_true(not _dense_right_int64_rows(probe, dates)[0])
+
+
+def test_progression_found_once_per_buffer_holds_for_its_windows() raises:
+    var values = List[Int64]()
+    for i in range(10):
+        values.append(Int64(100 + 3 * i))
+    var key = Series("k", Column[Int64](values^))
+    var found = int64_progression(key)
+    assert_true(found[0])
+    assert_equal(found[1], Int64(100))
+    assert_equal(found[2], UInt64(3))
+    assert_equal(key._data[Column[Int64]]._facts[].progression, 1)
+    # A window onto the buffer starts at its own first value.
+    var window = int64_progression(key.slice(2, 5))
+    assert_true(window[0])
+    assert_equal(window[1], Int64(106))
+    assert_equal(window[2], UInt64(3))
+    # Windows of one progression are one only where each meets the last.
+    var joined = Series._from_chunks([key.slice(0, 4), key.slice(4, 6)])
+    var whole = int64_progression(joined)
+    assert_true(whole[0])
+    assert_equal(whole[1], Int64(100))
+    assert_equal(whole[2], UInt64(3))
+    var gap = Series._from_chunks([key.slice(0, 4), key.slice(5, 5)])
+    assert_true(not int64_progression(gap)[0])
+    var swapped = Series._from_chunks([key.slice(5, 5), key.slice(0, 5)])
+    assert_true(not int64_progression(swapped)[0])
+    var single = Series._from_chunks([key.slice(0, 1), key.slice(1, 9)])
+    assert_true(int64_progression(single)[0])
+    # A buffer that is not one is known not to be; a window of it that is
+    # one is still checked on its own rows.
+    var irregular = Series("k", Column[Int64]([1, 2, 4, 5]))
+    assert_true(not int64_progression(irregular)[0])
+    assert_equal(irregular._data[Column[Int64]]._facts[].progression, 2)
+    assert_true(int64_progression(irregular.slice(0, 2))[0])
+    assert_true(not int64_progression(irregular.slice(1, 3))[0])
+    # A null anywhere in the buffer: never a progression.
+    var nulls = Series(
+        "k", Column[Int64]([1, 2, 3, 4], [True, True, True, False])
+    )
+    assert_true(not int64_progression(nulls)[0])
+    assert_true(int64_progression(nulls.slice(0, 3))[0])
 
 
 def test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell() raises:
