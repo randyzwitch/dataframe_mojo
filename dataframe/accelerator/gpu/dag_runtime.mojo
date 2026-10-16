@@ -33,6 +33,10 @@ from dataframe.accelerator.joins import (
 from . import runtime as rows
 from . import qcut_runtime as qcuts
 from dataframe.accelerator.qcuts import is_qcut_marker
+from dataframe.accelerator.partition_cuts import (
+    is_marker as is_partition_cut_marker,
+)
+from . import partition_runtime as partition_cuts
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
@@ -82,6 +86,9 @@ def preflight(
                 semantic,
             )
         elif task.kind == DAG_ROWS:
+            if is_partition_cut_marker(task.query):
+                _ = partition_cuts.preflight(task.query)
+                continue
             if is_qcut_marker(task.query):
                 _ = qcuts.preflight(task.query)
                 continue
@@ -209,6 +216,7 @@ def execute(
     )
     var scope = Scope(device_id, budget)
     var producer_metadata = MetadataReservation(scope, dag)
+    var partition_context = ArcPointer(partition_cuts.StateContext())
     var base_domain = Optional[ArcPointer[TextDomain]]()
     if text_context:
         base_domain = ArcPointer(
@@ -501,7 +509,20 @@ def execute(
                 task.query._frames[0] = _frame(dag, values, task.source)
                 resident = values[task.source].copy()
             var source_rows = resident.value().rows if resident else -1
-            if is_qcut_marker(task.query):
+            if is_partition_cut_marker(task.query):
+                if not resident:
+                    raise Error(
+                        "Partition CUT original resident producer is missing"
+                    )
+                executed = partition_cuts.execute_plan(
+                    task.query,
+                    resident.value(),
+                    scope,
+                    export_values=not (observation_only and index == dag.root),
+                    text_domain=target_domain,
+                    state_context=partition_context,
+                )
+            elif is_qcut_marker(task.query):
                 if not resident:
                     raise Error("QCUT observed resident producer is missing")
                 # Observed operand precedes dynamic quantile controls;

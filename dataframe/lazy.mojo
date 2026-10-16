@@ -210,6 +210,10 @@ struct PlanNode(Copyable):
     var producer_origin: Optional[ArcPointer[ProducerOrigin]]
     var lineage_anchor: Optional[ArcPointer[Int]]
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Original partition state/operand proof is outside rewritten row ASTs.
+    # Columns contain schema-only Series; no source values are retained here.
+    var partition_exprs: List[Expr]
+    var partition_columns: List[Series]
 
     def _record_execution(self):
         if self._executions:
@@ -236,6 +240,8 @@ def _plan_node(
     source_failure: String = "",
     code_domain: Optional[DataType] = None,
     text_fields: List[TextField] = List[TextField](),
+    partition_exprs: List[Expr] = List[Expr](),
+    partition_columns: List[Series] = List[Series](),
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -261,6 +267,8 @@ def _plan_node(
         Optional[ArcPointer[ProducerOrigin]](),
         Optional[ArcPointer[Int]](),
         Optional[ArcPointer[RegionProof]](),
+        partition_exprs.copy(),
+        partition_columns.copy(),
     )
 
 

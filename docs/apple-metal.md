@@ -142,6 +142,13 @@ finish and checks original input phases before publishing results. Encoded
 grouping keys still require a separate typed-domain owner; arbitrary checked
 resident inputs are not admitted by this route.
 
+Partitioned `cut(...).over(...)` and `qcut(...).over(...)` keep numeric operands
+resident, preserve original key domains and eager operand/control error order,
+and support immutable custom or default labels. Certified nested numeric OVER
+scopes preserve layout-cache order. `include_breaks=True` requires a terminal
+projection; intermediate Struct consumers and other nested stateful expressions
+remain unsupported.
+
 ## Residency, errors and memory
 
 Computed query regions retain immutable Mojo-owned device tables. A consumer
