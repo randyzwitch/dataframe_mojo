@@ -1,4 +1,5 @@
 """Duration windows preserve sorted time bounds, masks and checked observations."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -148,6 +149,7 @@ def test_duration_rolling_capability_intervals_private_indices_types_and_scopes(
         )
 
 
+# requires: metal
 def test_native_metal_duration_rolling_numeric_temporal_units_closed_partitions_slices_and_chunks() raises:
     var runtime = require_metal()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -219,6 +221,7 @@ def test_native_metal_duration_rolling_numeric_temporal_units_closed_partitions_
         )
 
 
+# requires: metal
 def test_native_metal_duration_rolling_checked_indices_unsigned_sums_and_finite_outlier_recovery() raises:
     var runtime = require_metal()
     var source = fixture(DataType.DATE, 3)
@@ -308,6 +311,7 @@ def test_native_metal_duration_rolling_checked_indices_unsigned_sums_and_finite_
         )
 
 
+# requires: metal
 def test_native_metal_duration_rolling_consumers_profile_family_budget_and_runtime_reuse() raises:
     var runtime = require_metal()
     var frame = fixture(DataType.DATE)

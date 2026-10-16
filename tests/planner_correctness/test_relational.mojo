@@ -1,4 +1,5 @@
 """Join/aggregate rewrites: fixed CPU executor plus independent row relations."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
 from tests.support.reference_model import (

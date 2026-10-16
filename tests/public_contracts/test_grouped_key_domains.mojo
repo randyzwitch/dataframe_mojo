@@ -1,4 +1,5 @@
 """Independent CPU key-domain/hash/worker contracts for grouped GPU planning."""
+# contract-group: public.apple_parity
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (

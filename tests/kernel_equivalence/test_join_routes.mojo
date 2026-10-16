@@ -1,4 +1,6 @@
 """Join progression, identity gathering, and stable parallel CSR contracts."""
+# contract-group: table.join
+# contract-group: kernel.row_ops
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, StringColumn

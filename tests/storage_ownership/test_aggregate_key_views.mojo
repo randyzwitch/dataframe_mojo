@@ -4,6 +4,7 @@ one pointing into the input's own byte buffer, whether the input stores
 offsets or views, so no key's bytes are copied. Keys whose bytes live in a
 dictionary (Parquet dictionary codes) are copied into a buffer the result
 owns, and stay correct after the input is gone."""
+# contract-group: storage.release
 from std.testing import assert_equal, assert_true
 
 from dataframe import DataFrame, Expr, Series, StringColumn, col

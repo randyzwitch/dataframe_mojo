@@ -1,4 +1,5 @@
 """Exact key membership and stable row order across encoding specializations."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series

@@ -1,4 +1,5 @@
 """Binary32 arithmetic preserves gradual underflow and each operator rounding."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
@@ -69,6 +70,7 @@ def fixture() raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_native_metal_float32_arithmetic_words_nulls_consumers_and_cost() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -163,6 +165,7 @@ def test_native_metal_float32_arithmetic_words_nulls_consumers_and_cost() raises
     )
 
 
+# requires: metal
 def test_native_metal_float32_arithmetic_conditional_scalar_and_rounding_boundaries() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

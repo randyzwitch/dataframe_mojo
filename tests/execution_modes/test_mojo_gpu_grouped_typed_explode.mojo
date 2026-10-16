@@ -1,4 +1,5 @@
 """Literal typed grouped→EXPLODE oracles, including downstream consumers."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,
@@ -28,6 +29,7 @@ def _collect(query: LazyFrame) raises -> DataFrame:
     return actual^
 
 
+# requires: metal
 def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
     for domain in [STRING, BINARY, GEOMETRY]:
         var keys = _key(
@@ -92,6 +94,7 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
         assert_equal(joined.height(), 5)
 
 
+# requires: metal
 def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() raises:
     var dictionary = CategoricalDictionary()
     dictionary.append("same")

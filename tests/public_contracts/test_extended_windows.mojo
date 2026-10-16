@@ -1,4 +1,5 @@
 """Logical types retain exact ordered cells, metadata and partition association."""
+# contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.coverage_generators import chunk_layout

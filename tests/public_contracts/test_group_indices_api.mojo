@@ -1,4 +1,5 @@
 """Row-index groups expose first-observed identities and complete memberships."""
+# contract-group: table.group_indices
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series
 from tests.support.key_kernel_reference import KeyCell, expected_key_ids

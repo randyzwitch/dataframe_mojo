@@ -1,4 +1,6 @@
 """Exact signed-zero order statistics, source-order ties and resident consumers."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
@@ -44,6 +46,7 @@ def _exact(query: LazyFrame) raises -> DataFrame:
     return actual^
 
 
+# requires: metal
 def test_mojo_gpu_quantile_zero_scalar_exact_ranks_and_reciprocal() raises:
     var negative = bitcast[DType.float64](UInt64(0x8000000000000000))
     var frame = DataFrame(
@@ -73,6 +76,7 @@ def test_mojo_gpu_quantile_zero_scalar_exact_ranks_and_reciprocal() raises:
             _ = _exact(frame.lazy().select_exprs(_expressions(q)))
 
 
+# requires: metal
 def test_mojo_gpu_quantile_zero_quickselect_fallback_and_nonfinite() raises:
     # Independent literal: three-way quickselect swaps trailing -0 into rank1.
     var values = List[Float64](length=27, fill=0)
@@ -113,6 +117,7 @@ def test_mojo_gpu_quantile_zero_quickselect_fallback_and_nonfinite() raises:
         _ = _exact(frame.lazy().select_exprs(_expressions(probability)))
 
 
+# requires: metal
 def test_mojo_gpu_quantile_zero_grouped_disjoint_scratch_and_budget() raises:
     var values = List[Float64]()
     var keys = List[Int32]()
@@ -171,6 +176,7 @@ def test_mojo_gpu_quantile_zero_grouped_disjoint_scratch_and_budget() raises:
     _ = _exact(scalar)
 
 
+# requires: metal
 def test_mojo_gpu_quantile_linear_separate_rounding_literal_anchors() raises:
     # Exact integer/rational IEEE round-to-nearest ties-even anchors. FMA
     # differs by one or two ULPs, so numerical tolerance would miss this.

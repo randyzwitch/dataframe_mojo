@@ -1,4 +1,6 @@
 """Prepared OVER states precede certified IMPLODE row AST evaluation."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
@@ -71,6 +73,7 @@ def _fails(query: LazyFrame, cpu: String, gpu: String) raises:
         _ = query.collect(accelerator=MetalRuntime(), optimize=False)
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_post_state_ast_categories_and_batches() raises:
     var original = _frame()
     for layout in range(3):
@@ -142,6 +145,7 @@ def test_mojo_gpu_ordered_implode_post_state_ast_categories_and_batches() raises
     )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_prepared_state_order_masks_and_projections() raises:
     var frame = _frame()
     var bad_state = col("d").sum().over("k").cast(DataType.INT64)
@@ -209,6 +213,7 @@ def test_mojo_gpu_ordered_implode_prepared_state_order_masks_and_projections() r
         )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_state_compositions_resources_empty_provenance() raises:
     var frame = (
         _frame()

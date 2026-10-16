@@ -1,4 +1,6 @@
 """Partition top-k and parallel stable ordering exercise their actual routes."""
+# contract-group: expr.order_windows
+# contract-group: kernel.order_keys
 from std.math import isnan
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true

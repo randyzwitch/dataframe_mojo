@@ -1,4 +1,5 @@
 """Literal anchors for CPU input-batch, state-update and finish error phases."""
+# contract-group: public.apple_parity
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
 from tests.support.lifecycle_jobs import WorkerSetting

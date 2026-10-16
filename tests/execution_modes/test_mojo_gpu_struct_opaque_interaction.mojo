@@ -1,4 +1,6 @@
 """Source Struct identity fields with ordinary opaque byte columns."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
@@ -165,6 +167,7 @@ def _literal_result(
             assert_equal(actual.item(row, "zero").bool(), source_row == 2)
 
 
+# requires: metal
 def test_mojo_gpu_struct_identity_and_opaque_transport_share_owners_masks_and_budget() raises:
     var original = _source()
     var expressions = _expressions()

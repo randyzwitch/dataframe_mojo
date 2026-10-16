@@ -1,4 +1,5 @@
 """Native StringView rank consumers match independent scalar typed ranks."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, DataType, Series, StringColumn, col
 from dataframe.string_view import StringViewBuilder

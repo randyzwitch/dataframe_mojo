@@ -1,4 +1,6 @@
 """Fill operations eagerly observe both inputs, under outer WHEN masks."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
@@ -25,6 +27,7 @@ def _fill(nan: Bool, lax: Bool = False) -> Expr:
     return col("i").fill_null(right.cast(DataType.INT64))
 
 
+# requires: metal
 def test_mojo_gpu_fill_observes_unselected_row_rhs_strict_cast() raises:
     var original = _source()
     for variant in range(3):
@@ -42,6 +45,7 @@ def test_mojo_gpu_fill_observes_unselected_row_rhs_strict_cast() raises:
                 _ = query.collect(accelerator=MetalRuntime(), engine="accel")
 
 
+# requires: metal
 def test_mojo_gpu_fill_outer_when_masks_rhs_fault_and_lax_cast_is_safe() raises:
     var frame = _source()
     for nan in [False, True]:

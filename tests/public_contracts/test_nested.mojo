@@ -1,4 +1,5 @@
 """Nested values have separate parent and child validity and ordered contents."""
+# contract-group: expr.nested
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     AnyValue,
@@ -872,6 +873,9 @@ def test_nested_parent_child_bitmaps_cross_window_and_batch_boundaries() raises:
                                 )
 
 
+# expected-failure: Grouping null struct keys distinguishes hidden child
+# expected-failure: payloads.
+# expected-diagnostic: null struct keys must ignore hidden field payloads
 def test_struct_null_parent_key_equality_ignores_hidden_field_payloads() raises:
     var source = struct_key_frame(hidden=True)
     var groups = source.group_by("key", maintain_order=True).agg(
@@ -888,6 +892,9 @@ def test_struct_null_parent_key_equality_ignores_hidden_field_payloads() raises:
     assert_equal(members.get(1).int64(), Int64(5))
 
 
+# expected-failure: Equal valid struct keys containing null fields do not
+# expected-failure: match in equality joins.
+# expected-diagnostic: valid struct join keys must match equal null fields
 def test_struct_join_matches_valid_records_with_null_fields() raises:
     var source = struct_key_frame(null_fields=True)
     var groups = source.group_by("key", maintain_order=True).agg(

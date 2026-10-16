@@ -1,10 +1,13 @@
 """Original public CUT/QCUT certificates, without input evaluation."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit, when
 from dataframe.binding import bind
 from dataframe.accelerator.partition_cuts import capture, validate
 
 
+# requires: mojo_gpu
 def test_partition_cut_capture_keeps_original_controls_and_eager_state() raises:
     var source = DataFrame(
         [
@@ -62,6 +65,7 @@ def test_partition_cut_capture_keeps_original_controls_and_eager_state() raises:
             validate(captured, eager, source)
 
 
+# requires: mojo_gpu
 def test_partition_nested_scope_cache_entry_snapshots() raises:
     from dataframe.accelerator.gpu.partition_state import Context
     from dataframe.accelerator.cuts import lower_cuts
@@ -112,6 +116,7 @@ def test_partition_nested_scope_cache_entry_snapshots() raises:
     assert_equal(numeric, 1)
 
 
+# requires: mojo_gpu
 def test_partition_lookup_reservation_retained_live_witness() raises:
     from dataframe.accelerator.gpu.residency import Scope
     from dataframe.accelerator.gpu.ranked_rows import _Reservation

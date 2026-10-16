@@ -1,4 +1,7 @@
 """CPU metadata and mask references for original IANA mutation phases."""
+# contract-group: execution.apple_parity
+# contract-group: execution.iana
+# contract-group: execution.backends
 from tests.tooling.iana_scalar_any_proofs import (
     metadata_scalar_occurrence_slots_and_resources,
 )

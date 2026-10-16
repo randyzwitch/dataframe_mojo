@@ -6,6 +6,7 @@ rank, rolling mean, forward fill and broadcast sums and means, with string
 and integer keys, null keys and null values. Rows already in partition
 order are evaluated where they are; rows in a single partition keep the
 row-order route."""
+# contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col

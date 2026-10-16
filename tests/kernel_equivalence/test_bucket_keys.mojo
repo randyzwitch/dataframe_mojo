@@ -1,4 +1,5 @@
 """Candidate hashes never replace complete typed tuple equality."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataType, Series, StringColumn
 from dataframe.dtype import CategoricalDictionary
