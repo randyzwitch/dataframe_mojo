@@ -13,7 +13,12 @@ from .cuts import has_cut_materializations
 from .partition_cuts import is_marker as is_partition_cut_marker, marker_capture
 from .capabilities import RowCapabilities
 from .rows import lower_rows
-from . import producer_phases, decimal_feed, decimal_group_feed
+from . import (
+    producer_phases,
+    decimal_feed,
+    decimal_group_feed,
+    decimal_scalar_feed,
+)
 from .decimal_prefix import prefix_infallible
 from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
@@ -156,13 +161,43 @@ def has_decimal_consumers(query: LazyFrame) raises -> Bool:
             _decimal_producer(query, index)
             or _decimal_feed_producer(query, index)
             or _decimal_group_producer(query, index)
+            or _decimal_scalar_producer(query, index)
         ):
             return True
     return False
 
 
+def _decimal_scalar_producer(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT or not len(operation.exprs):
+        return False
+    for expression in operation.exprs:
+        if (
+            not len(expression._nodes)
+            or expression._nodes[len(expression._nodes) - 1].op != SUM
+        ):
+            return False
+    if not prefix_infallible(query, operation.left):
+        return False
+    var schema = schema_frame(query, operation.left)
+    var bounds = List[BoundExpr]()
+    for expression in operation.exprs:
+        bounds.append(bind(expression, schema._columns))
+    return decimal_scalar_feed.eligible(bounds, schema._columns)
+
+
 def _mark_decimal_producers(mut query: LazyFrame) raises:
     for index in range(len(query._nodes)):
+        if not query._nodes[index].text and _decimal_scalar_producer(
+            query, index
+        ):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = decimal_scalar_feed.MATERIALIZATION
+            query._nodes[index].names2 = [decimal_scalar_feed.MATERIALIZATION]
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
         if not query._nodes[index].text and _decimal_group_producer(
             query, index
         ):
@@ -289,6 +324,7 @@ def _observed_marker(text: String) -> Bool:
         text == DECIMAL_MATERIALIZATION
         or text == decimal_feed.MATERIALIZATION
         or text == decimal_group_feed.MATERIALIZATION
+        or text == decimal_scalar_feed.MATERIALIZATION
         or text == INTEGER_MATERIALIZATION
         or text == GROUP_MATERIALIZATION
     )
@@ -940,11 +976,10 @@ def _task(
         or _observed_marker(query._nodes[root].text)
         or Bool(query._nodes[root].producer_origin)
     )
-    if query._nodes[
-        root
-    ].text == decimal_group_feed.MATERIALIZATION and not prefix_infallible(
-        query, query._nodes[root].left
-    ):
+    if query._nodes[root].text in [
+        decimal_group_feed.MATERIALIZATION,
+        decimal_scalar_feed.MATERIALIZATION,
+    ] and not prefix_infallible(query, query._nodes[root].left):
         capabilities.reject(
             "decimal group feed", "original infallible prefix changed"
         )

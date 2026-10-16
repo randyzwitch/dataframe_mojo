@@ -203,7 +203,7 @@ def observe_precision_partials(
     stride: UInt32,
     groups: UInt32,
 ):
-    """Bound the scan per lane; faults commute only under the whole AGG proof.
+    """Bound each lane's scan under the whole SUM/AGG precision-only proof.
 
     No invented batch/worker ordering: every admitted fault has the same
     public category. Unexpected categories win so the host rejects a broken
