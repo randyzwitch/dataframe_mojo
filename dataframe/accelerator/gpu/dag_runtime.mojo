@@ -27,11 +27,16 @@ from dataframe.accelerator.joins import (
     DAG_ROWS,
     DAG_SOURCE_FIELDS,
     DAG_EXPLODE,
+    DAG_GROUPED_FIELDS,
     lower_join_dag,
 )
 from . import runtime as rows
 from . import qcut_runtime as qcuts
 from dataframe.accelerator.qcuts import is_qcut_marker
+from dataframe.accelerator.partition_cuts import (
+    is_marker as is_partition_cut_marker,
+)
+from . import partition_runtime as partition_cuts
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
@@ -40,15 +45,22 @@ from .resident_fields import ResidentFrame
 from . import source_fields
 from .producer_phases_runtime import MetadataReservation
 from . import explode
+from .grouped_lists_producer import produce as produce_grouped_fields
 
 
 def preflight(
-    query: LazyFrame, capabilities: RowCapabilities
+    query: LazyFrame,
+    capabilities: RowCapabilities,
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> JoinDag:
     """Check every reachable task and operation without device initialization."""
     var semantic = capabilities.copy()
     semantic.scalar_regions = True
-    var dag = lower_join_dag(query, semantic)
+    var dag = lower_join_dag(
+        query, semantic, ordered_source=ordered_source, eager_feed=eager_feed
+    )
     for task in dag.tasks:
         if task.kind == DAG_JOIN:
             _ = joins.preflight(
@@ -62,6 +74,9 @@ def preflight(
                 dag.tasks[task.source].schema,
                 dag.tasks[task.right].schema,
             )
+        elif task.kind == DAG_GROUPED_FIELDS:
+            if not task.grouped:
+                raise Error("Resident grouped task prepared owner is missing")
         elif task.kind == DAG_SOURCE_FIELDS:
             source_fields.preflight(task.query._frames[0])
         elif task.kind == DAG_EXPLODE:
@@ -71,6 +86,9 @@ def preflight(
                 semantic,
             )
         elif task.kind == DAG_ROWS:
+            if is_partition_cut_marker(task.query):
+                _ = partition_cuts.preflight(task.query)
+                continue
             if is_qcut_marker(task.query):
                 _ = qcuts.preflight(task.query)
                 continue
@@ -186,11 +204,19 @@ def execute(
     *,
     observation_only: Bool = False,
     text_context: Optional[ArcPointer[TextQuery]] = None,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
-    var dag = preflight(query, capabilities)
+    var dag = preflight(
+        query,
+        capabilities,
+        ordered_source=ordered_source,
+        eager_feed=eager_feed,
+    )
     var scope = Scope(device_id, budget)
     var producer_metadata = MetadataReservation(scope, dag)
+    var partition_context = ArcPointer(partition_cuts.StateContext())
     var base_domain = Optional[ArcPointer[TextDomain]]()
     if text_context:
         base_domain = ArcPointer(
@@ -229,21 +255,43 @@ def execute(
                 ].copy()
             continue
         if (
-            task.kind == DAG_ROWS or task.kind == DAG_SOURCE_FIELDS
+            task.kind == DAG_ROWS
+            or task.kind == DAG_SOURCE_FIELDS
+            or task.kind == DAG_GROUPED_FIELDS
         ) and task.query._nodes[0].source_failure:
             raise Error(task.query._nodes[0].source_failure)
         var live_before = scope.info()[0]
         var traffic_before = scope.transfers()
         var region_started = Int(perf_counter_ns())
-        if task.kind == DAG_SOURCE_FIELDS:
-            task.query._nodes[0]._record_execution()
-            var fields = source_fields.stage(task.query._frames[0], scope)
+        if task.kind == DAG_SOURCE_FIELDS or task.kind == DAG_GROUPED_FIELDS:
+            var fields: ResidentFrame
+            var input_rows = 0
+            if task.kind == DAG_GROUPED_FIELDS:
+                ref prepared = task.grouped.value()[]
+                var source = rows.execute_plan(
+                    prepared.source,
+                    scope,
+                    profiling=profiling,
+                    export_values=False,
+                )
+                prepared.scan._record_execution()
+                fields = produce_grouped_fields(
+                    prepared, source[0], scope, profiling
+                )
+                input_rows = prepared.rows
+                _ = source^
+            else:
+                task.query._nodes[0]._record_execution()
+                fields = source_fields.stage(task.query._frames[0], scope)
+                input_rows = fields.rows
             var owned = scope.info()[0] - live_before
             var region = _storage_report(
                 task.root,
-                "SOURCE FIELDS",
-                "mojo_gpu_source_fields",
-                fields.rows,
+                "GROUPED FIELDS" if task.kind
+                == DAG_GROUPED_FIELDS else "SOURCE FIELDS",
+                "mojo_gpu_grouped_list_producer" if task.kind
+                == DAG_GROUPED_FIELDS else "mojo_gpu_source_fields",
+                input_rows,
                 fields.rows,
                 scope,
                 region_started,
@@ -461,7 +509,20 @@ def execute(
                 task.query._frames[0] = _frame(dag, values, task.source)
                 resident = values[task.source].copy()
             var source_rows = resident.value().rows if resident else -1
-            if is_qcut_marker(task.query):
+            if is_partition_cut_marker(task.query):
+                if not resident:
+                    raise Error(
+                        "Partition CUT original resident producer is missing"
+                    )
+                executed = partition_cuts.execute_plan(
+                    task.query,
+                    resident.value(),
+                    scope,
+                    export_values=not (observation_only and index == dag.root),
+                    text_domain=target_domain,
+                    state_context=partition_context,
+                )
+            elif is_qcut_marker(task.query):
                 if not resident:
                     raise Error("QCUT observed resident producer is missing")
                 # Observed operand precedes dynamic quantile controls;
@@ -622,9 +683,20 @@ def execute(
     return (result^, report^)
 
 
-def describe(query: LazyFrame, capabilities: RowCapabilities) -> String:
+def describe(
+    query: LazyFrame,
+    capabilities: RowCapabilities,
+    *,
+    ordered_source: Bool = False,
+    eager_feed: Bool = False,
+) -> String:
     try:
-        var dag = preflight(query, capabilities)
+        var dag = preflight(
+            query,
+            capabilities,
+            ordered_source=ordered_source,
+            eager_feed=eager_feed,
+        )
         return (
             "ENGINE accel: Mojo GPU joins and row regions; "
             + String(dag.joins)

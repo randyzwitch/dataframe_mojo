@@ -1,0 +1,12 @@
+{
+  "format": "dataframe-metal-case-metadata-v1",
+  "cases": {
+    "tpcds/q24": {
+      "workload_kind": "canonical",
+      "execution_boundary": "hybrid",
+      "audit_reason": "After the explicit ssales collect, DataFrame.select(mean).item executes an eager CPU aggregate before the final LazyFrame collect. Applies to both data variants, including empty outputs.",
+      "source_path": "benchmarks/suites/tpcds.mojo",
+      "source_sha256": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68"
+    }
+  }
+}

@@ -403,6 +403,7 @@ def lower_dictionary_operations(
     # default-QCUT control phase. Keep this separate boundary explicit until
     # dictionary-value lookup construction is scheduled at that phase.
     from .qcuts import QCUT_TAG, QCUT_DEFAULT
+    from .partition_cuts import TAG as PARTITION_CUT_TAG
 
     var dynamic = List[Bool](length=len(query._nodes), fill=False)
     for index in range(len(query._nodes)):
@@ -419,8 +420,13 @@ def lower_dictionary_operations(
                         )
         dynamic[index] = incoming or (
             len(operation.names2) > 1
-            and operation.names2[0] == QCUT_TAG
-            and operation.names2[1] == QCUT_DEFAULT
+            and (
+                (
+                    operation.names2[0] == QCUT_TAG
+                    and operation.names2[1] == QCUT_DEFAULT
+                )
+                or operation.names2[0] == PARTITION_CUT_TAG
+            )
         )
     var needed = False
     for operation in query._nodes:

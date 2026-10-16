@@ -5,7 +5,7 @@ execute CPU work inside the adapter and make no native device coverage claim.
 """
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, DataType, Series, col, lit
+from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.lazy import AcceleratorBackend, LazyFrame
 
 

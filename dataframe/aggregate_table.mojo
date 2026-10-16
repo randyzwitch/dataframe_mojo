@@ -2181,7 +2181,6 @@ def _string_keys(
     var local = List[Int](length=len(held.buffers), fill=-1)
     var spill = List[UInt8]()
     var spill_at = -1
-    var total_bytes = 0
     var buffer_bytes = 0
     for g in range(n):
         if groups.null(g) & bit != 0:
@@ -2193,7 +2192,6 @@ def _string_keys(
         var head = groups.word(g, w)
         var tail = groups.word(g, w + 1)
         var length = Int(head & 0xFFFFFFFF)
-        total_bytes += length
         if length <= STRING_VIEW_INLINE_BYTES:
             views.append(
                 StringView(
@@ -2246,7 +2244,7 @@ def _string_keys(
         buffers[spill_at] = ArcPointer(spill^)
     var bits = _pack_bits(valid) if nulls else List[UInt8]()
     return StringColumn(
-        StringViewStorage(views^, buffers^, bits^, n, total_bytes, buffer_bytes)
+        StringViewStorage(views^, buffers^, bits^, n, buffer_bytes)
     )
 
 
