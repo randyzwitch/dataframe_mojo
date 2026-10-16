@@ -27,15 +27,15 @@ def _source(nullable: Bool = False) raises -> DataFrame:
             Series(
                 "price",
                 Column[Int64]([100, 200, 300], [True, True, not nullable]),
-            ).with_dtype(DataType.decimal(15, 2)),
+            ).with_dtype(DataType.decimal(15, 2, 64)),
             Series("one", Column[Int32]([100, 100, 100])).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
             Series("discount", Column[Int32]([10, 20, 30])).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
             Series("tax", Column[Int32]([110, 110, 110])).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
         ]
     )
@@ -115,7 +115,7 @@ def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
         assert_equal(observed, 1)
     assert_true(
         decimal_group_feed.infallible_sum(
-            DataType.decimal(18, 18), Int(UInt32.MAX)
+            DataType.decimal(18, 18, 64), Int(UInt32.MAX)
         )
     )
     assert_true(
@@ -123,6 +123,41 @@ def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
             DataType.decimal(38, 0), Int(UInt32.MAX)
         )
     )
+    # An implicit Decimal WHEN common cast changes stored scale and can
+    # throw separately. The narrow arithmetic proof must not certify it.
+    var mixed = DataFrame(
+        [
+            Series("g", Column[Int32]([0, 0])),
+            Series("pick", Column[Int32]([1, 0])),
+            Series("a", Column[Int64]([100, 999])).with_dtype(
+                DataType.decimal(15, 2, 64)
+            ),
+            Series("b", Column[Int64]([777, 200])).with_dtype(
+                DataType.decimal(15, 4, 64)
+            ),
+            Series("factor", Column[Int64]([1, 1])).with_dtype(
+                DataType.decimal(15, 0, 64)
+            ),
+        ]
+    )
+    var aligned = (
+        when(col("pick") == lit(Int32(1))).then(col("a")).otherwise(col("b"))
+    )
+    var mixed_query = (
+        mixed.lazy()
+        .group_by("g")
+        .agg((aligned * col("factor")).sum().alias("total"))
+    )
+    var cpu = mixed_query.collect(
+        engine="cpu", optimize=False, streaming=True, batch_size=1
+    )
+    assert_equal(cpu.column("total").dtype(), DataType.decimal(38, 4))
+    assert_equal(cpu.column("total")._decimal_raw(0), Int128(10200))
+    with assert_raises(contains="checked decimal"):
+        _ = lower_join_dag(
+            mixed_query.head(0)._with_accelerator_settings(False, True, 1),
+            capabilities(),
+        )
     # Unary MIN/NEG and wide precision intermediates are different categories,
     # never covered by a narrow ADD/SUB/MUL proof.
     for expression in [
@@ -178,10 +213,10 @@ def test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks() raises:
         [
             Series("g", Column[Int32]([0, 0])),
             Series("a", Column[Int64]([Int64.MAX, 2])).with_dtype(
-                DataType.decimal(18, 0)
+                DataType.decimal(18, 0, 64)
             ),
             Series("b", Column[Int64]([Int64.MAX, 3])).with_dtype(
-                DataType.decimal(18, 0)
+                DataType.decimal(18, 0, 64)
             ),
             Series("pick", Column[Int32]([0, 1])),
         ]
@@ -190,7 +225,7 @@ def test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks() raises:
     var value = (
         when(col("pick") == lit(Int32(1)))
         .then(col("a") * col("b"))
-        .otherwise(lit(Int64(0)).cast(DataType.decimal(18, 0)))
+        .otherwise(lit(Int64(0)).cast(DataType.decimal(18, 0, 64)))
     )
     for gpu in [False, True]:
         var result = _collect(
@@ -202,7 +237,7 @@ def test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks() raises:
         assert_equal(result.column("total")._decimal_raw(0), Int128(6))
     var null_operand = masked.with_column(
         Series("a", Column[Int64]([Int64.MAX, 2], [False, True])).with_dtype(
-            DataType.decimal(18, 0)
+            DataType.decimal(18, 0, 64)
         )
     )
     for gpu in [False, True]:
@@ -231,16 +266,16 @@ def test_mojo_gpu_decimal_group_feed_stream_workers_and_precision_faults() raise
         [
             Series("g", Column[Int32](groups^)),
             Series("price", Column[Int64](price^)).with_dtype(
-                DataType.decimal(15, 2)
+                DataType.decimal(15, 2, 64)
             ),
             Series("one", Column[Int32](one^)).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
             Series("discount", Column[Int32](discount^)).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
             Series("tax", Column[Int32](tax^)).with_dtype(
-                DataType.decimal(9, 2)
+                DataType.decimal(9, 2, 32)
             ),
         ]
     )
@@ -279,13 +314,13 @@ def test_mojo_gpu_decimal_group_feed_stream_workers_and_precision_faults() raise
         [
             Series("g", Column[Int32]([0, 1, 0])),
             Series("a", Column[Int64]([Int64.MAX, Int64.MIN, 1])).with_dtype(
-                DataType.decimal(18, 0)
+                DataType.decimal(18, 0, 64)
             ),
             Series("b", Column[Int64]([Int64.MAX, 1, 1])).with_dtype(
-                DataType.decimal(18, 0)
+                DataType.decimal(18, 0, 64)
             ),
             Series("c", Column[Int64]([Int64.MAX, Int64.MIN, 1])).with_dtype(
-                DataType.decimal(18, 18)
+                DataType.decimal(18, 18, 64)
             ),
         ]
     )
