@@ -14,6 +14,11 @@ from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
 from dataframe.accelerator import decimal_scalar_feed
 from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe.accelerator.dictionaries import (
+    lower_dictionary_operations,
+    DictionaryCodes,
+    encode_query,
+)
 from dataframe.accelerator.aggregates import lower_aggregate_compositions
 from dataframe.accelerator.decimal_prefix import prefix_infallible
 from dataframe.accelerator.joins import lower_join_dag
@@ -56,6 +61,35 @@ def money_ratio(source: DataFrame) raises -> LazyFrame:
     )
 
 
+def money_joined_ratio(frame: DataFrame) raises -> LazyFrame:
+    var keyed = frame.with_column(Series("id", Column[Int32]([0, 1, 2])))
+    var labels = DataFrame(
+        [
+            Series("id", Column[Int32]([0, 1, 2])),
+            Series("label", StringColumn(["PROMO A", "OTHER", "PROMO B"])),
+        ]
+    )
+    var discounted = col("price") * (
+        lit("1").cast(DataType.decimal(15, 2)) - col("discount")
+    )
+    var conditional = (
+        when(col("label").str().starts_with("PROMO"))
+        .then(discounted.cast(DataType.FLOAT64))
+        .otherwise(lit(0.0))
+    )
+    return (
+        keyed.lazy()
+        .join(labels.lazy(), on="id")
+        .select(
+            (
+                lit(100.0)
+                * conditional.sum()
+                / discounted.sum().cast(DataType.FLOAT64)
+            ).alias("ratio")
+        )
+    )
+
+
 def test_decimal_scalar_feed_original_ast_prefix_and_resources() raises:
     var query = lower_aggregate_compositions(
         fold_literal_text_parsing(money_ratio(money_source()))
@@ -95,14 +129,57 @@ def test_decimal_scalar_feed_original_ast_prefix_and_resources() raises:
     assert_true(
         not prefix_infallible(checked_prefix, len(checked_prefix._nodes) - 1)
     )
+    # Exercise the exact public dictionary canonicalization that creates a
+    # fresh String key through fill_null(null(String)) before its lookup JOIN.
+    var joined = lower_aggregate_compositions(
+        fold_literal_text_parsing(money_joined_ratio(money_source()))
+    )._with_accelerator_settings(False, True, 257)
+    var lowered = lower_dictionary_operations(joined)
+    var staged = lowered[0].copy()
+    var dictionary = DictionaryCodes(staged)
+    var encoded = encode_query(staged, dictionary)
+    var joined_dag = lower_join_dag(encoded, capabilities())
+    var joined_observed = 0
+    for task in joined_dag.tasks:
+        for node in task.query._nodes:
+            if node.text == decimal_scalar_feed.MATERIALIZATION:
+                joined_observed += 1
+                var joined_plan = lower_rows(
+                    task.query, capabilities(), terminal_boundary=True
+                )
+                assert_equal(joined_plan.ordered_mode, 7)
+                _ = Program(joined_plan)
+    assert_equal(joined_observed, 1)
+    var different_scales = (
+        DataFrame(
+            [
+                Series("a", Column[Int32]([1])).with_dtype(
+                    DataType.decimal(3, 0, 32)
+                ),
+                Series("b", Column[Int32]([10])).with_dtype(
+                    DataType.decimal(3, 1, 32)
+                ),
+            ]
+        )
+        .lazy()
+        .with_columns(col("a").fill_null(col("b")).alias("v"))
+    )
+    assert_true(
+        not prefix_infallible(
+            different_scales, len(different_scales._nodes) - 1
+        )
+    )
 
 
 def test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts() raises:
     require_metal()
     var frame = money_source()
-    for source in [frame.copy(), offset_layout(frame), chunk_layout(frame)]:
+    var sources = [frame.copy(), offset_layout(frame), chunk_layout(frame)]
+    for layout in range(len(sources)):
+        var source = sources[layout].copy()
         var query = money_ratio(source)
         for streaming in [False, True]:
+            print("RUN scalar ratio layout", layout, "streaming", streaming)
             var cpu = query.collect(
                 engine="cpu", optimize=False, streaming=streaming, batch_size=1
             )
@@ -116,32 +193,8 @@ def test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts() raises:
             assert_equal(gpu.column("ratio").float64()._get(0), Float64(80))
     # Dictionary predicate transport and an ordinary join retain the same
     # general scalar feed proof; no source values are used for certification.
-    var keyed = frame.with_column(Series("id", Column[Int32]([0, 1, 2])))
-    var labels = DataFrame(
-        [
-            Series("id", Column[Int32]([0, 1, 2])),
-            Series("label", StringColumn(["PROMO A", "OTHER", "PROMO B"])),
-        ]
-    )
-    var discounted = col("price") * (
-        lit("1").cast(DataType.decimal(15, 2)) - col("discount")
-    )
-    var conditional = (
-        when(col("label").str().starts_with("PROMO"))
-        .then(discounted.cast(DataType.FLOAT64))
-        .otherwise(lit(0.0))
-    )
-    var joined = (
-        keyed.lazy()
-        .join(labels.lazy(), on="id")
-        .select(
-            (
-                lit(100.0)
-                * conditional.sum()
-                / discounted.sum().cast(DataType.FLOAT64)
-            ).alias("ratio")
-        )
-    )
+    var joined = money_joined_ratio(frame)
+    print("RUN scalar ratio ordinary JOIN and String starts_with")
     var joined_cpu = joined.collect(engine="cpu", optimize=False)
     var joined_gpu = joined.collect(accelerator=MetalRuntime(), optimize=False)
     assert_equal(joined_cpu.column("ratio").float64()._get(0), Float64(80))
