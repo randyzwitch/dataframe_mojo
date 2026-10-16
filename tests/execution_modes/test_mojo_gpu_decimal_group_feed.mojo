@@ -15,6 +15,7 @@ from dataframe.lazy import LazyFrame
 from dataframe.accelerator import decimal_group_feed
 from dataframe.accelerator.decimal_prefix import prefix_infallible
 from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
 from dataframe.binding import bind
 from dataframe.accelerator.joins import lower_join_dag
 from dataframe.accelerator.gpu.runtime import capabilities
@@ -96,6 +97,7 @@ def _literal(frame: DataFrame, nullable: Bool = False) raises:
 
 
 def _money_and_prefix_certificates() raises:
+    print("GROUP metadata: original money literals and signatures")
     var source = _source().with_column(
         Series("discount", Column[Int64]([10, 20, 30])).with_dtype(
             DataType.decimal(15, 2, 64)
@@ -193,12 +195,21 @@ def _money_and_prefix_certificates() raises:
     var normalized = fold_literal_text_parsing(
         grouped
     )._with_accelerator_settings(False, True, 65536)
-    var dag = lower_join_dag(normalized, capabilities())
+    # The public route encodes String fields before numeric DAG lowering.
+    # DATE retains its original Int64 logical/physical representation; the
+    # fresh String segment is the only carrier normalization needed here.
+    print("GROUP metadata: public dictionary staging with Int64 DATE keys")
+    var dictionary = DictionaryCodes(normalized)
+    var encoded = encode_query(normalized, dictionary)
+    var dag = lower_join_dag(encoded, capabilities())
     var observed = 0
     for task in dag.tasks:
         for node in task.query._nodes:
             observed += Int(node.text == decimal_group_feed.MATERIALIZATION)
     assert_equal(observed, 1)
+    print(
+        "GROUP metadata: original prefix fault and wide physical refusal checks"
+    )
     # A fallible value in either original JOIN arm is not made infallible by
     # a successful eventual GPU input-zero observation.
     var poison = (col("g").cast(DataType.INT64) + lit(Int64.MAX)).alias(

@@ -45,6 +45,7 @@ from dataframe.expr import (
     XOR,
     NOT,
     WHEN,
+    FILL_NULL,
     IS_NULL,
     IS_NOT_NULL,
     IS_NAN,
@@ -86,6 +87,7 @@ def _row_syntax(expression: Expr) -> Bool:
             XOR,
             NOT,
             WHEN,
+            FILL_NULL,
             IS_NULL,
             IS_NOT_NULL,
             IS_NAN,
@@ -122,6 +124,17 @@ def _row_infallible(bound: BoundExpr) -> Bool:
                 or bound.dtypes[node.left] != DataType.BOOL
                 or bound.dtypes[node.right] != bound.dtypes[at]
                 or bound.dtypes[node.extra] != bound.dtypes[at]
+            ):
+                return False
+        elif node.op == FILL_NULL:
+            # Dictionary lookup keys use String.fill_null(null(String)) to
+            # establish a fresh owner. Equal logical types merely select;
+            # implicit Decimal common casts still need their separate proof.
+            if (
+                node.left < 0
+                or node.right < 0
+                or bound.dtypes[node.left] != bound.dtypes[at]
+                or bound.dtypes[node.right] != bound.dtypes[at]
             ):
                 return False
         elif node.op not in [
