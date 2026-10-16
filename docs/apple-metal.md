@@ -95,8 +95,16 @@ footer rules follow the CPU lookup; table owners and uploads count toward the
 query budget. IANA timezone replacement, calendar offsets and truncation support
 a direct in-memory scan followed by a single SELECT. They preserve datetime
 units, ambiguity/gap policies, checked reconstruction, conditional masks and
-scalar activation within each original CPU batch. Prefix and resident temporal
-compositions remain outside this route.
+scalar activation within each original CPU batch.
+
+Eligible original IANA row producers can also feed resident sorting, head and
+grouped consumers. Typed certificates retain the original expression, source
+owners, input geometry and phase order; each checked producer is observed before
+its downstream consumer can hide a fault. This includes the order of checked
+integer prefixes and temporal errors. Regression coverage checks scalar mask
+activation across requested streaming batch settings and inactive branches.
+This route requires an exact certified in-memory prefix; arbitrary temporal
+rewrites and resident compositions remain restricted.
 
 Temporal arithmetic and physical casts currently require a direct in-memory
 scan and terminal row projection without a final head. Operand and predicate

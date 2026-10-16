@@ -140,6 +140,7 @@ from .accelerator.window_keys import WindowKey
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
+from .producer_origin import ProducerOrigin, RegionProof
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -207,6 +208,11 @@ struct PlanNode(Copyable):
     # Private text-code provenance; never inferred from UInt32 storage.
     var code_domain: Optional[DataType]
     var text_fields: List[TextField]
+    # Typed proof of an original row expression and its exact input prefix.
+    # Synthetic plans begin without either token; verified copies share it.
+    var producer_origin: Optional[ArcPointer[ProducerOrigin]]
+    var lineage_anchor: Optional[ArcPointer[Int]]
+    var producer_region: Optional[ArcPointer[RegionProof]]
     # Original partition state/operand proof is outside rewritten row ASTs.
     # Columns contain schema-only Series; no source values are retained here.
     var partition_exprs: List[Expr]
@@ -261,6 +267,9 @@ def _plan_node(
         source_failure,
         code_domain,
         text_fields.copy(),
+        Optional[ArcPointer[ProducerOrigin]](),
+        Optional[ArcPointer[Int]](),
+        Optional[ArcPointer[RegionProof]](),
         partition_exprs.copy(),
         partition_columns.copy(),
     )

@@ -641,6 +641,15 @@ def _selection_masks(
         i += run
 
 
+def _every_row(mask: List[Bool]) -> Bool:
+    """Whether an evaluation mask observes every row: empty, or all true
+    (`fit_mask` broadcasts a one-row mask to every row)."""
+    for active in mask:
+        if not active:
+            return False
+    return True
+
+
 def _null_otherwise(bound: BoundExpr, index: Int) -> Bool:
     """Whether node `index` is a conditional whose unselected rows are
     null: no otherwise, or a null literal."""
@@ -654,7 +663,8 @@ def _null_otherwise(bound: BoundExpr, index: Int) -> Bool:
 
 def _cannot_raise(bound: BoundExpr, index: Int) -> Bool:
     """Whether evaluating node `index` on any row is safe: a column, a
-    literal, or a cast between numeric types of one. Such a branch needs
+    literal, or a cast of one between numeric types (a decimal only to a
+    float). Such a branch needs
     no row mask, which saves building one per batch."""
     ref node = bound.expr._nodes[index]
     if node.op == COL or node.op == LIT_INT or node.op == LIT_FLOAT:
@@ -669,10 +679,26 @@ def _cannot_raise(bound: BoundExpr, index: Int) -> Bool:
             target.is_numeric()
             and not target.is_decimal()
             and source_type.is_numeric()
-            and not source_type.is_decimal()
-            and node.integer != 1
+            and (not source_type.is_decimal() or target.is_float())
+            and (node.integer != 1 or _total_cast(source_type, target))
         )
     return False
+
+
+def _total_cast(source: DataType, target: DataType) -> Bool:
+    """Whether a strict numeric cast is defined for every value, so its
+    strictness can never raise: a float target (a numeric cast raises only
+    for an integer target out of range), or an integer target whose range
+    holds the source's."""
+    if target.is_float():
+        return True
+    if not (source.is_integer() and target.is_integer()):
+        return False
+    if source.is_unsigned():
+        if target.is_unsigned():
+            return target.bit_width() >= source.bit_width()
+        return target.bit_width() > source.bit_width()
+    return target.is_signed() and target.bit_width() >= source.bit_width()
 
 
 def _masked_branch[
@@ -732,6 +758,11 @@ def _masked_branch[
             False,
             then_mask,
         )
+    # A batch that spans a source's chunks (a Parquet column's row
+    # groups) merges its branch once: one copy, where choosing every row
+    # through three row masks cost more.
+    if then.is_chunked():
+        then = then.rechunk()
     # Decimals too: only the validity changes, so the branch keeps its
     # storage and type.
     var branch_numeric = (
@@ -831,12 +862,14 @@ def _conditional[
     grouped: Bool,
     mask: List[Bool],
 ) raises -> Series:
-    if not grouped and len(mask) == 0 and _null_otherwise(bound, index):
+    if not grouped and _every_row(mask) and _null_otherwise(bound, index):
         # `when(c).then(x)` with null other rows: the branch's values under
         # a validity that adds the predicate, as a streamed reduction's
         # input already took (`_feed`), rather than chosen row by row. The
         # aggregate table's inputs are evaluated whole: TPC-DS q2's seven
-        # weekday sums spent 18% in `choose` and its masks.
+        # weekday sums spent 18% in `choose` and its masks. A mask that
+        # observes every row restricts nothing: the branch an enclosing
+        # scalar `when` takes passes down a one-row true mask.
         return _masked_branch[width](
             bound, columns, aggregates, index, offset, length
         )
