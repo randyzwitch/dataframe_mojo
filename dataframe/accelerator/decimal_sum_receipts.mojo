@@ -394,21 +394,22 @@ def _plain_transport(node: PlanNode) -> Bool:
 
 
 def _original_edge(origin: Origin, query: LazyFrame, child: Int) raises -> Int:
-    if child == -1:
+    var cursor = child
+    if cursor == -1:
         return -1
     # Projection pruning inserts unanchored plain column transports and can
     # reorder indices. Strip only those transports, retaining every original
     # checked occurrence and resolving edges by the original anchor identity.
     var remaining = len(query._nodes)
-    while child >= 0 and child < len(query._nodes) and remaining:
+    while cursor >= 0 and cursor < len(query._nodes) and remaining:
         remaining -= 1
-        ref node = query._nodes[child]
+        ref node = query._nodes[cursor]
         for at in range(len(origin.prefix_nodes)):
             if _same_anchor(node, origin.prefix_nodes[at]):
                 return origin.prefix_indices[at]
-        if not _transport_matches(query, child):
+        if not _transport_matches(query, cursor):
             return -2
-        child = node.left
+        cursor = node.left
     return -2
 
 
