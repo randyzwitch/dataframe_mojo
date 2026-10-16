@@ -45,6 +45,7 @@ from dataframe.expr import (
     FLOORDIV,
     POW,
     SUM,
+    COL,
     CAST,
     MOD,
     subtree,
@@ -139,16 +140,35 @@ def _checked_scalar_sum(query: LazyFrame, index: Int) raises -> Bool:
         if root.left < 0 or root.right >= 0 or bound.shapes[root.left] != ROWS:
             return False
         var operand = bind(subtree(bound.expr, root.left), schema._columns)
-        if not ordered_rows.eligible(operand):
+        if (
+            not ordered_rows.eligible(operand)
+            or operand.dtypes[len(operand.dtypes) - 1].is_decimal()
+        ):
             return False
         var proven = proven_integer_nodes(bound)
         # CPU completes each aggregate before evaluating the next operand.
         # Preparing infallible operands together cannot reorder checked faults.
         for at in range(top):
             ref node = bound.expr._nodes[at]
-            if bound.dtypes[at].is_decimal() or is_reduction(node.op):
+            if is_reduction(node.op):
                 return False
-            if node.op == CAST and node.integer and not proven[at]:
+            # A Decimal source converted to Float64 is an infallible operand,
+            # while Decimal arithmetic and Decimal reductions keep their own
+            # observation contracts.
+            if bound.dtypes[at].is_decimal() and node.op != COL:
+                return False
+            var float_cast = (
+                node.op == CAST
+                and node.left >= 0
+                and bound.dtypes[at] == DataType.FLOAT64
+                and bound.dtypes[node.left].is_numeric()
+            )
+            if (
+                node.op == CAST
+                and node.integer
+                and not proven[at]
+                and not float_cast
+            ):
                 return False
             if (
                 bound.dtypes[at].is_integer()
