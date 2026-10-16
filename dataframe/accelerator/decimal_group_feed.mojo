@@ -75,9 +75,19 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
             continue
         if node.op == CAST and proven[at]:
             continue
-        if node.op in [WHEN, IS_NULL, IS_NOT_NULL, AND, OR, XOR, NOT]:
-            # Masks select original arithmetic occurrences. These operators
-            # neither rescale Decimal operands nor introduce another fault.
+        if node.op == WHEN:
+            # A Decimal common dtype can implicitly rescale both branches.
+            # That introduces separate cast observations and requires its own
+            # alignment certificate; raw WHEN selection cannot prove them.
+            if (
+                node.extra < 0
+                or bound.dtypes[node.left] != DataType.BOOL
+                or bound.dtypes[node.right] != dtype
+                or bound.dtypes[node.extra] != dtype
+            ):
+                return (False, False)
+            continue
+        if node.op in [IS_NULL, IS_NOT_NULL, AND, OR, XOR, NOT]:
             continue
         if node.op in [EQ, NE, GT, GE, LT, LE]:
             if (
