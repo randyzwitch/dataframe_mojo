@@ -558,6 +558,50 @@ struct DataFrame(Copyable, Sized, Writable):
             columns.append(column.reverse())
         return Self(columns^, height=self._height)
 
+    def shift(
+        self, n: Int = 1, *, fill_value: Optional[Expr] = None
+    ) raises -> Self:
+        """Every column's values moved n rows later (earlier when n is
+        negative), as Polars' DataFrame.shift. Height and schema stay the
+        same. The min(|n|, height) rows left empty at the start (or, for
+        a negative n, the end) are null, or `fill_value` cast to each
+        column's type. `fill_value` is a scalar expression evaluated
+        against this frame: a literal, or a reduction such as
+        `col("a").max()`."""
+        var height = self._height
+        var vacated = height if n >= height or n <= -height else abs(n)
+        if vacated == 0:
+            return self.copy()
+        var fills = Optional[Self]()
+        if fill_value and self.width() > 0:
+            if bind(fill_value.value(), self._columns).shape() == ROWS:
+                raise Error("shift fill_value must be a scalar value")
+            var exprs = List[Expr](capacity=self.width())
+            for column in self._columns:
+                exprs.append(
+                    fill_value.value().cast(column.dtype()).alias(column.name())
+                )
+            fills = self.select_exprs(exprs)
+        # The source row of each output row; vacated rows read -1 (null)
+        # or, with a fill value, the fill row appended after the last.
+        var empty_row = height if fills else -1
+        var rows = List[Int](capacity=height)
+        for i in range(height):
+            if n > 0:
+                rows.append(i - vacated if i >= vacated else empty_row)
+            else:
+                rows.append(i + vacated if i + vacated < height else empty_row)
+        var columns = List[Series](capacity=self.width())
+        for k in range(self.width()):
+            ref column = self._columns[k]
+            if fills:
+                columns.append(
+                    column.append(fills.value()._columns[k]).take(rows)
+                )
+            else:
+                columns.append(column.take_or_null(rows))
+        return Self(columns^, height=height)
+
     def vstack(self, other: Self) raises -> Self:
         """Append other's rows; schemas must match exactly."""
         return concat([self.copy(), other.copy()], "vertical")

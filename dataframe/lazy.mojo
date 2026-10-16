@@ -25,9 +25,10 @@ the plan before execution:
   the footer statistics first and decodes only the row groups that can
   hold a match (see `parquet._pruned_row_groups`).
 
-Filters never move past a slice, unique, right/full join, or a group_by
-whose aggregates they read, because that would change which rows those
-operators see.
+Filters never move past a slice, unique, right/full join, a group_by
+whose aggregates they read, or a group_by_dynamic or rolling (as in
+Polars, whose predicate pushdown stops at dynamic and rolling group_bys),
+because that would change which rows those operators see.
 """
 from std.os import getenv
 from std.time import perf_counter_ns
@@ -87,6 +88,7 @@ from .expr import (
 )
 from .frame import concat
 from .sorted_range import sorted_window
+from .time_windows import negate_period
 from .value import AnyValue
 from .io.csv import CsvSchema, read_csv
 from .io.csv_reader import read_csv_explicit, read_csv_inferred
@@ -184,6 +186,28 @@ comptime CONCAT = 15
 # come out by value column, then input row, so it needs its whole input,
 # as Polars' unpivot is a map function over a materialized frame.
 comptime UNPIVOT = 20
+# Time windows (`DataFrame.group_by_dynamic` and `DataFrame.rolling`, then
+# `agg`). `names` holds the index column then the `by` keys, `names2` the
+# window settings (every, period, offset, closed, label) with their
+# defaults filled in as the eager methods fill them, `exprs` the
+# aggregations and `length` their batch size. Both read their whole
+# input in index order, so they run as pipeline breakers, and filters and
+# slices never move below them.
+comptime GROUP_BY_DYNAMIC = 28
+comptime ROLLING = 29
+# Row-order operators, each run by its eager DataFrame method on its whole
+# input in order (a pipeline breaker under streaming); filters, slices and
+# other row-changing rewrites do not cross them.
+# The last `offset` rows (DataFrame.tail; a negative count drops rows).
+comptime TAIL = 16
+# The rows in reverse order (DataFrame.reverse).
+comptime REVERSE = 17
+# Every column moved `offset` rows later (DataFrame.shift); `exprs` holds
+# the fill value when one was given.
+comptime SHIFT = 18
+# A leading Int64 row number named `names[0]`, starting at `offset`
+# (DataFrame.with_row_index).
+comptime ROW_INDEX = 19
 
 
 @fieldwise_init
@@ -1809,6 +1833,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         return result^
 
+    def tail(self, n: Int = 5) -> Self:
+        """The last n rows; a negative n drops the first -n rows. See
+        DataFrame.tail. Filters and slices written above it stay above
+        it."""
+        return self._push(_plan_node(TAIL, offset=n))
+
+    def reverse(self) -> Self:
+        """The rows in reverse order; see DataFrame.reverse."""
+        return self._push(_plan_node(REVERSE))
+
+    def shift(self, n: Int = 1, *, fill_value: Optional[Expr] = None) -> Self:
+        """Every column moved n rows later (earlier when negative), the
+        vacated rows null or `fill_value`; see DataFrame.shift."""
+        var exprs = List[Expr]()
+        if fill_value:
+            exprs.append(fill_value.value().copy())
+        return self._push(_plan_node(SHIFT, exprs=exprs, offset=n))
+
+    def with_row_index(self, name: String = "index", offset: Int64 = 0) -> Self:
+        """Prepend an Int64 row number starting at offset; see
+        DataFrame.with_row_index. The numbers count the rows this plan
+        produces here, so filters and slices above it stay above it."""
+        return self._push(
+            _plan_node(ROW_INDEX, names=[name], offset=Int(offset))
+        )
+
     def explode(self, columns: List[String]) -> Self:
         """One row per list element; see DataFrame.explode."""
         return self._push(_plan_node(EXPLODE, names=columns))
@@ -1933,6 +1983,130 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if name == "is_duplicated":
             flag = occurs > lit(Int64(1))
         return self.select_exprs([flag.alias(name)])
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        group_by: List[String] = List[String](),
+    ) -> LazyTimeGroupBy:
+        """Group rows into calendar-aligned, possibly overlapping windows of
+        the index column; see DataFrame.group_by_dynamic.
+
+        The index must be sorted (within each `group_by` group) when the
+        plan runs. Filters and slices above the aggregation stay above it,
+        and its input is read in full before any window is formed.
+        """
+        return LazyTimeGroupBy(
+            self.copy(),
+            _plan_node(
+                GROUP_BY_DYNAMIC,
+                names=List[String]([index_column]) + group_by.copy(),
+                names2=[
+                    every,
+                    period.value() if period else every,
+                    offset.value() if offset else "0d",
+                    closed,
+                    label,
+                ],
+            ),
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: String,
+    ) -> LazyTimeGroupBy:
+        return self.group_by_dynamic(
+            index_column,
+            every,
+            period,
+            offset,
+            closed,
+            label,
+            List[String]([group_by]),
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: NoneType,
+    ) -> LazyTimeGroupBy:
+        return self.group_by_dynamic(
+            index_column, every, period, offset, closed, label, List[String]()
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        group_by: List[String] = List[String](),
+    ) -> LazyTimeGroupBy:
+        """Aggregate a duration window ending at each row's index value;
+        see DataFrame.rolling.
+
+        The index must be sorted (within each `group_by` group) when the
+        plan runs. Filters and slices above the aggregation stay above it,
+        and its input is read in full before any window is formed.
+        """
+        return LazyTimeGroupBy(
+            self.copy(),
+            _plan_node(
+                ROLLING,
+                names=List[String]([index_column]) + group_by.copy(),
+                names2=[
+                    String(""),
+                    period,
+                    offset.value() if offset else negate_period(period),
+                    closed,
+                    String("datapoint"),
+                ],
+            ),
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: String,
+    ) -> LazyTimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]([group_by])
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: NoneType,
+    ) -> LazyTimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]()
+        )
 
     def join_asof(
         self,
@@ -2992,12 +3166,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _ends_in_breaker(self, index: Int) -> Bool:
         """Whether node `index` is a pipeline breaker (an aggregate, a
-        unique or a sort), or row-local steps over one: it is computed in
+        unique, a sort or a row-order operator such as tail), or row-local
+        steps over one: it is computed in
         full before any of its rows stream on."""
         var at = index
         while at >= 0:
             ref node = self._nodes[at]
-            if node.kind == AGG or node.kind == UNIQUE or node.kind == SORT:
+            if (
+                node.kind == AGG
+                or node.kind == UNIQUE
+                or node.kind == SORT
+                or _is_time_window(node.kind)
+                or _row_order_step(node.kind)
+            ):
                 return True
             if node.kind == DROP or _stream_rows(node):
                 at = node.left
@@ -3173,11 +3354,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     # whatever side a join was written on, rather than run
                     # the join outside the pipeline (TPC-DS q43 probed its
                     # 366 dates with 2.9M sales rows eagerly).
+                    # A right side whose one key is a progression is no hash
+                    # table to build: the left streams through its rows by
+                    # position, which no swap beats.
                     if (
                         node.how == JOIN_INNER
                         and not ordered
                         and _order_free_reductions(keys, expressions)
                         and self._direct_key(node.left, node.names)
+                        and not self._progression_key(
+                            node.right, node.right_keys
+                        )
                     ):
                         var large = self._execute(
                             node.right, False, True, batch_size
@@ -3268,9 +3455,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     and bound >= 0
                     and built.height() > bound
                     and _order_free_reductions(keys, expressions)
+                    and not self._progression_key(node.right, node.right_keys)
                 ):
                     # The built right side holds more rows than the left
-                    # can: hash the left instead and stream the right
+                    # can, and is no progression (above): hash the left
+                    # instead and stream the right
                     # through it, as DuckDB's build/probe side optimizer
                     # and Polars' join both build on the smaller side.
                     # Under an unordered aggregation into the aggregate
@@ -4657,6 +4846,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 variable_name=node.right_keys[0],
                 value_name=node.right_keys[1],
             )
+        if _is_time_window(node.kind):
+            return _run_time_window(node, input)
+        if node.kind == TAIL:
+            return input.tail(node.offset)
+        if node.kind == REVERSE:
+            return input.reverse()
+        if node.kind == SHIFT:
+            if len(node.exprs) > 0:
+                return input.shift(node.offset, fill_value=node.exprs[0].copy())
+            return input.shift(node.offset)
+        if node.kind == ROW_INDEX:
+            return input.with_row_index(node.names[0], Int64(node.offset))
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -5663,19 +5864,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         arithmetic progression, which is looked up by position."""
         if len(keys) != 1:
             return False
+        var column = keys[0]
         var cursor = index
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if node.kind == SCAN_FRAME:
-                var key = self._frames[node.offset][keys[0]]
+                ref frame = self._frames[node.offset]
+                if column not in frame.columns():
+                    return False
+                var key = frame[column]
                 if key.dtype().physical() != DataType.INT64:
                     return False
                 return int64_progression(key)[0]
             if node.kind != DROP and not (
                 (node.kind == SELECT or node.kind == WITH_COLUMNS)
-                and _chain_member(node)
+                and _stream_rows(node)
             ):
                 return False
+            if node.kind == SELECT or node.kind == WITH_COLUMNS:
+                # A renamed column is its source column; a computed one is
+                # no table's key.
+                for expr in node.exprs:
+                    if expr._name == column:
+                        if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                            return False
+                        column = expr._nodes[0].text
             cursor = node.left
         return False
 
@@ -5717,6 +5930,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if node.kind == FILTER:
             filters.append(index)
         self._collect_graph(node.left, relations, pairs, filters)
+
+    def _indexed_relation(
+        self,
+        entry: Int,
+        other: Int,
+        joined: List[Bool],
+        node_of: List[Int],
+        edges: List[JoinEdge],
+        masks: List[Int],
+    ) raises -> Bool:
+        """Whether tree entry `entry` is one relation joined to `other` on
+        a single key that is a progression in its table (`_progression_key`),
+        so building on it needs no hash table."""
+        if joined[entry]:
+            return False
+        var mine = masks[entry]
+        var theirs = masks[other]
+        var keys = List[String]()
+        for edge in edges:
+            if mine & (1 << edge.a) != 0 and theirs & (1 << edge.b) != 0:
+                for k in edge.a_keys:
+                    keys.append(k)
+            elif mine & (1 << edge.b) != 0 and theirs & (1 << edge.a) != 0:
+                for k in edge.b_keys:
+                    keys.append(k)
+        return len(keys) == 1 and self._progression_key(node_of[entry], keys)
 
     def _cost_order_joins(
         mut self, root: Int, streaming: Bool, batch_size: Int
@@ -5877,6 +6116,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     right_cost *= 1.15
                 if not joined[left] and joined[right]:
                     left_cost *= 1.15
+                # A lone relation joined on one key whose values are a
+                # progression builds no hash table: the other side looks
+                # its rows up by position (`join.progression`), so it costs
+                # nothing to build on.
+                if self._indexed_relation(
+                    left, right, joined, node_of, edges, tree.mask
+                ):
+                    left_cost = 0.0
+                if self._indexed_relation(
+                    right, left, joined, node_of, edges, tree.mask
+                ):
+                    right_cost = 0.0
                 if right_cost > left_cost:
                     var t = left
                     left = right
@@ -7088,6 +7339,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or node.kind == EXPLODE
                 or node.kind == UNNEST
                 or node.kind == CONCAT
+                or _row_order_step(node.kind)
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -7099,6 +7351,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 # column is a value column.
                 reads_all = len(node.names) == 0
                 reads = node.names + node.names2.copy()
+            elif _is_time_window(node.kind):
+                # Only what the windows read, whatever is wanted above:
+                # their outputs are new columns.
+                var window_reads = _time_window_reads(node)
+                reads_all = not window_reads
+                if window_reads:
+                    reads = window_reads.take()
             elif not reads_all:
                 if needed[i]:
                     for n in needed[i].value():
@@ -7276,6 +7535,53 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 + _joined(node.names2)
                 + " as "
                 + _joined(node.right_keys)
+            )
+        elif node.kind == GROUP_BY_DYNAMIC:
+            label = (
+                "GROUP_BY_DYNAMIC "
+                + node.names[0]
+                + " every "
+                + node.names2[0]
+                + " period "
+                + node.names2[1]
+                + " offset "
+                + node.names2[2]
+                + " closed "
+                + node.names2[3]
+                + " label "
+                + node.names2[4]
+            )
+            if len(node.names) > 1:
+                label += " by " + _joined(List[String](node.names[1:]))
+            label += " AGG " + _joined(_output_names(node.exprs))
+        elif node.kind == ROLLING:
+            label = (
+                "ROLLING "
+                + node.names[0]
+                + " period "
+                + node.names2[1]
+                + " offset "
+                + node.names2[2]
+                + " closed "
+                + node.names2[3]
+            )
+            if len(node.names) > 1:
+                label += " by " + _joined(List[String](node.names[1:]))
+            label += " AGG " + _joined(_output_names(node.exprs))
+        elif node.kind == TAIL:
+            label = "TAIL " + String(node.offset)
+        elif node.kind == REVERSE:
+            label = "REVERSE"
+        elif node.kind == SHIFT:
+            label = "SHIFT " + String(node.offset)
+            if len(node.exprs) > 0:
+                label += " fill " + node.exprs[0]._name
+        elif node.kind == ROW_INDEX:
+            label = (
+                "WITH_ROW_INDEX "
+                + node.names[0]
+                + " from "
+                + String(node.offset)
             )
         else:
             label = "DROP " + _joined(node.names)
@@ -7615,8 +7921,56 @@ def _chain_member(node: PlanNode) -> Bool:
     return False
 
 
+def _row_order_step(kind: Int) -> Bool:
+    """Whether `kind` is a row-order operator (tail, reverse, shift,
+    with_row_index): run whole, in input order, by its eager method."""
+    return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
+
+
 def _is_scan(kind: Int) -> Bool:
     return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
+
+
+def _is_time_window(kind: Int) -> Bool:
+    return kind == GROUP_BY_DYNAMIC or kind == ROLLING
+
+
+def _time_window_reads(node: PlanNode) -> Optional[List[String]]:
+    """The input columns a time window node reads: its index column, its
+    `by` keys and the columns its aggregations reference, as Polars'
+    projection pushdown keeps for a dynamic or rolling group_by. None
+    when an aggregation reads columns through a selector."""
+    var reads = node.names.copy()
+    for e in node.exprs:
+        var r = _references(e)
+        if not r:
+            return None
+        for n in r.value():
+            reads.append(n)
+    return reads^
+
+
+def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
+    """The eager `group_by_dynamic` or `rolling` aggregation a time window
+    node records, over its executed input."""
+    var by = List[String](node.names[1:])
+    if node.kind == ROLLING:
+        return input.rolling(
+            node.names[0],
+            node.names2[1],
+            Optional(node.names2[2]),
+            node.names2[3],
+            by,
+        ).agg(node.exprs, batch_size=node.length)
+    return input.group_by_dynamic(
+        node.names[0],
+        node.names2[0],
+        Optional(node.names2[1]),
+        Optional(node.names2[2]),
+        node.names2[3],
+        node.names2[4],
+        by,
+    ).agg(node.exprs, batch_size=node.length)
 
 
 def _text_hash(text: String) -> UInt64:
@@ -7785,6 +8139,25 @@ struct LazyGroupBy(Copyable):
 
     def agg(self, expr: Expr) -> LazyFrame:
         return self.agg([expr.copy()])
+
+
+@fieldwise_init
+struct LazyTimeGroupBy(Copyable):
+    """A pending lazy `group_by_dynamic` or `rolling`; finish it with agg."""
+
+    var _frame: LazyFrame
+    var _node: PlanNode
+
+    def agg(self, exprs: List[Expr], *, batch_size: Int = 1024) -> LazyFrame:
+        """One row per window: the `group_by` keys, the index column (the
+        window's label) and the aggregations; see TimeGroupBy.agg."""
+        var node = self._node.copy()
+        node.exprs = exprs.copy()
+        node.length = batch_size
+        return self._frame._push(node^)
+
+    def agg(self, expr: Expr, *, batch_size: Int = 1024) -> LazyFrame:
+        return self.agg([expr.copy()], batch_size=batch_size)
 
 
 def scan_csv(path: String) raises -> LazyFrame:
