@@ -12,8 +12,13 @@ which with no distinct-count statistics (DuckDB's case for Parquet) is the
 smallest table row count among the set's relations: a column's distinct
 count is taken as its table's rows before any filter
 (`RelationStatisticsHelper::ExtractGetStats`), so joining to a filtered
-table divides by the whole table and keeps its share of the rows. A plan's cost is the sum of
-the estimated rows of every join it makes (`CostModel::ComputeCost`).
+table divides by the whole table and keeps its share of the rows. Where a
+loaded table keeps distinct-count statistics (`distinct_statistics`,
+DuckDB's HyperLogLog per column), a set's domain is instead the largest
+count among its columns, and each edge with such a domain left over once
+the set is connected adds one to the denominator's multiplier. A plan's
+cost is the sum of the estimated rows of every join it makes
+(`CostModel::ComputeCost`).
 
 Below `EXACT_RELATIONS` relations every connected split of every connected
 set is tried (dynamic programming over subsets, as DPhyp enumerates them);
@@ -55,13 +60,18 @@ struct JoinGraph(Movable):
     # Each edge's total domain.
     var tdom: List[Float64]
     var estimates: Dict[Int, Float64]
+    # Whether each edge's total domain is a distinct count (DuckDB's
+    # `has_distinct_count_hll`) rather than table rows.
+    var counted: List[Bool]
 
     def __init__(
         out self,
         rows: List[Float64],
         domains: List[Float64],
         edges: List[JoinEdge],
+        distinct: Dict[String, Float64] = Dict[String, Float64](),
     ) raises:
+        self.counted = List[Bool]()
         self.rows = rows.copy()
         self.edges = edges.copy()
         self.tdom = List[Float64]()
@@ -97,29 +107,42 @@ struct JoinGraph(Movable):
                 var ry = find(parent, y)
                 if rx != ry:
                     parent[rx] = ry
-        # A set's total domain: with no distinct counts, the fewest table
-        # rows (`domains`) of any relation holding one of its columns
-        # (`UpdateTotalDomains`).
+        # A set's total domain (`UpdateTotalDomains`): the largest distinct
+        # count among its columns where a table keeps statistics
+        # (`distinct`, by "relation/column"), else the fewest table rows
+        # (`domains`) of any relation holding one of its columns.
         var domain = Dict[Int, Float64]()
+        var counted = Dict[Int, Float64]()
         for e in self.edges:
             for i in range(len(e.a_keys)):
                 for side in range(2):
                     var rel = e.a if side == 0 else e.b
                     var name = e.a_keys[i] if side == 0 else e.b_keys[i]
-                    var root = find(parent, ids[String(rel) + "/" + name])
+                    var key = String(rel) + "/" + name
+                    var root = find(parent, ids[key])
+                    if key in distinct:
+                        var d = max(distinct[key], 1.0)
+                        if root not in counted or d > counted[root]:
+                            counted[root] = d
                     var r = max(domains[rel], 1.0)
                     if root not in domain or r < domain[root]:
                         domain[root] = r
+        for root in counted.keys():
+            domain[root] = counted[root]
         # An edge of several key pairs merges its relations once, at the
         # largest of its pairs' domains (the first the descending walk
         # meets); the others are left unused, which with no distinct-count
         # statistics adds no factor.
         for e in self.edges:
             var best = 1.0
+            var from_count = False
             for i in range(len(e.a_keys)):
                 var root = find(parent, ids[String(e.a) + "/" + e.a_keys[i]])
-                best = max(best, domain[root])
+                if domain[root] > best:
+                    best = domain[root]
+                    from_count = root in counted
             self.tdom.append(best)
+            self.counted.append(from_count)
 
     def estimate(mut self, mask: Int) raises -> Float64:
         """Estimated rows of joining the relations in `mask`
@@ -149,16 +172,27 @@ struct JoinGraph(Movable):
         for r in range(n):
             component[r] = r
         var denominator = 1.0
+        # Edges met once every relation is connected, by their distinct
+        # domains: each adds one to the denominator's multiplier, DuckDB's
+        # "slight penalty to cardinality for unused edges" (`GetDenominator`).
+        var unused = List[Float64]()
+        var parts = Int(pop_count(mask))
         for k in order:
             ref e = self.edges[k]
+            if parts == 1:
+                if self.counted[k] and self.tdom[k] not in unused:
+                    unused.append(self.tdom[k])
+                continue
             var ca = component[e.a]
             var cb = component[e.b]
             if ca == cb:
                 continue
             denominator *= self.tdom[k]
+            parts -= 1
             for r in range(n):
                 if component[r] == cb:
                     component[r] = ca
+        denominator *= 1.0 + Float64(len(unused))
         var result = max(numerator / denominator, 1.0)
         self.estimates[mask] = result
         return result
@@ -222,13 +256,16 @@ def _build(
 
 
 def order_joins(
-    rows: List[Float64], domains: List[Float64], edges: List[JoinEdge]
+    rows: List[Float64],
+    domains: List[Float64],
+    edges: List[JoinEdge],
+    distinct: Dict[String, Float64] = Dict[String, Float64](),
 ) raises -> Optional[JoinTree]:
     """The cheapest join tree over these relations (`rows` after their own
     filters, `domains` their tables' rows before them), or None when the
     edges leave them disconnected (a cross product, which is not
     reordered)."""
-    var graph = JoinGraph(rows, domains, edges)
+    var graph = JoinGraph(rows, domains, edges, distinct)
     var n = len(rows)
     var full = (1 << n) - 1
     if n < 2 or not _connected(graph, full):
