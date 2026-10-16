@@ -100,7 +100,12 @@ from .accelerator.joins import (
 )
 from .accelerator import producer_phases
 from .accelerator.explodes import has_explode
-from .lazy import AcceleratorBackend, LazyFrame
+from .lazy import (
+    AcceleratorBackend,
+    LazyFrame,
+    GROUP_BY_DYNAMIC,
+    ROLLING,
+)
 from .column import Column
 from .frame import DataFrame
 from .series import Series
@@ -118,6 +123,16 @@ def metal_installed() -> Bool:
     from .accelerator.gpu.identity import available
 
     return available()
+
+
+def _reject_time_windows(query: LazyFrame) raises:
+    """`group_by_dynamic` and `rolling` run on the CPU only."""
+    for node in query._nodes:
+        if node.kind == GROUP_BY_DYNAMIC or node.kind == ROLLING:
+            raise Error(
+                "Metal unsupported [plan]: group_by_dynamic and rolling"
+                " require CPU execution"
+            )
 
 
 def _capabilities() -> RowCapabilities:
@@ -179,6 +194,7 @@ struct MetalRuntime(AcceleratorBackend):
         """Bound supported numeric work without reading values or device setup."""
         from .accelerator.gpu.calibration import estimate
 
+        _reject_time_windows(query)
         return estimate(query)
 
     def calibration_key(
@@ -193,6 +209,13 @@ struct MetalRuntime(AcceleratorBackend):
     ) -> Tuple[String, String]:
         from .accelerator.gpu.calibration import select_auto
 
+        try:
+            _reject_time_windows(query)
+        except error:
+            return (
+                "cpu",
+                "automatic analytical preflight rejected: " + String(error),
+            )
         return select_auto(
             query, self._device, self._budget, optimize, streaming, batch_size
         )
@@ -240,6 +263,7 @@ struct MetalRuntime(AcceleratorBackend):
 
         if self._execution_settings.batch_size <= 0:
             raise Error("batch_size must be positive")
+        _reject_time_windows(query)
         from .accelerator.grouped_stream_routes import candidate
         from .accelerator.gpu.grouped_stream_dispatch import (
             execute as execute_float_stream,
@@ -1030,6 +1054,7 @@ struct MetalRuntime(AcceleratorBackend):
         from .parallel import configured_workers
 
         try:
+            _reject_time_windows(query)
             var float_route = candidate(
                 query,
                 configured_workers(),

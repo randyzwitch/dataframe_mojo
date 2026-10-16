@@ -18,6 +18,8 @@ from dataframe.lazy import (
     UNNEST,
     CONCAT,
     _is_scan,
+    _is_time_window,
+    _time_window_reads,
     _plan_node,
     _references,
 )
@@ -140,7 +142,14 @@ def prune_projections(mut query: LazyFrame) raises:
             reads.append(node.text)
         if node.kind == UNIQUE and len(node.names) == 0:
             reads_all = True
-        if not reads_all:
+        if _is_time_window(node.kind):
+            # Only what the windows read, whatever is wanted above: their
+            # outputs are new columns.
+            var window_reads = _time_window_reads(node)
+            reads_all = not window_reads
+            if window_reads:
+                reads = window_reads.take()
+        elif not reads_all:
             if needed[i]:
                 for n in needed[i].value():
                     reads.append(n)

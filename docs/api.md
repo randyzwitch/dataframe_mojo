@@ -961,6 +961,14 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def explode(self, column: String) -> Self`
 - `def unnest(self, column: String) -> Self`
   Replace a struct column with its fields; see DataFrame.unnest.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> LazyTimeGroupBy`
+  Group rows into calendar-aligned, possibly overlapping windows of the index column; see DataFrame.group_by_dynamic.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> LazyTimeGroupBy`
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> LazyTimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", group_by: List[String] = List()) -> LazyTimeGroupBy`
+  Aggregate a duration window ending at each row's index value; see DataFrame.rolling.
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> LazyTimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> LazyTimeGroupBy`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
   As-of join with sortedness checked at execution; see DataFrame.join_asof.
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
@@ -1003,6 +1011,14 @@ A pending lazy grouping; finish it with agg.
 
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
 - `def agg(self, expr: Expr) -> LazyFrame`
+
+## `LazyTimeGroupBy`
+
+A pending lazy `group_by_dynamic` or `rolling`; finish it with agg.
+
+- `def agg(self, exprs: List[Expr], *, batch_size: Int = Int(1024)) -> LazyFrame`
+  One row per window: the `group_by` keys, the index column (the window's label) and the aggregations; see TimeGroupBy.agg.
+- `def agg(self, expr: Expr, *, batch_size: Int = Int(1024)) -> LazyFrame`
 
 ## `ListColumn`
 
