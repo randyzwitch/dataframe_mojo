@@ -33,7 +33,9 @@ def source(nullable: Bool = False) raises -> DataFrame:
 
 
 def expressions() raises -> List[Expr]:
-    var zero = lit("0").cast(DataType.decimal(7, 2))
+    # The public like(frame, "price", "0") helper retains the actual input
+    # width; Parquet narrows these precision7 money columns to32bits.
+    var zero = lit("0").cast(DataType.decimal(7, 2, 32))
     var net = col("price") - col("refund").fill_null(zero)
     return [
         when(col("before"))
