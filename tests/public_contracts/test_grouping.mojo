@@ -1,4 +1,5 @@
 """Group membership and aggregate associations use scalar key equality."""
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame
 from tests.support.reference_model import (

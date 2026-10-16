@@ -1,4 +1,5 @@
 """Calendar buckets preserve proleptic months and checked Datetime storage."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
@@ -76,6 +77,7 @@ def test_calendar_truncation_capability_month_metadata_and_checked_boundaries() 
         )
 
 
+# requires: metal
 def test_native_metal_calendar_truncation_units_leap_centuries_negative_epochs_and_empty_rows() raises:
     var runtime = require_metal()
     for dtype in List[DataType](
@@ -133,6 +135,7 @@ def test_native_metal_calendar_truncation_units_leap_centuries_negative_epochs_a
     )
 
 
+# requires: metal
 def test_native_metal_calendar_truncation_full_date_domain_datetime_overflow_and_masks() raises:
     var runtime = require_metal()
     var dates = DataFrame(
@@ -187,6 +190,7 @@ def test_native_metal_calendar_truncation_full_date_domain_datetime_overflow_and
         check(nulls.lazy().select(col("t").dt().truncate("1mo")), runtime)
 
 
+# requires: metal
 def test_native_metal_calendar_truncation_profiles_cost_budget_and_reuse() raises:
     var runtime = require_metal()
     var query = (

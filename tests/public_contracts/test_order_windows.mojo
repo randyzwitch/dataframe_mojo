@@ -1,4 +1,7 @@
 """Row-order semantics against scalar scans, membership and pairwise ranks."""
+# contract-group: expr.order_windows
+# contract-group: harness.sensitivity
+# contract-group: reference.anchors
 from std.math import abs, isnan, isinf
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit

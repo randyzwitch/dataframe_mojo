@@ -1,4 +1,5 @@
 """Selection cutoffs and large duplicate sets agree with a histogram oracle."""
+# contract-group: kernel.reduce
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe.aggregate import quantile_in

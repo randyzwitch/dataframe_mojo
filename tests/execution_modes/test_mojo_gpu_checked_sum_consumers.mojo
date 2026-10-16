@@ -1,4 +1,6 @@
 """Checked integer scalar totals finish before downstream consumers."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
@@ -33,6 +35,7 @@ def _sum_source() raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty() raises:
     var source = _sum_source()
     for frame in [source.copy(), offset_layout(source), chunk_layout(source)]:
@@ -100,6 +103,7 @@ def test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty() raise
         assert_equal(actual.item(0, "u").uint64(), UInt64.MAX)
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() raises:
     var frame = DataFrame([Series("v", Column[Int64]([Int64.MAX, 1]))])
     var producer = frame.lazy().select(col("v").sum().alias("total"))
@@ -178,6 +182,7 @@ def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() r
     )
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_conditional_counts_and_budget() raises:
     var frame = _sum_source()
     var counted = frame.lazy().select_exprs(
@@ -284,6 +289,7 @@ def test_checked_sum_canonical_false_filter_precedes_boundary_capture() raises:
     assert_equal(query._frames[0].height(), 2)
 
 
+# requires: metal
 def test_mojo_gpu_checked_sum_scalar_when_and_numeric_mean_siblings() raises:
     # Numeric-to-Float64 casts are infallible siblings of checked SUM. The
     # scalar state leaves complete before the outer WHEN chooses its branch.

@@ -1,4 +1,5 @@
 """Exact shift and bounded fill through resident ordered Metal windows."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -123,6 +124,7 @@ def test_shift_fill_capability_raw_parameters_and_nested_scopes() raises:
     )
 
 
+# requires: metal
 def test_native_metal_shift_fill_numeric_widths_offsets_limits_and_slices() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -222,6 +224,7 @@ def test_native_metal_shift_fill_numeric_widths_offsets_limits_and_slices() rais
         check(nulls.lazy().select(operation(col("x"), method, -1)), runtime)
 
 
+# requires: metal
 def test_native_metal_shift_fill_exact_words_logical_and_dictionary_payloads() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -338,6 +341,7 @@ def test_native_metal_shift_fill_exact_words_logical_and_dictionary_payloads() r
     check(plain.lazy().select(col("x").forward_fill()), runtime)
 
 
+# requires: metal
 def test_native_metal_shift_fill_partition_boundaries_and_nested_resident_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -432,6 +436,7 @@ def test_native_metal_shift_fill_partition_boundaries_and_nested_resident_consum
     check(frame.lazy().select(col("x").backward_fill().sum()), runtime)
 
 
+# requires: metal
 def test_native_metal_shift_fill_proofs_budget_cost_and_runtime_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

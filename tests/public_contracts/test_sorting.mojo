@@ -1,4 +1,5 @@
 """Independent stable lexicographic order, including ties and floating specials."""
+# contract-group: table.sort
 from std.testing import assert_equal, assert_raises
 from dataframe import DataFrame
 from tests.support.coverage_generators import frame_from_model, chunk_layout

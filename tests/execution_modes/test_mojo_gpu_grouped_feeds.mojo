@@ -1,4 +1,6 @@
 """Public grouped feeds preserve operand batches, update and finish phases."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
 from dataframe.metal import MetalRuntime
@@ -28,6 +30,7 @@ def _with_list(frame: DataFrame, reduction: Expr) raises:
     assert_true(actual.equals(expected))
 
 
+# requires: metal
 def test_mojo_gpu_grouped_feed_batch_input_update_and_integer_finish_order() raises:
     for workers in [1, 4]:
         var setting = WorkerSetting(workers)
@@ -89,6 +92,7 @@ def test_mojo_gpu_grouped_feed_batch_input_update_and_integer_finish_order() rai
         _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_grouped_feed_checked_ast_original_projection_order_and_masks() raises:
     var frame = integer_feed_frame(1024)
     var strict = col("x").cast(DataType.INT8).cast(DataType.INT64)
@@ -150,6 +154,7 @@ def test_mojo_gpu_grouped_feed_checked_ast_original_projection_order_and_masks()
     _with_list(frame, safe.count())
 
 
+# requires: metal
 def test_mojo_gpu_grouped_feed_success_high_words_empty_profile_budget_and_provenance() raises:
     var values: List[Int128] = [Int128(1) << 80, -(Int128(1) << 80), 7, 11]
     var source = DataFrame(

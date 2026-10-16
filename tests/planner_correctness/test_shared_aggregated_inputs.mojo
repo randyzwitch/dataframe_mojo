@@ -5,6 +5,7 @@ UNION ALL), and a subquery several joins build on. Copies with a filter of
 their own above them stay apart, since each filter would have narrowed its
 copy. Either way the result is the scalar model's, with the optimizer on
 or off."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 
 from dataframe import (

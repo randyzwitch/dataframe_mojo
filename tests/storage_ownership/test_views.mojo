@@ -1,4 +1,6 @@
 """Ownership and representation must preserve cells after the source dies."""
+# contract-group: storage.views
+# contract-group: storage.chunks
 from dataframe import DataFrame
 from tests.support.coverage_generators import generated_frame, chunk_layout
 from tests.support.coverage_compare import assert_model

@@ -1,4 +1,5 @@
 """Physical chunk fragments upload with independent offsets and owned metadata."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import (
     capabilities as _capabilities,
@@ -112,6 +113,7 @@ def test_chunked_inputs_capability_owned_descriptors_and_value_blind_estimates()
     assert_true(frame.column("x").is_chunked())
 
 
+# requires: metal
 def test_native_metal_chunked_inputs_physical_types_offsets_nulls_and_slices() raises:
     var runtime = require_metal()
     var types: List[DataType] = [
@@ -181,6 +183,7 @@ def test_native_metal_chunked_inputs_physical_types_offsets_nulls_and_slices() r
     check(DataFrame([fragmented(strings)]).lazy(), runtime)
 
 
+# requires: metal
 def test_native_metal_chunked_inputs_row_consumers_groups_and_resident_joins() raises:
     var runtime = require_metal()
     var frame = chunk_frame()
@@ -223,6 +226,7 @@ def test_native_metal_chunked_inputs_row_consumers_groups_and_resident_joins() r
     check(common.join(common, on="k").sort(["k", "x", "x_right"]), runtime)
 
 
+# requires: metal
 def test_native_metal_chunked_inputs_profiles_exact_budget_and_float_reductions() raises:
     var runtime = require_metal()
     var query = chunk_frame().lazy().select((col("x") + 1).alias("x"))

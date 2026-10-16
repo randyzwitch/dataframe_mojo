@@ -1,4 +1,6 @@
 """Original numeric operand certificates and scalar-literal ROWS lifting."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
     Column,
@@ -20,6 +22,7 @@ from dataframe.accelerator.partition_operands import (
 )
 
 
+# requires: mojo_gpu
 def test_partition_operand_metadata_scalar_faults_masks_and_numeric_anchor() raises:
     var source = DataFrame(
         [

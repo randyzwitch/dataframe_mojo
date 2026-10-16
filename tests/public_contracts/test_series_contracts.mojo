@@ -1,4 +1,5 @@
 """Standalone Series APIs obey positional, typed scalar and validity contracts."""
+# contract-group: series.api
 from std.math import sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import AnyValue, Column, DataType, Series, col, lit

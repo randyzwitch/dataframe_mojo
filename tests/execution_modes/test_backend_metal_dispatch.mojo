@@ -1,4 +1,5 @@
 """Native dispatch mechanisms must retain complete stable scalar semantics."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from dataframe import DataFrame, Series, Column, col, lit
 from dataframe.metal import MetalRuntime
@@ -55,6 +56,7 @@ def predicate_case(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_filtered_scalar_reductions_observe_predicates_without_row_compaction() raises:
     predicate_case(require_metal(), True)
 
@@ -135,6 +137,7 @@ def hash_group_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_group_dispatch_boundary_preserves_nullable_composite_first_seen_groups() raises:
     hash_group_cases(require_metal(), True)
 
@@ -193,6 +196,7 @@ def radix_sort_cases(runtime: MetalRuntime, native: Bool) raises:
             )
 
 
+# requires: metal
 def test_native_metal_integer_sort_dispatch_boundary_keeps_exact_words_null_placement_and_stable_ties() raises:
     radix_sort_cases(require_metal(), True)
 
@@ -250,6 +254,7 @@ def float_join_cases(runtime: MetalRuntime, native: Bool) raises:
     check_domain(plan, expected, runtime, native)
 
 
+# requires: metal
 def test_native_metal_float_join_keys_canonicalize_nan_and_signed_zero_without_matching_nulls() raises:
     float_join_cases(require_metal(), True)
 

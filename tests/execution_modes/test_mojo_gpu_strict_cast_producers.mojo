@@ -1,4 +1,6 @@
 """Strict-cast producers observe their complete original phase before consumers."""
+# contract-group: execution.apple_parity
+# contract-group: execution.strict_cast_producers
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.metal import MetalRuntime
@@ -6,6 +8,7 @@ from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_strict_cast_composition_filter_group_join_and_layouts() raises:
     var raw = DataFrame(
         [
@@ -52,6 +55,7 @@ def test_mojo_gpu_strict_cast_composition_filter_group_join_and_layouts() raises
     print("PASS strict cast composition filter/group/join offset/chunk")
 
 
+# requires: metal
 def test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals() raises:
     var source = DataFrame([Series("x", Column[Int64]([1, 128]))])
     var produced = source.lazy().with_columns(
@@ -98,6 +102,7 @@ def test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals() raises:
     )
 
 
+# requires: metal
 def test_mojo_gpu_strict_cast_projection_fault_order_before_consumer() raises:
     var source = DataFrame(
         [
@@ -123,6 +128,7 @@ def test_mojo_gpu_strict_cast_projection_fault_order_before_consumer() raises:
     print("PASS strict cast projection order before downstream empty head")
 
 
+# requires: metal
 def test_mojo_gpu_strict_cast_nullable_original_values_and_dtype() raises:
     var source = DataFrame(
         [

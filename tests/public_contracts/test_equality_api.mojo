@@ -1,4 +1,5 @@
 """Structural equality is a public result, checked against explicit truth values."""
+# contract-group: table.equals
 from std.testing import assert_equal
 from dataframe import (
     Column,
@@ -161,6 +162,14 @@ def test_structural_equals_reads_nested_children_and_logical_metadata() raises:
     )
 
 
+# expected-failure: Two one-row null Struct parents, physically valid Int64
+# expected-failure: children123/-456. Same schema; self-equalityTrue and
+# expected-failure: null_equalFalseFalse controls pass. Public equals must
+# expected-failure: ignore hidden payload per semantics.md79ff but
+# expected-failure: returnsFalse. Own precise error isolates assertion;
+# expected-failure: unrelated failures propagate.
+# expected-diagnostic: Structural equality compared child payload hidden by a
+# expected-diagnostic: null struct parent
 def test_structural_equals_ignores_children_hidden_by_a_null_struct_parent() raises:
     # Semantics specifies that null payloads never participate. A struct
     # field's physical validity does not make its null parent's cell valid.

@@ -2,6 +2,7 @@
 across a chunk boundary. A source of one chunk about a batch long is cut
 into a piece a worker of at least a batch's share per worker (and one
 vector); a smaller one stays whole."""
+# contract-group: table.join
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series
