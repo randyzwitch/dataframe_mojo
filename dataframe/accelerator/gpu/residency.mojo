@@ -22,6 +22,8 @@ from dataframe.accelerator.code_domains import (
     text_less,
 )
 
+from .grouped_key_owner import GroupedKeyField
+
 comptime CELL_BYTES = 21
 
 
@@ -396,6 +398,7 @@ struct Table(Copyable):
     var text: List[Optional[TextColumn]]
     var categories: List[Optional[CategoryField]]
     var category_leases: List[ArcPointer[CategoryLease]]
+    var grouped_keys: List[Optional[GroupedKeyField]]
 
     def __init__(
         out self,
@@ -429,6 +432,9 @@ struct Table(Copyable):
             capacity=self.schema.width()
         )
         self.category_leases = List[ArcPointer[CategoryLease]]()
+        self.grouped_keys = List[Optional[GroupedKeyField]](
+            length=self.schema.width(), fill=None
+        )
         for _ in range(self.schema.width()):
             self.text.append(None)
             self.categories.append(None)
@@ -449,6 +455,9 @@ struct Table(Copyable):
             capacity=self.schema.width()
         )
         self.category_leases = List[ArcPointer[CategoryLease]]()
+        self.grouped_keys = List[Optional[GroupedKeyField]](
+            length=self.schema.width(), fill=None
+        )
         for _ in range(self.schema.width()):
             self.text.append(None)
             self.categories.append(None)
@@ -569,7 +578,22 @@ struct Table(Copyable):
                 ) == Int(Pointer(to=owner[]))
             if not duplicate:
                 categories += owner[].retained
-        return payload + self._text_bytes() + categories
+        var grouped = 0
+        var seen = List[Int]()
+        for field in self.grouped_keys:
+            if not field:
+                continue
+            var owner = field.value().owner
+            var identity = Int(Pointer(to=owner[]))
+            var duplicate = False
+            for old in seen:
+                duplicate |= old == identity
+            if not duplicate:
+                seen.append(identity)
+                grouped += (
+                    owner[].staging[].bytes + owner[].source.retained_bytes()
+                )
+        return payload + self._text_bytes() + categories + grouped
 
     def same_storage(self, other: Self) -> Bool:
         if self.identity_storage and other.identity_storage:

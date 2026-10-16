@@ -933,8 +933,10 @@ def last() -> Expr
 
 A deferred query; build it with DataFrame.lazy() or scan_csv().
 
+- `def __init__(out self, *, deinit move: Self)`
 - `def __init__(out self, frame: DataFrame)`
 - `def __init__(out self, var nodes: List[PlanNode], var frames: List[DataFrame], var schemas: List[Optional[CsvSchema]])`
+- `def __deinit__(deinit self)`
 - `def filter(self, predicate: Expr) -> Self`
 - `def select(self, expr: Expr) -> Self`
 - `def select(self, names: List[String]) -> Self`

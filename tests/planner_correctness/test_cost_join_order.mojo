@@ -9,6 +9,7 @@ swapped, the dropped ones read from their partners), a filter between
 joins, and a plan whose rows' order shows, which keeps its written order."""
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
+from dataframe.distinct_statistics import distinct_estimate
 from dataframe.join_order import JoinEdge, JoinGraph, order_joins
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
@@ -181,4 +182,180 @@ def test_a_join_graph_whose_row_order_shows_keeps_its_order() raises:
         .join(t[0].collect(), left_on=["s_id"], right_on=["f_store"])
         .join(t[1].collect(), left_on=["f_product"], right_on=["p_id"])
     )
+    assert_frame(rows, eager)
+
+
+def test_counted_domains_take_the_largest_count_and_charge_unused_edges() raises:
+    # A triangle: 0-1 and 1-2 join on one key set, 0-2 on another. With
+    # counts, a set's domain is the largest count among its columns (not
+    # the fewest table rows), and an edge met once the set is connected
+    # adds one to the denominator's multiplier when its domain is counted.
+    var rows: List[Float64] = [100.0, 1000.0, 1000.0]
+    var domains: List[Float64] = [100.0, 1000.0, 1000.0]
+    var edges: List[JoinEdge] = [
+        JoinEdge(0, 1, ["a"], ["b"]),
+        JoinEdge(1, 2, ["b"], ["c"]),
+        JoinEdge(0, 2, ["x"], ["y"]),
+    ]
+    var uncounted = JoinGraph(rows, domains, edges)
+    # {a, b, c} has domain 100 (relation 0's rows); {x, y} also 100.
+    assert_equal(uncounted.estimate(0b011), 1000.0)
+    # Two spanning edges of domain 100; the third, not counted, adds
+    # nothing: 1e8 / (100 * 100).
+    assert_equal(uncounted.estimate(0b111), 10000.0)
+    var distinct = Dict[String, Float64]()
+    distinct["0/a"] = 50.0
+    distinct["1/b"] = 500.0
+    distinct["2/y"] = 1000.0
+    var counted = JoinGraph(rows, domains, edges, distinct)
+    # {a, b, c}: the largest count, 500; {x, y}: 1000.
+    assert_equal(counted.estimate(0b011), 200.0)
+    # Spanning by descending domain: 0-2 (1000), then 0-1 (500); 1-2
+    # (500, counted) is left over: 1e8 / (1000 * 500 * 2).
+    assert_equal(counted.estimate(0b111), 100.0)
+
+
+def test_distinct_estimates_sample_like_duckdb_and_skip_booleans() raises:
+    var n = 100_000
+    var few = List[Int64]()
+    var unique = List[Int64]()
+    var mostly_null = List[Bool]()
+    for row in range(n):
+        few.append(Int64(row % 5))
+        unique.append(Int64(row))
+        mostly_null.append(row % 1000 == 0)
+    # Five values: every sampled window holds all five (the sketch is
+    # coarse, but this few values land in distinct registers).
+    var small = distinct_estimate(ints("few", few))
+    assert_true(small >= 4 and small <= 6)
+    # A unique column comes out near its row count (a coarse sketch).
+    var estimate = distinct_estimate(ints("unique", unique))
+    assert_true(estimate > n // 3 and estimate <= n)
+    # Null rows count as sampled but are never hashed.
+    var sparse = Series("sparse", Column[Int64](few.copy(), mostly_null^))
+    assert_true(distinct_estimate(sparse) <= 5)
+    var flags = List[Bool]()
+    for row in range(10):
+        flags.append(row % 2 == 0)
+    assert_equal(distinct_estimate(Series("flag", Column[Bool](flags^))), -1)
+
+
+def test_table_statistics_are_shared_by_copies_and_redone_for_new_columns() raises:
+    var values = List[Int64]()
+    for row in range(5000):
+        values.append(Int64(row % 7))
+    var plain = DataFrame([ints("k", values)])
+    assert_equal(plain._distinct_count("k"), -1)
+    var table = plain^._with_statistics()
+    var copy = table.copy()
+    assert_equal(copy._distinct_count("k"), 7)
+    assert_equal(table._distinct_count("k"), 7)
+    assert_equal(len(table._statistics.value()[].counts), 1)
+    # A copy whose column is replaced is counted again, not read back.
+    var other = List[Int64]()
+    for row in range(5000):
+        other.append(Int64(row % 3))
+    copy._columns[0] = ints("k", other)
+    assert_equal(copy._distinct_count("k"), 3)
+    assert_equal(table._distinct_count("k"), 7)
+    assert_equal(table._distinct_count("missing"), -1)
+
+
+def test_joins_over_tables_with_statistics_match_the_written_order() raises:
+    var t = tables()
+    var fact = t[0].collect()._with_statistics().lazy()
+    var products = t[1].collect()._with_statistics().lazy()
+    var stores = t[3].collect()._with_statistics().lazy()
+    var query = (
+        stores.filter(col("s_region") < lit(Int64(2)))
+        .join(fact, left_on=["s_id"], right_on=["f_store"])
+        .join(products, left_on=["f_product"], right_on=["p_id"])
+        .group_by(["p_category"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["p_category"])
+    )
+    var eager = (
+        t[3]
+        .filter(col("s_region") < lit(Int64(2)))
+        .collect()
+        .join(t[0].collect(), left_on=["s_id"], right_on=["f_store"])
+        .join(t[1].collect(), left_on=["f_product"], right_on=["p_id"])
+        .group_by(["p_category"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["p_category"])
+    )
+    assert_true(eager.height() > 0)
+    assert_frame(query.collect(), eager)
+
+
+def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
+    # DuckDB's estimate for an input the join order cannot reorder: a
+    # left, right or full join yields its larger input's rows, a semi or
+    # anti join its left input's.
+    var t = tables()
+    var left = t[0].join(
+        t[1], left_on=["f_product"], right_on=["p_id"], how="left"
+    )
+    assert_equal(left._relation_estimate(len(left._nodes) - 1), 40_000)
+    var full = t[1].join(
+        t[0], left_on=["p_id"], right_on=["f_product"], how="full"
+    )
+    assert_equal(full._relation_estimate(len(full._nodes) - 1), 40_000)
+    var semi = t[1].join(
+        t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
+    )
+    assert_equal(semi._relation_estimate(len(semi._nodes) - 1), 2000)
+    var anti = t[3].join(
+        t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
+    )
+    assert_equal(anti._relation_estimate(len(anti._nodes) - 1), 4000)
+    # An inner join is part of the graph itself: no estimate here.
+    var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
+    assert_equal(inner._relation_estimate(len(inner._nodes) - 1), -1)
+
+
+def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
+    # The left join is one relation of the graph: its rows are estimated,
+    # the graph is ordered, and the rows equal the written joins'.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var sales = t[0].join(
+        t[3], left_on=["f_store"], right_on=["s_id"], how="left"
+    )
+    var query = (
+        sales.join(
+            t[1].filter(col("p_category") < lit(Int64(3))),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2], left_on=["p_category"], right_on=["c_id"])
+        .group_by(["c_group"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["c_group"])
+    )
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    assert_true(
+        "dataframe-path: lazy.cost_join_order\n" in observed.text(),
+        "the graph over a left join was not ordered",
+    )
+    _ = observed^
+    _ = trace^
+    var eager = (
+        t[0]
+        .collect()
+        .join(
+            t[3].collect(), left_on=["f_store"], right_on=["s_id"], how="left"
+        )
+        .join(
+            t[1].filter(col("p_category") < lit(Int64(3))).collect(),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2].collect(), left_on=["p_category"], right_on=["c_id"])
+        .group_by(["c_group"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["c_group"])
+    )
+    assert_true(eager.height() > 0)
     assert_frame(rows, eager)
