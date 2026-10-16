@@ -3627,6 +3627,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
                 "tests/public_contracts/test_partition_cut_capture.mojo",
@@ -3839,6 +3840,18 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/kernel_equivalence/test_borrowed_parsers.mojo",
             ],
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_literal_raw_domains_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_typed_explode.mojo::test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity",
+            "metal",
         )
     )
     policy.requirements.append(

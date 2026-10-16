@@ -142,6 +142,15 @@ finish and checks original input phases before publishing results. Encoded
 grouping keys still require a separate typed-domain owner; arbitrary checked
 resident inputs are not admitted by this route.
 
+Grouped primitive List producers can retain String, Binary, Geometry and
+categorical key domains through EXPLODE and supported resident row, join and
+group consumers. Query-scoped owners certify the original plan, source view
+and dictionary or byte domain, and retain staging charges through the last
+consumer. Categorical keys retain their original dictionary and codes; coded
+String grouped keys publish ordinary String values. This route keeps the
+existing primitive List and certified-producer limits; it does not add general
+nested List values or arbitrary composed producers.
+
 Partitioned `cut(...).over(...)` and `qcut(...).over(...)` keep numeric operands
 resident, preserve original key domains and eager operand/control error order,
 and support immutable custom or default labels. Certified nested numeric OVER

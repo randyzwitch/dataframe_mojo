@@ -707,7 +707,7 @@ def _grouped_fields_task(
     producer._nodes[0].source_failure = failure
     prepared.scan.source_failure = failure
     prepared.source.source_failure = failure
-    if (
+    if not prepared.original_keys and (
         len(prepared.key_provenance)
         or prepared.source.source_domain
         or len(prepared.source.source_text)

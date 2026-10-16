@@ -134,6 +134,8 @@ from .execution import direct_reductions
 from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
+from .accelerator.grouped_key_queries import KeyQuery
+from .accelerator.opaque_dictionary import ByteDomain
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
@@ -177,7 +179,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable):
+struct PlanNode(Copyable, Deinitable, Movable):
     var kind: Int
     var left: Int
     var right: Int
@@ -210,10 +212,19 @@ struct PlanNode(Copyable):
     var producer_origin: Optional[ArcPointer[ProducerOrigin]]
     var lineage_anchor: Optional[ArcPointer[Int]]
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Original grouped key domains survive whole-query code normalization.
+    var grouped_keys: Optional[ArcPointer[KeyQuery]]
+    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
     # Original partition state/operand proof is outside rewritten row ASTs.
     # Columns contain schema-only Series; no source values are retained here.
     var partition_exprs: List[Expr]
     var partition_columns: List[Series]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def _record_execution(self):
         if self._executions:
@@ -267,6 +278,8 @@ def _plan_node(
         Optional[ArcPointer[ProducerOrigin]](),
         Optional[ArcPointer[Int]](),
         Optional[ArcPointer[RegionProof]](),
+        None,
+        None,
         partition_exprs.copy(),
         partition_columns.copy(),
     )
@@ -1389,7 +1402,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable):
+struct LazyFrame(Copyable, Deinitable, Movable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
@@ -1414,6 +1427,25 @@ struct LazyFrame(Copyable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
+
+    def __init__(out self, *, deinit move: Self):
+        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
+        # whose original query is a LazyFrame. This avoids recursive generated
+        # move inference while preserving all eight existing owner fields.
+        self._nodes = move._nodes^
+        self._frames = move._frames^
+        self._schemas = move._schemas^
+        self._report = move._report^
+        self._origin_rows = move._origin_rows^
+        self._accelerator_settings = move._accelerator_settings^
+        self._schema_memo = move._schema_memo^
+        self._prefetched = move._prefetched^
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
