@@ -112,6 +112,23 @@ struct _ChunkCodesJob(Job):
         self.result = coded.take()
 
 
+def _storage_dtype_of(storage: Storage) -> DataType:
+    """The physical DataType of a stored column."""
+    comptime for i in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[i]
+        if storage.isa[Column[Scalar[D]]]():
+            return DataType.of(D)
+    if storage.isa[Column[Int128]]():
+        return DataType.of(DType.int128)
+    if storage.isa[BoolColumn]():
+        return DataType.BOOL
+    if storage.isa[ListColumn]():
+        return storage[ListColumn].dtype()
+    if storage.isa[StructColumn]():
+        return storage[StructColumn].dtype()
+    return DataType.STRING
+
+
 struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     """A named column of one supported dtype, plus expression-backed methods."""
 
@@ -173,11 +190,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def _wrap[
         E: Copyable & Deinitable
     ](var name: String, var column: Column[E]) -> Self:
-        """Build a series from any storable column type."""
-        var result = Self(name^, Column[Int64]([]))
-        result._data = Storage(column^)
-        result._dtype = result._storage_dtype()
-        return result^
+        """Build a series from any storable column type: straight from its
+        storage, with no placeholder column made and dropped first."""
+        var storage = Storage(column^)
+        var dtype = _storage_dtype_of(storage)
+        return Self(name^, storage^, dtype)
 
     def __init__(
         out self,
@@ -503,19 +520,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def _storage_dtype(self) -> DataType:
         """The physical DataType of the stored column."""
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
-            if self._data.isa[Column[Scalar[D]]]():
-                return DataType.of(D)
-        if self._data.isa[Column[Int128]]():
-            return DataType.of(DType.int128)
-        if self._data.isa[BoolColumn]():
-            return DataType.BOOL
-        if self._data.isa[ListColumn]():
-            return self._data[ListColumn].dtype()
-        if self._data.isa[StructColumn]():
-            return self._data[StructColumn].dtype()
-        return DataType.STRING
+        return _storage_dtype_of(self._data)
 
     def with_dtype(self, dtype: DataType) raises -> Self:
         """The same values tagged with another logical type that shares their
@@ -1506,6 +1511,29 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 parts.append(part.slice(0, min(end, stop) - start))
                 lo += 1
             return Self._from_chunks(parts)
+        if (
+            offset < 0
+            or length < 0
+            or offset > len(self)
+            or length > len(self) - offset
+        ):
+            raise Error("Invalid column slice")
+        # A fixed-width or Boolean window: one copy of the series, its
+        # window moved in place (no new series, type or metadata built).
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if self._data.isa[Column[E]]():
+                var window = self.copy()
+                ref column = window._data[Column[E]]
+                column._offset += offset
+                column._length = length
+                return window^
+        if self._data.isa[BoolColumn]():
+            var window = self.copy()
+            ref bools = window._data[BoolColumn]
+            bools._offset += offset
+            bools._length = length
+            return window^
         var result = self._slice_storage(offset, length)
         result._dtype = self._dtype
         result._field_metadata = self._field_metadata

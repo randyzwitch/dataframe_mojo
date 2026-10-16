@@ -287,6 +287,29 @@ struct Field(Copyable):
     var dtype: DataType
 
 
+# Up to this many columns, names are checked pair by pair: no dictionary is
+# built for a frame of a few columns, and frames are built for every step.
+comptime _PAIRWISE_NAMES = 32
+
+
+def _check_unique_names(columns: List[Series]) raises:
+    """Raise on a repeated column name."""
+    var n = len(columns)
+    if n <= _PAIRWISE_NAMES:
+        for i in range(1, n):
+            ref name = columns[i]._name
+            for j in range(i):
+                if columns[j]._name == name:
+                    raise Error("Duplicate column name: " + name)
+        return
+    var names = Dict[String, Bool]()
+    for column in columns:
+        var name = column.name()
+        if name in names:
+            raise Error("Duplicate column name: " + name)
+        names[name] = True
+
+
 struct DataFrame(Copyable, Sized, Writable):
     """Own equal-length, uniquely named columns; transformations copy storage."""
 
@@ -305,14 +328,10 @@ struct DataFrame(Copyable, Sized, Writable):
             inferred = height
         if height >= 0 and inferred != height:
             raise Error("Explicit height does not match columns")
-        var names = Dict[String, Bool]()
         for column in columns:
             if len(column) != inferred:
                 raise Error("DataFrame columns must have equal lengths")
-            var name = column.name()
-            if name in names:
-                raise Error("Duplicate column name: " + name)
-            names[name] = True
+        _check_unique_names(columns)
         self._columns = columns^
         self._height = inferred
 
