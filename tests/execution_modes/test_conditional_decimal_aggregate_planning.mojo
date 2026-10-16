@@ -34,7 +34,7 @@ def operand() -> Expr:
 def test_decimal_when_inside_sum_keeps_original_operand_masks() raises:
     var query = source().lazy().select((operand().sum() + lit(1.0)).alias("v"))
     var lowered = lower_aggregate_compositions(query)
-    for planned in [query, lowered]:
+    for planned in [query.copy(), lowered.copy()]:
         var actual = planned.collect(engine="cpu", optimize=False)
         assert_equal(actual.column("v").dtype(), DataType.FLOAT64)
         assert_equal(actual.column("v").float64()._get(0), Float64(4))
@@ -48,7 +48,7 @@ def test_decimal_when_inside_sum_keeps_original_operand_masks() raises:
         source(True).lazy().select((operand().sum() + lit(1.0)).alias("v"))
     )
     var lowered_bad = lower_aggregate_compositions(bad)
-    for planned in [bad, lowered_bad]:
+    for planned in [bad.copy(), lowered_bad.copy()]:
         with assert_raises(contains="decimal precision"):
             _ = planned.collect(engine="cpu", optimize=False)
 

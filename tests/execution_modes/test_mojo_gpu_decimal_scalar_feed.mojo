@@ -100,7 +100,7 @@ def test_decimal_scalar_feed_original_ast_prefix_and_resources() raises:
 def test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts() raises:
     require_metal()
     var frame = money_source()
-    for source in [frame, offset_layout(frame), chunk_layout(frame)]:
+    for source in [frame.copy(), offset_layout(frame), chunk_layout(frame)]:
         var query = money_ratio(source)
         for streaming in [False, True]:
             var cpu = query.collect(
