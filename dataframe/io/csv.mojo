@@ -49,7 +49,7 @@ def read_csv(
     buffer_size remains a positive compatibility argument; mapped reads use
     the pipeline's row-aligned chunk sizing. See docs/csv.md.
     """
-    return read_csv_explicit(
+    var table = read_csv_explicit(
         path,
         schema,
         has_header=has_header,
@@ -65,6 +65,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
+    return table^._with_statistics()
 
 
 def read_csv(
@@ -136,7 +137,7 @@ def read_csv(
     inference is enabled by try_parse_dates. schema_overrides sets explicit
     output dtypes. See docs/csv.md for Polars-compatible inference rules.
     """
-    return read_csv_inferred(
+    var table = read_csv_inferred(
         path,
         infer_schema_length=infer_schema_length,
         schema_overrides=schema_overrides,
@@ -154,6 +155,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
+    return table^._with_statistics()
 
 
 def _needs_quotes(text: String, separator: UInt8, null_value: String) -> Bool:

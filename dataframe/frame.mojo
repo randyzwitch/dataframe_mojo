@@ -19,6 +19,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
+from .distinct_statistics import TableStatistics
 from .fused_compare import (
     SelectionTree,
     fused_comparisons,
@@ -292,6 +293,9 @@ struct DataFrame(Copyable, Sized, Writable):
 
     var _columns: List[Series]
     var _height: Int
+    # A loaded table's distinct-count statistics, shared by its copies
+    # (`read_parquet`, `read_csv`); none for a frame made any other way.
+    var _statistics: Optional[ArcPointer[TableStatistics]]
 
     def __init__(
         out self, var columns: List[Series], *, height: Int = -1
@@ -315,6 +319,25 @@ struct DataFrame(Copyable, Sized, Writable):
             names[name] = True
         self._columns = columns^
         self._height = inferred
+        self._statistics = None
+
+    def _with_statistics(var self) -> Self:
+        """This frame as a loaded table: its columns' distinct counts are
+        estimated on first request and kept for every copy (DuckDB keeps
+        them with each table it stores)."""
+        self._statistics = Optional(ArcPointer(TableStatistics()))
+        return self^
+
+    def _distinct_count(self, name: String) raises -> Int:
+        """Column `name`'s estimated distinct count from the table's
+        statistics, or -1 when this frame has none or no such column."""
+        if not self._statistics:
+            return -1
+        for column in self._columns:
+            if column.name() == name:
+                var box = self._statistics.value()
+                return box[].distinct(column)
+        return -1
 
     def rechunk(self) raises -> Self:
         """Return one contiguous array per column, copying only chunked
