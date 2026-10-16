@@ -178,6 +178,19 @@ comptime UNNEST = 13
 comptime ASOF = 14
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
+# Row-order operators, each run by its eager DataFrame method on its whole
+# input in order (a pipeline breaker under streaming); filters, slices and
+# other row-changing rewrites do not cross them.
+# The last `offset` rows (DataFrame.tail; a negative count drops rows).
+comptime TAIL = 16
+# The rows in reverse order (DataFrame.reverse).
+comptime REVERSE = 17
+# Every column moved `offset` rows later (DataFrame.shift); `exprs` holds
+# the fill value when one was given.
+comptime SHIFT = 18
+# A leading Int64 row number named `names[0]`, starting at `offset`
+# (DataFrame.with_row_index).
+comptime ROW_INDEX = 19
 
 
 @fieldwise_init
@@ -1803,6 +1816,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         return result^
 
+    def tail(self, n: Int = 5) -> Self:
+        """The last n rows; a negative n drops the first -n rows. See
+        DataFrame.tail. Filters and slices written above it stay above
+        it."""
+        return self._push(_plan_node(TAIL, offset=n))
+
+    def reverse(self) -> Self:
+        """The rows in reverse order; see DataFrame.reverse."""
+        return self._push(_plan_node(REVERSE))
+
+    def shift(self, n: Int = 1, *, fill_value: Optional[Expr] = None) -> Self:
+        """Every column moved n rows later (earlier when negative), the
+        vacated rows null or `fill_value`; see DataFrame.shift."""
+        var exprs = List[Expr]()
+        if fill_value:
+            exprs.append(fill_value.value().copy())
+        return self._push(_plan_node(SHIFT, exprs=exprs, offset=n))
+
+    def with_row_index(self, name: String = "index", offset: Int64 = 0) -> Self:
+        """Prepend an Int64 row number starting at offset; see
+        DataFrame.with_row_index. The numbers count the rows this plan
+        produces here, so filters and slices above it stay above it."""
+        return self._push(
+            _plan_node(ROW_INDEX, names=[name], offset=Int(offset))
+        )
+
     def explode(self, columns: List[String]) -> Self:
         """One row per list element; see DataFrame.explode."""
         return self._push(_plan_node(EXPLODE, names=columns))
@@ -2872,15 +2911,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _ends_in_breaker(self, index: Int) -> Bool:
         """Whether node `index` is a pipeline breaker (an aggregate, a
-        unique or a sort), or row-local steps over one: it is computed in
-        full before any of its rows stream on. A selection that reads its
-        whole input (aggregates over all rows, as DuckDB's ungrouped
-        aggregate sink, or windows) is one too: TPC-DS q28's six one-row
-        bands, cross joined, ran one after another."""
+        unique, a sort or a row-order operator such as tail), or row-local
+        steps over one: it is computed in full before any of its rows stream
+        on. A selection that reads its whole input (aggregates over all
+        rows, as DuckDB's ungrouped aggregate sink, or windows) is one too:
+        TPC-DS q28's six one-row bands, cross joined, ran one after
+        another."""
         var at = index
         while at >= 0:
             ref node = self._nodes[at]
-            if node.kind == AGG or node.kind == UNIQUE or node.kind == SORT:
+            if (
+                node.kind == AGG
+                or node.kind == UNIQUE
+                or node.kind == SORT
+                or _row_order_step(node.kind)
+            ):
                 return True
             if (
                 node.kind == SELECT or node.kind == WITH_COLUMNS
@@ -3060,11 +3105,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     # whatever side a join was written on, rather than run
                     # the join outside the pipeline (TPC-DS q43 probed its
                     # 366 dates with 2.9M sales rows eagerly).
+                    # A right side whose one key is a progression is no hash
+                    # table to build: the left streams through its rows by
+                    # position, which no swap beats.
                     if (
                         node.how == JOIN_INNER
                         and not ordered
                         and _order_free_reductions(keys, expressions)
                         and self._direct_key(node.left, node.names)
+                        and not self._progression_key(
+                            node.right, node.right_keys
+                        )
                     ):
                         var large = self._execute(
                             node.right, False, True, batch_size
@@ -3155,9 +3206,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     and bound >= 0
                     and built.height() > bound
                     and _order_free_reductions(keys, expressions)
+                    and not self._progression_key(node.right, node.right_keys)
                 ):
                     # The built right side holds more rows than the left
-                    # can: hash the left instead and stream the right
+                    # can, and is no progression (above): hash the left
+                    # instead and stream the right
                     # through it, as DuckDB's build/probe side optimizer
                     # and Polars' join both build on the smaller side.
                     # Under an unordered aggregation into the aggregate
@@ -4537,6 +4590,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return input.explode(node.names)
         if node.kind == UNNEST:
             return input.unnest(node.text)
+        if node.kind == TAIL:
+            return input.tail(node.offset)
+        if node.kind == REVERSE:
+            return input.reverse()
+        if node.kind == SHIFT:
+            if len(node.exprs) > 0:
+                return input.shift(node.offset, fill_value=node.exprs[0].copy())
+            return input.shift(node.offset)
+        if node.kind == ROW_INDEX:
+            return input.with_row_index(node.names[0], Int64(node.offset))
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -5543,19 +5606,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         arithmetic progression, which is looked up by position."""
         if len(keys) != 1:
             return False
+        var column = keys[0]
         var cursor = index
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if node.kind == SCAN_FRAME:
-                var key = self._frames[node.offset][keys[0]]
+                ref frame = self._frames[node.offset]
+                if column not in frame.columns():
+                    return False
+                var key = frame[column]
                 if key.dtype().physical() != DataType.INT64:
                     return False
                 return int64_progression(key)[0]
             if node.kind != DROP and not (
                 (node.kind == SELECT or node.kind == WITH_COLUMNS)
-                and _chain_member(node)
+                and _stream_rows(node)
             ):
                 return False
+            if node.kind == SELECT or node.kind == WITH_COLUMNS:
+                # A renamed column is its source column; a computed one is
+                # no table's key.
+                for expr in node.exprs:
+                    if expr._name == column:
+                        if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                            return False
+                        column = expr._nodes[0].text
             cursor = node.left
         return False
 
@@ -5597,6 +5672,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if node.kind == FILTER:
             filters.append(index)
         self._collect_graph(node.left, relations, pairs, filters)
+
+    def _indexed_relation(
+        self,
+        entry: Int,
+        other: Int,
+        joined: List[Bool],
+        node_of: List[Int],
+        edges: List[JoinEdge],
+        masks: List[Int],
+    ) raises -> Bool:
+        """Whether tree entry `entry` is one relation joined to `other` on
+        a single key that is a progression in its table (`_progression_key`),
+        so building on it needs no hash table."""
+        if joined[entry]:
+            return False
+        var mine = masks[entry]
+        var theirs = masks[other]
+        var keys = List[String]()
+        for edge in edges:
+            if mine & (1 << edge.a) != 0 and theirs & (1 << edge.b) != 0:
+                for k in edge.a_keys:
+                    keys.append(k)
+            elif mine & (1 << edge.b) != 0 and theirs & (1 << edge.a) != 0:
+                for k in edge.b_keys:
+                    keys.append(k)
+        return len(keys) == 1 and self._progression_key(node_of[entry], keys)
 
     def _cost_order_joins(
         mut self, root: Int, streaming: Bool, batch_size: Int
@@ -5757,6 +5858,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     right_cost *= 1.15
                 if not joined[left] and joined[right]:
                     left_cost *= 1.15
+                # A lone relation joined on one key whose values are a
+                # progression builds no hash table: the other side looks
+                # its rows up by position (`join.progression`), so it costs
+                # nothing to build on.
+                if self._indexed_relation(
+                    left, right, joined, node_of, edges, tree.mask
+                ):
+                    left_cost = 0.0
+                if self._indexed_relation(
+                    right, left, joined, node_of, edges, tree.mask
+                ):
+                    right_cost = 0.0
                 if right_cost > left_cost:
                     var t = left
                     left = right
@@ -6968,6 +7081,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or node.kind == EXPLODE
                 or node.kind == UNNEST
                 or node.kind == CONCAT
+                or _row_order_step(node.kind)
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -7142,6 +7256,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "UNNEST " + node.text
         elif node.kind == CONCAT:
             label = "CONCAT"
+        elif node.kind == TAIL:
+            label = "TAIL " + String(node.offset)
+        elif node.kind == REVERSE:
+            label = "REVERSE"
+        elif node.kind == SHIFT:
+            label = "SHIFT " + String(node.offset)
+            if len(node.exprs) > 0:
+                label += " fill " + node.exprs[0]._name
+        elif node.kind == ROW_INDEX:
+            label = (
+                "WITH_ROW_INDEX "
+                + node.names[0]
+                + " from "
+                + String(node.offset)
+            )
         else:
             label = "DROP " + _joined(node.names)
         return label^
@@ -7478,6 +7607,12 @@ def _chain_member(node: PlanNode) -> Bool:
                 return False
         return True
     return False
+
+
+def _row_order_step(kind: Int) -> Bool:
+    """Whether `kind` is a row-order operator (tail, reverse, shift,
+    with_row_index): run whole, in input order, by its eager method."""
+    return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
 
 
 def _is_scan(kind: Int) -> Bool:
