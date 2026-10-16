@@ -26,7 +26,9 @@ def dtype_receipt(dtype: DataType) -> String:
     return text + "}"
 
 
-def schema_receipt(frame: DataFrame, engine: String, repetition: Int) -> String:
+def schema_receipt(
+    frame: DataFrame, engine: String, repetition: Int
+) raises -> String:
     var text = (
         '{"format":"dataframe-answer-schema-v1","engine":'
         + json_quote(engine)
