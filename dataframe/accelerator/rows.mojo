@@ -14,6 +14,8 @@ from . import (
     producer_phases,
     decimal_feed,
     decimal_group_feed,
+    decimal_sum_receipts,
+    decimal_sum_bounds,
     decimal_scalar_feed,
 )
 from dataframe.producer_origin import RegionProof
@@ -970,6 +972,7 @@ def lower_rows(
     *,
     terminal_boundary: Bool = True,
     source_rows: Int = -1,
+    sum_receipt: Optional[ArcPointer[decimal_sum_receipts.Receipt]] = None,
     ordered_source: Bool = False,
 ) raises -> RowPlan:
     """Bind the entire resident region before GPU submission or source I/O.
@@ -1589,6 +1592,17 @@ def lower_rows(
                 or capabilities.decimal_multiplicative
             ):
                 proven = proven_integer_nodes(bound)
+            if sum_receipt and k == len(chain) - 1:
+                var receipt = sum_receipt.value()
+                if not decimal_sum_receipts.schema_matches(
+                    receipt[].origin[], frame
+                ):
+                    raise Error("Decimal SUM receipt source layout differs")
+                var checked_bounds = decimal_sum_bounds.analyze(
+                    bound, receipt[].origin[].maxima
+                )
+                for at in range(len(proven)):
+                    proven[at] |= checked_bounds[1][at]
             for part_index in range(len(bound.expr._nodes)):
                 if capabilities.utc_temporal_conversions:
                     ref utc_part = bound.expr._nodes[part_index]

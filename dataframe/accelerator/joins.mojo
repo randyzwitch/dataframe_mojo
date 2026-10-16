@@ -18,6 +18,7 @@ from . import (
     decimal_feed,
     decimal_group_feed,
     decimal_scalar_feed,
+    decimal_sum_receipts,
 )
 from .decimal_prefix import prefix_infallible
 from .explodes import schema as explode_schema
@@ -426,6 +427,7 @@ struct DagTask(Copyable):
     var fields: List[JoinField]
     var equal_rows: Bool
     var grouped: Optional[ArcPointer[GroupedListsPlan]]
+    var sum_receipt: Optional[ArcPointer[decimal_sum_receipts.Receipt]]
 
 
 @fieldwise_init
@@ -525,6 +527,9 @@ def _join_task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
     *,
+    sum_origins: List[Optional[ArcPointer[decimal_sum_receipts.Origin]]] = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](),
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> Int:
@@ -549,6 +554,7 @@ def _join_task(
         equal_rows,
         capabilities,
         tasks,
+        sum_origins=sum_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
@@ -558,6 +564,7 @@ def _join_task(
         equal_rows,
         capabilities,
         tasks,
+        sum_origins=sum_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
@@ -677,6 +684,7 @@ def _join_task(
             fields^,
             equal_rows,
             None,
+            None,
         )
     )
     return id
@@ -690,6 +698,9 @@ def _asof_task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
     *,
+    sum_origins: List[Optional[ArcPointer[decimal_sum_receipts.Origin]]] = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](),
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> Int:
@@ -706,6 +717,7 @@ def _asof_task(
         True,
         capabilities,
         tasks,
+        sum_origins=sum_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
@@ -715,6 +727,7 @@ def _asof_task(
         True,
         capabilities,
         tasks,
+        sum_origins=sum_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
@@ -789,6 +802,7 @@ def _asof_task(
             fields^,
             False,
             None,
+            None,
         )
     )
     return id
@@ -809,6 +823,9 @@ def _grouped_fields_task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
     *,
+    sum_origins: List[Optional[ArcPointer[decimal_sum_receipts.Origin]]] = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](),
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> Int:
@@ -864,6 +881,7 @@ def _grouped_fields_task(
             List[JoinField](),
             False,
             ArcPointer(prepared^),
+            None,
         )
     )
     return id
@@ -875,6 +893,9 @@ def _explode_task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
     *,
+    sum_origins: List[Optional[ArcPointer[decimal_sum_receipts.Origin]]] = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](),
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> Int:
@@ -919,6 +940,7 @@ def _explode_task(
                     List[JoinField](),
                     False,
                     None,
+                    None,
                 )
             )
     else:
@@ -927,6 +949,7 @@ def _explode_task(
             operation.left,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -955,6 +978,7 @@ def _explode_task(
             List[JoinField](),
             False,
             None,
+            None,
         )
     )
     return id
@@ -967,6 +991,9 @@ def _task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
     *,
+    sum_origins: List[Optional[ArcPointer[decimal_sum_receipts.Origin]]] = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](),
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> Int:
@@ -996,6 +1023,7 @@ def _task(
             root,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1007,6 +1035,7 @@ def _task(
             -1,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1018,6 +1047,7 @@ def _task(
             -1,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1036,6 +1066,7 @@ def _task(
             top.length,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1051,6 +1082,7 @@ def _task(
             top.length,
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1133,6 +1165,7 @@ def _task(
             Bool(query._nodes[root].producer_origin),
             capabilities,
             tasks,
+            sum_origins=sum_origins,
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
@@ -1178,10 +1211,31 @@ def _task(
                 List[JoinField](),
                 False,
                 None,
+                None,
             )
         )
         return id
-    var plan = lower_rows(region, capabilities, terminal_boundary=boundary)
+    var sum_receipt: Optional[ArcPointer[decimal_sum_receipts.Receipt]] = None
+    if (
+        source >= 0
+        and cursor >= 0
+        and cursor < len(sum_origins)
+        and sum_origins[cursor]
+    ):
+        var origin = sum_origins[cursor].value()
+        if tasks[source].root == cursor and decimal_sum_receipts.matches(
+            origin[], query, cursor
+        ):
+            sum_receipt = decimal_sum_receipts.bind_receipt(origin, source)
+            decimal_sum_receipts.validate(
+                sum_receipt.value()[], source, tasks[source].query, region
+            )
+    var plan = lower_rows(
+        region,
+        capabilities,
+        terminal_boundary=boundary,
+        sum_receipt=sum_receipt,
+    )
     # Pure projections preserve the prefix. Push their final head into a join
     # only after binding proves that no reduction or row reordering intervenes.
     var prefix = plan.limit >= 0 and not plan.reductions
@@ -1214,6 +1268,7 @@ def _task(
             List[JoinField](),
             False,
             None,
+            sum_receipt,
         )
     )
     return id
@@ -1228,6 +1283,16 @@ def lower_join_dag(
 ) raises -> JoinDag:
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
+    # Capture actual original GROUP occurrences before projection pruning.
+    # UInt32 is the existing admitted GROUP-input row bound, never a base
+    # SCAN count (a JOIN may multiply rows). The receipt is only consumed
+    # behind the original successful observed GROUP task.
+    var sum_origins = List[Optional[ArcPointer[decimal_sum_receipts.Origin]]](
+        length=len(query._nodes), fill=None
+    )
+    for at in range(len(query._nodes)):
+        if _decimal_group_producer(query, at):
+            sum_origins[at] = decimal_sum_receipts.capture(query, at)
     var projected = query.copy()
     if producer_phases.has_certified(projected):
         # Original-entry normalization records the annotations as part of
@@ -1260,6 +1325,7 @@ def lower_join_dag(
         True,
         capabilities,
         tasks,
+        sum_origins=sum_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
