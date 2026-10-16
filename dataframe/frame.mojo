@@ -3631,9 +3631,15 @@ def _smaller_build_join_rows(
     # list-indexed three passes before cost 19 ns a pair (PDS-H q2, 159K
     # pairs, 3 ms on one thread).
     var count = len(left[0])
+    var n = len(pairs[0])
+    # On several workers when there are at least as many pairs a worker
+    # as left rows: each worker keeps a count per left row, so more
+    # workers than that would count more than they scatter.
+    var lanes = min(worker_count(n), max(1, n // max(count, 1)))
+    if lanes > 1 and not include_unmatched:
+        return _parallel_left_major(pairs[1], pairs[0], count, lanes)
     var pairs_left = pairs[1].unsafe_ptr()
     var pairs_right = pairs[0].unsafe_ptr()
-    var n = len(pairs[0])
     var starts = _group_index(pairs[1], count)
     var cursor = starts.copy()
     var unmatched = 0
@@ -3682,6 +3688,153 @@ def _smaller_build_join_rows(
         fill[unsafe_offset=i] = position + 1
         out_left[unsafe_offset=position] = i
         out_right[unsafe_offset=position] = pairs_right[unsafe_offset=k]
+    return (left_rows^, right_rows^)
+
+
+struct _OrderCountJob(Job):
+    """Rows of each left id among pairs [lo, hi)."""
+
+    var ids: Int
+    var lo: Int
+    var hi: Int
+    var counts: List[Int]
+
+    def __init__(out self, ids: Int, lo: Int, hi: Int, count: Int):
+        self.ids = ids
+        self.lo = lo
+        self.hi = hi
+        self.counts = List[Int](length=count, fill=0)
+
+    def run(mut self) raises:
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var counts = self.counts.unsafe_ptr()
+        for k in range(self.lo, self.hi):
+            counts[unsafe_offset=ids[unsafe_offset=k]] += 1
+
+
+struct _OrderScatterJob(Job):
+    """Pairs [lo, hi) to their left id's group, each id's next position
+    in `cursor` (this range's own, after earlier ranges' rows)."""
+
+    var ids: Int
+    var rows: Int
+    var out: Int
+    var lo: Int
+    var hi: Int
+    var cursor: List[Int]
+
+    def __init__(
+        out self,
+        ids: Int,
+        rows: Int,
+        out_rows: Int,
+        lo: Int,
+        hi: Int,
+        var cursor: List[Int],
+    ):
+        self.ids = ids
+        self.rows = rows
+        self.out = out_rows
+        self.lo = lo
+        self.hi = hi
+        self.cursor = cursor^
+
+    def run(mut self) raises:
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
+        var at = self.cursor.unsafe_ptr()
+        for k in range(self.lo, self.hi):
+            var id = ids[unsafe_offset=k]
+            var position = at[unsafe_offset=id]
+            at[unsafe_offset=id] = position + 1
+            out[unsafe_offset=position] = rows[unsafe_offset=k]
+
+
+struct _OrderFillJob(Job):
+    """Each output position of left ids [lo, hi) given its id."""
+
+    var starts: Int
+    var out: Int
+    var lo: Int
+    var hi: Int
+
+    def __init__(out self, starts: Int, out_ids: Int, lo: Int, hi: Int):
+        self.starts = starts
+        self.out = out_ids
+        self.lo = lo
+        self.hi = hi
+
+    def run(mut self) raises:
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
+        for id in range(self.lo, self.hi):
+            for position in range(
+                starts[unsafe_offset=id], starts[unsafe_offset=id + 1]
+            ):
+                out[unsafe_offset=position] = id
+
+
+def _parallel_left_major(
+    ids: List[Int], rows: List[Int], count: Int, lanes: Int
+) raises -> Tuple[List[Int], List[Int]]:
+    """`_smaller_build_join_rows`' stable counting sort of pairs by left id,
+    on `lanes` workers: each counts its contiguous range of pairs per id,
+    one pass turns the counts into each range's own write positions (after
+    the earlier ranges' rows of the same id), and each scatters its range
+    there, as a parallel radix sort's scatter does. Ranges follow probe
+    order, so every group keeps its pairs in probe order, as the serial
+    sort does."""
+    var n = len(ids)
+    var bounds = partitions(n, lanes, 1)
+    var counting = List[_OrderCountJob](capacity=lanes)
+    for j in range(lanes):
+        counting.append(
+            _OrderCountJob(
+                Int(ids.unsafe_ptr()), bounds[j], bounds[j + 1], count
+            )
+        )
+    run_jobs(counting)
+    var starts = List[Int](unsafe_uninit_length=count + 1)
+    var total = 0
+    for id in range(count):
+        starts[id] = total
+        for j in range(lanes):
+            var c = counting[j].counts[id]
+            counting[j].counts[id] = total
+            total += c
+    starts[count] = total
+    var left_rows = List[Int](unsafe_uninit_length=n)
+    var right_rows = List[Int](unsafe_uninit_length=n)
+    var scatter = List[_OrderScatterJob](capacity=lanes)
+    for j in range(lanes):
+        var cursor = List[Int]()
+        swap(cursor, counting[j].counts)
+        scatter.append(
+            _OrderScatterJob(
+                Int(ids.unsafe_ptr()),
+                Int(rows.unsafe_ptr()),
+                Int(right_rows.unsafe_ptr()),
+                bounds[j],
+                bounds[j + 1],
+                cursor^,
+            )
+        )
+    run_jobs(scatter)
+    var id_bounds = partitions(count, lanes, 1)
+    var fill = List[_OrderFillJob](capacity=lanes)
+    for j in range(lanes):
+        if id_bounds[j] < id_bounds[j + 1]:
+            fill.append(
+                _OrderFillJob(
+                    Int(starts.unsafe_ptr()),
+                    Int(left_rows.unsafe_ptr()),
+                    id_bounds[j],
+                    id_bounds[j + 1],
+                )
+            )
+    run_jobs(fill)
+    _ = starts^
     return (left_rows^, right_rows^)
 
 
