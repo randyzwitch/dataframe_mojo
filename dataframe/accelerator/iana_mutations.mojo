@@ -93,8 +93,8 @@ struct Capsule(Movable):
         var dtype = bound.dtypes[node.left]
         if not dtype.is_datetime():
             raise Error("IANA mutation requires Datetime")
-        var source = -1
-        var target = -1
+        var source: Int
+        var target: Int
         var ambiguous = 0
         var non_existent = 0
         var parameter = Int64(0)

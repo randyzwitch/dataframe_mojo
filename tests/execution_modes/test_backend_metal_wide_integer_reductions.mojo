@@ -100,9 +100,11 @@ def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raise
             _ = overflow.collect(accelerator=runtime)
         with assert_raises(contains="overflow"):
             _ = overflow.collect(engine="cpu")
-        # Checked sums retain conservative preflight in pruned child regions.
-        with assert_raises(contains="terminal boundary"):
+        # CPU evaluates the SUM before the outer head; so does Metal.
+        with assert_raises(contains="overflow"):
             _ = overflow.head(0).collect(accelerator=runtime)
+        with assert_raises(contains="overflow"):
+            _ = overflow.head(0).collect(engine="cpu")
     assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(query).family)
 
 

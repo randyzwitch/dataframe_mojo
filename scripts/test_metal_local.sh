@@ -30,13 +30,25 @@ fi
 echo "== Parquet reader (the file-source contracts read Parquet)"
 pixi run --locked -e native build-dfparquet
 
-echo "== Backend contracts on the device"
-pixi run --locked test --areas execution --contracts execution.backends \
-  --capabilities metal
+# Every contract group with a module that needs the device, found from the
+# `# requires:` markers so a new group cannot be left out. (macOS ships
+# bash 3.2: no mapfile, and empty arrays trip `set -u`.)
+groups="$(grep -rlE '^# requires: (metal|mojo_gpu)' tests \
+  | xargs grep -h '^# contract-group:' | awk '{print $3}' | sort -u | tr '\n' ' ')"
+failed=""
+
+echo "== Metal contracts on the device: $groups"
+# shellcheck disable=SC2086 # one argument per group
+pixi run --locked test --areas execution public --contracts $groups \
+  --capabilities metal mojo_gpu || failed="$failed contracts"
 
 echo "== Mojo GPU contracts and independent oracles"
-pixi run --locked -e gpu test-mojo-gpu
-pixi run --locked -e gpu test-mojo-gpu-floating
-pixi run --locked -e gpu test-mojo-gpu-decimal
-pixi run --locked -e gpu test-mojo-gpu-integer
+for task in test-mojo-gpu test-mojo-gpu-floating test-mojo-gpu-decimal \
+  test-mojo-gpu-integer; do
+  pixi run --locked -e gpu "$task" || failed="$failed $task"
+done
+if [[ -n "$failed" ]]; then
+  echo "Failed:$failed" >&2
+  exit 1
+fi
 echo "All Metal contracts passed."

@@ -119,12 +119,12 @@ def test_scalar_broadcast_rejects_file_reads_and_checked_integer_children() rais
     )
     with assert_raises(contains="checked integer arithmetic"):
         _ = invalid_child.collect(accelerator=runtime)
-    with assert_raises(contains="terminal boundary"):
-        _ = (
-            wide.lazy()
-            .with_columns(col("x").sum().alias("s"))
-            .collect(accelerator=runtime)
+    assert_true(
+        "unsupported"
+        not in runtime.describe(
+            wide.lazy().with_columns(col("x").sum().alias("s"))
         )
+    )
 
 
 # requires: metal
