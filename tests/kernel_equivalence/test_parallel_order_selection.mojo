@@ -387,7 +387,7 @@ def test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_rad
             var expected = scalar_parallel_rows(
                 n, ScalarParallelOrder(distinct, skew, False)
             )
-            var bucketed = _low_card_first_sort(ranks, True, 4)
+            var bucketed = _low_card_first_sort(ranks, 4)
             assert_equal(len(bucketed) > 0, distinct <= 256 and not skew)
             if len(bucketed) > 0:
                 assert_equal(bucketed, expected)

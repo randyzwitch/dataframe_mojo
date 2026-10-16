@@ -145,6 +145,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_layouts_metadata_stable_children_and_retained_producer",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_resident_row_join_group_slices_and_source_failure",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_original_phase_errors_empty_observer_and_exact_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo::test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads",
             "metal",
         )
@@ -258,6 +276,114 @@ def production_policy() -> SuitePolicy:
         )
     )
     policy.capabilities = ["metal", "mojo_gpu"]
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_native_execution_profile",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_cut_qcut_resident_outputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_cut_qcut_eager_fault_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_cuts_original_categorical_keys",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_cuts_nested_numeric_scopes",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_when_head_and_sibling_error_contracts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_qcut_signed_zero_breakpoint_literals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo::test_mojo_gpu_partition_ranked_rows_owners_and_resources",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo::test_mojo_gpu_partition_exact_cpu_schedules",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo::test_mojo_gpu_partition_run_state_operand_fault_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo::test_mojo_gpu_partition_layout_certificates_and_owners",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo::test_mojo_gpu_partition_private_cut_qcut_publication",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_partition_cut_capture.mojo::test_partition_cut_capture_keeps_original_controls_and_eager_state",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_partition_cut_capture.mojo::test_partition_nested_scope_cache_entry_snapshots",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_partition_cut_capture.mojo::test_partition_lookup_reservation_retained_live_witness",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_partition_operand_metadata.mojo::test_partition_operand_metadata_scalar_faults_masks_and_numeric_anchor",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_partition_qcut_label_domains.mojo::test_partition_qcut_label_domains_literal_mapping_owner_budget_and_guards",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_ranked_rows_resources.mojo::test_private_ranked_rows_resources_zero_rows_descriptors_and_wide_cells",
+            "mojo_gpu",
+        )
+    )
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo::test_categorical_activation_requires_reachable_logical_or_code_owners",
@@ -1593,7 +1719,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_variance_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1309:39: get: wrong variant type",
+            "aggregate.mojo:1303:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -1601,7 +1727,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_standard_deviation_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1309:39: get: wrong variant type",
+            "aggregate.mojo:1303:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -3044,6 +3170,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
+                "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
+                "tests/public_contracts/test_partition_cut_capture.mojo",
+                "tests/public_contracts/test_partition_operand_metadata.mojo",
+                "tests/public_contracts/test_partition_qcut_label_domains.mojo",
+                "tests/public_contracts/test_ranked_rows_resources.mojo",
                 "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut.mojo",
                 "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
@@ -3052,6 +3184,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
@@ -3494,6 +3627,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
+                "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
+                "tests/public_contracts/test_partition_cut_capture.mojo",
+                "tests/public_contracts/test_partition_operand_metadata.mojo",
+                "tests/public_contracts/test_partition_qcut_label_domains.mojo",
+                "tests/public_contracts/test_ranked_rows_resources.mojo",
                 "tests/execution_modes/test_mojo_gpu_categorical_activation.mojo",
                 "tests/execution_modes/test_mojo_gpu_categorical_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_observed_integer_producers.mojo",
@@ -3505,6 +3644,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
@@ -3699,6 +3839,18 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/kernel_equivalence/test_borrowed_parsers.mojo",
             ],
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_publication_layouts_slices_mixed_siblings_and_resident_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_publication_empty_foreign_owner_checked_phase_order_and_exact_budget",
+            "metal",
         )
     )
     return policy^

@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -25,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_suites as suites
 import bench_policy
+import metal_query_report
+from metal_materialization_adapter import lift_scalar_selects
 
 
 def sha(path):
@@ -43,6 +46,7 @@ def derive(source, name, engine):
         )
     if engine == "cpu":
         return source.replace(".collect()", '.collect(engine="cpu")')
+    source, _ = lift_scalar_selects(source)
     source = source.replace(
         ".collect()", ".collect(accelerator=MetalRuntime())"
     )
@@ -100,9 +104,16 @@ def derive(source, name, engine):
 def stage_sources(destination):
     destination.mkdir(parents=True, exist_ok=True)
     copied = {}
+    materialization_proofs = {}
     for name in ("h2o", "pdsh", "tpcds", "clickbench"):
         original = ROOT / "benchmarks/suites" / (name + ".mojo")
         copied[str(original.relative_to(ROOT))] = sha(original)
+        _, proof = lift_scalar_selects(original.read_text())
+        proof["canonical_source_sha256"] = sha(original)
+        proof["metal_derived_source_sha256"] = hashlib.sha256(
+            derive(original.read_text(), name, "metal").encode()
+        ).hexdigest()
+        materialization_proofs[str(original.relative_to(ROOT))] = proof
         for engine in ("cpu", "metal"):
             (destination / f"{engine}_{name}.mojo").write_text(
                 derive(original.read_text(), name, engine)
@@ -129,15 +140,21 @@ def main() raises:
     for name, original in {
         "suite_common.mojo": ROOT / "benchmarks/suites/suite_common.mojo",
         "metal_suite_common.mojo": ROOT / "benchmarks/metal_suite_common.mojo",
+        "metal_suite_diagnostics.mojo": ROOT
+        / "benchmarks/metal_suite_diagnostics.mojo",
     }.items():
         shutil.copyfile(original, destination / name)
         copied[str(original.relative_to(ROOT))] = sha(original)
     return {
         "original_source_sha256": copied,
+        "scalar_materialization_proofs": materialization_proofs,
+        "scalar_materialization_adapter_sha256": sha(
+            Path(__file__).with_name("metal_materialization_adapter.py")
+        ),
         "derived_source_sha256": {
             p.name: sha(p) for p in destination.glob("*.mojo")
         },
-        "derivation": "Only materialization boundaries changed; H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
+        "derivation": "Only materialization boundaries changed; token-reviewed scalar SELECT/item after collected DataFrames gains lazy/forced-collect boundaries, with exact expression hashes. H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
     }
 
 
@@ -160,22 +177,162 @@ def parse(output, query):
     }:
         raise ValueError("Unknown coverage outcome")
     result = {"status": status, "reason": rows[0][3]}
+    diagnostics = {}
     for line in output.splitlines():
         fields = line.split("\t")
         if len(fields) == 2 and fields[0] in {
             "output_rows",
             "collections",
             "collection_ns",
+            "expected_rows",
+            "actual_rows",
         }:
             result[fields[0]] = int(fields[1])
         elif len(fields) == 2 and fields[0] == "ordered_equal":
+            if fields[1] not in {"True", "False"}:
+                raise ValueError("Invalid ordered equality")
             result["ordered_equal"] = fields[1] == "True"
+        elif len(fields) == 2 and fields[0] == "cpu_repeat_equal":
+            if fields[1] not in {"True", "False"}:
+                raise ValueError("Invalid CPU repeat equality")
+            diagnostics["cpu_repeat_ordered_equal"] = fields[1] == "True"
+        elif fields[0] == "diagnostic":
+            if len(fields) != 3 or fields[1] in diagnostics:
+                raise ValueError("Malformed or duplicate diagnostic")
+            name, value = fields[1:]
+            if not name.startswith(("cpu_metal.", "cpu_repeat.")):
+                raise ValueError("Unknown comparison diagnostic")
+            if name.endswith(("_equal", "_ties")):
+                if value not in {"True", "False"}:
+                    raise ValueError("Invalid diagnostic Boolean")
+                value = value == "True"
+            diagnostics[name] = value
+        elif fields[0] == "column_bag":
+            if (
+                len(fields) != 4
+                or fields[1] not in {"cpu_metal", "cpu_repeat"}
+                or fields[3] not in {"True", "False"}
+            ):
+                raise ValueError("Malformed column bag diagnostic")
+            values = diagnostics.setdefault(fields[1] + ".column_bags", {})
+            if fields[2] in values:
+                raise ValueError("Duplicate column bag diagnostic")
+            values[fields[2]] = fields[3] == "True"
+        elif fields[0] == "column_diagnostic":
+            if len(fields) != 11 or fields[1] not in {
+                "cpu_metal",
+                "cpu_repeat",
+            }:
+                raise ValueError("Malformed numeric column diagnostic")
+            counts = [int(value) for value in fields[4:8]]
+            if min(counts) < 0 or sum(counts[1:]) > counts[0]:
+                raise ValueError("Invalid column mismatch counts")
+            metrics = dict(
+                zip(
+                    (
+                        "mismatches",
+                        "null_mismatches",
+                        "finite_float_mismatches",
+                        "nonfinite_float_mismatches",
+                    ),
+                    counts,
+                )
+            )
+            metrics["dtype"] = fields[3]
+            if counts[2] == 0:
+                if fields[8:] != ["unavailable"] * 3:
+                    raise ValueError(
+                        "Distances require finite floating mismatches"
+                    )
+                metrics.update(
+                    max_ulp=None, max_absolute=None, max_relative=None
+                )
+            else:
+                ulp = int(fields[8])
+                if not 0 <= ulp <= (1 << 64) - 1 or any(
+                    math.isnan(float(v)) or float(v) < 0 for v in fields[9:]
+                ):
+                    raise ValueError("Invalid finite floating distance")
+                metrics.update(
+                    max_ulp=ulp, max_absolute=fields[9], max_relative=fields[10]
+                )
+            values = diagnostics.setdefault(fields[1] + ".columns", {})
+            if fields[2] in values:
+                raise ValueError("Duplicate numeric column diagnostic")
+            values[fields[2]] = metrics
+        elif fields[0] == "diagnostic_error":
+            if len(fields) != 3 or fields[1] not in {"cpu_metal", "cpu_repeat"}:
+                raise ValueError("Malformed diagnostic error")
+            diagnostics.setdefault("errors", []).append(
+                {"comparison": fields[1], "reason": fields[2]}
+            )
     if status == "ok" and (
         result.get("collections", 0) < 1 or "ordered_equal" not in result
     ):
         raise ValueError(
             "Successful outcome lacks correctness/repetition evidence"
         )
+    if diagnostics:
+        result["diagnostics"] = diagnostics
+    return result
+
+
+def case_audit(
+    metadata, suite, variant, query, source_hashes, derived_source_hashes=None
+):
+    entry = metadata.get("cases", {}).get(suite + "/" + variant + "/" + query)
+    if entry is None:
+        entry = metadata.get("cases", {}).get(suite + "/" + query)
+    if entry is None:
+        module = suites.SUITES[suite]["runner"]
+        path = "benchmarks/suites/" + module + ".mojo"
+        return {
+            "workload_kind": "canonical",
+            "execution_boundary": "gpu_collects",
+            "source_path": path,
+            "source_sha256": source_hashes[path],
+            "audit_reason": "Every collect is forced; no separate eager-operation certificate.",
+        }
+    metal_query_report.validate_metadata(
+        {
+            "format": "dataframe-metal-case-metadata-v1",
+            "cases": {"selected": entry},
+        }
+    )
+    result = dict(entry)
+    module = suites.SUITES[suite]["runner"]
+    derived_path = "metal_" + module + ".mojo"
+    canonical_matches = (
+        source_hashes.get(entry["source_path"]) == entry["source_sha256"]
+    )
+    derived_pin = entry.get("metal_derived_source_sha256")
+    if derived_pin is not None and (
+        not isinstance(derived_pin, str) or not derived_pin
+    ):
+        raise ValueError("Invalid derived worker source pin")
+    derived_matches = derived_pin is None or (
+        derived_source_hashes is not None
+        and derived_source_hashes.get(derived_path) == derived_pin
+    )
+    if not canonical_matches or not derived_matches:
+        result.update(
+            execution_boundary="unknown",
+            alignment_keys=[],
+            order_keys=[],
+            whole_query_gpu_certificate=False,
+            audit_reason="Case audit canonical or derived worker source hash does not match current workload.",
+        )
+    for field in ("alignment_keys", "order_keys"):
+        keys = result.get(field, [])
+        if (
+            not isinstance(keys, list)
+            or any(
+                not isinstance(k, str) or not k or "\t" in k or "\n" in k
+                for k in keys
+            )
+            or len(set(keys)) != len(keys)
+        ):
+            raise ValueError("Invalid declared diagnostic keys")
     return result
 
 
@@ -197,6 +354,11 @@ def main():
     )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument(
+        "--case-metadata",
+        type=Path,
+        default=ROOT / "benchmarks/tools/metal_case_metadata.json",
+    )
     args = parser.parse_args()
     selected = list(suites.SUITES) if args.all_suites else args.suites.split(
         ","
@@ -210,6 +372,9 @@ def main():
     out = args.output.resolve().parent
     sources = out / "sources"
     provenance = stage_sources(sources)
+    metadata = json.loads(args.case_metadata.read_text())
+    metal_query_report.validate_metadata(metadata)
+    provenance["case_metadata_sha256"] = sha(args.case_metadata)
     if args.prepare_only:
         print(json.dumps(provenance, indent=2))
         return
@@ -284,8 +449,23 @@ def main():
                     "inputs": inputs,
                     "log": f"logs/{label}.txt",
                 }
+                audit = case_audit(
+                    metadata,
+                    suite,
+                    variant,
+                    query,
+                    provenance["original_source_sha256"],
+                    provenance["derived_source_sha256"],
+                )
+                case["execution_audit"] = audit
                 env = os.environ.copy()
                 env.update(DATAFRAME_THREADS=str(args.threads))
+                env["DATAFRAME_BENCH_ALIGNMENT_KEYS"] = "\t".join(
+                    audit.get("alignment_keys", [])
+                )
+                env["DATAFRAME_BENCH_ORDER_KEYS"] = "\t".join(
+                    audit.get("order_keys", [])
+                )
                 call = [
                     str(binaries[suites.SUITES[suite]["runner"]]),
                     suite,

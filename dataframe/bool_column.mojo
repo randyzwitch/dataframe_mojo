@@ -21,7 +21,6 @@ from .column import (
     _count_valid,
     _copy_validity,
     _append_validity,
-    _append_validity_bit,
 )
 
 

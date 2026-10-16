@@ -15,7 +15,7 @@ from .dtype import DataType
 from .binding import BoundExpr
 from .bool_column import BoolColumn
 from .column import Column
-from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV, GT, LT, GE, LE, EQ, NE
+from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV
 from .series import Series
 
 
