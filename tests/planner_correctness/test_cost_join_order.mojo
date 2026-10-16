@@ -286,3 +286,76 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
     )
     assert_true(eager.height() > 0)
     assert_frame(query.collect(), eager)
+
+
+def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
+    # DuckDB's estimate for an input the join order cannot reorder: a
+    # left, right or full join yields its larger input's rows, a semi or
+    # anti join its left input's.
+    var t = tables()
+    var left = t[0].join(
+        t[1], left_on=["f_product"], right_on=["p_id"], how="left"
+    )
+    assert_equal(left._relation_estimate(len(left._nodes) - 1), 40_000)
+    var full = t[1].join(
+        t[0], left_on=["p_id"], right_on=["f_product"], how="full"
+    )
+    assert_equal(full._relation_estimate(len(full._nodes) - 1), 40_000)
+    var semi = t[1].join(
+        t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
+    )
+    assert_equal(semi._relation_estimate(len(semi._nodes) - 1), 2000)
+    var anti = t[3].join(
+        t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
+    )
+    assert_equal(anti._relation_estimate(len(anti._nodes) - 1), 4000)
+    # An inner join is part of the graph itself: no estimate here.
+    var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
+    assert_equal(inner._relation_estimate(len(inner._nodes) - 1), -1)
+
+
+def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
+    # The left join is one relation of the graph: its rows are estimated,
+    # the graph is ordered, and the rows equal the written joins'.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var sales = t[0].join(
+        t[3], left_on=["f_store"], right_on=["s_id"], how="left"
+    )
+    var query = (
+        sales.join(
+            t[1].filter(col("p_category") < lit(Int64(3))),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2], left_on=["p_category"], right_on=["c_id"])
+        .group_by(["c_group"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["c_group"])
+    )
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    assert_true(
+        "dataframe-path: lazy.cost_join_order\n" in observed.text(),
+        "the graph over a left join was not ordered",
+    )
+    _ = observed^
+    _ = trace^
+    var eager = (
+        t[0]
+        .collect()
+        .join(
+            t[3].collect(), left_on=["f_store"], right_on=["s_id"], how="left"
+        )
+        .join(
+            t[1].filter(col("p_category") < lit(Int64(3))).collect(),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2].collect(), left_on=["p_category"], right_on=["c_id"])
+        .group_by(["c_group"])
+        .agg([col("f_amount").sum().alias("total")])
+        .sort(["c_group"])
+    )
+    assert_true(eager.height() > 0)
+    assert_frame(rows, eager)
