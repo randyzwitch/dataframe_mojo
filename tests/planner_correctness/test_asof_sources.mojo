@@ -1,4 +1,6 @@
 """File-backed children remain complete across an as-of execution barrier."""
+# contract-group: table.join
+# contract-group: planner.relational
 from std.os import getenv
 from std.testing import assert_equal, assert_true
 from dataframe import (

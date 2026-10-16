@@ -1,4 +1,5 @@
 """Reducing an expression cannot bypass its per-row arithmetic contract."""
+# contract-group: reduce.global
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Expr, Series, col, lit
 from tests.support.numeric_model import integer_bounds

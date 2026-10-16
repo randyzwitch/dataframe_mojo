@@ -1,4 +1,5 @@
 """Bounded borrowed decimal parsers use independent grammar and rounding models."""
+# contract-group: kernel.parse
 from std.math import isnan
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true

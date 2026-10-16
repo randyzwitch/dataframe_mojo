@@ -1,4 +1,5 @@
 """Trailing windows retain CPU recomputation order and checked sum boundaries."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -112,6 +113,7 @@ def test_rolling_capability_threshold_metadata_and_nested_scope_lowering() raise
     )
 
 
+# requires: metal
 def test_native_metal_rolling_numeric_widths_windows_thresholds_and_literal_anchors() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -194,6 +196,7 @@ def test_native_metal_rolling_numeric_widths_windows_thresholds_and_literal_anch
         check(nulls.lazy().select(operation(col("x"), method, 3, 0)), runtime)
 
 
+# requires: metal
 def test_native_metal_rolling_float_order_decimal_means_and_exact_logical_extrema() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -316,6 +319,7 @@ def test_native_metal_rolling_float_order_decimal_means_and_exact_logical_extrem
             check(logical.lazy().select_exprs(expressions), runtime)
 
 
+# requires: metal
 def test_native_metal_rolling_wide_sum_failures_observation_and_unsigned_inputs() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -382,6 +386,7 @@ def test_native_metal_rolling_wide_sum_failures_observation_and_unsigned_inputs(
     check(wide.lazy().select(col("x").rolling_sum(2, 100)), runtime)
 
 
+# requires: metal
 def test_native_metal_rolling_nested_scopes_consumers_cost_budget_and_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

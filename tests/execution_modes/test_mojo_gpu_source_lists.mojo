@@ -1,4 +1,6 @@
 """Primitive source List len/get remain resident through row expressions."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
@@ -98,6 +100,7 @@ def _check(actual: DataFrame, source: DataFrame, start: Int) raises:
             assert_equal(actual.item(row, "last").int64(), last[at])
 
 
+# requires: metal
 def test_mojo_gpu_source_list_get_len_null_parents_layouts_metadata_and_computed_rows() raises:
     var original = _source()
     var first = col("xs").list().get(0)
@@ -173,6 +176,7 @@ def test_mojo_gpu_source_list_get_len_null_parents_layouts_metadata_and_computed
         )
 
 
+# requires: metal
 def test_mojo_gpu_source_list_oob_empty_error_order_observer_and_exact_budget() raises:
     var source = _source()
     for index in [Int64.MIN, Int64.MAX, Int64(2), Int64(-3)]:
@@ -260,6 +264,7 @@ def test_mojo_gpu_source_list_oob_empty_error_order_observer_and_exact_budget() 
             _ = checked.collect(accelerator=MetalRuntime(), engine="accel")
 
 
+# requires: metal
 def test_mojo_gpu_source_list_metadata_only_admission_and_retained_boundaries() raises:
     var source = _source()
     var query = source.lazy().select((col("xs").list().get(0) + 1).alias("x"))

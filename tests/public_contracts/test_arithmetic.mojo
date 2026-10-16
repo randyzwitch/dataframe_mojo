@@ -4,6 +4,8 @@ Generators partition mathematical cases into values, null results, and errors;
 errors are then exercised as valid cells and as hidden null payloads. Integer
 expectations use exact Int128 references, never floating-point range checks.
 """
+# contract-group: expr.arithmetic
+# contract-group: reference.anchors
 from std.math import abs, isnan, isinf
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
@@ -1480,10 +1482,20 @@ def _infinite_divisor_modulo[D: DType]() raises:
                 )
 
 
+# expected-failure: Finite floating remainder with an infinite divisor returns
+# expected-failure: NaN instead of the user-selected Python divisor-sign
+# expected-failure: policy.
+# expected-diagnostic: finite modulo infinite divisor must follow Python
+# expected-diagnostic: remainder, not NaN
 def test_float32_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float32]()
 
 
+# expected-failure: Finite floating remainder with an infinite divisor returns
+# expected-failure: NaN instead of the user-selected Python divisor-sign
+# expected-failure: policy.
+# expected-diagnostic: finite modulo infinite divisor must follow Python
+# expected-diagnostic: remainder, not NaN
 def test_float64_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float64]()
 

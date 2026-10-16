@@ -1,4 +1,6 @@
 """CPU partition provenance survives OVER splitting and dictionary recoding."""
+# contract-group: public.apple_parity
+# contract-group: expr.decimal_extrema
 from std.testing import assert_equal, assert_true, assert_false
 from std.memory import Pointer
 from std.sys import size_of

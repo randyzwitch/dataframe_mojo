@@ -1,4 +1,5 @@
 """Set equality and shape transforms across complete logical typed cells."""
+# contract-group: table.sets_reshape
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -131,6 +132,9 @@ def test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boole
                         )
 
 
+# expected-failure: Struct key equality reads hidden fields of null parents,
+# expected-failure: retaining extra equivalent null keys.
+# expected-diagnostic: struct unique must ignore hidden null-parent fields
 def test_struct_unique_null_parents_ignore_every_hidden_field_payload() raises:
     var ignored_parent_failures = 0
     for n in [1, 9, 65]:
@@ -546,6 +550,11 @@ def test_categorical_concat_empty_inputs_preserve_logical_type_during_dictionary
     )
 
 
+# expected-failure: Missing categorical columns become String null columns;
+# expected-failure: exact underlying diagnostic concat vertical: frame 1
+# expected-failure: column 0 is x:string, expected x:categorical.
+# expected-diagnostic: diagonal missing categorical columns must keep logical
+# expected-diagnostic: dtype
 def test_diagonal_concat_missing_categorical_columns_preserve_dictionary_and_null_padding() raises:
     var rejected = 0
     for n in [0, 1, 9, 65]:

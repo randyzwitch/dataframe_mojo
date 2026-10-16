@@ -3,6 +3,7 @@
 These tests require Apple Silicon macOS and a working MAX Metal device. Reports
 must identify the Mojo implementation and actual kernel submissions.
 """
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
 from std.memory import bitcast
 from std.sys import CompilationTarget
@@ -115,6 +116,7 @@ def assert_native_report(report: DataFrame, nonempty: Bool = True) raises:
         )
 
 
+# requires: metal
 def test_native_metal_common_numeric_and_boolean_domain_matches_literal_rows_and_cpu_modes() raises:
     var runtime = require_metal()
     comptime for index in range(len(NATIVE_NUMERIC)):
@@ -178,6 +180,7 @@ def test_native_metal_common_numeric_and_boolean_domain_matches_literal_rows_and
         assert_equal(native[0].item(row, "b").bool(), True)
 
 
+# requires: metal
 def test_native_metal_payload_budget_accepts_exact_estimate_and_rejects_one_byte_less() raises:
     var runtime = require_metal()
     var plan = (
@@ -241,6 +244,7 @@ def assert_resident_rows(actual: DataFrame) raises:
         assert_equal(actual.item(row, "sum").int64(), sums[row])
 
 
+# requires: metal
 def test_native_metal_resident_join_regions_export_complete_owned_typed_results() raises:
     var runtime = require_metal()
     var plan = resident_join_plan()
@@ -295,6 +299,7 @@ def opaque_word(row: Int) -> UInt64:
     return words[row % len(words)]
 
 
+# requires: metal
 def test_native_metal_opaque_float64_preserves_ieee_words_through_filter_sort_and_export() raises:
     var runtime = require_metal()
     var values = List[Float64]()

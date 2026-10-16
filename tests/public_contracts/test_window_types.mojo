@@ -1,4 +1,5 @@
 """Typed order operations, width limits and IEEE state recovery."""
+# contract-group: expr.order_windows
 from std.sys import size_of
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
@@ -148,6 +149,9 @@ def test_window_sums_check_their_declared_width_after_narrow_integer_promotion()
                 _ = frame.select(expression)
 
 
+# expected-failure: UInt64 cumulative sums reject valid values above Int64.MAX
+# expected-failure: despite a UInt64 result type.
+# expected-diagnostic: uint64 window sum overflow
 def test_uint64_cumulative_sums_preserve_values_above_signed_range() raises:
     var frame = DataFrame([Series("x", Column[UInt64]([UInt64.MAX, 0, 0]))])
     var result = frame.select(col("x").cum_sum())
@@ -156,6 +160,9 @@ def test_uint64_cumulative_sums_preserve_values_above_signed_range() raises:
         assert_equal(result.item(row, "x").numeric[DType.uint64](), UInt64.MAX)
 
 
+# expected-failure: UInt64 rolling sums reject valid values above Int64.MAX
+# expected-failure: despite a UInt64 result type.
+# expected-diagnostic: uint64 window sum overflow
 def test_uint64_rolling_sums_preserve_values_above_signed_range() raises:
     var frame = DataFrame([Series("x", Column[UInt64]([UInt64.MAX, 0, 0]))])
     var result = frame.select(col("x").rolling_sum(2, 1))

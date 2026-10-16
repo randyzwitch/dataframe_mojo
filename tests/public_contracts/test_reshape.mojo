@@ -1,4 +1,6 @@
 """Schema transforms and cell associations, rather than reshape roundtrips."""
+# contract-group: expr.nested
+# contract-group: table.sets_reshape
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, ListColumn, Series, concat
 from tests.support.reference_model import generated_model, ReferenceTable

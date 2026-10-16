@@ -82,6 +82,7 @@ struct RowCapabilities(Copyable):
     var decimal_multiplicative: Bool
     var decimal_arithmetic: Bool
     var ranks: Bool
+    var observed_rank_inputs: Bool
     var paired_moments: Bool
     var moments: Bool
     var quantiles: Bool
@@ -150,6 +151,7 @@ struct RowCapabilities(Copyable):
         temporal_offsets: Bool = False,
         duration_totals: Bool = False,
         ranks: Bool = False,
+        observed_rank_inputs: Bool = False,
         cumulative_windows: Bool = False,
         paired_moments: Bool = False,
         moments: Bool = False,
@@ -222,6 +224,7 @@ struct RowCapabilities(Copyable):
         self.temporal_offsets = temporal_offsets
         self.duration_totals = duration_totals
         self.ranks = ranks
+        self.observed_rank_inputs = observed_rank_inputs
         self.cumulative_windows = cumulative_windows
         self.paired_moments = paired_moments
         self.moments = moments

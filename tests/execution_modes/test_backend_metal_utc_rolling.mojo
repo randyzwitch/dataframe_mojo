@@ -1,4 +1,5 @@
 """UTC duration windows retain separate calendar and fixed-time stages."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -68,6 +69,7 @@ def test_utc_duration_capability_staged_metadata_wide_days_and_no_device_preflig
         )
 
 
+# requires: metal
 def test_native_metal_utc_duration_units_zero_offset_zones_calendar_days_fixed_ticks_decimals_and_layouts() raises:
     var runtime = require_metal()
     for unit in ["ms", "us", "ns"]:
@@ -143,6 +145,7 @@ def test_native_metal_utc_duration_units_zero_offset_zones_calendar_days_fixed_t
                     assert_equal(wide.column("x").int64().value(3), Int64(15))
 
 
+# requires: metal
 def test_native_metal_utc_duration_full_width_ticks_checked_day_stages_and_index_observations() raises:
     var runtime = require_metal()
     for unit in ["ms", "us", "ns"]:
@@ -234,6 +237,7 @@ def test_native_metal_utc_duration_full_width_ticks_checked_day_stages_and_index
         )
 
 
+# requires: metal
 def test_native_metal_utc_duration_resident_consumers_distinct_stage_families_and_exact_budgets() raises:
     var runtime = require_metal()
     var frame = fixture(DataType.datetime("us", "UTC"))

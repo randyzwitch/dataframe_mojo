@@ -1,4 +1,5 @@
 """Distinct counts reuse resident grouping, including null categories."""
+# contract-group: planner.routing
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame

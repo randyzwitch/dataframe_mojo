@@ -10,6 +10,8 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from dataframe import DataFrame
 from suite_common import load_tables
+from metal_suite_diagnostics import emit_comparison, environment_keys
+from metal_suite_answer_exports import export_answer
 
 
 def clean(message: String) -> String:
@@ -25,6 +27,8 @@ def run[
     var name = String(args[2])
     var repetitions = Int(String(args[3]))
     var tables = load_tables()
+    var alignment_keys = environment_keys("DATAFRAME_BENCH_ALIGNMENT_KEYS")
+    var order_keys = environment_keys("DATAFRAME_BENCH_ORDER_KEYS")
     var expected: DataFrame
     try:
         expected = reference(name, tables)
@@ -40,13 +44,14 @@ def run[
             + reason
         )
         return
+    export_answer(expected, "cpu", 0)
     var ordered_equal = True
     # Suite outputs can leave group/tie order unspecified. Canonical sorting
     # compares complete row multisets, preserving duplicates; also record the
     # stricter original-order comparison instead of silently discarding it.
     var canonical = expected.sort(expected.columns())
     var elapsed = 0
-    for _ in range(repetitions):
+    for repetition in range(repetitions):
         var actual: DataFrame
         try:
             var start = perf_counter_ns()
@@ -67,6 +72,7 @@ def run[
                 + reason
             )
             return
+        export_answer(actual, "metal", repetition)
         ordered_equal &= actual.equals(expected)
         if (
             actual.columns() != expected.columns()
@@ -84,15 +90,41 @@ def run[
                 "actual_sample\n"
                 + actual.to_string(max_rows=20, max_columns=64)
             )
-            # Repeating the original CPU query helps diagnose unspecified
-            # limit/tie choices without relaxing the full-result comparison.
-            var repeated = reference(name, tables)
-            print("cpu_repeat_equal\t" + String(repeated.equals(expected)))
-            print(
-                "cpu_repeat_sample\n"
-                + repeated.to_string(max_rows=20, max_columns=64)
-            )
+            # Diagnostics cannot turn a strict mismatch into a passing case.
+            try:
+                emit_comparison(
+                    expected, actual, "cpu_metal", alignment_keys, order_keys
+                )
+            except diagnostic_error:
+                print(
+                    "diagnostic_error\tcpu_metal\t"
+                    + clean(String(diagnostic_error))
+                )
+            # Repeat the CPU query without excusing either kind of difference.
+            try:
+                var repeated = reference(name, tables)
+                export_answer(repeated, "cpu_repeat", 0)
+                print("cpu_repeat_equal\t" + String(repeated.equals(expected)))
+                emit_comparison(
+                    expected, repeated, "cpu_repeat", alignment_keys, order_keys
+                )
+                print(
+                    "cpu_repeat_sample\n"
+                    + repeated.to_string(max_rows=20, max_columns=64)
+                )
+            except diagnostic_error:
+                print(
+                    "diagnostic_error\tcpu_repeat\t"
+                    + clean(String(diagnostic_error))
+                )
             return
+    print("diagnostic\tcpu_metal.schema_equal\tTrue")
+    print("diagnostic\tcpu_metal.row_count_equal\tTrue")
+    print("diagnostic\tcpu_metal.row_multiset_equal\tTrue")
+    print(
+        "diagnostic\tcpu_metal.classification\t"
+        + ("equal" if ordered_equal else "order_only")
+    )
     print("coverage\t" + name + "\tok\t")
     print("ordered_equal\t" + String(ordered_equal))
     print("output_rows\t" + String(expected.height()))

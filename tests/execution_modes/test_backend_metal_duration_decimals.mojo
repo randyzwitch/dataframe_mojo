@@ -1,4 +1,5 @@
 """Decimal duration sums retain precision; floating windows retain decimal scale."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -62,6 +63,7 @@ def test_duration_decimal_private_widening_precision_float_casts_and_no_device_p
             )
 
 
+# requires: metal
 def test_native_metal_duration_decimals_all_widths_scales_signs_layouts_partitions_and_boundaries() raises:
     var runtime = require_metal()
     for width in [32, 64, 128]:
@@ -126,6 +128,7 @@ def test_native_metal_duration_decimals_all_widths_scales_signs_layouts_partitio
                     )
 
 
+# requires: metal
 def test_native_metal_duration_decimal_observed_prefix_errors_null_payloads_and_physical_extremes() raises:
     var runtime = require_metal()
     var maximum = pow10(38) - 1
@@ -243,6 +246,7 @@ def test_native_metal_duration_decimal_observed_prefix_errors_null_payloads_and_
     )
 
 
+# requires: metal
 def test_native_metal_duration_decimal_consumers_profiles_precision_families_and_exact_budgets() raises:
     var runtime = require_metal()
     var dtype = DataType.decimal(18, 3, 64)

@@ -1,4 +1,5 @@
 """Sideways join-key filters preserve scalar pairs through chains and renames."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
 from dataframe.lazy import JOIN, SCAN_FRAME, _key_set_filter

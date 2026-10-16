@@ -82,6 +82,8 @@ from .expr import (
     QUANTILE,
     CORR,
     COV,
+    CAST,
+    LIT_NULL,
 )
 from .frame import concat
 from .sorted_range import sorted_window
@@ -130,10 +132,12 @@ from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
-from .execution import direct_reductions
+from .execution import direct_reductions, evaluate
 from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
+from .accelerator.grouped_key_queries import KeyQuery
+from .accelerator.opaque_dictionary import ByteDomain
 from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
@@ -177,7 +181,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable):
+struct PlanNode(Copyable, Deinitable, Movable):
     var kind: Int
     var left: Int
     var right: Int
@@ -210,10 +214,19 @@ struct PlanNode(Copyable):
     var producer_origin: Optional[ArcPointer[ProducerOrigin]]
     var lineage_anchor: Optional[ArcPointer[Int]]
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Original grouped key domains survive whole-query code normalization.
+    var grouped_keys: Optional[ArcPointer[KeyQuery]]
+    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
     # Original partition state/operand proof is outside rewritten row ASTs.
     # Columns contain schema-only Series; no source values are retained here.
     var partition_exprs: List[Expr]
     var partition_columns: List[Series]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
 
     def _record_execution(self):
         if self._executions:
@@ -267,6 +280,8 @@ def _plan_node(
         Optional[ArcPointer[ProducerOrigin]](),
         Optional[ArcPointer[Int]](),
         Optional[ArcPointer[RegionProof]](),
+        None,
+        None,
         partition_exprs.copy(),
         partition_columns.copy(),
     )
@@ -394,6 +409,168 @@ def _fold_constants(expr: Expr) -> Expr:
     var out = List[Node]()
     _ = _emit_folded(nodes, value, n - 1, out)
     return Expr(out^, expr._name)
+
+
+def _fold_casts(expr: Expr) raises -> Optional[Expr]:
+    """`expr` with each cast of a column-free subexpression replaced by the
+    literal it evaluates to, or None when there is none to fold. A cast
+    that raises is left in place, so its error is raised where it was."""
+    ref nodes = expr._nodes
+    var replaced = Dict[Int, Node]()
+    for i in range(len(nodes)):
+        ref node = nodes[i]
+        if node.op != CAST or node.left < 0:
+            continue
+        if not _column_free(expr, i):
+            continue
+        try:
+            var no_columns = List[Series]()
+            var value = evaluate(
+                bind(subtree(expr, i), no_columns), no_columns, 1
+            )
+            var literal = _literal_node(value)
+            if literal:
+                replaced[i] = literal.take()
+        except:
+            continue
+    if len(replaced) == 0:
+        return None
+    var out = List[Node]()
+    _ = _emit_replaced(nodes, replaced, len(nodes) - 1, out)
+    return Optional(Expr(out^, expr._name))
+
+
+def _column_free(expr: Expr, root: Int) -> Bool:
+    """Whether the subexpression at `root` reads no column, selector,
+    aggregate or window: one value whatever the rows."""
+    var stack: List[Int] = [root]
+    while len(stack) > 0:
+        var i = stack.pop()
+        ref node = expr._nodes[i]
+        if (
+            node.op == COL
+            or node.op == SELECTOR
+            or is_reduction(node.op)
+            or is_window(node.op)
+        ):
+            return False
+        if node.left >= 0:
+            stack.append(node.left)
+        if node.right >= 0:
+            stack.append(node.right)
+        if node.op == WHEN and node.extra >= 0:
+            stack.append(node.extra)
+    return True
+
+
+def _literal_node(value: Series) raises -> Optional[Node]:
+    """A one-row result as a typed literal node: integers, temporal values
+    and decimals as `LIT_INT` (a 128-bit decimal's high word in `text2`),
+    floats as `LIT_FLOAT`, Booleans, strings and nulls as theirs. None for
+    anything else (a list, a struct, a categorical)."""
+    if len(value) != 1:
+        return None
+    var dtype = value.dtype()
+    var dtypes: List[Optional[DataType]] = [Optional(dtype)]
+    if value.null_count() == 1:
+        return Optional(
+            Node(LIT_NULL, -1, -1, dtype.name(), 0, 0, 0, -1, "", dtypes^)
+        )
+    if dtype == DataType.BOOL:
+        return Optional(
+            Node(
+                LIT_BOOL,
+                -1,
+                -1,
+                "",
+                Int64(1) if value.get(0).bool() else Int64(0),
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+    if dtype == DataType.STRING:
+        return Optional(
+            Node(
+                LIT_STRING,
+                -1,
+                -1,
+                value.get(0).string(),
+                0,
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+    if dtype.is_categorical() or dtype.is_nested():
+        return None
+    if value._data.isa[Column[Int128]]():
+        if not dtype.is_decimal():
+            return None
+        var raw = value._data[Column[Int128]]._get(0)
+        var low = Int64(UInt64(UInt128(raw) & UInt128(0xFFFFFFFFFFFFFFFF)))
+        var high = Int64(raw >> 64)
+        return Optional(
+            Node(LIT_INT, -1, -1, "", low, 0, 0, -1, String(high), dtypes^)
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if value._data.isa[Column[Scalar[D]]]():
+            var x = value._data[Column[Scalar[D]]]._get(0)
+            comptime if D.is_floating_point():
+                return Optional(
+                    Node(
+                        LIT_FLOAT,
+                        -1,
+                        -1,
+                        "",
+                        0,
+                        x.cast[DType.float64](),
+                        0,
+                        -1,
+                        "",
+                        dtypes^,
+                    )
+                )
+            else:
+                return Optional(
+                    Node(
+                        LIT_INT,
+                        -1,
+                        -1,
+                        "",
+                        x.cast[DType.int64](),
+                        0,
+                        0,
+                        -1,
+                        "",
+                        dtypes^,
+                    )
+                )
+    return None
+
+
+def _emit_replaced(
+    nodes: List[Node], replaced: Dict[Int, Node], i: Int, mut out: List[Node]
+) raises -> Int:
+    """Append node `i` to `out` after its inputs, a folded subexpression as
+    its literal; its index in `out`."""
+    if i in replaced:
+        out.append(replaced[i].copy())
+        return len(out) - 1
+    var copy = nodes[i].copy()
+    if copy.left >= 0:
+        copy.left = _emit_replaced(nodes, replaced, nodes[i].left, out)
+    if copy.right >= 0:
+        copy.right = _emit_replaced(nodes, replaced, nodes[i].right, out)
+    if nodes[i].op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_replaced(nodes, replaced, nodes[i].extra, out)
+    out.append(copy^)
+    return len(out) - 1
 
 
 def _emit_folded(
@@ -1389,7 +1566,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable):
+struct LazyFrame(Copyable, Deinitable, Movable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
@@ -1414,6 +1591,25 @@ struct LazyFrame(Copyable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+
+    def __deinit__(deinit self):
+        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
+        # documentation trait inference cycles. Owned fields clean up
+        # automatically after this body; no owner is released manually.
+        pass
+
+    def __init__(out self, *, deinit move: Self):
+        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
+        # whose original query is a LazyFrame. This avoids recursive generated
+        # move inference while preserving all eight existing owner fields.
+        self._nodes = move._nodes^
+        self._frames = move._frames^
+        self._schemas = move._schemas^
+        self._report = move._report^
+        self._origin_rows = move._origin_rows^
+        self._accelerator_settings = move._accelerator_settings^
+        self._schema_memo = move._schema_memo^
+        self._prefetched = move._prefetched^
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -4340,6 +4536,7 @@ struct LazyFrame(Copyable):
 
     def _optimized(self) raises -> Self:
         var plan = self.copy()
+        plan._fold_casts()
         plan._unique_as_aggregate()
         plan._split_filters()
         plan._filter_shared_subplans()
@@ -4349,6 +4546,26 @@ struct LazyFrame(Copyable):
         plan._fuse_top_k()
         plan._push_projections()
         return plan^
+
+    def _fold_casts(mut self) raises:
+        """Constant folding (DuckDB's `ConstantFoldingRule`): a cast of an
+        expression that reads no column is evaluated once, here, and
+        becomes a literal of its type, rather than being evaluated again
+        for every batch or morsel the expression meets (a decimal written
+        as a cast string literal was parsed per morsel)."""
+        for i in range(len(self._nodes)):
+            var kind = self._nodes[i].kind
+            if not (
+                kind == FILTER
+                or kind == SELECT
+                or kind == WITH_COLUMNS
+                or kind == AGG
+            ):
+                continue
+            for k in range(len(self._nodes[i].exprs)):
+                var folded = _fold_casts(self._nodes[i].exprs[k])
+                if folded:
+                    self._nodes[i].exprs[k] = folded.take()
 
     def _share_subplans(mut self, streaming: Bool, batch_size: Int) raises:
         """Execute a subplan used in two places once (common-subplan
@@ -5473,7 +5690,7 @@ struct LazyFrame(Copyable):
             var domains = List[Float64](capacity=n)
             for r in range(n):
                 var table = self._spine_rows(relations[r])
-                var estimated = self._estimated_rows(relations[r])
+                var estimated = self._relation_estimate(relations[r])
                 if estimated < 0:
                     var frame = self._execute(
                         relations[r], False, streaming, batch_size
@@ -5486,7 +5703,25 @@ struct LazyFrame(Copyable):
                     )
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
-            var chosen = order_joins(rows, domains, edges)
+            # Each key column's distinct count, where its relation's table
+            # keeps statistics: DuckDB's estimator then takes a set's
+            # domain as the largest count among its columns.
+            var distinct = Dict[String, Float64]()
+            for e in edges:
+                for i in range(len(e.a_keys)):
+                    for side in range(2):
+                        var rel = e.a if side == 0 else e.b
+                        var name = e.a_keys[i] if side == 0 else e.b_keys[i]
+                        var key = String(rel) + "/" + name
+                        if key in distinct:
+                            continue
+                        var table = self._spine_frame(relations[rel])
+                        if not table:
+                            continue
+                        var count = table.value()._distinct_count(name)
+                        if count > 0:
+                            distinct[key] = Float64(count)
+            var chosen = order_joins(rows, domains, edges, distinct)
             if not chosen:
                 continue
             var tree = chosen.take()
@@ -5848,6 +6083,70 @@ struct LazyFrame(Copyable):
         self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
         trace_path("lazy.probe_largest")
         return True
+
+    def _relation_estimate(self, index: Int) raises -> Int:
+        """Rows a join-graph relation yields, estimated without running it:
+        `_estimated_rows`, else, for a join the order cannot reorder, DuckDB's
+        combination of its inputs' estimates
+        (`CombineStatsOfNonReorderableOperator`): a semi or anti join keeps
+        its left input's rows, any other the larger input's. -1 when an
+        input has no estimate."""
+        var known = self._estimated_rows(index)
+        if known >= 0:
+            return known
+        ref node = self._nodes[index]
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._relation_estimate(node.left)
+        if (
+            node.kind != JOIN
+            or node.how == JOIN_INNER
+            or node.how == JOIN_CROSS
+        ):
+            return -1
+        var left = self._relation_estimate(node.left)
+        if left < 0:
+            return -1
+        if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+            return left
+        var right = self._relation_estimate(node.right)
+        if right < 0:
+            return -1
+        return max(left, right)
+
+    def _spine_frame(self, index: Int) -> Optional[DataFrame]:
+        """The in-memory table under `index`, along the steps
+        `_spine_rows` follows and a left, semi or anti join's left input,
+        whose columns keep their table's statistics; None through anything
+        else."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                return Optional(self._frames[node.offset].copy())
+            if (
+                node.kind == FILTER
+                or node.kind == DROP
+                or (
+                    node.kind == JOIN
+                    and (
+                        node.how == JOIN_INNER
+                        or node.how == JOIN_LEFT
+                        or node.how == JOIN_SEMI
+                        or node.how == JOIN_ANTI
+                    )
+                )
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                cursor = node.left
+                continue
+            return None
+        return None
 
     def _spine_rows(self, index: Int) -> Int:
         """Rows of the table under `index` along steps that keep, drop or

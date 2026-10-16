@@ -1,4 +1,5 @@
 """Literal temporal parsing and safe rejection before dictionary encoding."""
+# contract-group: execution.backends
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import (
     DataFrame,
@@ -22,6 +23,7 @@ from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
 from tests.execution_modes.test_backend_metal import require_metal
 
 
+# requires: metal
 def test_native_metal_literal_numeric_and_decimal_casts_on_metal() raises:
     _ = require_metal()
     var dtype = DataType.decimal(18, 2, 64)

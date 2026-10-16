@@ -1,4 +1,5 @@
 """Bounded dictionary pairs for resident row-wise String concatenation."""
+# contract-group: execution.backends
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import (
@@ -51,6 +52,7 @@ def compare_concat(query: LazyFrame) raises:
     assert_true(query.collect(accelerator=MetalRuntime()).equals(expected))
 
 
+# requires: metal
 def test_native_metal_concat_dictionary_pairs_nulls_unicode_literals_and_chains() raises:
     _ = require_metal()
     var frame = concat_frame()
@@ -102,6 +104,7 @@ def test_native_metal_concat_dictionary_pairs_nulls_unicode_literals_and_chains(
     )
 
 
+# requires: metal
 def test_native_metal_concat_dictionary_domains_replacement_aliases_and_internal_names() raises:
     _ = require_metal()
     var frame = concat_frame().with_column(
@@ -132,6 +135,7 @@ def test_native_metal_concat_dictionary_domains_replacement_aliases_and_internal
     )
 
 
+# requires: metal
 def test_native_metal_concat_dictionary_group_filter_join_order_and_duplicate_outputs() raises:
     _ = require_metal()
     var frame = concat_frame()
@@ -161,6 +165,7 @@ def test_native_metal_concat_dictionary_group_filter_join_order_and_duplicate_ou
     compare_concat(query.sort("name").head(5))
 
 
+# requires: metal
 def test_native_metal_concat_dictionary_pair_capacity_byte_budget_and_recovery() raises:
     _ = require_metal()
     var query = (

@@ -1,4 +1,5 @@
 """Signed calendar offsets clamp days, retain time, then add checked fixed ticks."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -61,6 +62,7 @@ def test_calendar_offsets_capability_signed_metadata_and_checked_boundaries() ra
         )
 
 
+# requires: metal
 def test_native_metal_calendar_offsets_units_leap_day_clamps_mixed_intervals_and_nulls() raises:
     var runtime = require_metal()
     for dtype in List[DataType](
@@ -123,6 +125,7 @@ def test_native_metal_calendar_offsets_units_leap_day_clamps_mixed_intervals_and
     )
 
 
+# requires: metal
 def test_native_metal_calendar_offsets_extreme_dates_checked_datetime_reconstruction_and_masks() raises:
     var runtime = require_metal()
     var dates = tagged(
@@ -170,6 +173,7 @@ def test_native_metal_calendar_offsets_extreme_dates_checked_datetime_reconstruc
         )
 
 
+# requires: metal
 def test_native_metal_calendar_offsets_profiles_cost_budget_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = (

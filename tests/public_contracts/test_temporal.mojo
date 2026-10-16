@@ -1,4 +1,7 @@
 """Temporal contracts in civil time, UTC instants, and independent row memberships."""
+# contract-group: expr.temporal
+# contract-group: types.cast
+# contract-group: reference.anchors
 from std.math import sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (

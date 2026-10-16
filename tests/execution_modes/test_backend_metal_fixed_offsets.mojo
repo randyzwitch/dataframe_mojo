@@ -1,4 +1,5 @@
 """Fixed temporal offsets preserve checked storage addition and Time wrapping."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -73,6 +74,7 @@ def test_fixed_offset_capability_units_descriptors_and_observation_boundaries() 
     _ = Program(lower_rows(utc_query, _capabilities()))
 
 
+# requires: metal
 def test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and_empty_rows() raises:
     var runtime = require_metal()
     var types: List[DataType] = [
@@ -129,6 +131,7 @@ def test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and
         assert_equal(actual.column("t").int64()._get(0), expected)
 
 
+# requires: metal
 def test_native_metal_fixed_offset_checked_endpoints_and_conditional_masks() raises:
     var runtime = require_metal()
     var types: List[DataType] = [
@@ -183,6 +186,7 @@ def test_native_metal_fixed_offset_checked_endpoints_and_conditional_masks() rai
         )
 
 
+# requires: metal
 def test_native_metal_fixed_offset_profiles_cost_budget_and_reuse() raises:
     var runtime = require_metal()
     var query = (

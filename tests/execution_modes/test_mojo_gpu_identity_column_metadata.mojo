@@ -1,4 +1,6 @@
 """CPU and GPU share exact primitive identity-cast metadata provenance."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import (
@@ -22,6 +24,7 @@ from tests.public_contracts.test_identity_column_metadata import (
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_identity_column_metadata_logical_views_empty_and_budget() raises:
     var raw = _source()
     for layout in range(3):
@@ -60,6 +63,7 @@ def test_mojo_gpu_identity_column_metadata_logical_views_empty_and_budget() rais
     _check(safe.collect(accelerator=MetalRuntime(memory_limit_bytes=peak)), raw)
 
 
+# requires: metal
 def test_mojo_gpu_identity_column_metadata_struct_transport_and_fresh_results() raises:
     var raw = _source()
     var child = Series("value", Column[Int64]([-7, Int64.MAX, 11]))

@@ -1,4 +1,6 @@
 """File decoders feed real GPU operators, with observed staging and budgets."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -41,6 +43,7 @@ def _check_profile(query: LazyFrame, scans: Int) raises -> Int:
     return Int(report.item(0, "query_peak_requested_bytes").int64())
 
 
+# requires: metal
 def test_mojo_gpu_csv_sources_projection_nullable_rows_budget_and_recovery() raises:
     var work = temporary_directory("/tmp/mojo-gpu-file-sources")
     var path = work + "/input.csv"
@@ -94,6 +97,7 @@ def test_mojo_gpu_csv_sources_projection_nullable_rows_budget_and_recovery() rai
     run_command(["rm", "-r", work])
 
 
+# requires: metal
 def test_mojo_gpu_csv_sources_dictionary_join_inference_and_metadata() raises:
     var work = temporary_directory("/tmp/mojo-gpu-file-sources")
     var path = work + "/text.csv"
@@ -133,6 +137,7 @@ def test_mojo_gpu_csv_sources_dictionary_join_inference_and_metadata() raises:
     run_command(["rm", "-r", work])
 
 
+# requires: metal
 def test_mojo_gpu_parquet_sources_typed_projection_groups_and_join() raises:
     var source = scan_parquet("tests/fixtures/parquet/plain.parquet")
     var query = (
@@ -153,6 +158,7 @@ def test_mojo_gpu_parquet_sources_typed_projection_groups_and_join() raises:
     _ = _check_profile(narrowed, 1)
 
 
+# requires: metal
 def test_mojo_gpu_file_sources_observe_left_decimal_failure_before_right_csv_decode() raises:
     var work = temporary_directory("/tmp/mojo-gpu-source-errors")
     var path = work + "/right.csv"
@@ -249,6 +255,7 @@ def _source_order_error(
     raise Error("File error-order fixture unexpectedly succeeded")
 
 
+# requires: metal
 def test_mojo_gpu_file_sources_unavailable_schema_preserves_cpu_error_order() raises:
     var work = temporary_directory("/tmp/mojo-gpu-missing-source-errors")
     var path = work + "/missing.csv"
@@ -285,6 +292,7 @@ def test_mojo_gpu_file_sources_unavailable_schema_preserves_cpu_error_order() ra
     run_command(["rm", "-r", work])
 
 
+# requires: metal
 def test_mojo_gpu_file_sources_planning_metadata_failure_precedes_gpu_prefix() raises:
     var work = temporary_directory("/tmp/mojo-gpu-source-metadata-errors")
     var path = work + "/missing.csv"
@@ -327,6 +335,7 @@ def test_mojo_gpu_file_sources_planning_metadata_failure_precedes_gpu_prefix() r
     run_command(["rm", "-r", work])
 
 
+# requires: metal
 def test_mojo_gpu_file_sources_prefix_observer_downloads_only_error_words() raises:
     for dictionary in [False, True]:
         var columns: List[Series] = [Series("x", Column[Int64]([1, 2, 3]))]
@@ -356,6 +365,7 @@ def test_mojo_gpu_file_sources_prefix_observer_downloads_only_error_words() rais
         )
 
 
+# requires: metal
 def test_mojo_gpu_file_prefix_unvisited_dictionary_does_not_hide_earlier_error() raises:
     from tests.public_contracts.test_file_source_prefixes import (
         _prefix_budget_left,

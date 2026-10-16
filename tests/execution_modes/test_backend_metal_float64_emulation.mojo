@@ -1,4 +1,5 @@
 """Integer-only binary64 arithmetic through the public Metal query API."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
@@ -83,6 +84,7 @@ def same(actual: DataFrame, expected: DataFrame) raises:
                 assert_equal(bitcast[DType.uint64](a._get(i)), bits)
 
 
+# requires: metal
 def test_native_metal_float64_arithmetic_rounding_subnormals_and_nulls() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -107,6 +109,7 @@ def test_native_metal_float64_arithmetic_rounding_subnormals_and_nulls() raises:
     same(empty.collect(accelerator=runtime), empty.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_float64_predicates_nan_filling_and_clipping() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -130,6 +133,7 @@ def test_native_metal_float64_predicates_nan_filling_and_clipping() raises:
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_float64_emulation_filters_conditionals_and_join_regions() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -158,6 +162,7 @@ def test_native_metal_float64_emulation_filters_conditionals_and_join_regions() 
     same(joined.collect(accelerator=runtime), joined.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_float64_emulation_has_separate_automatic_cost_family() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -189,6 +194,7 @@ def test_native_metal_float64_emulation_has_separate_automatic_cost_family() rai
     )
 
 
+# requires: metal
 def test_native_metal_floating_decimal_rounding_bits_extremes_and_cost() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -293,6 +299,7 @@ def test_native_metal_floating_decimal_rounding_bits_extremes_and_cost() raises:
     )
 
 
+# requires: metal
 def test_native_metal_float64_numeric_casts_and_integer_division() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -416,6 +423,7 @@ def test_native_metal_float64_numeric_casts_and_integer_division() raises:
     same(narrowed.collect(accelerator=runtime), narrowed.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_float64_keys_extrema_and_joins() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -514,6 +522,7 @@ def test_native_metal_float64_keys_extrema_and_joins() raises:
     )
 
 
+# requires: metal
 def test_native_metal_float64_accumulation_scalar_grouped_and_resident() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -582,6 +591,7 @@ def test_native_metal_float64_accumulation_scalar_grouped_and_resident() raises:
     same(specials.collect(accelerator=runtime), specials.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_integer_mean_preserves_exact_accumulation_before_float64_division() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -608,6 +618,7 @@ def test_native_metal_integer_mean_preserves_exact_accumulation_before_float64_d
     same(exact.collect(accelerator=runtime), exact.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_float64_remainder_extremes_filters_children_and_cost() raises:
     var frame = fixture()
     var query = frame.lazy().select(
@@ -663,6 +674,7 @@ def test_native_metal_float64_remainder_extremes_filters_children_and_cost() rai
     )
 
 
+# requires: metal
 def test_native_metal_float64_sqrt_bits_filters_children_and_cost() raises:
     _ = require_metal()
     var frame = fixture()

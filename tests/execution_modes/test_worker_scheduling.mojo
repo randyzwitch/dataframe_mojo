@@ -1,4 +1,5 @@
 """Nested scheduling shares one thread budget and survives changing/error rounds."""
+# contract-group: execution.lifecycle
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import ArcPointer

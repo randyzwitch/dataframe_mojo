@@ -19,6 +19,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _pack_bits
 from .string_column import StringColumn
 from .series import Series, sort_indices, smallest_indices
+from .distinct_statistics import TableStatistics
 from .fused_compare import (
     SelectionTree,
     fused_comparisons,
@@ -284,11 +285,37 @@ struct Field(Copyable):
     var dtype: DataType
 
 
+# Up to this many columns, names are checked pair by pair: no dictionary is
+# built for a frame of a few columns, and frames are built for every step.
+comptime _PAIRWISE_NAMES = 32
+
+
+def _check_unique_names(columns: List[Series]) raises:
+    """Raise on a repeated column name."""
+    var n = len(columns)
+    if n <= _PAIRWISE_NAMES:
+        for i in range(1, n):
+            ref name = columns[i]._name
+            for j in range(i):
+                if columns[j]._name == name:
+                    raise Error("Duplicate column name: " + name)
+        return
+    var names = Dict[String, Bool]()
+    for column in columns:
+        var name = column.name()
+        if name in names:
+            raise Error("Duplicate column name: " + name)
+        names[name] = True
+
+
 struct DataFrame(Copyable, Sized, Writable):
     """Own equal-length, uniquely named columns; transformations copy storage."""
 
     var _columns: List[Series]
     var _height: Int
+    # A loaded table's distinct-count statistics, shared by its copies
+    # (`read_parquet`, `read_csv`); none for a frame made any other way.
+    var _statistics: Optional[ArcPointer[TableStatistics]]
 
     def __init__(
         out self, var columns: List[Series], *, height: Int = -1
@@ -302,16 +329,31 @@ struct DataFrame(Copyable, Sized, Writable):
             inferred = height
         if height >= 0 and inferred != height:
             raise Error("Explicit height does not match columns")
-        var names = Dict[String, Bool]()
         for column in columns:
             if len(column) != inferred:
                 raise Error("DataFrame columns must have equal lengths")
-            var name = column.name()
-            if name in names:
-                raise Error("Duplicate column name: " + name)
-            names[name] = True
+        _check_unique_names(columns)
         self._columns = columns^
         self._height = inferred
+        self._statistics = None
+
+    def _with_statistics(var self) -> Self:
+        """This frame as a loaded table: its columns' distinct counts are
+        estimated on first request and kept for every copy (DuckDB keeps
+        them with each table it stores)."""
+        self._statistics = Optional(ArcPointer(TableStatistics()))
+        return self^
+
+    def _distinct_count(self, name: String) raises -> Int:
+        """Column `name`'s estimated distinct count from the table's
+        statistics, or -1 when this frame has none or no such column."""
+        if not self._statistics:
+            return -1
+        for column in self._columns:
+            if column.name() == name:
+                var box = self._statistics.value()
+                return box[].distinct(column)
+        return -1
 
     def rechunk(self) raises -> Self:
         """Return one contiguous array per column, copying only chunked

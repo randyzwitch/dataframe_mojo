@@ -1,4 +1,5 @@
 """Coordinate interpolation retains independent value and coordinate validity."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -77,6 +78,7 @@ def test_coordinate_interpolation_capability_private_axis_metadata_and_checked_i
         )
 
 
+# requires: metal
 def test_native_metal_coordinate_interpolation_numeric_decimals_partitions_and_chunked_sources() raises:
     var runtime = require_metal()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -124,6 +126,7 @@ def test_native_metal_coordinate_interpolation_numeric_decimals_partitions_and_c
             )
 
 
+# requires: metal
 def test_native_metal_coordinate_interpolation_independent_distances_duplicate_axes_and_consumers() raises:
     var runtime = require_metal()
     var frame = DataFrame(
@@ -223,6 +226,7 @@ def test_native_metal_coordinate_interpolation_independent_distances_duplicate_a
     )
 
 
+# requires: metal
 def test_native_metal_coordinate_interpolation_profile_exact_budget_cost_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = (

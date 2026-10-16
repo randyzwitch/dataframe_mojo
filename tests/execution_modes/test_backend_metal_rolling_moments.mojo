@@ -1,4 +1,5 @@
 """Sliding binary64 moments preserve CPU bounds, recovery, and partitions."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt, isnan
@@ -116,6 +117,7 @@ def test_rolling_moments_capability_packed_bounds_private_casts_and_scopes() rai
     )
 
 
+# requires: metal
 def test_native_metal_rolling_moments_numeric_widths_bounds_nulls_and_anchors() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -180,6 +182,7 @@ def test_native_metal_rolling_moments_numeric_widths_bounds_nulls_and_anchors() 
     check(default_minimum.lazy().select_exprs(expressions(3)), runtime)
 
 
+# requires: metal
 def test_native_metal_rolling_moments_nonfinite_recovery_unsigned_and_decimal_inputs() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -278,6 +281,7 @@ def test_native_metal_rolling_moments_nonfinite_recovery_unsigned_and_decimal_in
     check(chunks.lazy().select_exprs(expressions(3, 1, 0)), runtime)
 
 
+# requires: metal
 def test_native_metal_rolling_moments_large_offsets_partition_workers_and_nested_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

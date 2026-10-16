@@ -1,4 +1,6 @@
 """Reduction kernels agree with a scalar accumulator across layouts and tails."""
+# contract-group: reduce.global
+# contract-group: kernel.reduce
 from std.testing import assert_equal, assert_true
 from dataframe import Expr, col
 from tests.support.coverage_generators import frame_from_model, chunk_layout

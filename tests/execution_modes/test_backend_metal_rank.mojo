@@ -1,4 +1,5 @@
 """Stable global and partitioned ranks through the resident Metal API."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
@@ -26,6 +27,7 @@ def methods() -> List[String]:
     return ["average", "min", "max", "dense", "ordinal"]
 
 
+# requires: metal
 def test_native_metal_rank_float_words_unsigned_limits_and_partitions() raises:
     _ = require_metal()
     var words: List[UInt64] = [
@@ -95,6 +97,7 @@ def test_native_metal_rank_float_words_unsigned_limits_and_partitions() raises:
                     )
 
 
+# requires: metal
 def test_native_metal_rank_all_numeric_widths_and_boolean() raises:
     _ = require_metal()
     comptime for D in NUMERIC_DTYPES:
@@ -130,6 +133,7 @@ def test_native_metal_rank_all_numeric_widths_and_boolean() raises:
         )
 
 
+# requires: metal
 def test_native_metal_rank_string_and_logical_values_multiple_partition_keys() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -171,6 +175,7 @@ def test_native_metal_rank_string_and_logical_values_multiple_partition_keys() r
                 )
 
 
+# requires: metal
 def test_native_metal_rank_resident_filters_groups_joins_empty_and_cost() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -237,6 +242,7 @@ def test_native_metal_rank_resident_filters_groups_joins_empty_and_cost() raises
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_rank_dense_prefix_across_blocks() raises:
     _ = require_metal()
     var values = List[Int64]()
@@ -270,8 +276,12 @@ def test_rank_capability_and_checked_input_preflight() raises:
     assert_true(len(plan.steps) == 2)
     assert_true(plan.outputs[0].slot == plan.steps[1].slot)
     var invalid = frame.lazy().select((col("x") + lit(Int32(1))).rank())
+    var observed = lower_rows(invalid, _capabilities())
+    assert_true(observed.ordered_mode == 10)
+    var unchecked = _capabilities()
+    unchecked.observed_rank_inputs = False
     with assert_raises(contains="checked rank inputs"):
-        _ = lower_rows(invalid, _capabilities())
+        _ = lower_rows(invalid, unchecked)
     var nested = frame.lazy().select(col("x").rank().over("x").over("x"))
     with assert_raises(contains="nested over scopes"):
         _ = lower_rows(nested, _capabilities())

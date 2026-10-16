@@ -5,6 +5,7 @@ from dataframe.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_integer_division_modulo_power_rounding_and_membership() raises:
     comptime types = (
         DType.int8,
@@ -55,6 +56,7 @@ def test_mojo_gpu_integer_division_modulo_power_rounding_and_membership() raises
             )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_integer_operator_endpoints_conditional_errors_and_reuse() raises:
     var source = DataFrame(
         [

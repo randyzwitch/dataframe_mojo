@@ -3,6 +3,7 @@ views, so joins and group-bys match keys across storages: up to eight bytes
 read in one load from inside the view, nine to twelve inline, longer ones
 from a buffer; with nulls, Unicode, NUL bytes, a sliced view column, and as
 the second key after an integer."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal
 
 from dataframe import Column, Series, StringColumn

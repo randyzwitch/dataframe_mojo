@@ -1,4 +1,6 @@
 """Checked scalar temporal branches observe ANY selected row, including row1."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_raises, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.metal import MetalRuntime
@@ -13,6 +15,7 @@ from dataframe.accelerator.gpu.temporal_descriptors import (
 )
 
 
+# requires: metal
 def test_mojo_gpu_temporal_scalar_faults_any_active_and_empty_rows() raises:
     var dtype = DataType.duration("ns")
     var checked_scalars: List[Expr] = [
@@ -71,6 +74,7 @@ def test_mojo_gpu_temporal_scalar_faults_any_active_and_empty_rows() raises:
             assert_true(result.column("v").dtype() == dtype)
 
 
+# requires: metal
 def test_mojo_gpu_temporal_safe_literal_cast_folding_preserves_dt_fields() raises:
     var source = DataFrame([Series("keep", Column[Bool]([False, True]))])
     var query = source.lazy().select(

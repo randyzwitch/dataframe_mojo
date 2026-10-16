@@ -1,4 +1,5 @@
 """Exact Decimal products and Float64 quotients preserve CPU semantics."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -81,6 +82,7 @@ def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     )
 
 
+# requires: metal
 def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_and_slices() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -217,6 +219,7 @@ def test_native_metal_decimal_multiplication_division_all_scales_widths_nulls_an
         parity(wide.lazy().select(col("a") / col("b")), runtime)
 
 
+# requires: metal
 def test_native_metal_decimal_multiplicative_proven_resident_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -252,6 +255,7 @@ def test_native_metal_decimal_multiplicative_proven_resident_consumers() raises:
     )
 
 
+# requires: metal
 def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_and_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -308,6 +312,7 @@ def test_native_metal_decimal_multiplicative_errors_conditionals_zero_divisor_an
     same(zero.collect(accelerator=runtime), zero.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_decimal_exact_product_literals_layouts_and_precision() raises:
     from tests.public_contracts.test_decimal_exact_product import (
         exact_scale_fixture,
@@ -350,6 +355,7 @@ def test_native_metal_decimal_exact_product_literals_layouts_and_precision() rai
             same(masked, query.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_decimal_product_width_and_quotient_literal_bits() raises:
     from std.memory import bitcast
 

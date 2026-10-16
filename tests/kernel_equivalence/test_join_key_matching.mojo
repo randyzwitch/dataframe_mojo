@@ -3,6 +3,7 @@ a time over batches of probe rows, against a nested-loop model: probes
 longer than a batch, strings stored as offsets or as Arrow views (inline
 lengths 0 to 12, and long strings that share their first bytes), floats
 with NaN and signed zero, Bool and Int128 keys, and a null in each key."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal
 
 from dataframe import BoolColumn, Column, Series, StringColumn

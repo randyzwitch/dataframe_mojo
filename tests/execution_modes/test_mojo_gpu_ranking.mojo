@@ -46,6 +46,7 @@ def _integer_case[D: DType]() raises:
             )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rank_integer_widths_chunks_methods_and_partitions() raises:
     comptime types = (
         DType.int8,
@@ -84,6 +85,7 @@ def test_mojo_gpu_rank_integer_widths_chunks_methods_and_partitions() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rank_floating_nan_direction_zero_ties_nulls_and_empty() raises:
     var source = DataFrame(
         [
@@ -167,6 +169,7 @@ def test_mojo_gpu_rank_floating_nan_direction_zero_ties_nulls_and_empty() raises
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_rank_compositions_key_errors_budget_and_reuse() raises:
     var frame = DataFrame(
         [

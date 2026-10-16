@@ -1,4 +1,6 @@
 """Variable-height distributions have explicit projection and grouping shapes."""
+# contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit
 

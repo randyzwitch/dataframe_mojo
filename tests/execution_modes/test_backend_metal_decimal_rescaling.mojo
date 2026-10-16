@@ -1,4 +1,5 @@
 """Exact decimal scale changes, integer conversions, and observed cast errors."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -40,6 +41,7 @@ def test_decimal_rescaling_capability_and_strict_metadata() raises:
     )
 
 
+# requires: metal
 def test_native_metal_decimal_rescaling_all_scales_widths_and_numeric_targets() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -93,6 +95,7 @@ def test_native_metal_decimal_rescaling_all_scales_widths_and_numeric_targets() 
         same(sliced.collect(accelerator=runtime), sliced.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_integer_decimal_casts_exact_words_nulls_and_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -175,6 +178,7 @@ def test_native_metal_integer_decimal_casts_exact_words_nulls_and_consumers() ra
     )
 
 
+# requires: metal
 def test_native_metal_decimal_cast_errors_observation_lax_budget_and_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
