@@ -17,6 +17,7 @@ from dataframe.lazy import (
     EXPLODE,
     UNNEST,
     CONCAT,
+    UNPIVOT,
     _is_scan,
     _plan_node,
     _references,
@@ -139,6 +140,9 @@ def prune_projections(mut query: LazyFrame) raises:
         if node.kind == UNNEST:
             reads.append(node.text)
         if node.kind == UNIQUE and len(node.names) == 0:
+            reads_all = True
+        if node.kind == UNPIVOT:
+            # Accelerators do not run unpivot; read every input column.
             reads_all = True
         if not reads_all:
             if needed[i]:
