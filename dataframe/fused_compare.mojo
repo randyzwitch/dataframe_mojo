@@ -17,7 +17,7 @@ from .binding import bind
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
-from .execution import evaluate
+from .execution import _numeric_literal, evaluate
 from .expr import (
     AND,
     COL,
@@ -27,9 +27,12 @@ from .expr import (
     IS_NOT_NULL,
     IS_NULL,
     LE,
+    LIT_FLOAT,
+    LIT_INT,
     LT,
     NE,
     OR,
+    UNTYPED,
     Expr,
     subtree,
 )
@@ -133,10 +136,23 @@ def _comparison(
             numeric = True
     if not numeric:
         return None
-    var no_columns = List[Series]()
-    var value = evaluate(
-        bind(subtree(part, constant_at), no_columns), no_columns, 1
-    )
+    # A typed numeric literal (what the optimizer folds a constant cast
+    # into) is read straight from its node; anything else is bound and
+    # evaluated. Filters build these comparisons for every morsel.
+    var value: Series
+    ref constant = part._nodes[constant_at]
+    if (
+        (constant.op == LIT_INT or constant.op == LIT_FLOAT)
+        and constant.text != UNTYPED
+        and len(constant.dtypes) == 1
+        and constant.dtypes[0]
+    ):
+        value = _numeric_literal(constant)
+    else:
+        var no_columns = List[Series]()
+        value = evaluate(
+            bind(subtree(part, constant_at), no_columns), no_columns, 1
+        )
     if len(value) != 1 or value.is_chunked() or value.null_count() > 0:
         return None
     if value.dtype() != column.dtype():
