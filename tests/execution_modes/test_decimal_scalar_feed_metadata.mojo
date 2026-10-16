@@ -1,10 +1,14 @@
 """No-device bounds for conditional checked Decimal Float64 SUM operands."""
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import BoundExpr, bind
 from dataframe.accelerator.decimal_scalar_feed import eligible
 from dataframe.accelerator.constants import fold_literal_text_parsing
 from dataframe.expr import LIT_INT, MUL, SUB
+from tests.execution_modes.test_conditional_decimal_aggregate_planning import (
+    source,
+    operand,
+)
 
 
 def fixture() raises -> DataFrame:
@@ -122,3 +126,15 @@ def test_decimal_money_literal_and_arithmetic_bound_metadata() raises:
             assert_equal(bound.dtypes[at], DataType.decimal(18, 4, 64))
             product = True
     assert_true(literal and subtraction and product)
+
+
+def test_conditional_decimal_sum_min_count_preserves_operand_faults() raises:
+    var masked = source().lazy().select(operand().sum(min_count=3).alias("v"))
+    var actual = masked.collect(engine="cpu", optimize=False).column("v")
+    assert_equal(actual.dtype(), DataType.FLOAT64)
+    assert_true(not actual.float64().is_valid(0))
+    var bad = (
+        source(True).lazy().select(operand().sum(min_count=999).alias("v"))
+    )
+    with assert_raises(contains="decimal precision"):
+        _ = bad.collect(engine="cpu", optimize=False)
