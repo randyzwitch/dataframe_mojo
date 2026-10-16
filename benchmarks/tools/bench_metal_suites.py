@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tokenize
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,6 +29,7 @@ import bench_suites as suites
 import bench_policy
 import metal_query_report
 from metal_materialization_adapter import lift_scalar_selects
+from metal_answer_exports import parse_export, collect_exports
 
 
 def sha(path):
@@ -140,6 +142,8 @@ def main() raises:
     for name, original in {
         "suite_common.mojo": ROOT / "benchmarks/suites/suite_common.mojo",
         "metal_suite_common.mojo": ROOT / "benchmarks/metal_suite_common.mojo",
+        "metal_suite_answer_exports.mojo": ROOT
+        / "benchmarks/metal_suite_answer_exports.mojo",
         "metal_suite_diagnostics.mojo": ROOT
         / "benchmarks/metal_suite_diagnostics.mojo",
     }.items():
@@ -178,9 +182,14 @@ def parse(output, query):
         raise ValueError("Unknown coverage outcome")
     result = {"status": status, "reason": rows[0][3]}
     diagnostics = {}
+    exports = []
     for line in output.splitlines():
         fields = line.split("\t")
-        if len(fields) == 2 and fields[0] in {
+        if fields[0] == "answer_export":
+            if len(fields) != 2:
+                raise ValueError("Malformed answer export line")
+            exports.append(parse_export(fields[1]))
+        elif len(fields) == 2 and fields[0] in {
             "output_rows",
             "collections",
             "collection_ns",
@@ -274,6 +283,8 @@ def parse(output, query):
         )
     if diagnostics:
         result["diagnostics"] = diagnostics
+    if exports:
+        result["answer_exports"] = exports
     return result
 
 
@@ -355,6 +366,11 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument(
+        "--export-answers",
+        action="store_true",
+        help="Export complete typed CPU/Metal answers outside collection timing; CPU repeat when the existing mismatch diagnostic runs.",
+    )
+    parser.add_argument(
         "--case-metadata",
         type=Path,
         default=ROOT / "benchmarks/tools/metal_case_metadata.json",
@@ -415,6 +431,10 @@ def main():
             "mojo": command(["mojo", "--version"]),
             "platform": platform.platform(),
             "driver_sha256": sha(__file__),
+            "answer_export_verifier_sha256": sha(
+                Path(__file__).with_name("metal_answer_exports.py")
+            ),
+            "answer_exports_requested": args.export_answers,
             "implementation": "mojo",
             "binaries_sha256": {
                 name: sha(path) for name, path in binaries.items()
@@ -460,6 +480,21 @@ def main():
                 case["execution_audit"] = audit
                 env = os.environ.copy()
                 env.update(DATAFRAME_THREADS=str(args.threads))
+                env.pop("DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX", None)
+                export_prefix = None
+                if args.export_answers:
+                    (out / "answers").mkdir(exist_ok=True)
+                    export_prefix = (
+                        Path(
+                            tempfile.mkdtemp(
+                                prefix=label + "-", dir=out / "answers"
+                            )
+                        )
+                        / "answer"
+                    )
+                    env["DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX"] = str(
+                        export_prefix
+                    )
                 env["DATAFRAME_BENCH_ALIGNMENT_KEYS"] = "\t".join(
                     audit.get("alignment_keys", [])
                 )
@@ -504,6 +539,18 @@ def main():
                     )
                 except ValueError as error:
                     case.update(status="protocol_failed", reason=str(error))
+                if export_prefix is not None:
+                    try:
+                        case["answer_exports"] = collect_exports(
+                            case.get("answer_exports", []),
+                            export_prefix,
+                            args.reps,
+                        )
+                    except ValueError as error:
+                        case["answer_exports"] = {
+                            "status": "unavailable",
+                            "error": str(error),
+                        }
                 data["cases"].append(case)
                 args.output.write_text(json.dumps(data, indent=2) + "\n")
                 print(label, case["status"], case.get("reason", ""), flush=True)
