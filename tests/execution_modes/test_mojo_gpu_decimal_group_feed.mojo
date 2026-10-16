@@ -158,7 +158,7 @@ def _money_and_prefix_certificates() raises:
     var right = DataFrame(
         [
             Series("g", Column[Int32]([0, 1])),
-            Series("orderdate", Column[Int32]([9000, 9100])).with_dtype(
+            Series("orderdate", Column[Int64]([9000, 9100])).with_dtype(
                 DataType.DATE
             ),
             Series("priority", Column[Int32]([0, 1])),
