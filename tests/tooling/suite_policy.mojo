@@ -3160,6 +3160,13 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_mojo_gpu_decimal_group_feed_coded_keys_publish_plain_strings",
+            "metal",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_decimal_scalar_feed.mojo::test_mojo_gpu_decimal_scalar_feed_ratio_money_masks_and_layouts",
             "metal",
         )
