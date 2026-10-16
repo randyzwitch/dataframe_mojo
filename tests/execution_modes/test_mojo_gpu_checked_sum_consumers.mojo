@@ -117,14 +117,11 @@ def test_mojo_gpu_checked_sum_overflow_before_suppressed_consumers_and_reuse() r
             else:
                 with assert_raises(contains="overflow"):
                     _ = _collect_sum(producer.filter(lit(False)), gpu, optimize)
-            var folded_false = producer.filter(lit(Int64(1)) > lit(Int64(2)))
-            if optimize:
-                assert_equal(
-                    _collect_sum(folded_false, gpu, optimize).height(), 0
-                )
-            else:
-                with assert_raises(contains="overflow"):
-                    _ = _collect_sum(folded_false, gpu, optimize)
+            # The canonical CPU folder handles equality/Boolean operations;
+            # it does not fold GT, so this predicate still observes the SUM.
+            var constant_gt = producer.filter(lit(Int64(1)) > lit(Int64(2)))
+            with assert_raises(contains="overflow"):
+                _ = _collect_sum(constant_gt, gpu, optimize)
             with assert_raises(contains="overflow"):
                 _ = _collect_sum(
                     producer.filter(col("total") < 0), gpu, optimize
