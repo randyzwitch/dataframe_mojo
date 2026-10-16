@@ -387,9 +387,11 @@ scripts/test_metal_local.sh
 
 It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
-Parquet reader, runs the `execution.backends` contracts with the `metal`
-capability, then the integrated query contracts and independent oracles.
-Those last steps can also run alone, with the pinned environment:
+Parquet reader, then runs every contract group that has a module marked
+`# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
+then runs the integrated query contracts and independent oracles, and reports
+every failed step at the end. Those last steps can also run alone, with the
+pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu

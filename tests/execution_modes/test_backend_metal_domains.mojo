@@ -1095,27 +1095,16 @@ def checked_boundary_preflight() raises:
     # Mojo carries checked per-value errors through row selection, so this
     # metadata boundary no longer requires the old provider's blanket refusal.
     assert_true("unsupported" not in unavailable.describe(checked_head))
-    with assert_raises(contains="strict casts require terminal"):
-        _ = (
-            source.lazy()
-            .with_columns(col("x").cast("int8").alias("n"))
-            .filter(col("n") > lit(Int8(0)))
-            .collect(accelerator=unavailable)
-        )
-    with assert_raises(contains="terminal boundary"):
-        _ = (
-            source.lazy()
-            .select(col("x").sum())
-            .join(source.lazy(), "x")
-            .collect(accelerator=unavailable)
-        )
-    with assert_raises(contains="terminal boundary"):
-        _ = (
-            source.lazy()
-            .select(col("x").sum())
-            .head(0)
-            .collect(accelerator=unavailable)
-        )
+    # Strict casts and checked SUMs before consumers are admitted; planning
+    # them must still finish without initializing a device.
+    for admitted in [
+        source.lazy()
+        .with_columns(col("x").cast("int8").alias("n"))
+        .filter(col("n") > lit(Int8(0))),
+        source.lazy().select(col("x").sum()).join(source.lazy(), "x"),
+        source.lazy().select(col("x").sum()).head(0),
+    ]:
+        assert_true("unsupported" not in unavailable.describe(admitted))
     var float_source = DataFrame([Series("f", Column[Float64]([1.5]))])
     assert_true(
         "unsupported"

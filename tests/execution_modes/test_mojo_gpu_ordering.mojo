@@ -277,14 +277,15 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
             Series("id", Column[Int64]([0, 1, 2])),
         ]
     )
-    # A sort observes checked key errors even when the key is later dropped.
+    # Checked key errors are observed even when the key is later dropped:
+    # the projection step reports them before the sort runs.
     var bad = (
         overflow.lazy()
         .with_columns((col("x") + 1).alias("key"))
         .sort("key")
         .select(["id"])
     )
-    with assert_raises(contains="sort key"):
+    with assert_raises(contains="overflow"):
         _ = bad.collect(accelerator=runtime, engine="accel")
     var recovered = (
         overflow.lazy()
