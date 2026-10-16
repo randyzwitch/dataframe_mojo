@@ -21,8 +21,8 @@ def physical_width_is_not_declared_precision() raises:
     raw.append(Int64.MAX)
     raw.append(Int64.MIN)
     raw.append(Int64.MIN)
-    var keys = List[Int32]([0, 0, 1, 2, 2])
-    var valid = List[Bool]([True, True, False, True, True])
+    var keys: List[Int32] = [0, 0, 1, 2, 2]
+    var valid: List[Bool] = [True, True, False, True, True]
     var dtype = DataType.decimal(18, 0, 64)
     var frame = DataFrame(
         [
@@ -116,10 +116,10 @@ def successful_sum_does_not_make_later_multiply_infallible() raises:
 
 def q64_scaled_literal_and_comparison_alignment() raises:
     var dtype = DataType.decimal(18, 2, 64)
-    var keys = List[Int32]([0, 1, 2])
-    var sales = List[Int64]([1000, 1000, Int64.MIN])
-    var refunds = List[Int64]([400, 600, Int64.MAX])
-    var valid = List[Bool]([True, True, False])
+    var keys: List[Int32] = [0, 1, 2]
+    var sales: List[Int64] = [1000, 1000, Int64.MIN]
+    var refunds: List[Int64] = [400, 600, Int64.MAX]
+    var valid: List[Bool] = [True, True, False]
     var frame = DataFrame(
         [
             Series("k", Column[Int32](keys^)),

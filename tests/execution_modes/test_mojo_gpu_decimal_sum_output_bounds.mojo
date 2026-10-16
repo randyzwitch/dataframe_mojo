@@ -23,12 +23,12 @@ from tests.support.lifecycle_jobs import WorkerSetting
 
 def source() raises -> DataFrame:
     var dtype = DataType.decimal(18, 2, 64)
-    var keys = List[Int32]([-2, -2, 0, 1])
-    var key_valid = List[Bool]([True, True, True, False])
-    var sale = List[Int64]([1000, 0, 1000, Int64.MIN])
-    var refund = List[Int64]([200, 200, 600, Int64.MAX])
-    var zero = List[Int64]([0, 0, 0, 1])
-    var valid = List[Bool]([True, True, True, False])
+    var keys: List[Int32] = [-2, -2, 0, 1]
+    var key_valid: List[Bool] = [True, True, True, False]
+    var sale: List[Int64] = [1000, 0, 1000, Int64.MIN]
+    var refund: List[Int64] = [200, 200, 600, Int64.MAX]
+    var zero: List[Int64] = [0, 0, 0, 1]
+    var valid: List[Bool] = [True, True, True, False]
     return DataFrame(
         [
             Series("g", Column[Int32](keys^, key_valid^)),
@@ -202,7 +202,7 @@ def test_mojo_gpu_sum_output_bounds_preserve_producer_fault_and_budget() raises:
 
 
 def test_sum_output_bounds_refuse_arbitrary_wide_columns_and_scale18_products() raises:
-    var payload = List[Int128]([1, 2])
+    var payload: List[Int128] = [1, 2]
     var wide = DataFrame(
         [
             Series("v", Column[Int128](payload^)).with_dtype(
