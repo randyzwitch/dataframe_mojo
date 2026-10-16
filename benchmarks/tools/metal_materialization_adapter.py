@@ -142,6 +142,7 @@ def signature(tokens):
     while index < end:
         if index + 1 < end and values[index + 1] == ":":
             name, type_start = values[index], index + 2
+            parameters[name] = UNKNOWN
             if values[type_start : type_start + 6] == [
                 "Dict",
                 "[",

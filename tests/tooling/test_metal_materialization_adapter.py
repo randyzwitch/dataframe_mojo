@@ -159,6 +159,11 @@ def caller(source: DataFrame) raises -> DataFrame:
     def test_local_api_shadow_is_not_a_scalar_expression_proof(self):
         source = sample(extra="    var col = custom_expression_factory\n")
         self.assertEqual(adapter.lift_scalar_selects(source)[1]["adapted"], [])
+        source = sample().replace(
+            "inputs: Dict[String, DataFrame]",
+            "inputs: Dict[String, DataFrame], col: CustomFactory",
+        )
+        self.assertEqual(adapter.lift_scalar_selects(source)[1]["adapted"], [])
 
 
 if __name__ == "__main__":
