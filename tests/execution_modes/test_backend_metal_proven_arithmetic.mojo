@@ -157,7 +157,7 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
     var restricted = _capabilities()
     restricted.deferred_integer_errors = False
     with assert_raises(contains="terminal projections"):
-        _ = lower_rows(unsafe.head(0), restricted)
+        _ = lower_rows(unsafe.head(1), restricted)
     with assert_raises(contains="strict casts"):
         _ = (
             source.lazy()

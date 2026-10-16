@@ -2067,7 +2067,6 @@ def lower_rows(
                             or operation == ABS
                             or operation == FLOORDIV
                             or operation == POW
-                            or (operation == MOD and window_op == RANK)
                         )
                         or operation == CAST
                         and child.expr._nodes[c].integer

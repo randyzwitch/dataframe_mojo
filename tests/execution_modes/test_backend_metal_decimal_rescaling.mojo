@@ -197,8 +197,10 @@ def test_native_metal_decimal_cast_errors_observation_lax_budget_and_reuse() rai
     var bad = frame.lazy().select(col("v").cast(target)).head(1)
     with assert_raises(contains="cast"):
         _ = bad.collect(engine="cpu", optimize=False)
-    with assert_raises(contains="strict casts require"):
-        _ = bad.collect(accelerator=runtime)
+    # The optimized head keeps only the representable first row on both.
+    same(bad.collect(accelerator=runtime), bad.collect(engine="cpu"))
+    with assert_raises(contains="cast"):
+        _ = bad.collect(accelerator=runtime, optimize=False)
     with assert_raises(contains="cast"):
         _ = (
             frame.lazy()

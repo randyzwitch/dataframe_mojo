@@ -142,12 +142,7 @@ def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() rai
     assert_true(
         grouped_head.collect(accelerator=MetalRuntime()).equals(cpu_head)
     )
-    with assert_raises(contains="checked sums require a terminal boundary"):
-        _ = (
-            wide.lazy()
-            .select_exprs(expressions)
-            .collect(accelerator=MetalRuntime())
-        )
+    check_siblings(wide.lazy().select_exprs(expressions))
     # Window states remain fully observed and permit the checked producer.
     check_siblings(
         wide.lazy().select(
