@@ -294,7 +294,7 @@ def test_mojo_gpu_binary_join_grouped_windows_and_raw_hash_provenance() raises:
                 assert_true(key.string_hash)
                 assert_equal(len(key.values[]), 4)
                 var code = Int(
-                    staged.dictionary.code(
+                    staged.dictionary[].code(
                         Span[UInt8, ImmutAnyOrigin](key_values[0])
                     )
                 )
@@ -432,7 +432,7 @@ def _dead_byte_branches_preserve_live_results_and_budget() raises:
     assert_equal(actual.query._nodes[0].offset, 0)
     assert_equal(actual.query._nodes[0].source_failure, "")
     assert_equal(actual.query._origin_rows[0], 12345)
-    assert_equal(actual.dictionary.keys, expected.dictionary.keys)
+    assert_equal(actual.dictionary[].keys, expected.dictionary[].keys)
     with assert_raises(contains="opaque staging"):
         _ = prepare(combined, memory_limit_bytes=expected.staging_bytes - 1)
     var cpu = combined.collect(engine="cpu", streaming=False)
@@ -453,7 +453,7 @@ def _dead_byte_branches_preserve_live_results_and_budget() raises:
     assert_false(has_opaque_columns(dead_numeric))
     var compact = prepare(dead_numeric, memory_limit_bytes=8)
     assert_equal(compact.staging_bytes, 8)
-    assert_equal(len(compact.dictionary.keys), 0)
+    assert_equal(len(compact.dictionary[].keys), 0)
     assert_equal(len(compact.query._frames), 1)
     var numeric_measured = numeric.profile(
         accelerator=MetalRuntime(), engine="accel"

@@ -1,8 +1,11 @@
 """Publish certified grouped fields as scoped GPU owners, without List export."""
+from std.memory import ArcPointer
+from .grouped_key_owner import GroupedKeyOwner, GroupedKeyField
+from dataframe.accelerator.grouped_key_domains import CODED_STRING
 from dataframe.parallel import configured_workers
 from dataframe import DataFrame, Series
 from dataframe.accelerator.grouped_lists import GroupedListsPlan
-from .residency import Scope, Table
+from .residency import Scope, Table, TextDomain
 from .runtime import execute_plan
 from .device_lists import (
     DeviceLists,
@@ -35,16 +38,30 @@ def _column(source: Table, name: String) raises -> Table:
                 and not source.storage
                 and not source.identity_storage
             ):
-                return Table.empty(result.schema.copy())
+                var empty = Table.empty(result.schema.copy())
+                empty.text = [source.text[index].copy()]
+                empty.categories = [source.categories[index].copy()]
+                empty.category_leases = source.category_leases.copy()
+                empty.grouped_keys = [source.grouped_keys[index].copy()]
+                return empty^
             result.columns = [source.columns[index]]
+            result.text = [source.text[index].copy()]
+            result.categories = [source.categories[index].copy()]
+            result.category_leases = source.category_leases.copy()
+            result.grouped_keys = [source.grouped_keys[index].copy()]
             return result^
     raise Error("Grouped IMPLODE output column is missing")
 
 
 def _validate_source(
-    plan: GroupedListsPlan, source: Table, scope: Scope
+    plan: GroupedListsPlan,
+    source: Table,
+    scope: Scope,
+    typed: Optional[ArcPointer[GroupedKeyOwner]] = None,
 ) raises:
-    if (
+    if typed:
+        typed.value()[].validate(plan, source, scope)
+    if not typed and (
         len(plan.key_provenance)
         or plan.source.source_domain
         or len(plan.source.source_text)
@@ -114,7 +131,12 @@ def _slice(
 
 
 def produce(
-    plan: GroupedListsPlan, source: Table, scope: Scope, profiling: Bool = False
+    plan: GroupedListsPlan,
+    source: Table,
+    scope: Scope,
+    profiling: Bool = False,
+    *,
+    typed: Optional[ArcPointer[GroupedKeyOwner]] = None,
 ) raises -> ResidentFrame:
     """Complete the certified grouped producer without any List/value export.
 
@@ -123,15 +145,22 @@ def produce(
     reconstructs keys or groups on CPU, never creates a new Scope, and cannot
     grant an original-source ordering certificate to an arbitrary resident AST.
     """
-    _validate_source(plan, source, scope)
+    var retained_typed = typed.copy()
+    _validate_source(plan, source, scope, typed)
     source.observe_errors()
     var layout = build_groups(source, plan.names, scope)
+    var text_domain = Optional[ArcPointer[TextDomain]]()
+    for field in source.text:
+        if field:
+            text_domain = field.value().domain.copy()
+            break
     var key_result = execute_plan(
         plan.keys,
         scope,
         Optional(source.copy()),
         profiling,
         export_values=False,
+        text_domain=text_domain,
     )
     var keys = key_result[0].copy()
     keys.observe_errors()
@@ -303,6 +332,24 @@ def produce(
             table.schema = DataFrame(
                 [table.schema._columns[0].renamed(request.name)]
             )
+            if typed and request.source < len(plan.names):
+                table.grouped_keys = [
+                    GroupedKeyField(typed.value().copy(), request.source)
+                ]
+                ref original = typed.value()[].query[]
+                var logical = typed.value()[].publication(request.source)
+                table.schema._columns[
+                    0
+                ]._field_metadata = logical._field_metadata
+                if table.text[0]:
+                    var publication_text = table.text[0].value().copy()
+                    publication_text.logical = logical.dtype()
+                    table.text[0] = publication_text^
+                if (
+                    original.domains[request.source].kind == CODED_STRING
+                    or not logical.dtype().is_categorical()
+                ):
+                    table.categories[0] = None
             final_indices.append(len(final_tables))
             final_tables.append(table^)
             final_kinds.append(False)
@@ -324,7 +371,23 @@ def produce(
             table.schema._columns[0]._field_metadata = plan.schema._columns[
                 index
             ]._field_metadata
-            fields.append(ResidentField.primitive(table))
+            if table.grouped_keys[0]:
+                ref certificate = table.grouped_keys[0].value()
+                var publication = certificate.owner[].publication(
+                    certificate.domain
+                )
+                table.schema._columns[
+                    0
+                ]._field_metadata = publication._field_metadata
+            var field = ResidentField.primitive(table)
+            if table.grouped_keys[0]:
+                ref certificate = table.grouped_keys[0].value()
+                field.prototype = (
+                    certificate.owner[]
+                    .publication(certificate.domain)
+                    .renamed(plan.schema._columns[index].name())
+                )
+            fields.append(field^)
     var result = ResidentFrame(scope.copy(), keys.rows, fields^)
     validate_frame(result, scope)
     for slice in plan.slices:
@@ -337,4 +400,5 @@ def produce(
     _ = scalars^
     _ = final_tables^
     _ = final_lists^
+    _ = retained_typed^
     return result^

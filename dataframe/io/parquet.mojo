@@ -290,7 +290,9 @@ def read_parquet(
             if g < 0:
                 raise Error("read_parquet: row group indices must be >= 0")
             groups.append(Int32(g))
-    return _read_with_dfparquet(path, columns, groups, group_count, use_threads)
+    return _read_with_dfparquet(
+        path, columns, groups, group_count, use_threads
+    )._with_statistics()
 
 
 def parquet_row_group_statistics(path: String) raises -> DataFrame:
