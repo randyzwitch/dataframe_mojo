@@ -1,4 +1,5 @@
 """Scalar reductions broadcast through resident GPU branches into row expressions."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import (
     capabilities as _capabilities,
     estimate_resources,
@@ -126,6 +127,7 @@ def test_scalar_broadcast_rejects_file_reads_and_checked_integer_children() rais
         )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_mixed_projections_and_literal_scalar_outputs() raises:
     _ = require_metal()
     var frame = fixture()
@@ -155,6 +157,7 @@ def test_native_metal_scalar_broadcast_mixed_projections_and_literal_scalar_outp
     )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_filters_and_head_observe_complete_prefix() raises:
     _ = require_metal()
     var frame = fixture()
@@ -179,6 +182,7 @@ def test_native_metal_scalar_broadcast_filters_and_head_observe_complete_prefix(
     )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_with_columns_joins_and_grouped_consumers() raises:
     _ = require_metal()
     var frame = fixture()
@@ -199,6 +203,7 @@ def test_native_metal_scalar_broadcast_with_columns_joins_and_grouped_consumers(
     )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_empty_null_and_conditional_inputs() raises:
     _ = require_metal()
     var frame = fixture()
@@ -233,6 +238,7 @@ def test_native_metal_scalar_broadcast_empty_null_and_conditional_inputs() raise
         )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_float32_subnormal_values() raises:
     _ = require_metal()
     var tiny = bitcast[DType.float32](UInt32(1))
@@ -253,6 +259,7 @@ def test_native_metal_scalar_broadcast_float32_subnormal_values() raises:
     )
 
 
+# requires: metal
 def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -348,6 +355,7 @@ def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() r
     )
 
 
+# requires: metal
 def test_native_metal_conditional_integer_means_limits_nulls_empty_and_partitions() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -480,6 +488,7 @@ def test_native_metal_conditional_integer_means_limits_nulls_empty_and_partition
     )
 
 
+# requires: metal
 def test_native_metal_conditional_integer_means_resident_joins_filters_and_budget() raises:
     _ = require_metal()
     var n = 8193

@@ -8,6 +8,8 @@ ones. Worker counts cover tables that clear and keep their rows (three or
 more) and tables that grow (two). Decimal sums and means (decimal32, 64
 and 128 inputs) keep exact 128-bit totals on both routes and raise past
 their precision."""
+# contract-group: reduce.grouped
+# contract-group: kernel.reduce
 from std.testing import assert_equal, assert_raises, assert_true
 
 from dataframe import (

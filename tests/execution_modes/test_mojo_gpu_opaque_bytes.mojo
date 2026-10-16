@@ -1,4 +1,6 @@
 """Public Binary/Geometry GPU transport and raw-key contracts."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer, bitcast
 from std.math import abs
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
@@ -75,6 +77,7 @@ def _ids(frame: DataFrame, expected: List[Int64]) raises:
     assert_equal(frame.column("id").int64().to_list(), expected)
 
 
+# requires: metal
 def test_mojo_gpu_binary_opaque_raw_bytes_literals_stable_orders_layouts_and_metadata() raises:
     var source = _binary()
     var metadata: List[UInt8] = [1, 0, 0, 0, 1, 0, 0, 0, 107, 1, 0, 0, 0, 118]
@@ -197,6 +200,7 @@ def test_mojo_gpu_binary_opaque_raw_bytes_literals_stable_orders_layouts_and_met
         )
 
 
+# requires: metal
 def test_mojo_gpu_binary_join_grouped_windows_and_raw_hash_provenance() raises:
     var source = _binary()
     var ids = List[Int64]()
@@ -294,7 +298,7 @@ def test_mojo_gpu_binary_join_grouped_windows_and_raw_hash_provenance() raises:
                 assert_true(key.string_hash)
                 assert_equal(len(key.values[]), 4)
                 var code = Int(
-                    staged.dictionary.code(
+                    staged.dictionary[].code(
                         Span[UInt8, ImmutAnyOrigin](key_values[0])
                     )
                 )
@@ -345,6 +349,7 @@ def _geometry(crs: String) raises -> Series:
     )
 
 
+# requires: metal
 def test_mojo_gpu_geometry_transport_preserves_wkb_identity_crs_and_field_metadata() raises:
     var source = _geometry('{"crs":"EPSG:4326"}')
     var metadata: List[UInt8] = [1, 0, 0, 0, 1, 0, 0, 0, 107, 1, 0, 0, 0, 118]
@@ -432,7 +437,7 @@ def _dead_byte_branches_preserve_live_results_and_budget() raises:
     assert_equal(actual.query._nodes[0].offset, 0)
     assert_equal(actual.query._nodes[0].source_failure, "")
     assert_equal(actual.query._origin_rows[0], 12345)
-    assert_equal(actual.dictionary.keys, expected.dictionary.keys)
+    assert_equal(actual.dictionary[].keys, expected.dictionary[].keys)
     with assert_raises(contains="opaque staging"):
         _ = prepare(combined, memory_limit_bytes=expected.staging_bytes - 1)
     var cpu = combined.collect(engine="cpu", streaming=False)
@@ -453,7 +458,7 @@ def _dead_byte_branches_preserve_live_results_and_budget() raises:
     assert_false(has_opaque_columns(dead_numeric))
     var compact = prepare(dead_numeric, memory_limit_bytes=8)
     assert_equal(compact.staging_bytes, 8)
-    assert_equal(len(compact.dictionary.keys), 0)
+    assert_equal(len(compact.dictionary[].keys), 0)
     assert_equal(len(compact.query._frames), 1)
     var numeric_measured = numeric.profile(
         accelerator=MetalRuntime(), engine="accel"
@@ -480,6 +485,7 @@ def _dead_byte_branches_preserve_live_results_and_budget() raises:
     )
 
 
+# requires: metal
 def test_mojo_gpu_opaque_budgets_observers_empty_inputs_and_explicit_refusals() raises:
     _dead_byte_branches_preserve_live_results_and_budget()
     var source = _binary()

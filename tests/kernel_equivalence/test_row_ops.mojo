@@ -1,4 +1,5 @@
 """Row kernels against scalar models, with explicit specialized/fallback calls."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import BoolColumn, Column, DataType, Series
 from dataframe.column import gather_scalars

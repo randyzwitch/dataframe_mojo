@@ -1,4 +1,5 @@
 """Independent typed anchors for scalar mode and exact decimal histograms."""
+# contract-group: public.apple_parity
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
 from dataframe import (

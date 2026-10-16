@@ -1,4 +1,5 @@
 """Distinct row membership and multiplicity follow scalar key equality."""
+# contract-group: table.sets_reshape
 from std.testing import assert_equal, assert_raises
 from dataframe import DataFrame
 from tests.support.reference_model import (

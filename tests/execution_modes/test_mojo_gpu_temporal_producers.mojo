@@ -1,4 +1,7 @@
 """Observed temporal producers retain original phase and mask behavior."""
+# contract-group: execution.apple_parity
+# contract-group: execution.iana_producers
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.metal import MetalRuntime
@@ -6,6 +9,7 @@ from tests.support.coverage_compare import assert_frame
 from tests.tooling.iana_scalar_any_proofs import _frame, _expression
 
 
+# requires: metal
 def test_mojo_gpu_temporal_producer_head_order_group_faults_and_recovery() raises:
     var runtime = MetalRuntime()
     var naive = DataType.datetime("us")
@@ -68,6 +72,7 @@ def test_mojo_gpu_temporal_producer_head_order_group_faults_and_recovery() raise
     )
 
 
+# requires: metal
 def test_mojo_gpu_temporal_producer_integer_prefix_sibling_order_and_recovery() raises:
     var runtime = MetalRuntime()
     var source = DataFrame(
@@ -153,6 +158,7 @@ def test_mojo_gpu_temporal_producer_integer_prefix_sibling_order_and_recovery() 
     )
 
 
+# requires: metal
 def test_mojo_gpu_temporal_producer_scalar_any_streaming_batch_geometry() raises:
     var runtime = MetalRuntime()
     var mismatches = 0

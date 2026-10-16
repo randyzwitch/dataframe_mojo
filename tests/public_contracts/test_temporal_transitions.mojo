@@ -1,4 +1,5 @@
 """Civil transition contracts use an independent piecewise-offset model."""
+# contract-group: expr.temporal
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col
 from tests.support.coverage_compare import assert_frame

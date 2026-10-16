@@ -1,4 +1,5 @@
 """Literal original categorical codes, dictionaries and decoded ROW semantics."""
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import (
     Column,
@@ -57,6 +58,7 @@ def _collect(query: LazyFrame, gpu: Bool) raises -> DataFrame:
     ) if gpu else query.collect(engine="cpu", streaming=False, optimize=False)
 
 
+# requires: metal
 def test_mojo_gpu_categorical_original_rows_filter_sort_group_and_over() raises:
     var labels: List[String] = ["dup", "dup", "z", "unused"]
     var dtype = _dtype(labels)
@@ -131,6 +133,7 @@ def test_mojo_gpu_categorical_original_rows_filter_sort_group_and_over() raises:
             _integers(decoded, "sum", [51, 51, 4, 8, 51, 51])
 
 
+# requires: metal
 def test_mojo_gpu_categorical_join_duplicate_codes_and_dictionary_union() raises:
     var labels: List[String] = ["dup", "dup", "z", "unused"]
     var dtype = _dtype(labels)
@@ -190,6 +193,7 @@ def test_mojo_gpu_categorical_join_duplicate_codes_and_dictionary_union() raises
         _codes(mixed.column("k"), [1, 1], ["new", "dup", "z", "unused"])
 
 
+# requires: metal
 def test_mojo_gpu_categorical_asof_temporary_by_union_preserves_output_owner() raises:
     var left_dtype = _dtype(["dup", "dup", "unused"])
     var payload_dtype = _dtype(["payload", "payload", "unused-payload"])
@@ -243,6 +247,7 @@ def test_mojo_gpu_categorical_asof_temporary_by_union_preserves_output_owner() r
         _integers(resident, "r", [-1, 10])
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_categorical_dictionary_budget_owners() raises:
     from std.memory import ArcPointer
     from dataframe.accelerator.gpu.residency import Scope, CategoryLease, Table
@@ -264,6 +269,7 @@ def test_mojo_gpu_categorical_dictionary_budget_owners() raises:
     assert_false(scope.initialized())
 
 
+# requires: metal
 def test_mojo_gpu_categorical_mixed_join_control_readback_and_budget() raises:
     from std.memory import ArcPointer
     from std.testing import assert_raises
@@ -326,6 +332,7 @@ def test_mojo_gpu_categorical_mixed_join_control_readback_and_budget() raises:
         )
 
 
+# requires: metal
 def test_mojo_gpu_coded_string_group_publication_drops_original_code_identity() raises:
     from std.memory import ArcPointer
     from dataframe.categorical import decode

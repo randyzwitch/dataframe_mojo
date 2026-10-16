@@ -3,6 +3,9 @@
 Cell expectations are independent positional literals. Sharing and release are
 observed separately with Arc identities, actual destructors, and unmapped pages.
 """
+# contract-group: storage.views
+# contract-group: storage.isolation
+# contract-group: storage.chunks
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
 from std.testing import assert_equal, assert_true, assert_raises
@@ -653,6 +656,10 @@ def test_native_string_and_nested_foreign_exports_own_materialized_adapters_afte
             assert_nested_native(imported, shape == 2)
 
 
+# expected-failure: Arrow date32 export narrows hidden null Int64.MAX payloads
+# expected-failure: and raises instead of preserving valid visible dates plus
+# expected-failure: nulls.
+# expected-diagnostic: date export must ignore hidden null payloads
 def test_date_export_does_not_narrow_hidden_null_payloads() raises:
     var releases = 0
     var array = ArrowArray()

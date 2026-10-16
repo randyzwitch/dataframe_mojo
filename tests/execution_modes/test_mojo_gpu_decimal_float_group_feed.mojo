@@ -1,4 +1,6 @@
 """Infallible Float64 states retain narrow Decimal operand observations."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
@@ -102,6 +104,7 @@ def literal(actual: DataFrame, nullable: Bool) raises:
     assert_equal(actual.column("money")._decimal_raw(1), Int128(2000))
 
 
+# requires: metal
 def test_mojo_gpu_decimal_float_group_feed_literals_views_nulls_and_states() raises:
     require_metal()
     for nullable in [False, True]:
@@ -138,6 +141,7 @@ def test_mojo_gpu_decimal_float_group_feed_literals_views_nulls_and_states() rai
                 )
 
 
+# requires: metal
 def test_mojo_gpu_decimal_float_group_feed_precision_faults_and_ieee_division() raises:
     require_metal()
     var bad = DataFrame(

@@ -35,6 +35,7 @@ def _source(rows: Int, other_values: Bool = False) raises -> DataFrame:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_calibration_metadata() raises:
     var source = _source(257)
     var query = (
@@ -108,6 +109,7 @@ def test_mojo_gpu_calibration_metadata() raises:
     assert_true(reductions.accelerator[11] < facts.accelerator[11])
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_calibration_isolation() raises:
     var facts = estimate(
         _source(17).lazy().select((col("x") * lit(Float32(2))).alias("x"))
@@ -166,6 +168,7 @@ def test_mojo_gpu_calibration_isolation() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_calibration_measurements() raises:
     var query = (
         _source(257).lazy().select((col("x") * lit(Float32(2))).alias("x"))

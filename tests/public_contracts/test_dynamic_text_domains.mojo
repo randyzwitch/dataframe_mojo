@@ -1,4 +1,5 @@
 """Logical text provenance and immutable union/map metadata, no GPU needed."""
+# contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import DataFrame, DataType, Series
@@ -37,6 +38,7 @@ def _dtype(values: List[String]) -> DataType:
     return DataType.categorical(dictionary^)
 
 
+# requires: mojo_gpu
 def test_dynamic_text_domain_union_maps_are_metadata_and_private() raises:
     var scope = Scope(99999)
     var original = _dtype(["a", "z"])
@@ -113,6 +115,7 @@ def test_dynamic_text_domain_union_maps_are_metadata_and_private() raises:
     assert_equal(scope.info()[0], 0)
 
 
+# requires: mojo_gpu
 def test_dynamic_text_domains_keep_original_categorical_and_hash_provenance() raises:
     var scope = Scope(99999)
     var ordered = _dtype(["a", "m", "z"])
@@ -163,6 +166,7 @@ def test_dynamic_text_domains_keep_original_categorical_and_hash_provenance() ra
     assert_false(scope.initialized())
 
 
+# requires: mojo_gpu
 def test_dynamic_text_domain_guards_precede_device_creation() raises:
     var scope = Scope(99999)
     var denied = Scope(99999, 0)
@@ -202,6 +206,7 @@ def test_dynamic_text_domain_guards_precede_device_creation() raises:
     assert_false(foreign.initialized())
 
 
+# requires: mojo_gpu
 def test_dynamic_qcut_label_controls_match_cpu_literal_spelling() raises:
     from dataframe.accelerator.gpu.qcut_labels import build
 

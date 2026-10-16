@@ -1,4 +1,5 @@
 """Zero-column sources and resident consumers retain independent row metadata."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import (
     capabilities as _capabilities,
@@ -67,6 +68,7 @@ def test_empty_inputs_capability_schema_descriptors_and_empty_selectors() raises
     assert_equal(result.width(), 0)
 
 
+# requires: metal
 def test_native_metal_empty_inputs_rows_slices_filters_and_literal_broadcasts() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -94,6 +96,7 @@ def test_native_metal_empty_inputs_rows_slices_filters_and_literal_broadcasts() 
         )
 
 
+# requires: metal
 def test_native_metal_empty_inputs_selectors_and_resident_scalar_consumers() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -126,6 +129,7 @@ def test_native_metal_empty_inputs_selectors_and_resident_scalar_consumers() rai
         )
 
 
+# requires: metal
 def test_native_metal_empty_inputs_profiles_cost_budget_and_runtime_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

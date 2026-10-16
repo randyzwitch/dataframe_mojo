@@ -1,4 +1,5 @@
 """Streaming aggregation decisions preserve scalar groups across budget boundaries."""
+# contract-group: execution.modes
 from std.math import abs
 from std.os import getenv
 from std.io import FileDescriptor

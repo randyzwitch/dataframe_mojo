@@ -1,4 +1,6 @@
 """Public MetalRuntime temporal arithmetic and physical-cast contracts."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
@@ -60,6 +62,7 @@ def check(
             assert_equal(value, values[row])
 
 
+# requires: metal
 def test_mojo_gpu_temporal_binary_arithmetic_extremes_layouts_descriptors_and_budget() raises:
     var d = DataType.duration("ns")
     var original = DataFrame(
@@ -126,6 +129,7 @@ def test_mojo_gpu_temporal_binary_arithmetic_extremes_layouts_descriptors_and_bu
     print("PASS public temporal arithmetic values/layouts/descriptors/budget")
 
 
+# requires: metal
 def test_mojo_gpu_temporal_physical_casts_conditional_masks_and_overflow_contract() raises:
     var target = DataType.duration("ns")
     var original = DataFrame(
@@ -238,6 +242,7 @@ def test_mojo_gpu_temporal_physical_casts_conditional_masks_and_overflow_contrac
     print("PASS public temporal casts/conditional masks/error anchors")
 
 
+# requires: metal
 def test_mojo_gpu_temporal_arithmetic_preflight_rejects_checked_producers_and_resident_sources() raises:
     var d = DataType.duration("ns")
     var frame = DataFrame(

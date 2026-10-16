@@ -1,4 +1,7 @@
 """Opaque schema agreement and parent-offset import across worker dispatch."""
+# contract-group: storage.isolation
+# contract-group: kernel.row_ops
+# contract-group: io.arrow
 from std.testing import assert_equal, assert_true, assert_raises
 from std.sys import CompilationTarget
 from dataframe.io.arrow import _ARROW_IMPORT_MIN_CELLS, _arrow_import_workers

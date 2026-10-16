@@ -1,4 +1,5 @@
 """Join order changes preserve coalesced names and position-sensitive barriers."""
+# contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
 from dataframe.lazy import JOIN, SELECT, PlanNode, _late_key_build

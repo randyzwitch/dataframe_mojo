@@ -53,6 +53,7 @@ def _typed_join[D: DType](runtime: MetalRuntime, dtype: DataType) raises:
             )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides() raises:
     var runtime = MetalRuntime()
     comptime types = (
@@ -73,6 +74,7 @@ def test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides() 
     _typed_join[DType.int64](runtime, DataType.DATE)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads() raises:
     var encodings: List[UInt64] = [
         0,
@@ -206,6 +208,7 @@ def test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads() raises:
         same(actual, query.collect(engine="cpu", streaming=False))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget() raises:
     var ids = List[Int32]()
     for row in range(50_000):
@@ -244,6 +247,7 @@ def test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight() raises:
     var left = DataFrame(
         [
@@ -362,6 +366,7 @@ def test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_join_empty_projection_preserves_cardinality_and_zero_column_contract() raises:
     var left = DataFrame([Series("k", Column[Int64]([1, 2, 2, 3]))])
     var right = DataFrame([Series("k", Column[Int64]([2, 2, 4]))])

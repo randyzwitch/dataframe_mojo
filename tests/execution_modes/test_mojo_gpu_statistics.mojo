@@ -82,6 +82,7 @@ def _layout_case[D: DType](n: Int, chunked: Bool) raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_statistics_numeric_layouts_empty_masks_and_mixed_outputs() raises:
     comptime types = (DType.int64, DType.uint64, DType.float32, DType.float64)
     comptime for i in range(len(types)):
@@ -90,6 +91,7 @@ def test_mojo_gpu_statistics_numeric_layouts_empty_masks_and_mixed_outputs() rai
             _layout_case[types[i]](n, True)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_statistics_nonfinite_constant_and_scalar_anchors() raises:
     var examples: List[List[Float64]] = [
         [],
@@ -136,6 +138,7 @@ def test_mojo_gpu_statistics_nonfinite_constant_and_scalar_anchors() raises:
     assert_true(isnan(result.item(0, "correlation").float64()))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_statistics_filtered_sliced_and_pair_intersection() raises:
     var frame = DataFrame(
         [

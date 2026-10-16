@@ -1,4 +1,5 @@
 """Stable binary64 moments through scalar, grouped and partitioned Metal."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt, isnan, isfinite
@@ -93,6 +94,7 @@ def test_moments_capability_precision_metadata_and_private_casts() raises:
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_moments_numeric_widths_ddof_empty_null_and_literal_results() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
@@ -187,6 +189,7 @@ def test_native_metal_moments_numeric_widths_ddof_empty_null_and_literal_results
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_moments_ieee_words_full_unsigned_and_decimal_casts() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
@@ -254,6 +257,7 @@ def test_native_metal_moments_ieee_words_full_unsigned_and_decimal_casts() raise
     _ = setting^
 
 
+# requires: metal
 def test_native_metal_moments_large_worker_merges_and_conditioned_accuracy() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -339,6 +343,7 @@ def test_native_metal_moments_large_worker_merges_and_conditioned_accuracy() rai
         _ = setting^
 
 
+# requires: metal
 def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse() raises:
     _ = require_metal()
     var setting = WorkerSetting(1)
