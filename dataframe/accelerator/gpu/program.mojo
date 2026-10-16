@@ -177,7 +177,9 @@ struct Program(Movable):
                             plan.slot_dtypes[output.slot],
                         ),
                         decimal_descriptors.reduction_parameter(
-                            plan.slot_dtypes[output.slot], output.min_count
+                            plan.slot_dtypes[output.slot],
+                            output.min_count,
+                            plan.decimal_feed_batch_rows != 0,
                         ) if plan.slot_dtypes[output.slot].is_decimal()
                         and (
                             output.reduction == SUM or output.reduction == MEAN

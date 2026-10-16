@@ -17,6 +17,7 @@ from dataframe.string_column import StringColumn
 from dataframe.nested_column import ListColumn, StructColumn
 from dataframe.expr import (
     Node,
+    CAST,
     DT_REPLACE_TZ,
     DT_TRUNCATE,
     DT_OFFSET_BY,
@@ -40,9 +41,33 @@ from dataframe.producer_origin import (
 from .metadata import schema_frame, prune_projections
 from . import iana_mutations, ordered_rows
 from .memory import checked_add, checked_mul
+from .integer_ranges import proven_integer_nodes
 
 comptime OBSERVED_IANA = 6
+comptime OBSERVED_STRICT_CAST = 7
 comptime MATERIALIZATION = "metal_original_temporal_producer"
+comptime STRICT_CAST_MATERIALIZATION = "metal_original_strict_cast_producer"
+
+
+def _marker(phase: Int) -> String:
+    return (
+        STRICT_CAST_MATERIALIZATION if phase
+        == OBSERVED_STRICT_CAST else MATERIALIZATION
+    )
+
+
+def _strict_cast(bound: BoundExpr) -> Bool:
+    var proven = proven_integer_nodes(bound)
+    for at in range(len(bound.expr._nodes)):
+        ref node = bound.expr._nodes[at]
+        if (
+            node.op == CAST
+            and node.integer
+            and not proven[at]
+            and not bound.dtypes[at].is_float()
+        ):
+            return True
+    return False
 
 
 def _bound_bytes(bound: BoundExpr) raises -> Int:
@@ -376,7 +401,7 @@ def validate_prefix(query: LazyFrame, index: Int) raises:
         raise Error("Original producer typed provenance is missing")
     var origin = node.producer_origin.value()
     if (
-        node.text != MATERIALIZATION
+        node.text != _marker(origin[].phase)
         or _phase_geometry(node) != origin[].phase_geometry
         or not node.lineage_anchor
         or Int(Pointer(to=node.lineage_anchor.value()[]))
@@ -417,7 +442,7 @@ def validate_bound(node: PlanNode, bound: BoundExpr, index: Int) raises:
         raise Error("Original producer typed provenance is missing")
     var origin = node.producer_origin.value()
     if (
-        node.text != MATERIALIZATION
+        node.text != _marker(origin[].phase)
         or _phase_geometry(node) != origin[].phase_geometry
     ):
         raise Error("Original producer phase geometry changed")
@@ -459,19 +484,25 @@ def prepare_original(
         ref operation = result._nodes[at]
         if (
             (operation.kind != SELECT and operation.kind != WITH_COLUMNS)
-            or operation.text.byte_length()
-            or len(operation.names2)
+            or (
+                operation.text.byte_length()
+                and operation.text != "metal_integer_materialization"
+                and operation.text != "metal_decimal_materialization"
+            )
+            or (len(operation.names2) and not operation.text)
         ):
             continue
         var input = schema_frame(result, operation.left)
         var bounds = List[BoundExpr]()
         var signatures = List[String]()
         var temporal = False
+        var strict_cast = False
         var eligible = True
         for expression in operation.exprs:
             var bound = bind(expression, input._columns)
             eligible &= bound.shape() == ROWS
             temporal |= iana_mutations.contains(bound)
+            strict_cast |= _strict_cast(bound)
             for node in bound.expr._nodes:
                 eligible &= not is_reduction(node.op) and not is_window(node.op)
             eligible &= ordered_rows.eligible(bound, allow_iana=True)
@@ -485,8 +516,16 @@ def prepare_original(
             and operation.left == 0
             and result._nodes[0].kind == SCAN_FRAME
         )
-        if not eligible or not temporal or direct:
+        if not eligible or not (temporal or strict_cast) or direct:
             continue
+        # The original-entry bridge may already have marked this exact row
+        # projection as checked integer/decimal work. Its typed certificate
+        # supersedes that marker before retaining any prefix signatures.
+        if operation.text and not strict_cast:
+            continue
+        if operation.text:
+            operation.text = ""
+            operation.names2.clear()
         operation.lineage_anchor = ArcPointer(Int(0))
         var prefix = List[Prefix]()
         var sources = List[Series]()
@@ -555,9 +594,10 @@ def prepare_original(
         retained = checked_add(
             retained, checked_mul(geometry.byte_length() + 32, 2)
         )
+        var phase = OBSERVED_IANA if temporal else OBSERVED_STRICT_CAST
         operation.producer_origin = ArcPointer(
             ProducerOrigin(
-                OBSERVED_IANA,
+                phase,
                 geometry,
                 operation.lineage_anchor.value(),
                 bounds^,
@@ -570,7 +610,7 @@ def prepare_original(
                 retained,
             )
         )
-        operation.text = MATERIALIZATION
+        operation.text = _marker(phase)
     return result^
 
 
@@ -711,7 +751,8 @@ def has_candidates(query: LazyFrame) -> Bool:
             for node in expression._nodes:
                 if len(query._nodes) > 2 or operation.kind == WITH_COLUMNS:
                     if (
-                        node.op == DT_REPLACE_TZ
+                        (node.op == CAST and node.integer)
+                        or node.op == DT_REPLACE_TZ
                         or node.op == DT_TRUNCATE
                         or node.op == DT_OFFSET_BY
                     ):
