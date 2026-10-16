@@ -22,6 +22,7 @@ from dataframe.lazy import (
     _time_window_reads,
     _plan_node,
     _references,
+    _row_order_step,
 )
 
 
@@ -137,6 +138,7 @@ def prune_projections(mut query: LazyFrame) raises:
             or node.kind == EXPLODE
             or node.kind == UNNEST
             or node.kind == CONCAT
+            or _row_order_step(node.kind)
         )
         if node.kind == UNNEST:
             reads.append(node.text)
