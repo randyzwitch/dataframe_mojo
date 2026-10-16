@@ -1,4 +1,5 @@
 """Decimal-to-Float64 casts round the integer first, then divide by scale."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -121,6 +122,7 @@ def test_decimal_cast_capability_scale_descriptors_and_rejections() raises:
     assert_true("unsupported" not in runtime.describe(query))
 
 
+# requires: metal
 def test_native_metal_decimal_cast_all_scales_widths_and_integer_rounding() raises:
     _ = require_metal()
     for scale in range(39):
@@ -145,6 +147,7 @@ def test_native_metal_decimal_cast_all_scales_widths_and_integer_rounding() rais
     check(frame.lazy().select(col("a").cast(DataType.FLOAT64)))
 
 
+# requires: metal
 def test_native_metal_decimal_cast_empty_nulls_slices_sort_and_resident_filters() raises:
     _ = require_metal()
     for n in List[Int]([0, 1, 4097, 65537]):
@@ -178,6 +181,7 @@ def test_native_metal_decimal_cast_empty_nulls_slices_sort_and_resident_filters(
     )
 
 
+# requires: metal
 def test_native_metal_decimal_cast_aggregates_windows_broadcasts_and_joins() raises:
     _ = require_metal()
     var frame = fixture(257, 18)
@@ -245,6 +249,7 @@ def test_native_metal_decimal_cast_aggregates_windows_broadcasts_and_joins() rai
     )
 
 
+# requires: metal
 def test_native_metal_decimal_cast_profile_budget_and_recovery() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

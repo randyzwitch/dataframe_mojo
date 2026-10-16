@@ -1,4 +1,5 @@
 """Native temporal fields and fixed logical values use independent calendars."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
@@ -238,6 +239,7 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_calendar() raises:
     temporal_cases(require_metal(), True)
 
@@ -264,6 +266,7 @@ def extreme_date_plan() raises -> LazyFrame:
     )
 
 
+# requires: metal
 def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields() raises:
     var runtime = require_metal()
     var plan = extreme_date_plan()
@@ -410,6 +413,7 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
     )
 
 
+# requires: metal
 def test_native_metal_fixed_truncation_literal_folding_and_temporal_resident_groups() raises:
     truncation_cases(require_metal(), True)
 
@@ -479,6 +483,7 @@ def logical_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_fixed_logical_metadata_survives_nullable_rows_and_extrema() raises:
     logical_cases(require_metal(), True)
 
@@ -528,6 +533,7 @@ def temporal_preflight_cases() raises:
         _ = lower_rows(wide_arg_min, without_wide_reductions)
 
 
+# requires: metal
 def test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup() raises:
     _ = require_metal()
     temporal_preflight_cases()
@@ -546,6 +552,7 @@ def test_metal_temporal_lowering_and_cpu_models() raises:
     verify_metal_temporal_cpu_models()
 
 
+# requires: metal
 def test_native_metal_date_fields_match_independent_full_storage_domain() raises:
     from tests.public_contracts.test_temporal_extremes import (
         full_date_fixture,

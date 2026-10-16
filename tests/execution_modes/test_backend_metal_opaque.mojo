@@ -1,4 +1,5 @@
 """Opaque Float64 follows row identities and preserves every valid IEEE word."""
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
@@ -259,6 +260,7 @@ def opaque_cases(runtime: MetalRuntime, native: Bool) raises:
         )
 
 
+# requires: metal
 def test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words() raises:
     opaque_cases(require_metal(), True)
 
@@ -282,6 +284,7 @@ def opaque_preflight() raises:
         )
 
 
+# requires: metal
 def test_native_metal_opaque_float64_computation_rejects_before_device_setup() raises:
     _ = require_metal()
     opaque_preflight()

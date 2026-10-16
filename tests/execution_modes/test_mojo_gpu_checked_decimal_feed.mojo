@@ -1,4 +1,6 @@
 """Checked Decimal operand batches remain observed before SUM consumers."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.lazy import LazyFrame
@@ -50,6 +52,7 @@ def _narrow(width: Int) raises -> DataFrame:
     return DataFrame([left.with_dtype(dtype), right.with_dtype(dtype)])
 
 
+# requires: mojo_gpu
 def test_checked_decimal_feed_metadata_retains_eager_boundary_and_signature() raises:
     var query = _narrow(128).lazy().select(feed_expression()).head(0)
     var configured = query._with_accelerator_settings(False, False, 17)
@@ -74,6 +77,7 @@ def test_checked_decimal_feed_metadata_retains_eager_boundary_and_signature() ra
         _ = lower_join_dag(unsupported, capabilities())
 
 
+# requires: metal
 def test_mojo_gpu_checked_decimal_sum_feed_success_layouts_nulls_and_consumers() raises:
     var workers = WorkerSetting(1)
     for width in [32, 64, 128]:
@@ -168,6 +172,7 @@ def _worker_fixture(
     )
 
 
+# requires: metal
 def test_mojo_gpu_checked_decimal_sum_feed_faults_before_head_and_empty_join() raises:
     test_checked_decimal_sum_operand_batches_precede_prefix_observation()
     var workers = WorkerSetting(1)

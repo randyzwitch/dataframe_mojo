@@ -1,4 +1,5 @@
 """Fixed plans retain independent semantics across CPU execution modes."""
+# contract-group: execution.modes
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, DataType, col
 from dataframe.parallel import _helpers

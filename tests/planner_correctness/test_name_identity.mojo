@@ -1,4 +1,5 @@
 """Identifier encoding preserves identity through dependencies and shared plans."""
+# contract-group: planner.relational
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, Series, as_struct, col
 from tests.support.name_cases import opaque_names

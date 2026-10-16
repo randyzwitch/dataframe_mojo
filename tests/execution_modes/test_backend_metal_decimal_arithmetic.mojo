@@ -1,4 +1,5 @@
 """Decimal row addition/subtraction and width-preserving unary operations."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
@@ -75,6 +76,7 @@ def test_decimal_unary_cpu_storage_widths_and_arithmetic_descriptors() raises:
         _ = lower_rows(query, caps)
 
 
+# requires: metal
 def test_native_metal_decimal_add_subtract_all_widths_scales_and_unary_metadata() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -149,6 +151,7 @@ def test_native_metal_decimal_add_subtract_all_widths_scales_and_unary_metadata(
         same(sliced.collect(accelerator=runtime), sliced.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_decimal_arithmetic_proven_consumers_aggregates_and_windows() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -182,6 +185,7 @@ def test_native_metal_decimal_arithmetic_proven_consumers_aggregates_and_windows
     )
 
 
+# requires: metal
 def test_native_metal_decimal_arithmetic_checked_errors_conditionals_budget_and_reuse() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -257,6 +261,7 @@ def test_native_metal_decimal_arithmetic_checked_errors_conditionals_budget_and_
     same(valid.collect(accelerator=runtime), valid.collect(engine="cpu"))
 
 
+# requires: metal
 def test_native_metal_decimal_add_subtract_literal_result_types_and_boundaries() raises:
     _ = require_metal()
     var runtime = MetalRuntime()

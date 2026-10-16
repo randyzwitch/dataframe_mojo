@@ -1,4 +1,6 @@
 """Unbuilt integration fixtures: IANA tables preserve exact CPU local fields."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.metal import MetalRuntime
@@ -1233,6 +1235,7 @@ def _literals() -> List[List[Int64]]:
     ]
 
 
+# requires: metal
 def test_mojo_gpu_iana_fields_literal_transitions_footer_extrema_and_nullable_layouts() raises:
     var zones: List[String] = [
         "America/New_York",
@@ -1314,6 +1317,7 @@ def test_mojo_gpu_iana_fields_literal_transitions_footer_extrema_and_nullable_la
                 assert_equal(empty.dtypes(), expected.dtypes())
 
 
+# requires: metal
 def test_mojo_gpu_iana_fields_descriptor_dedup_budgets_conversion_and_refusals() raises:
     _check_distinct_zone_tables_after_decimal_program()
     assert_true(not RowCapabilities().iana_zone_temporal_fields)

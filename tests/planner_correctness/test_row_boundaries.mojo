@@ -1,4 +1,5 @@
 """Rewrite barriers preserve row identity, stable order and whole-input state."""
+# contract-group: planner.row_rewrites
 from std.testing import assert_equal
 from dataframe import LazyFrame, col, lit
 from tests.support.reference_model import ReferenceTable, generated_model

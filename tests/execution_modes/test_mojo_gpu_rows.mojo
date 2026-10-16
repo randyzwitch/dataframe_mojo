@@ -5,6 +5,7 @@ from dataframe import Column, DataFrame, DataType, Series, col, lit, when
 from dataframe.metal import MetalRuntime
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_integer_widths_nullable_slices_chunks_and_chained_programs() raises:
     comptime types = (
         DType.int8,
@@ -64,6 +65,7 @@ def test_mojo_gpu_integer_widths_nullable_slices_chunks_and_chained_programs() r
                     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_conditional_errors_are_observed_only_in_selected_values() raises:
     var source = DataFrame(
         [
@@ -87,6 +89,7 @@ def test_mojo_gpu_conditional_errors_are_observed_only_in_selected_values() rais
     _ = query.collect(accelerator=MetalRuntime(), engine="accel")
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_integer_endpoints_and_width_overflow_match_exact_anchors() raises:
     comptime types = (
         DType.int8,
@@ -138,6 +141,7 @@ def test_mojo_gpu_integer_endpoints_and_width_overflow_match_exact_anchors() rai
             )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_preserves_float64_storage_and_reports_direct_execution() raises:
     var patterns: List[UInt64] = [
         0,
@@ -185,6 +189,7 @@ def test_mojo_gpu_preserves_float64_storage_and_reports_direct_execution() raise
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_boolean_kleene_nulls_empty_rows_and_zero_columns() raises:
     var source = DataFrame(
         [
@@ -238,6 +243,7 @@ def test_mojo_gpu_boolean_kleene_nulls_empty_rows_and_zero_columns() raises:
     assert_equal(no_columns.width(), 0)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_floating_arithmetic_predicates_rounding_and_subnormals() raises:
     from tests.execution_modes.test_backend_metal_float64_emulation import (
         fixture,
@@ -344,6 +350,7 @@ def test_mojo_gpu_floating_arithmetic_predicates_rounding_and_subnormals() raise
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_transcendentals_power_and_numeric_casts() raises:
     from tests.execution_modes.test_backend_metal_transcendentals import (
         fixture,
@@ -471,6 +478,7 @@ def test_mojo_gpu_transcendentals_power_and_numeric_casts() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits() raises:
     from tests.execution_modes.test_backend_metal_float64_emulation import same
 
@@ -579,6 +587,7 @@ def test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits() raises:
         )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_compaction_observes_checked_work_on_surviving_rows() raises:
     var frame = DataFrame(
         [

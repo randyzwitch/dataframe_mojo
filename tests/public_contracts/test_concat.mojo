@@ -1,4 +1,5 @@
 """Concatenation follows independently constructed schemas and ordered rows."""
+# contract-group: table.sets_reshape
 from std.testing import assert_raises
 from dataframe import DataFrame, Series, concat
 from tests.support.reference_model import generated_model

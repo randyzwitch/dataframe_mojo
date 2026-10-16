@@ -1,4 +1,6 @@
 """Whole-group CPU OVER runs retain floating and checked decimal prefixes."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
@@ -42,6 +44,7 @@ def _float_skew_frame(hashed: Bool) raises -> DataFrame:
     )
 
 
+# requires: metal
 def test_mojo_gpu_partition_schedule_skewed_float_runs() raises:
     var setting = WorkerSetting(4)
     for hashed in [False, True]:
@@ -72,6 +75,7 @@ def test_mojo_gpu_partition_schedule_skewed_float_runs() raises:
     _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_partition_schedule_skewed_decimal_prefixes() raises:
     var setting = WorkerSetting(4)
     for hashed in [False, True]:
@@ -112,6 +116,7 @@ def test_mojo_gpu_partition_schedule_skewed_decimal_prefixes() raises:
     _ = setting^
 
 
+# requires: metal
 def test_mojo_gpu_partition_schedule_dictionary_provenance() raises:
     var setting = WorkerSetting(4)
     var dictionary = CategoricalDictionary()

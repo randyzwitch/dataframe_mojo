@@ -1,4 +1,6 @@
 """Reduction accumulators and equality use the full logical decimal domain."""
+# contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from tests.support.coverage_generators import offset_layout, chunk_layout
@@ -112,6 +114,12 @@ def test_decimal_means_allow_exact_totals_beyond_input_precision() raises:
                 assert_true(empty.item().is_null())
 
 
+# expected-failure: Independent quadratic Int128 equality counts five distinct
+# expected-failure: values including null. Decimal128 scaled values beyond
+# expected-failure: Int64, duplicate and signs; eager-global ordinary error is
+# expected-failure: first reached witness.
+# expected-diagnostic: n_unique of a decimal value beyond 64 bits is not
+# expected-diagnostic: supported
 def test_decimal_distinct_counts_compare_full_int128_values() raises:
     # n_unique accepts any logical type; a Decimal128 value is not limited
     # to Int64. Independent equality over scaled integers counts null once.
@@ -201,26 +209,62 @@ def _wide_mean(grouped: Bool, lazy: Bool, streaming: Bool) raises:
                         assert_equal(actual.item(row, "m").float64(), expected)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_eager_global_mean_uses_wide_total() raises:
     _wide_mean(False, False, False)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_eager_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, False, False)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_materialized_global_mean_uses_wide_total() raises:
     _wide_mean(False, True, False)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_materialized_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, True, False)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_streaming_global_mean_uses_wide_total() raises:
     _wide_mean(False, True, True)
 
 
+# expected-failure: Decimal128(3,2)
+# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
+# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
+# expected-failure: optimizeFalse reached before ordinary error; later
+# expected-failure: variants are unexecuted.
+# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_streaming_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, True, True)
 

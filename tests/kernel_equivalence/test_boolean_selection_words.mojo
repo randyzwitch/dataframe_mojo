@@ -1,4 +1,5 @@
 """Boolean fill and null retention use independent scalar state expectations."""
+# contract-group: kernel.row_ops
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, DataType, Series, col, lit
 from dataframe.bool_column import BoolColumn

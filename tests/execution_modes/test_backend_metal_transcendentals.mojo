@@ -1,4 +1,5 @@
 """GPU exponential/logarithm approximations retain domain and numeric contracts."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
@@ -110,6 +111,7 @@ def test_transcendental_capability_metadata_types_and_no_device_preflight() rais
         )
 
 
+# requires: metal
 def test_native_metal_transcendentals_float_widths_subnormals_extremes_nulls_and_empty_rows() raises:
     var runtime = require_metal()
     for dtype in List[DataType]([DataType.FLOAT32, DataType.FLOAT64]):
@@ -155,6 +157,7 @@ def test_native_metal_transcendentals_float_widths_subnormals_extremes_nulls_and
     assert_equal(known.column("l").float64()._get(1), Float64(0))
 
 
+# requires: metal
 def test_native_metal_transcendentals_resident_consumers_windows_chunks_and_scalar_literals() raises:
     var runtime = require_metal()
     var frame = DataFrame(
@@ -202,6 +205,7 @@ def test_native_metal_transcendentals_resident_consumers_windows_chunks_and_scal
     check(frame.lazy().select(lit(Float64(0)).exp()), runtime)
 
 
+# requires: metal
 def test_native_metal_transcendentals_profiles_family_exact_budget_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = (

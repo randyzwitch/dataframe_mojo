@@ -1,4 +1,5 @@
 """Ordered terminal admission and rank/control traffic are context-free."""
+# contract-group: public.apple_parity
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,

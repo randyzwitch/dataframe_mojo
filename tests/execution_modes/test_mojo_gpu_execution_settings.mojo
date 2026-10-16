@@ -1,4 +1,6 @@
 """Metal receives requested settings while preserving operator batch contracts."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -23,6 +25,7 @@ from tests.tooling.contract_runner import (
 )
 
 
+# requires: metal
 def test_mojo_gpu_settings_control_file_planning_and_preserve_eager_fault_batches() raises:
     var work = temporary_directory("/tmp/mojo-gpu-execution-settings")
     var missing = work + "/missing.csv"

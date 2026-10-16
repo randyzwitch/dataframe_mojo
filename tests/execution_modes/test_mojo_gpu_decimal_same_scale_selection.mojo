@@ -1,4 +1,6 @@
 """Implicit same-scale Decimal literal casts in original grouped operands."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import BoundExpr, bind, ROWS
@@ -184,6 +186,7 @@ def literal(actual: DataFrame, nullable: Bool) raises:
     assert_equal(actual.column("after_total")._decimal_raw(1), Int128(5300))
 
 
+# requires: metal
 def test_mojo_gpu_decimal_same_scale_selection_nulls_masks_and_layouts() raises:
     require_metal()
     for nullable in [False, True]:
@@ -220,6 +223,7 @@ def test_mojo_gpu_decimal_same_scale_selection_nulls_masks_and_layouts() raises:
                 )
 
 
+# requires: metal
 def test_mojo_gpu_decimal_same_scale_fill_observes_both_children_under_when() raises:
     require_metal()
     var frame = DataFrame(

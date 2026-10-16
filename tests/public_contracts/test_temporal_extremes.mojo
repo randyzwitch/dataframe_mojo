@@ -1,4 +1,5 @@
 """Extreme date fields keep Gregorian meaning without signed epoch-shift wrap."""
+# contract-group: expr.temporal
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, DataType, Series, Column, Expr, col
 

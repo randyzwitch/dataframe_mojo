@@ -1,4 +1,5 @@
 """As-of joins select independently modeled rows and preserve full left schemas."""
+# contract-group: table.join
 from std.collections import Optional
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import AnyValue, Column, DataFrame, DataType, Series

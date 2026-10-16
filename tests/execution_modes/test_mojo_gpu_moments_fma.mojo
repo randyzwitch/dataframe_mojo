@@ -123,6 +123,7 @@ def test_cpu_public_moments_local_fma_and_nan_payload_literal_layouts() raises:
     cpu_nan_layouts[DType.float64]()
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_public_moments_local_fma_exact_layouts_and_nulls() raises:
     var runtime = MetalRuntime()
     for nullable in [False, True]:
@@ -172,6 +173,7 @@ def gpu_nan_layouts[D: DType](runtime: MetalRuntime) raises:
             )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_public_moments_nan_payload_first_input_layouts_and_nulls() raises:
     var runtime = MetalRuntime()
     gpu_nan_layouts[DType.float32](runtime)

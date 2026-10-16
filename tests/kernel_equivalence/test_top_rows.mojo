@@ -1,4 +1,5 @@
 """Parallel per-chunk Top-N candidate rebasing and stable tie selection."""
+# contract-group: kernel.order_keys
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, col

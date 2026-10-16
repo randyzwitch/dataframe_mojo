@@ -1,4 +1,5 @@
 """Schema selector expansion precedes every Metal expression normalization."""
+# contract-group: execution.backends
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import (
     DataFrame,
@@ -77,6 +78,7 @@ def test_metal_selectors_metadata_names_positions_dtypes_and_errors() raises:
         _ = missing.select(all()).collect(accelerator=runtime)
 
 
+# requires: metal
 def test_native_metal_selectors_projection_replacement_filters_strings_and_estimates() raises:
     _ = require_metal()
     var frame = fixture()
@@ -112,6 +114,7 @@ def test_native_metal_selectors_projection_replacement_filters_strings_and_estim
     check(query)
 
 
+# requires: metal
 def test_native_metal_selectors_aggregates_partition_windows_join_and_consumer_scopes() raises:
     _ = require_metal()
     var frame = fixture()

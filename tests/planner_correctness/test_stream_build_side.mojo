@@ -2,6 +2,7 @@
 smaller (DuckDB's build side): the join's result keeps the left's row order
 and every row the written join gives, and a join whose left cannot be the
 smaller keeps building on its right."""
+# contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame

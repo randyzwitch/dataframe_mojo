@@ -1,4 +1,5 @@
 """Typed CSV interchange preserves null/empty/text distinctions across buffers."""
+# contract-group: io.csv
 from std.os import getenv
 from dataframe import CsvSchema, read_csv, write_csv
 from tests.support.coverage_generators import generated_frame, chunk_layout
