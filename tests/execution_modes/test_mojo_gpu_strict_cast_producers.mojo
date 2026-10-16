@@ -63,7 +63,7 @@ def test_mojo_gpu_strict_cast_complete_phase_faults_and_conditionals() raises:
             _ = failing.collect(engine="cpu", optimize=False, streaming=False)
         with assert_raises(contains="strict cast failed"):
             _ = failing.collect(accelerator=MetalRuntime(), optimize=False)
-    var empty_right = DataFrame([Series("y", Column[Int8]())])
+    var empty_right = DataFrame([Series("y", Column[Int8](List[Int8]()))])
     var joined = produced.join(empty_right.lazy(), "y").head(0)
     with assert_raises(contains="cast from int64 to int8 failed"):
         _ = joined.collect(engine="cpu", optimize=False, streaming=False)
