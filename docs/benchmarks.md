@@ -325,3 +325,21 @@ reproduce a historical record in `docs/`.
 | `bench_lazy_pipeline.mojo`, `bench_lazy_streaming.mojo`, `bench_lazy_measurement.mojo`, `scripts/bench_lazy_streaming.py` | `8a50a95` | Lazy CSV pipelines, measured-input reuse and the streaming executor; the suites measure full queries end to end |
 | `bench_suite.mojo` (`bench`, `bench-smoke`) | `8a50a95` | Quick mixed CPU workloads, replaced by the suites |
 | `bench_fallbacks.mojo`, `bench_fallbacks_polars.py` | `8a50a95` | Development checks for mixed aggregation and general row sorting, with a Polars counterpart; the suites cover both on upstream queries |
+
+
+Forced-Metal mismatch diagnostics retain the exact schema and duplicate-row
+multiset comparator. Failed comparisons additionally record schema/cardinality,
+whole-row and per-column multisets, and a second CPU query's comparison. Numeric
+row comparisons require source-pinned output keys and runtime checks that both
+outputs have unique, identical key sets; a zero- or one-row result can align by
+position. Each aligned column reports mismatch and null counts; floating columns
+also report finite ULP, absolute, and relative maxima separately from nonfinite
+differences. These distances never change pass/fail. NaNs and signed zero retain
+`DataFrame.equals` semantics. Declared sort keys can expose output ties but do
+not prove that a tie caused a truncated-result difference. Missing certificates
+and secondary diagnostic failures remain explicit. Case audits are embedded in
+receipts, with their metadata hash, so a later checkout cannot silently replace
+the measured alignment or hybrid classification. The CPU-only literal entry
+`tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo` validates diagnostic
+behavior independently of GPU execution (include `-I benchmarks`). Collection
+durations remain diagnostic and are not performance measurements.
