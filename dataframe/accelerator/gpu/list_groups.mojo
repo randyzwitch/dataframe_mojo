@@ -103,6 +103,8 @@ def build_groups(
         if mapped < 0:
             raise Error("Grouped List key source is missing")
         program.code[4 * node + 1] = source.columns[mapped]
+        if source.categories[mapped]:
+            program.code[4 * node + 3] = 2
     var rows = source.rows
     var blocks = (rows + 255) // 256
     var bytes = checked_add(

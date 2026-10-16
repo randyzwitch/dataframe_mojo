@@ -448,6 +448,11 @@ def build(
         if found < 0:
             raise Error("Grouped CPU schedule key source is missing")
         program.code[4 * node + 1] = source.columns[found]
+        if source.categories[found]:
+            program.code[4 * node + 3] = 2
+            program.literals[node] = (
+                (UInt64(1) << 63) | (UInt64(1) << 62) | (UInt64(1) << 61)
+            )
     var rows = source.rows
     var workers = max(
         1, max(min(configured, rows // 65536), min(configured, rows // 16384))
@@ -884,6 +889,10 @@ def gather_phase(
             output_columns^,
             rows,
         )
+        result.text = source.text.copy()
+        result.categories = source.categories.copy()
+        result.category_leases = source.category_leases.copy()
+        result.grouped_keys = source.grouped_keys.copy()
         _ = mapping^
         _ = matrix^
         _ = held_mapping^

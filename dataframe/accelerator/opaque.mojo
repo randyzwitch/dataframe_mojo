@@ -46,7 +46,7 @@ from .opaque_dictionary import ByteDomain
 struct OpaquePlan(Movable):
     var query: LazyFrame
     var schema: DataFrame
-    var dictionary: ByteDomain
+    var dictionary: ArcPointer[ByteDomain]
     var staging_bytes: Int
 
 
@@ -251,7 +251,11 @@ def prepare(
         staged._frames[index] = DataFrame(
             columns^, height=staged._frames[index].height()
         )
-    return OpaquePlan(staged^, schema^, dictionary^, staging)
+    var shared = ArcPointer(dictionary^)
+    for index in range(len(staged._nodes)):
+        if staged._nodes[index].grouped_keys:
+            staged._nodes[index].grouped_byte_domain = shared.copy()
+    return OpaquePlan(staged^, schema^, shared^, staging)
 
 
 def _retained_frame_bytes(frame: DataFrame) raises -> Int:
@@ -327,15 +331,15 @@ def restoration_bytes(frame: DataFrame, plan: OpaquePlan) raises -> Int:
         for row in range(len(column)):
             if codes._valid(row):
                 var code = Int(codes._get(row))
-                if code >= len(plan.dictionary.keys):
+                if code >= len(plan.dictionary[].keys):
                     raise Error(
                         "Metal opaque result code is outside dictionary"
                     )
                 payload = checked_add(
                     payload,
                     Int(
-                        plan.dictionary.offsets[code + 1]
-                        - plan.dictionary.offsets[code]
+                        plan.dictionary[].offsets[code + 1]
+                        - plan.dictionary[].offsets[code]
                     ),
                 )
         # restore() builds row byte Lists before packing final bytes/offsets.
@@ -361,7 +365,8 @@ def restore(frame: DataFrame, plan: OpaquePlan) raises -> DataFrame:
     var columns = List[Series](capacity=frame.width())
     for index in range(frame.width()):
         var column = (
-            plan.dictionary.restore(
+            plan.dictionary[]
+            .restore(
                 frame._columns[index], plan.schema._columns[index]
             ) if plan.schema._columns[index]
             .dtype()

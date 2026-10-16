@@ -2976,6 +2976,23 @@ def execute_plan(
                             field.category.value().owner.copy(),
                             result.categories[output].value().string_codes,
                         )
+    if resident_input:
+        for output in range(len(plan.outputs)):
+            var slot = plan.outputs[output].slot
+            if (
+                plan.outputs[output].reduction < 0
+                and slot >= 0
+                and slot < plan.source.width()
+            ):
+                var name = plan.source._columns[slot].name()
+                for column in range(resident_input.value().schema.width()):
+                    if (
+                        resident_input.value().schema._columns[column].name()
+                        == name
+                    ):
+                        result.grouped_keys[output] = (
+                            resident_input.value().grouped_keys[column].copy()
+                        )
     if not terminal_boundary:
         result.observe_errors()
     var traffic = scope.transfers()
