@@ -70,7 +70,7 @@ def test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_ful
                     var x = values[a + 7]
                     var y = values[b + 7]
                     if isnan(x) != isnan(y):
-                        return not isnan(x)
+                        return isnan(x) if descending else not isnan(x)
                     if not isnan(x) and x != y:
                         return x > y if descending else x < y
                 var ap = text_valid[a + 7]

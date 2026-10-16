@@ -26,8 +26,8 @@ Per key:
   UInt64 has its top bit toggled, since values at or above 2**63 would
   otherwise be negative.
 - Floats use the IEEE-754 total order (flip every bit of a negative, the
-  sign bit of a positive), which also puts NaN above every number, the
-  order sorting already documents. Getting this half right -- the total
+  sign bit of a positive), which also puts NaN above every number, as
+  Polars and DuckDB order it. Getting this half right -- the total
   order without the sign toggle -- sorts every positive below every
   negative, so the tests below check signs explicitly.
 - Booleans are 0 and 1.
@@ -35,12 +35,11 @@ Per key:
   Int64.MIN overflows while inversion is total and order-reversing.
 - A column with nulls, or any float column, gets a rank word *before* its
   value word, so placement is decided before the value is compared: 0 for
-  an ordinary value, 1 for NaN, and 2 or -1 for a null according to
-  `nulls_last`. NaN needs its own tier because sorting here documents
-  "NaN ranks after the numbers in either direction", where the IEEE total
-  order would flip NaN to the front of a descending sort. The rank word is
-  never inverted, so both NaN and null placement survive `descending`.
-  Columns that can hold neither skip the word entirely.
+  an ordinary value, 1 for NaN ascending or -1 descending, and 2 or -2 for
+  a null according to `nulls_last`. NaN is the largest value, so its tier
+  puts it after the numbers ascending and before them descending. The rank
+  word is never inverted, so null placement survives `descending`. Columns
+  that can hold neither skip the word entirely.
 """
 from std.memory import bitcast
 
@@ -167,7 +166,10 @@ def encode_sort_keys(
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
-        var null_rank = 2 if nulls_last[k] else -1
+        var null_rank = 2 if nulls_last[k] else -2
+        # NaN is the largest value: after the numbers ascending, before
+        # them descending.
+        var nan_rank = -1 if flip else 1
         var ranked = List[Int](length=rows if nulls or floating else 0, fill=0)
         var values = List[Int](length=rows, fill=0)
         # Strings fill these with their prefix; other dtypes leave it empty.
@@ -204,7 +206,7 @@ def encode_sort_keys(
                     var value = typed._get(offset + i)
                     comptime if D.is_floating_point():
                         if value != value:
-                            ranked[i] = 1
+                            ranked[i] = nan_rank
                             continue
                     var order = _value_order[D](value)
                     values[i] = ~order if flip else order

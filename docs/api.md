@@ -339,7 +339,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def with_column(self, var column: Series) -> Self`
   Replace by name or append; the input dataframe is unchanged.
 - `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True) -> Self`
-  Stable single-column sort. NaNs follow non-null numbers.
+  Stable single-column sort. NaN is the largest value: it follows the numbers ascending and precedes them descending.
 - `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
   Stable lexicographic sort by several columns, one direction.
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> Self`

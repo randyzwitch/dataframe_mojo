@@ -851,7 +851,8 @@ struct Expr(Copyable):
         """Rank non-null values: average, min, max, dense, or ordinal.
 
         Ranks start at 1; average gives Float64, the rest Int64. Ordinal
-        breaks ties by row order. NaN ranks after numbers, as in sort.
+        breaks ties by row order. NaN is the largest value, as in sort: it
+        ranks after the numbers ascending and before them descending.
         """
         return self._window(RANK, reverse=descending, text=method)
 

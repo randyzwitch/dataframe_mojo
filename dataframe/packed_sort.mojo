@@ -11,9 +11,10 @@ every key fall back to row order in either direction.
 The packing stays small by storing each key relative to its own range:
 `value - min` (or `max - value` descending) takes only as many bits as the
 column spans, so an Int64 key of 1..100,000 costs 17 bits, not 64. A key
-with nulls or NaN adds a two-bit tier above its value (nulls first, value,
-NaN, nulls last), which keeps both placements independent of direction as
-the general path documents. A string key drops the prefix every value
+with nulls or NaN adds a two-bit tier above its value: nulls first, then
+value and NaN (NaN second when descending, since NaN is the largest value),
+then nulls last. Null placement stays independent of direction, as the
+general path documents. A string key drops the prefix every value
 shares and keeps its next 7 bytes and its remaining length, capped at 8:
 exact for strings that end within those 7 bytes, and for longer strings a
 prefix key whose ties are settled by comparing the strings themselves. That
@@ -43,10 +44,12 @@ from .series import Series
 from .string_bytes import _Bytes
 from .string_column import StringColumn
 
-# Tier codes as stored: a key with nulls or NaN orders tiers first.
+# Tier codes as stored: a key with nulls or NaN orders tiers first. Values
+# take the lower middle tier ascending and NaN the upper; descending swaps
+# them, so NaN, the largest value, comes first (`_Key.value_code`).
 comptime _NULLS_FIRST = 0
-comptime _VALUE = 1
-comptime _NAN = 2
+comptime _LOWER = 1
+comptime _UPPER = 2
 comptime _NULLS_LAST = 3
 # Per-row tier while extracting: 0 value, 1 NaN, 2 null.
 comptime _ROW_VALUE = UInt8(0)
@@ -103,6 +106,13 @@ def _string_order(
 
 
 @always_inline
+def _value_code(descending: Bool) -> Int:
+    """The tier of an ordinary value: below NaN ascending, above it
+    descending."""
+    return _UPPER if descending else _LOWER
+
+
+@always_inline
 def _length_bits(width: Int) -> Int:
     return _bit_length(UInt64(width + 1))
 
@@ -114,6 +124,8 @@ struct _Key(ImplicitlyCopyable, Movable):
     var descending: Bool
     var nulls_last: Bool
     var tiers: Bool
+    var value_code: Int
+    var nan_code: Int
     var low: UInt64
     var high: UInt64
     var bits: Int
@@ -129,6 +141,8 @@ struct _Key(ImplicitlyCopyable, Movable):
         self.descending = descending
         self.nulls_last = nulls_last
         self.tiers = False
+        self.value_code = _value_code(descending)
+        self.nan_code = _LOWER if descending else _UPPER
         self.low = UInt64.MAX
         self.high = 0
         self.bits = 0
@@ -148,9 +162,11 @@ struct _Key(ImplicitlyCopyable, Movable):
             )
             var bits = Scalar[T](value) << Scalar[T](self.shift)
             if self.tiers:
-                bits |= Scalar[T](_VALUE) << Scalar[T](self.shift + self.bits)
+                bits |= Scalar[T](self.value_code) << Scalar[T](
+                    self.shift + self.bits
+                )
             return bits
-        var code = _NAN
+        var code = self.nan_code
         if tier != _ROW_NAN:
             code = _NULLS_LAST if self.nulls_last else _NULLS_FIRST
         return Scalar[T](code) << Scalar[T](self.shift + self.bits)
@@ -475,7 +491,7 @@ struct _Settle(ImplicitlyCopyable, Movable):
             var code = Int(
                 (packed >> Scalar[T](self.shift + self.bits)) & Scalar[T](3)
             )
-            if code != _VALUE:
+            if code != _value_code(self.descending):
                 return False
         var field = UInt64((packed >> Scalar[T](self.shift)) & value_mask)
         var order = (self.high - field) if self.descending else (

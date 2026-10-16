@@ -1098,7 +1098,8 @@ struct DataFrame(Copyable, Sized, Writable):
     def sort(
         self, by: String, descending: Bool = False, nulls_last: Bool = True
     ) raises -> Self:
-        """Stable single-column sort. NaNs follow non-null numbers."""
+        """Stable single-column sort. NaN is the largest value: it follows
+        the numbers ascending and precedes them descending."""
         return self.sort([by], descending, nulls_last)
 
     def sort(
