@@ -1329,10 +1329,20 @@ def lower_rows(
         if ordered_group and not scalar_precision:
             for field in query._nodes[node.left].text_fields:
                 if field.name in node.names and field.category:
-                    capabilities.reject(
-                        "decimal group feed",
-                        "original code keys require their own certificate",
-                    )
+                    # Only dictionary normalization can issue this owner.
+                    # Bare coded String GROUP compares its certified HIGH
+                    # original codes; visible output is plain String again.
+                    if (
+                        field.dtype != DataType.STRING
+                        or not field.category.value().string_codes
+                        or not field.category.value()
+                        .owner[]
+                        .dtype.is_categorical()
+                    ):
+                        capabilities.reject(
+                            "decimal group feed",
+                            "original code key lacks a coded String owner",
+                        )
             var original_bounds = List[BoundExpr]()
             for expression in node.exprs:
                 original_bounds.append(bind(expression, schema))

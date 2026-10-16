@@ -9,7 +9,7 @@ sources, scheduling may commute precision sites without changing the public
 GPU exception: it reports a generic precision category, not CPU dtype digits.
 Original occurrence ranks are retained; all faults precede any consumer.
 """
-from dataframe import DataFrame, DataType, Series, StringColumn
+from dataframe import DataFrame, DataType, Series
 from dataframe.binding import BoundExpr, bind
 from dataframe.expr import (
     SUM,
@@ -146,14 +146,9 @@ def eligible(
             or key.dtype().is_nested()
         ):
             return False
-        # An ordinary String hashes raw bytes. Coded String and CAT keys
-        # require their separate original-code certificate, never inference.
-        for chunk in key.chunks():
-            if (
-                chunk._data.isa[StringColumn]()
-                and chunk._data[StringColumn]._codes
-            ):
-                return False
+        # Coded String keys use the existing original-code category owner at
+        # lowering. This is independent of the commuting operand-fault proof;
+        # publication drops that private identity exactly as CPU GROUP does.
     for bound in expressions:
         var last = len(bound.expr._nodes) - 1
         if last < 0:
