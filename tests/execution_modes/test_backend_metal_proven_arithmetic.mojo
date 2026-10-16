@@ -156,13 +156,12 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
     assert_equal(recovered.item(0, "bad").int64(), Int64.MIN + 1)
     # test_integer_proofs_cover_unsigned_product_and_literal_boundaries covers
     # the refusal by a backend without deferred errors.
-    with assert_raises(contains="strict casts"):
-        _ = (
-            source.lazy()
-            .select(col("x").cast("int32"))
-            .head(0)
-            .collect(accelerator=MetalRuntime())
-        )
+    # Strict cast producers before a head are admitted (#761).
+    var narrowed = source.lazy().select(col("x").cast("int32")).head(0)
+    same(
+        narrowed.collect(accelerator=MetalRuntime()),
+        narrowed.collect(engine="cpu"),
+    )
 
 
 # requires: metal
