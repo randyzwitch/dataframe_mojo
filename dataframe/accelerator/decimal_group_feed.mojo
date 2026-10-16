@@ -39,6 +39,7 @@ from dataframe.expr import (
     OR,
     XOR,
     NOT,
+    INT_IS_IN,
     subtree,
 )
 from .integer_ranges import proven_integer_nodes
@@ -105,6 +106,13 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
                 return (False, False)
             continue
         if node.op in [IS_NULL, IS_NOT_NULL, AND, OR, XOR, NOT]:
+            continue
+        if (
+            node.op == INT_IS_IN
+            and node.left >= 0
+            and bound.dtypes[node.left].is_integer()
+            and dtype == DataType.BOOL
+        ):
             continue
         if node.op in [EQ, NE, GT, GE, LT, LE]:
             if (

@@ -90,6 +90,15 @@ head or join, including streaming collections; this proof does not assume a
 worker or morsel assignment. Nullable operands and supported Boolean masks
 retain their original evaluation. Wide Decimal intermediates, other fallible
 operations/states, categorical keys and OVER feeds require separate proofs.
+
+Scalar Float64 SUM also accepts these precision-only Decimal operands,
+including same-type WHEN branches and infallible Decimal-to-Float64 casts.
+Bounded Decimal SUM siblings retain their precision-38 state proof. The whole
+original scalar projection observes operand faults before any later head,
+filter or join, including when `min_count` would make the SUM null. Both
+certificates require an infallible original input prefix and accept canonical
+sign-extended Int64 literals with a Decimal128 dtype; arbitrary Decimal128
+source words and implicit WHEN common-type casts retain separate guards.
 Typed Decimal128 constants also qualify when their exact high word proves an
 Int64 sign extension; this does not admit arbitrary Decimal128 source values.
 The original input prefix, including both JOIN arms, must be infallible. A GPU
