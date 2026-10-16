@@ -20,6 +20,7 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
     var disabled = _capabilities()
     disabled.proven_integer_operations = False
     disabled.observed_rank_inputs = False
+    disabled.adjudicated_faults = False
     with assert_raises(contains="checked rank inputs"):
         _ = lower_rows(query, disabled)
     for unsafe in List[Expr](
@@ -31,10 +32,19 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
             col("x") // lit(Int64(-1)),
         ]
     ):
+        var certified = _capabilities()
+        certified.adjudicated_faults = False
         var observed = lower_rows(
-            source.lazy().select(unsafe.rank()), _capabilities()
+            source.lazy().select(unsafe.rank()), certified
         )
         assert_true(observed.ordered_mode == 10)
+        # Metal observes the input step itself and needs no certificate.
+        assert_true(
+            lower_rows(
+                source.lazy().select(unsafe.rank()), _capabilities()
+            ).ordered_mode
+            == 0
+        )
 
 
 # requires: metal

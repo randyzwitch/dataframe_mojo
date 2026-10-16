@@ -217,8 +217,8 @@ def test_sum_output_bounds_refuse_arbitrary_wide_columns_and_scale18_products() 
     var arbitrary = wide.lazy().filter(
         col("v") > lit("2").cast(DataType.decimal(18, 2, 64)) * col("v")
     )
-    with assert_raises(contains="checked decimal"):
-        _ = _preflight(fold_literal_text_parsing(arbitrary))
+    # Admitted: a fault in this comparison is decided on the CPU.
+    _ = _preflight(fold_literal_text_parsing(arbitrary))
     var dtype = DataType.decimal(18, 18, 64)
     var frame = DataFrame(
         [
@@ -235,13 +235,14 @@ def test_sum_output_bounds_refuse_arbitrary_wide_columns_and_scale18_products() 
             col("s") > col("s") * lit("2").cast(DataType.decimal(19, 18, 128))
         )
     )
+    var unsafe_plan = fold_literal_text_parsing(
+        unsafe
+    )._with_accelerator_settings(False, True, 17)
+    var strict = capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="checked decimal"):
-        _ = lower_join_dag(
-            fold_literal_text_parsing(unsafe)._with_accelerator_settings(
-                False, True, 17
-            ),
-            capabilities(),
-        )
+        _ = lower_join_dag(unsafe_plan, strict)
+    _ = lower_join_dag(unsafe_plan, capabilities())
 
 
 def _guarded_prefix_cases() raises:

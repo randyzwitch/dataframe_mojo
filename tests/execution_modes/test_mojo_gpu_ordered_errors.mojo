@@ -282,16 +282,15 @@ def test_mojo_gpu_ordered_rows_profile_budget_estimate_and_provenance() raises:
         _ = query.collect(
             accelerator=MetalRuntime(memory_limit_bytes=facts.peak_bytes - 1)
         )
-    # No foreign error scope may reach the new mode through synthetic scans.
-    with assert_raises(contains="direct scan"):
-        _ = _preflight(
-            frame.lazy()
-            .with_columns(col("t").alias("alias"))
-            .select(
-                col("alias").cast(DataType.duration("ns")).cast(DataType.INT64)
-                + _cast()
-            ),
-            ordered_source=True,
-        )
-    with assert_raises(contains="direct scan"):
-        _ = _preflight(query, ordered_source=True, source_rows=3)
+    # Synthetic scans no longer need the ordered certificate: their faults
+    # are decided on the CPU (accelerator/faults.mojo).
+    _ = _preflight(
+        frame.lazy()
+        .with_columns(col("t").alias("alias"))
+        .select(
+            col("alias").cast(DataType.duration("ns")).cast(DataType.INT64)
+            + _cast()
+        ),
+        ordered_source=True,
+    )
+    _ = _preflight(query, ordered_source=True, source_rows=3)

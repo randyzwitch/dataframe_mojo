@@ -259,13 +259,16 @@ def _money_and_prefix_certificates() raises:
     )
     with assert_raises(contains="decimal multiplication overflow"):
         _ = wide_query.collect(engine="cpu", optimize=False, streaming=True)
+    var wide_head = (
+        fold_literal_text_parsing(wide_query)
+        .head(0)
+        ._with_accelerator_settings(False, True, 65536)
+    )
+    var strict = capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="checked decimal"):
-        _ = lower_join_dag(
-            fold_literal_text_parsing(wide_query)
-            .head(0)
-            ._with_accelerator_settings(False, True, 65536),
-            capabilities(),
-        )
+        _ = lower_join_dag(wide_head, strict)
+    _ = lower_join_dag(wide_head, capabilities())
 
 
 # requires: mojo_gpu
@@ -331,11 +334,14 @@ def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
     )
     assert_equal(cpu.column("total").dtype(), DataType.decimal(38, 4))
     assert_equal(cpu.column("total")._decimal_raw(0), Int128(10200))
+    var mixed_head = mixed_query.head(0)._with_accelerator_settings(
+        False, True, 1
+    )
+    var strict = capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="checked decimal"):
-        _ = lower_join_dag(
-            mixed_query.head(0)._with_accelerator_settings(False, True, 1),
-            capabilities(),
-        )
+        _ = lower_join_dag(mixed_head, strict)
+    _ = lower_join_dag(mixed_head, capabilities())
     # Unary MIN/NEG and wide precision intermediates are different categories,
     # never covered by a narrow ADD/SUB/MUL proof.
     for expression in [
@@ -350,7 +356,8 @@ def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
             ._with_accelerator_settings(False, True, 17)
         )
         with assert_raises(contains="checked decimal"):
-            _ = lower_join_dag(unsupported, capabilities())
+            _ = lower_join_dag(unsupported, strict)
+        _ = lower_join_dag(unsupported, capabilities())
 
 
 # requires: metal

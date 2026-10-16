@@ -2,6 +2,7 @@
 # contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr, when
 from dataframe.binding import bind
@@ -76,6 +77,7 @@ def test_integer_proofs_cover_unsigned_product_and_literal_boundaries() raises:
     )
     var restricted = _capabilities()
     restricted.deferred_integer_errors = False
+    restricted.adjudicated_faults = False
     with assert_raises(contains="terminal projections"):
         _ = lower_rows(query, restricted)
     # A proof for a parent must never hide an unproved child operation.
@@ -156,12 +158,7 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
     assert_equal(recovered.item(0, "bad").int64(), Int64.MIN + 1)
     # test_integer_proofs_cover_unsigned_product_and_literal_boundaries covers
     # the refusal by a backend without deferred errors.
-    # Strict cast producers before a head are admitted (#761).
-    var narrowed = source.lazy().select(col("x").cast("int32")).head(0)
-    same(
-        narrowed.collect(accelerator=MetalRuntime()),
-        narrowed.collect(engine="cpu"),
-    )
+    same_outcome(source.lazy().select(col("x").cast("int32")).head(0))
 
 
 # requires: metal

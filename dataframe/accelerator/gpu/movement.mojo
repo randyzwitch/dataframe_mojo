@@ -34,6 +34,25 @@ def filter_scan(
         blocks[unsafe_offset=count + block_idx.x] = failures
 
 
+def observe_slot(
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    fault: Pointer[UInt32, MutAnyOrigin],
+    slot: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+):
+    """Flag a fault anywhere in one freshly written slot.
+
+    A writer stores its own nonzero error word, so the word read back is
+    always one real fault and its category; the race needs no atomics.
+    """
+    var row = global_idx.x
+    if row < Int(rows):
+        var error = errors[unsafe_offset=Int(slot) * Int(stride) + row]
+        if error:
+            fault[unsafe_offset=0] = error
+
+
 def filter_offsets(
     blocks: Pointer[UInt32, MutAnyOrigin],
     metadata: Pointer[UInt32, MutAnyOrigin],
