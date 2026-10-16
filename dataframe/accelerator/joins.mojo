@@ -45,6 +45,9 @@ from dataframe.expr import (
     FLOORDIV,
     POW,
     SUM,
+    CAST,
+    MOD,
+    subtree,
 )
 from dataframe.binding import bind, ROWS
 from .integer_ranges import proven_integer_nodes
@@ -110,6 +113,75 @@ def _mark_decimal_producers(mut query: LazyFrame) raises:
 
 comptime INTEGER_MATERIALIZATION = "metal_integer_materialization"
 comptime GROUP_MATERIALIZATION = "metal_group_materialization"
+comptime SUM_MATERIALIZATION = "metal_sum_materialization"
+
+
+def _checked_scalar_sum(query: LazyFrame, index: Int) raises -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT or not len(operation.exprs):
+        return False
+    var possible = False
+    for expression in operation.exprs:
+        if not len(expression._nodes):
+            return False
+        ref root = expression._nodes[len(expression._nodes) - 1]
+        if not is_reduction(root.op):
+            return False
+        possible |= root.op == SUM
+    if not possible:
+        return False
+    var schema = schema_frame(query, operation.left)
+    var checked = False
+    for expression in operation.exprs:
+        var bound = bind(expression, schema._columns)
+        var top = len(bound.expr._nodes) - 1
+        ref root = bound.expr._nodes[top]
+        if root.left < 0 or root.right >= 0 or bound.shapes[root.left] != ROWS:
+            return False
+        var operand = bind(subtree(bound.expr, root.left), schema._columns)
+        if not ordered_rows.eligible(operand):
+            return False
+        var proven = proven_integer_nodes(bound)
+        # CPU completes each aggregate before evaluating the next operand.
+        # Preparing infallible operands together cannot reorder checked faults.
+        for at in range(top):
+            ref node = bound.expr._nodes[at]
+            if bound.dtypes[at].is_decimal() or is_reduction(node.op):
+                return False
+            if node.op == CAST and node.integer and not proven[at]:
+                return False
+            if (
+                bound.dtypes[at].is_integer()
+                and node.op
+                in [ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW, NEG, ABS]
+                and not proven[at]
+            ):
+                return False
+        var input = bound.dtypes[root.left]
+        checked |= root.op == SUM and (
+            bound.dtypes[top] == DataType.INT32
+            or bound.dtypes[top] == DataType.UINT32
+            or input.physical() == DataType.INT64
+            or input == DataType.UINT64
+        )
+    return checked
+
+
+def _mark_scalar_sums(mut query: LazyFrame) raises:
+    var live = _live_nodes(query)
+    for index in range(len(query._nodes) - 1):
+        if (
+            live[index]
+            and not query._nodes[index].text
+            and _checked_scalar_sum(query, index)
+        ):
+            var schema = schema_frame(query, query._nodes[index].left)
+            query._nodes[index].text = SUM_MATERIALIZATION
+            query._nodes[index].names2 = [SUM_MATERIALIZATION]
+            for expression in query._nodes[index].exprs:
+                query._nodes[index].names2.append(
+                    implode_ordered.signature(bind(expression, schema._columns))
+                )
 
 
 def _integer_producer(query: LazyFrame, index: Int) raises -> Bool:
@@ -187,7 +259,9 @@ def has_checked_integer_consumers(query: LazyFrame) raises -> Bool:
     var live = _live_nodes(query)
     for index in range(len(query._nodes) - 1):
         if live[index] and (
-            _integer_producer(query, index) or _checked_group(query, index)
+            _integer_producer(query, index)
+            or _checked_group(query, index)
+            or _checked_scalar_sum(query, index)
         ):
             return True
     return False
@@ -198,6 +272,7 @@ def _observed_marker(text: String) -> Bool:
         text == DECIMAL_MATERIALIZATION
         or text == INTEGER_MATERIALIZATION
         or text == GROUP_MATERIALIZATION
+        or text == SUM_MATERIALIZATION
     )
 
 
@@ -239,6 +314,7 @@ def prepare_temporal_prefix(
         prune_projections(result)
     _mark_decimal_producers(result)
     _mark_integer_producers(result)
+    _mark_scalar_sums(result)
     return result^
 
 
@@ -1115,6 +1191,7 @@ def lower_join_dag(
         prune_projections(projected)
         _mark_decimal_producers(projected)
         _mark_integer_producers(projected)
+        _mark_scalar_sums(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected,

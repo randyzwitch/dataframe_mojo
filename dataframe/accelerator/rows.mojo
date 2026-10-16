@@ -1273,6 +1273,18 @@ def lower_rows(
                     "ordered decimal", "invalid observed producer"
                 )
             ordered_mode = 4
+        var observed_sum = node.text == "metal_sum_materialization"
+        if observed_sum:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != SELECT
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject("observed sum", "invalid observed producer")
+        var sum_expression = 0
         var observed_group = node.text == "metal_group_materialization"
         if observed_group:
             if (
@@ -1338,6 +1350,15 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if observed_sum:
+                if node.names2[1 + sum_expression] != implode_ordered.signature(
+                    bound
+                ):
+                    capabilities.reject(
+                        "observed sum",
+                        "producer AST or logical metadata changed",
+                    )
+                sum_expression += 1
             if observed_group:
                 if node.names2[
                     2 + len(node.names) + grouped_expression
