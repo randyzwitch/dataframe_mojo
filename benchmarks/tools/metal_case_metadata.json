@@ -13,7 +13,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id1"
       ]
@@ -23,7 +23,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id1",
         "id2"
@@ -34,7 +34,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id3"
       ]
@@ -44,7 +44,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id4"
       ]
@@ -54,7 +54,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id6"
       ]
@@ -64,7 +64,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id4",
         "id5"
@@ -75,7 +75,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id3"
       ]
@@ -85,7 +85,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id2",
         "id4"
@@ -96,7 +96,7 @@
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "57ac8bd2b16b0e6814b62a27ffc161b04079ee240ed93abb90f1c677843433cd",
+      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id1",
         "id2",
