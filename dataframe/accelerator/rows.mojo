@@ -12,6 +12,7 @@ from . import (
     iana_mutations,
     iana_certificate,
     producer_phases,
+    decimal_feed,
 )
 from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
@@ -259,6 +260,8 @@ struct RowPlan(Movable):
     var iana_diagnostics: List[String]
     var iana_construction_peak_bytes: Int
     var producer_region: Optional[ArcPointer[RegionProof]]
+    # Exact eager operand batches for checked scalar Decimal SUM replay.
+    var decimal_feed_batch_rows: Int
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -1081,6 +1084,7 @@ def lower_rows(
     var reduced = False
     var reused_columns = False
     var ordered_ranks = List[UInt32]()
+    var decimal_feed_batch_rows = 0
     var ordered_mode = 0
     var producer_region = Optional[ArcPointer[RegionProof]]()
     for k in range(len(chain) - 1, -1, -1):
@@ -1309,9 +1313,11 @@ def lower_rows(
         var ordered_producer = Bool(node.producer_origin)
         if ordered_producer:
             producer_phases.validate_region(query, node)
-            if (
-                node.producer_origin.value()[].phase
-                != producer_phases.OBSERVED_IANA
+            if node.producer_origin.value()[].phase not in List[Int](
+                [
+                    producer_phases.OBSERVED_IANA,
+                    producer_phases.OBSERVED_STRICT_CAST,
+                ]
             ):
                 capabilities.reject(
                     "observed temporal", "unknown producer phase"
@@ -1368,6 +1374,22 @@ def lower_rows(
                         "producer AST or logical metadata changed",
                     )
                 grouped_expression += 1
+            if node.text == decimal_feed.MATERIALIZATION:
+                if (
+                    len(chain) != 1
+                    or not terminal_boundary
+                    or limit >= 0
+                    or node.kind != SELECT
+                    or len(node.exprs) != 1
+                    or len(node.names2) != 2
+                    or node.names2[0] != node.text
+                    or node.names2[1] != implode_ordered.signature(bound)
+                    or not decimal_feed.eligible(bound, schema)
+                ):
+                    capabilities.reject(
+                        "decimal feed", "original scalar producer changed"
+                    )
+                decimal_feed_batch_rows = decimal_feed.BATCH_ROWS
             if ordered_decimal:
                 if not ordered_rows.eligible(bound) or node.names2[
                     1 + decimal_expression
@@ -1684,6 +1706,7 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
+                    and not ordered_producer
                     and not (
                         capabilities.proven_integer_operations
                         and proven[part_index]
@@ -2920,7 +2943,7 @@ def lower_rows(
             )
     var capsule_peak = 0
     var zone_words = List[UInt64]()
-    if len(capsule.descriptors):
+    if len(capsule.words):
         for step in steps:
             for node in range(step.start, step.start + step.nodes):
                 var op = code[4 * node]
@@ -3004,4 +3027,5 @@ def lower_rows(
         capsule.diagnostics.copy(),
         capsule_peak,
         producer_region,
+        decimal_feed_batch_rows,
     )

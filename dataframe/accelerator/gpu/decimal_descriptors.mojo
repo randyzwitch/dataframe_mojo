@@ -19,6 +19,7 @@ from dataframe.expr import (
 )
 from dataframe.accelerator.rows import RowPlan, ROW_GROUP_OUTPUT
 from dataframe.parallel import configured_workers
+from dataframe.accelerator.decimal_feed import DESCRIPTOR_FLAG
 from std.memory import bitcast
 from . import decimal, floating
 
@@ -40,13 +41,16 @@ def reduction_op(op: Int64, dtype: DataType) -> Int64:
     return op
 
 
-def reduction_parameter(dtype: DataType, minimum: Int) raises -> Int64:
+def reduction_parameter(
+    dtype: DataType, minimum: Int, observed_feed: Bool = False
+) raises -> Int64:
     var precision = dtype.precision() if dtype.decimal_width() == 128 else 38
     return (
         Int64(min(minimum, Int(UInt32.MAX)))
         | Int64(precision) << 32
         | Int64(dtype.scale()) << 38
         | Int64(min(65535, max(1, configured_workers()))) << 44
+        | (Int64(DESCRIPTOR_FLAG) if observed_feed else Int64(0))
     )
 
 
