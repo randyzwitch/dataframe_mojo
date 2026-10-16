@@ -13,6 +13,9 @@ from dataframe import (
 )
 from dataframe.lazy import LazyFrame
 from dataframe.accelerator import decimal_group_feed
+from dataframe.accelerator.decimal_prefix import prefix_infallible
+from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe.binding import bind
 from dataframe.accelerator.joins import lower_join_dag
 from dataframe.accelerator.gpu.runtime import capabilities
 from dataframe.metal import MetalRuntime
@@ -92,7 +95,168 @@ def _literal(frame: DataFrame, nullable: Bool = False) raises:
     )
 
 
+def _money_and_prefix_certificates() raises:
+    var source = _source().with_column(
+        Series("discount", Column[Int64]([10, 20, 30])).with_dtype(
+            DataType.decimal(15, 2, 64)
+        )
+    )
+    for text in ["1", "-1"]:
+        # This is the benchmark money() expression, including its original
+        # Arrow Decimal128 dtype. No source or literal dtype is rewritten.
+        var money = lit(text).cast(DataType.decimal(15, 2))
+        var query = (
+            source.lazy()
+            .group_by("g", maintain_order=True)
+            .agg(
+                (col("price") * (money - col("discount"))).sum().alias("total")
+            )
+        )
+        var cpu = query.collect(
+            engine="cpu", optimize=False, streaming=True, batch_size=1
+        )
+        assert_equal(
+            cpu.column("total")._decimal_raw(0),
+            Int128(30000 if text == "1" else -50000),
+        )
+        var normalized = fold_literal_text_parsing(query)
+        var bound = bind(
+            normalized._nodes[len(normalized._nodes) - 1].exprs[0],
+            source._columns,
+        )
+        var literals = 0
+        for at in range(len(bound.expr._nodes)):
+            if (
+                bound.dtypes[at].is_decimal()
+                and bound.dtypes[at].decimal_width() == 128
+                and bound.expr._nodes[at].left < 0
+            ):
+                literals += 1
+                assert_true(decimal_group_feed.narrow_value(bound, at))
+                var forged = bound.copy()
+                forged.expr._nodes[at].text2 = (
+                    "1" if forged.expr._nodes[at].integer >= 0 else "0"
+                )
+                assert_true(not decimal_group_feed.narrow_value(forged, at))
+                assert_true(not decimal_group_feed.operand(forged)[0])
+        assert_equal(literals, 1)
+        var dag = lower_join_dag(
+            normalized.head(0)._with_accelerator_settings(False, True, 65536),
+            capabilities(),
+        )
+        var observed = 0
+        for task in dag.tasks:
+            for node in task.query._nodes:
+                observed += Int(node.text == decimal_group_feed.MATERIALIZATION)
+        assert_equal(observed, 1)
+    var left = DataFrame(
+        [
+            Series("g", Column[Int32]([0, 1])),
+            Series("segment", StringColumn(["BUILDING", "BUILDING"])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("g", Column[Int32]([0, 1])),
+            Series("orderdate", Column[Int32]([9000, 9100])).with_dtype(
+                DataType.DATE
+            ),
+            Series("priority", Column[Int32]([0, 1])),
+        ]
+    )
+    var prefix = (
+        left.lazy()
+        .filter(col("segment") == "BUILDING")
+        .join(
+            right.lazy().filter(
+                col("orderdate") < lit("1995-03-15").str().to_date()
+            ),
+            on="g",
+        )
+        .join(source.lazy(), on="g")
+    )
+    prefix = fold_literal_text_parsing(prefix)
+    assert_true(prefix_infallible(prefix, len(prefix._nodes) - 1))
+    var grouped = (
+        prefix.group_by(["g", "orderdate", "priority"])
+        .agg(
+            (
+                col("price")
+                * (lit("1").cast(DataType.decimal(15, 2)) - col("discount"))
+            )
+            .sum()
+            .alias("revenue")
+        )
+        .sort("revenue", descending=True)
+        .head(10)
+    )
+    var normalized = fold_literal_text_parsing(
+        grouped
+    )._with_accelerator_settings(False, True, 65536)
+    var dag = lower_join_dag(normalized, capabilities())
+    var observed = 0
+    for task in dag.tasks:
+        for node in task.query._nodes:
+            observed += Int(node.text == decimal_group_feed.MATERIALIZATION)
+    assert_equal(observed, 1)
+    # A fallible value in either original JOIN arm is not made infallible by
+    # a successful eventual GPU input-zero observation.
+    var poison = (col("g").cast(DataType.INT64) + lit(Int64.MAX)).alias(
+        "unused"
+    )
+    for bad in [
+        left.lazy().with_columns(poison).join(right.lazy(), on="g"),
+        left.lazy().join(right.lazy().with_columns(poison), on="g"),
+    ]:
+        assert_true(not prefix_infallible(bad, len(bad._nodes) - 1))
+    var controls = source.lazy().with_columns(
+        col("g").cut([2.0, 1.0]).alias("unused")
+    )
+    assert_true(not prefix_infallible(controls, len(controls._nodes) - 1))
+    var failed_source = source.lazy()
+    failed_source._nodes[0].source_failure = "captured original source failure"
+    assert_true(not prefix_infallible(failed_source, 0))
+    assert_equal(
+        failed_source._nodes[0].source_failure,
+        "captured original source failure",
+    )
+    # Declared p15 cannot bound retagged physical128 source values.
+    var wide = DataFrame(
+        [
+            Series("g", Column[Int32]([0])),
+            Series("price", Column[Int128]([Int128.MAX])).with_dtype(
+                DataType.decimal(15, 2)
+            ),
+            Series("discount", Column[Int64]([0])).with_dtype(
+                DataType.decimal(15, 2, 64)
+            ),
+        ]
+    )
+    var wide_query = (
+        wide.lazy()
+        .group_by("g")
+        .agg(
+            (
+                col("price")
+                * (lit("1").cast(DataType.decimal(15, 2)) - col("discount"))
+            )
+            .sum()
+            .alias("total")
+        )
+    )
+    with assert_raises(contains="decimal multiplication overflow"):
+        _ = wide_query.collect(engine="cpu", optimize=False, streaming=True)
+    with assert_raises(contains="checked decimal"):
+        _ = lower_join_dag(
+            fold_literal_text_parsing(wide_query)
+            .head(0)
+            ._with_accelerator_settings(False, True, 65536),
+            capabilities(),
+        )
+
+
 def test_decimal_group_feed_certificate_preserves_whole_original_agg() raises:
+    _money_and_prefix_certificates()
     var source = _source()
     var query = (
         source.lazy()
@@ -395,3 +559,47 @@ def test_mojo_gpu_decimal_group_feed_budget_precedes_device() raises:
             streaming=True,
             batch_size=17,
         )
+
+    from dataframe.accelerator.rows import lower_rows
+    from dataframe.accelerator.gpu.runtime import execute_plan
+    from dataframe.accelerator.gpu.residency import Scope, HostMatrix, Table
+
+    var source = _source()
+    var producer = (
+        source.lazy()
+        .group_by("g")
+        .agg(_expressions())
+        .head(0)
+        ._with_accelerator_settings(False, True, 17)
+    )
+    var dag = lower_join_dag(producer, capabilities())
+    for task in dag.tasks:
+        if (
+            task.query._nodes[len(task.query._nodes) - 1].text
+            != decimal_group_feed.MATERIALIZATION
+        ):
+            continue
+        var plan = lower_rows(
+            task.query, capabilities(), terminal_boundary=True
+        )
+        var scope = Scope()
+        var cells = source.height() * plan.source.width()
+        var errors = List[UInt32](length=cells, fill=0)
+        errors[cells - 1] = 32
+        var foreign = Table.identity(
+            scope,
+            HostMatrix(
+                plan.source.clear(),
+                source.height(),
+                List[UInt64](length=2 * cells, fill=0),
+                List[UInt8](length=cells, fill=1),
+                errors^,
+            ),
+        )
+        with assert_raises(contains="already observed successful inputs"):
+            _ = execute_plan(
+                plan,
+                scope,
+                resident_input=foreign.copy(),
+                terminal_boundary=True,
+            )

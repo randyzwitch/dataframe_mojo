@@ -14,6 +14,7 @@ from .partition_cuts import is_marker as is_partition_cut_marker, marker_capture
 from .capabilities import RowCapabilities
 from .rows import lower_rows
 from . import producer_phases, decimal_feed, decimal_group_feed
+from .decimal_prefix import prefix_infallible
 from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
@@ -125,12 +126,20 @@ def _decimal_group_producer(query: LazyFrame, index: Int) raises -> Bool:
             possible |= node.op in [ADD, SUB, MUL]
     if not possible:
         return False
+    if not prefix_infallible(query, operation.left):
+        return False
     for key in operation.window_keys:
-        if key.dtype.is_categorical():
+        if (
+            key.dtype.is_categorical()
+            or key.dtype._is_bytes()
+            or key.dtype.is_nested()
+        ):
             return False
     ref source = query._nodes[operation.left]
     for field in source.text_fields:
-        if field.name in operation.names and field.category:
+        if field.name in operation.names and (
+            field.category or field.dtype._is_bytes() or field.dtype.is_nested()
+        ):
             return False
     var schema = schema_frame(query, operation.left)
     var bounds = List[BoundExpr]()
@@ -931,6 +940,14 @@ def _task(
         or _observed_marker(query._nodes[root].text)
         or Bool(query._nodes[root].producer_origin)
     )
+    if query._nodes[
+        root
+    ].text == decimal_group_feed.MATERIALIZATION and not prefix_infallible(
+        query, query._nodes[root].left
+    ):
+        capabilities.reject(
+            "decimal group feed", "original infallible prefix changed"
+        )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
         if terminal:

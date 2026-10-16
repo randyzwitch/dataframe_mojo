@@ -90,6 +90,11 @@ head or join, including streaming collections; this proof does not assume a
 worker or morsel assignment. Nullable operands and supported Boolean masks
 retain their original evaluation. Wide Decimal intermediates, other fallible
 operations/states, categorical keys and OVER feeds require separate proofs.
+Typed Decimal128 constants also qualify when their exact high word proves an
+Int64 sign extension; this does not admit arbitrary Decimal128 source values.
+The original input prefix, including both JOIN arms, must be infallible. A GPU
+input-zero check independently rejects foreign flags and never substitutes for
+that original streaming-order proof.
 
 Sorts preserve source order on ties, configured per-key null placement, and
 original value encodings. Nulls, NaNs and signed zeros retain the CPU grouping

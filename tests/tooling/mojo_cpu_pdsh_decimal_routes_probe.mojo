@@ -4,6 +4,7 @@ mojo run -I . -I benchmarks/suites tests/tooling/mojo_cpu_pdsh_decimal_routes_pr
 The table arguments are exactly the baseline worker's arguments.
 """
 from std.sys import argv
+from std.testing import assert_equal
 from dataframe import DataType, StringColumn
 from dataframe.binding import bind
 from dataframe.expr import ADD, SUB, MUL, LIT_INT, CAST
@@ -50,6 +51,7 @@ def main() raises:
         var name = String(part)
         print("QUERY", name, "default streaming True batch65536")
         var query = fold_literal_text_parsing(plan(name, tables))
+        var proved = 0
         for index in range(len(query._nodes)):
             ref operation = query._nodes[index]
             if operation.kind != AGG and operation.kind != WITH_COLUMNS:
@@ -59,9 +61,9 @@ def main() raises:
             )
             var schema = schema_frame(query, operation.left)
             if operation.kind == AGG:
-                print(
-                    "NARROW_GROUP_PROOF", _decimal_group_producer(query, index)
-                )
+                var candidate = _decimal_group_producer(query, index)
+                proved += Int(candidate)
+                print("NARROW_GROUP_PROOF", candidate)
             for expression in operation.exprs:
                 var bound = bind(expression, schema._columns)
                 print("EXPR", expression._name)
@@ -85,6 +87,11 @@ def main() raises:
                             "literal_high",
                             node.text2,
                         )
+        if (name == "q3" or name == "q15") and tables["lineitem"].column(
+            "l_discount"
+        ).dtype().is_decimal():
+            assert_equal(proved, 1)
+            print("PASS actual PDS grouped certificate", name)
         try:
             print(
                 "DESCRIBE",
