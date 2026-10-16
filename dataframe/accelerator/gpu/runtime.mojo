@@ -138,7 +138,7 @@ from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
 from .rows import row_program, row_program_ordered, row_program_iana
 from . import iana_scalar_scopes
-from dataframe.accelerator import iana_certificate
+from dataframe.accelerator import iana_certificate, checked_rank
 from dataframe.accelerator.iana_mutations import (
     ROW_IANA_MUTATION,
     validate_descriptor,
@@ -209,6 +209,7 @@ def capabilities() -> RowCapabilities:
         quantiles=True,
         order=True,
         ranks=True,
+        observed_rank_inputs=True,
         cumulative_windows=True,
         shift_fill_windows=True,
         rolling_windows=True,
@@ -832,8 +833,16 @@ def _quantile_indices(plan: RowPlan) -> Bool:
 
 def _iana_scalar_slots(plan: RowPlan) raises -> Int:
     var slots = 0
-    if plan.ordered_mode == 5 or plan.ordered_mode == 6:
+    if (
+        plan.ordered_mode == 5
+        or plan.ordered_mode == 6
+        or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
+    ):
+        if len(plan.iana_mask_bases) != len(plan.steps):
+            raise Error("Certified row mask step geometry is invalid")
         for at in range(len(plan.steps)):
+            if plan.iana_mask_bases[at] < 0:
+                continue
             slots = max(
                 slots,
                 iana_certificate.scalar_count(
@@ -972,12 +981,21 @@ def estimate_resources(
     # captured host zone owner too; empty execution still creates two host tails.
     var captured_zone_bytes = _checked_mul(
         plan.zone_words.capacity() if plan.ordered_mode == 5
-        or plan.ordered_mode == 6 else len(plan.zone_words),
+        or plan.ordered_mode == 6
+        or plan.ordered_mode
+        == checked_rank.ORDERED_RANK_INPUT else len(plan.zone_words),
         8,
     )
-    if plan.ordered_mode == 5 or plan.ordered_mode == 6:
+    if (
+        plan.ordered_mode == 5
+        or plan.ordered_mode == 6
+        or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
+    ):
         var scalar_workspace = iana_scalar_scopes.resources(
-            rows, _iana_scalar_slots(plan)
+            rows,
+            _iana_scalar_slots(plan),
+            checked_rank.BATCH_ROWS if plan.ordered_mode
+            == checked_rank.ORDERED_RANK_INPUT else 8192,
         )
         peak = _checked_add(peak, scalar_workspace.workspace_bytes)
         peak = _checked_add(peak, 48 if rows else 0)
@@ -1000,6 +1018,7 @@ def estimate_resources(
             or plan.ordered_mode == 5
             or plan.ordered_mode == 6
             or plan.ordered_mode == 7
+            or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
         ):
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
@@ -1088,8 +1107,14 @@ def estimate_resources(
                 + 3 * Int(has_quantiles)
                 + Int(has_float_sums),
             )
-    if rows and (plan.ordered_mode == 5 or plan.ordered_mode == 6):
+    if rows and (
+        plan.ordered_mode == 5
+        or plan.ordered_mode == 6
+        or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
+    ):
         for at in range(len(plan.steps)):
+            if plan.iana_mask_bases[at] < 0:
+                continue
             launches = _checked_add(
                 launches,
                 _checked_mul(
@@ -1109,6 +1134,7 @@ def estimate_resources(
             or plan.ordered_mode == 4
             or plan.ordered_mode == 6
             or plan.ordered_mode == 7
+            or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
         )
         if plan.ordered_mode == 7:
             observations = 1  # Input-zero proof precedes all original operands.
@@ -1123,7 +1149,8 @@ def estimate_resources(
                 or plan.ordered_mode == 4
                 or plan.ordered_mode == 5
                 or plan.ordered_mode == 6
-                or plan.ordered_mode == 7 else 1
+                or plan.ordered_mode == 7
+                or plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT else 1
             ),
         )
         waits = _checked_add(waits, observations)
@@ -1339,7 +1366,11 @@ def execute_plan(
             if step.filter or step.order or step.grouped:
                 raise Error("Mojo GPU checked Decimal feed cannot move rows")
     var observed_producer = plan.ordered_mode == 6
-    var iana_certified = plan.ordered_mode == 5 or observed_producer
+    var observed_rank = plan.ordered_mode == checked_rank.ORDERED_RANK_INPUT
+    var ordered_batch_rows = checked_rank.BATCH_ROWS if observed_rank else 8192
+    var iana_certified = (
+        plan.ordered_mode == 5 or observed_producer or observed_rank
+    )
     var ordered_terminal = plan.ordered_mode == 2 or plan.ordered_mode == 5
     var ordered_private = plan.ordered_mode == 3
     var ordered_decimal = plan.ordered_mode == 4
@@ -1348,9 +1379,25 @@ def execute_plan(
         or ordered_private
         or ordered_decimal
         or observed_producer
+        or observed_rank
     )
     var ordered_group = plan.ordered_mode == 7
     var ordered = ordered_scalar or ordered_rows or ordered_group
+    if observed_rank:
+        if len(plan.iana_mask_bases) != len(plan.steps):
+            raise Error("Checked rank certificate step geometry changed")
+        var certified_inputs = 0
+        for at in range(len(plan.steps)):
+            if plan.iana_mask_bases[at] >= 0:
+                ref input_step = plan.steps[at]
+                if input_step.filter or input_step.order or input_step.grouped:
+                    raise Error("Checked rank input cannot move rows")
+                iana_certificate.validate(
+                    plan.zone_words, plan.iana_mask_bases[at], input_step.nodes
+                )
+                certified_inputs += 1
+        if certified_inputs != 1:
+            raise Error("Checked rank requires one isolated input phase")
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
     if ordered_group:
@@ -1370,7 +1417,7 @@ def execute_plan(
             or len(plan.ordered_ranks[]) != len(plan.literals)
         ):
             raise Error("Mojo GPU narrow Decimal group certificate changed")
-    if ordered_rows:
+    if ordered_rows and not observed_rank:
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
                 raise Error(
@@ -1535,7 +1582,10 @@ def execute_plan(
     var iana_scalar_cache = Optional[DeviceBuffer[DType.uint8]]()
     var iana_active_scratch = Optional[DeviceBuffer[DType.uint8]]()
     var iana_scalar_resources = iana_scalar_scopes.resources(
-        rows, _iana_scalar_slots(plan)
+        rows,
+        _iana_scalar_slots(plan),
+        checked_rank.BATCH_ROWS if plan.ordered_mode
+        == checked_rank.ORDERED_RANK_INPUT else 8192,
     )
     var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     var ordered_partials = Optional[DeviceBuffer[DType.uint32]]()
@@ -1658,6 +1708,7 @@ def execute_plan(
                         or ordered_decimal
                         or observed_producer
                         or ordered_group
+                        or observed_rank
                     ):
                         # Input cells are ordinary flags from an already
                         # observed producer. Prove every staged source cell is
@@ -1701,6 +1752,12 @@ def execute_plan(
                     uploaded += len(plan.key_values) * 8
                     device_key_values = lookup^
                 for step in plan.steps:
+                    var observed_step = not observed_rank
+                    if observed_rank:
+                        for at in range(len(plan.steps)):
+                            if plan.steps[at].start == step.start:
+                                observed_step = plan.iana_mask_bases[at] >= 0
+                                break
                     if current_rows == 0:
                         break
                     if step.grouped:
@@ -2309,7 +2366,7 @@ def execute_plan(
                         device_valid = gathered_valid^
                         device_errors = gathered_errors^
                         continue
-                    if ordered:
+                    if ordered and observed_step:
                         if iana_certified:
                             var mask_base = -1
                             for at in range(len(plan.steps)):
@@ -2379,7 +2436,7 @@ def execute_plan(
                                     UInt32.MAX,
                                     UInt32.MAX,
                                     UInt32(node),
-                                    UInt32(8192),
+                                    UInt32(ordered_batch_rows),
                                     grid_dim=(current_rows + 255) // 256,
                                     block_dim=256,
                                 )
@@ -2389,8 +2446,11 @@ def execute_plan(
                                     active_scratch,
                                     scalar_cache,
                                     UInt32(current_rows),
-                                    UInt32(8192),
-                                    UInt32(iana_scalar_resources.batches),
+                                    UInt32(ordered_batch_rows),
+                                    UInt32(
+                                        (current_rows + ordered_batch_rows - 1)
+                                        // ordered_batch_rows
+                                    ),
                                     UInt32(scalar_slot - 1),
                                     grid_dim=(
                                         iana_scalar_resources.batches + 255
@@ -2420,7 +2480,7 @@ def execute_plan(
                                 UInt32.MAX,
                                 UInt32.MAX,
                                 UInt32.MAX,
-                                UInt32(8192),
+                                UInt32(ordered_batch_rows),
                                 grid_dim=(current_rows + 255) // 256,
                                 block_dim=256,
                             )
@@ -2475,7 +2535,7 @@ def execute_plan(
                                 UInt32(current_rows),
                                 UInt32(rows),
                                 UInt32(fault_groups),
-                                UInt32(8192),
+                                UInt32(ordered_batch_rows),
                                 grid_dim=(fault_groups + 127) // 128,
                                 block_dim=128,
                             )
@@ -2483,7 +2543,7 @@ def execute_plan(
                                 ordered_partials.value().unsafe_ptr(),
                                 ordered_control.value().unsafe_ptr(),
                                 UInt32(fault_groups),
-                                UInt32(8192),
+                                UInt32(ordered_batch_rows),
                                 grid_dim=1,
                                 block_dim=1,
                             )
@@ -2495,7 +2555,7 @@ def execute_plan(
                                 UInt32(step.slot),
                                 UInt32(current_rows),
                                 UInt32(rows),
-                                UInt32(8192),
+                                UInt32(ordered_batch_rows),
                                 grid_dim=1,
                                 block_dim=1,
                             )
@@ -2566,7 +2626,7 @@ def execute_plan(
                                     ordered_faults.rank(fault[0]),
                                     fault[1],
                                     UInt32.MAX,
-                                    UInt32(8192),
+                                    UInt32(ordered_batch_rows),
                                     grid_dim=1,
                                     block_dim=1,
                                 )
