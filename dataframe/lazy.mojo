@@ -3053,11 +3053,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     # whatever side a join was written on, rather than run
                     # the join outside the pipeline (TPC-DS q43 probed its
                     # 366 dates with 2.9M sales rows eagerly).
+                    # A right side whose one key is a progression is no hash
+                    # table to build: the left streams through its rows by
+                    # position, which no swap beats.
                     if (
                         node.how == JOIN_INNER
                         and not ordered
                         and _order_free_reductions(keys, expressions)
                         and self._direct_key(node.left, node.names)
+                        and not self._progression_key(
+                            node.right, node.right_keys
+                        )
                     ):
                         var large = self._execute(
                             node.right, False, True, batch_size
@@ -3148,9 +3154,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     and bound >= 0
                     and built.height() > bound
                     and _order_free_reductions(keys, expressions)
+                    and not self._progression_key(node.right, node.right_keys)
                 ):
                     # The built right side holds more rows than the left
-                    # can: hash the left instead and stream the right
+                    # can, and is no progression (above): hash the left
+                    # instead and stream the right
                     # through it, as DuckDB's build/probe side optimizer
                     # and Polars' join both build on the smaller side.
                     # Under an unordered aggregation into the aggregate
@@ -5536,19 +5544,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         arithmetic progression, which is looked up by position."""
         if len(keys) != 1:
             return False
+        var column = keys[0]
         var cursor = index
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if node.kind == SCAN_FRAME:
-                var key = self._frames[node.offset][keys[0]]
+                ref frame = self._frames[node.offset]
+                if column not in frame.columns():
+                    return False
+                var key = frame[column]
                 if key.dtype().physical() != DataType.INT64:
                     return False
                 return int64_progression(key)[0]
             if node.kind != DROP and not (
                 (node.kind == SELECT or node.kind == WITH_COLUMNS)
-                and _chain_member(node)
+                and _stream_rows(node)
             ):
                 return False
+            if node.kind == SELECT or node.kind == WITH_COLUMNS:
+                # A renamed column is its source column; a computed one is
+                # no table's key.
+                for expr in node.exprs:
+                    if expr._name == column:
+                        if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                            return False
+                        column = expr._nodes[0].text
             cursor = node.left
         return False
 
@@ -5590,6 +5610,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if node.kind == FILTER:
             filters.append(index)
         self._collect_graph(node.left, relations, pairs, filters)
+
+    def _indexed_relation(
+        self,
+        entry: Int,
+        other: Int,
+        joined: List[Bool],
+        node_of: List[Int],
+        edges: List[JoinEdge],
+        masks: List[Int],
+    ) raises -> Bool:
+        """Whether tree entry `entry` is one relation joined to `other` on
+        a single key that is a progression in its table (`_progression_key`),
+        so building on it needs no hash table."""
+        if joined[entry]:
+            return False
+        var mine = masks[entry]
+        var theirs = masks[other]
+        var keys = List[String]()
+        for edge in edges:
+            if mine & (1 << edge.a) != 0 and theirs & (1 << edge.b) != 0:
+                for k in edge.a_keys:
+                    keys.append(k)
+            elif mine & (1 << edge.b) != 0 and theirs & (1 << edge.a) != 0:
+                for k in edge.b_keys:
+                    keys.append(k)
+        return len(keys) == 1 and self._progression_key(node_of[entry], keys)
 
     def _cost_order_joins(
         mut self, root: Int, streaming: Bool, batch_size: Int
@@ -5750,6 +5796,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     right_cost *= 1.15
                 if not joined[left] and joined[right]:
                     left_cost *= 1.15
+                # A lone relation joined on one key whose values are a
+                # progression builds no hash table: the other side looks
+                # its rows up by position (`join.progression`), so it costs
+                # nothing to build on.
+                if self._indexed_relation(
+                    left, right, joined, node_of, edges, tree.mask
+                ):
+                    left_cost = 0.0
+                if self._indexed_relation(
+                    right, left, joined, node_of, edges, tree.mask
+                ):
+                    right_cost = 0.0
                 if right_cost > left_cost:
                     var t = left
                     left = right
