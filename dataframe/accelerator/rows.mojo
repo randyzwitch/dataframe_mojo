@@ -15,6 +15,7 @@ from . import (
     checked_rank,
     decimal_feed,
     decimal_group_feed,
+    decimal_scalar_feed,
 )
 from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
@@ -1291,9 +1292,34 @@ def lower_rows(
             ):
                 capabilities.reject("observed sum", "invalid observed producer")
         var sum_expression = 0
-        var ordered_group = node.text == decimal_group_feed.MATERIALIZATION
+        var scalar_precision = node.text == decimal_scalar_feed.MATERIALIZATION
+        var ordered_group = (
+            node.text == decimal_group_feed.MATERIALIZATION or scalar_precision
+        )
+        if scalar_precision:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or node.kind != SELECT
+                or len(node.names2) != 1 + len(node.exprs)
+                or node.names2[0] != node.text
+            ):
+                capabilities.reject(
+                    "decimal scalar feed", "invalid original SUM projection"
+                )
+            var original_bounds = List[BoundExpr]()
+            for expression in node.exprs:
+                original_bounds.append(bind(expression, schema))
+            if not decimal_scalar_feed.eligible(original_bounds, schema):
+                capabilities.reject(
+                    "decimal scalar feed",
+                    "original operand/state proof changed",
+                )
+            ordered_mode = decimal_scalar_feed.ORDERED_MODE
         var observed_group = (
-            node.text == "metal_group_materialization" or ordered_group
+            node.text == "metal_group_materialization"
+            or node.text == decimal_group_feed.MATERIALIZATION
         )
         if observed_group:
             if (
@@ -1313,7 +1339,7 @@ def lower_rows(
             for at in range(len(node.names)):
                 if node.names2[2 + at] != node.names[at]:
                     capabilities.reject("observed group", "group key changed")
-        if ordered_group:
+        if ordered_group and not scalar_precision:
             for field in query._nodes[node.left].text_fields:
                 if field.name in node.names and field.category:
                     capabilities.reject(
@@ -1378,6 +1404,15 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
+            if scalar_precision:
+                if node.names2[
+                    1 + decimal_expression
+                ] != implode_ordered.signature(bound):
+                    capabilities.reject(
+                        "decimal scalar feed",
+                        "producer AST or logical metadata changed",
+                    )
+                decimal_expression += 1
             if observed_sum:
                 if node.names2[1 + sum_expression] != implode_ordered.signature(
                     bound
@@ -2654,7 +2689,8 @@ def lower_rows(
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
                 if ordered_group:
-                    # AGG strips the reduction root before emitting its operand.
+                    # Scalar SUM and AGG strip the reduction root before
+                    # emitting its intact original operand.
                     # Preserve precisely those original occurrence ranks.
                     for at in range(count):
                         ordered_ranks.append(expression_ranks[at])
@@ -3012,10 +3048,32 @@ def lower_rows(
                     "decimal group feed", "row movement escaped original AGG"
                 )
             grouped_steps += Int(step.grouped)
-        if grouped_steps != 1 or reduced or len(ordered_ranks) != len(literals):
+        if grouped_steps != (0 if reduced else 1) or len(ordered_ranks) != len(
+            literals
+        ):
             capabilities.reject(
                 "decimal group feed", "invalid original AGG geometry"
             )
+        if reduced:
+            var floating_sum = False
+            for output in outputs:
+                var input_type = slot_dtypes[output.slot]
+                if output.reduction != SUM:
+                    capabilities.reject(
+                        "decimal scalar feed", "requires original SUM states"
+                    )
+                if input_type == DataType.FLOAT64:
+                    floating_sum = True
+                elif not decimal_group_feed.infallible_sum(
+                    input_type, Int(UInt32.MAX)
+                ):
+                    capabilities.reject(
+                        "decimal scalar feed", "state exception bound changed"
+                    )
+            if not floating_sum:
+                capabilities.reject(
+                    "decimal scalar feed", "missing original Float64 SUM"
+                )
     for step_index in range(len(steps)):
         ref step = steps[step_index]
         for occurrence in range(step.start, step.start + step.nodes):

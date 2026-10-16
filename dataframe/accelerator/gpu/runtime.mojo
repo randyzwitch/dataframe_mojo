@@ -20,6 +20,7 @@ from dataframe.parallel import configured_workers
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.binding import temporal_result
+from dataframe.accelerator.decimal_group_feed import infallible_sum
 from dataframe.expr import (
     SUM,
     MEAN,
@@ -1403,7 +1404,7 @@ def execute_plan(
     if ordered_group:
         var groups = 0
         for step in plan.steps:
-            if step.filter or (step.order and not groups):
+            if step.filter or (step.order and (plan.reductions or not groups)):
                 raise Error(
                     "Mojo GPU narrow Decimal group cannot move source rows"
                 )
@@ -1411,12 +1412,27 @@ def execute_plan(
         if (
             not terminal_boundary
             or plan.limit >= 0
-            or plan.reductions
-            or groups != 1
+            or groups != (0 if plan.reductions else 1)
             or rows > Int(UInt32.MAX)
             or len(plan.ordered_ranks[]) != len(plan.literals)
         ):
             raise Error("Mojo GPU narrow Decimal group certificate changed")
+        if plan.reductions:
+            var floating_sum = False
+            for output in plan.outputs:
+                var input_type = plan.slot_dtypes[output.slot]
+                if output.reduction != SUM:
+                    raise Error(
+                        "Mojo GPU narrow Decimal scalar requires SUM states"
+                    )
+                if input_type == DataType.FLOAT64:
+                    floating_sum = True
+                elif not infallible_sum(input_type, rows):
+                    raise Error(
+                        "Mojo GPU narrow Decimal scalar state bound changed"
+                    )
+            if not floating_sum:
+                raise Error("Mojo GPU narrow Decimal scalar lacks Float64 SUM")
     if ordered_rows and not observed_rank:
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
