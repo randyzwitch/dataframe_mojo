@@ -6,6 +6,8 @@ the device. Original scans stage on first consumption; only the final table
 exports CPU values. Shared owner accounting includes all live intermediates,
 region scratch and the final host export before allocation.
 """
+from dataframe.accelerator import decimal_sum_receipts
+
 from std.time import perf_counter_ns
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer
@@ -92,8 +94,17 @@ def preflight(
             if is_qcut_marker(task.query):
                 _ = qcuts.preflight(task.query)
                 continue
+            if task.sum_receipt:
+                decimal_sum_receipts.validate(
+                    task.sum_receipt.value()[],
+                    task.source,
+                    dag.tasks[task.source].query,
+                    task.query,
+                )
             var plan = rows._preflight(
-                task.query, terminal_boundary=task.terminal
+                task.query,
+                terminal_boundary=task.terminal,
+                sum_receipt=task.sum_receipt,
             )
             if plan.ordered_mode == 6 and (
                 not plan.producer_region
@@ -535,10 +546,21 @@ def execute(
                     text_domain=target_domain,
                 )
             else:
+                if task.sum_receipt:
+                    # Producer execute/observe completed synchronously before
+                    # this task; no failed or masked GROUP result can authorize
+                    # arithmetic. The same DAG retains its exact source owner.
+                    decimal_sum_receipts.validate(
+                        task.sum_receipt.value()[],
+                        task.source,
+                        dag.tasks[task.source].query,
+                        task.query,
+                    )
                 var plan = rows._preflight(
                     task.query,
                     terminal_boundary=task.terminal,
                     source_rows=source_rows,
+                    sum_receipt=task.sum_receipt,
                 )
                 executed = rows.execute_plan(
                     plan,
