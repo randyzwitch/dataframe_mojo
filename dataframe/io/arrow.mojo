@@ -32,7 +32,6 @@ nullable and Mojo `Pointer`s are not.
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
 from ..bool_column import BoolColumn
 from ..column import Column, _copy_bits, _copy_validity
-from std.collections import Dict
 from ..categorical import encode
 from ..geometry import from_wkb
 from ..field_metadata import _append_metadata, _has_extension_name

@@ -364,7 +364,7 @@ def _decimal_feed_worker(
             var error = errors[unsafe_offset=slot * stride + row]
             if error:
                 partial.error = UInt64(error)
-                return partial
+                return partial^
         for row in range(offset, stop):
             var at = slot * stride + row
             partial.add(
@@ -379,8 +379,8 @@ def _decimal_feed_worker(
                 parameter,
             )
             if partial.error:
-                return partial
-    return partial
+                return partial^
+    return partial^
 
 
 def reduce_partials(

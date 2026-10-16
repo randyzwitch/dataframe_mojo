@@ -22,9 +22,9 @@ useful going forward, while acknowledging prior exposure.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
    the suites together) says why in a `Benchmark-Change:` commit trailer.
-3. **Development and held-out suites.** Tune on H2O, PDS-H and mechanism
-   benchmarks. Keep TPC-DS and ClickBench as held-out validation of
-   completed changes. Do not use their per-query timings to choose
+3. **Development and held-out suites.** Tune on H2O, PDS-H, TPC-DS and
+   mechanism benchmarks. Keep ClickBench as held-out validation of
+   completed changes. Do not use its per-query timings to choose
    optimization targets, tune thresholds, or add query-specific exceptions.
    Some earlier optimization work used ClickBench results; record that
    caveat and enforce the boundary going forward. Correctness bugs can be
@@ -54,7 +54,7 @@ follow on every change; the full tier is what a report cites.
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
 | `pdsh` | development (held out until 2026-10-05) | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 55 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
+| `tpcds` | development (held out until 2026-10-15) | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 55 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
 | `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
@@ -97,15 +97,15 @@ beside the main checkout, `<checkout>_benchdata` (override with
 ```bash
 pixi run -e native build-dfparquet                                   # once
 
-# After a code change: about two minutes once built.
+# After a code change: a few minutes once built.
 pixi run -e oracle python3 benchmarks/tools/bench_suites.py --baseline main
 
 # For a report: hours; run it occasionally, not per change.
 pixi run -e oracle python3 benchmarks/tools/bench_suites.py --tier full --all-suites
 ```
 
-**Quick** (the default) runs the development suites (H2O at 1M rows, PDS-H at
-scale factor 0.1) with every data variant, three rounds of three timed runs, and times only this library.
+**Quick** (the default) runs the development suites (H2O at 1M rows, PDS-H
+and TPC-DS at scale factor 0.1) with every data variant, three rounds of three timed runs, and times only this library.
 `--baseline REF` builds the suite runners against the library at `REF`
 (checked out once as a git worktree under `build/suites/baseline/`, cached by
 commit) and alternates the two builds. The report opens with **Changes vs
@@ -116,11 +116,11 @@ repetitions and reference query-source hash, because their code does not
 change when this library does.
 Narrow a run with `--suites h2o_join` or `--queries q1,q2`.
 
-**Full** runs both development and held-out suites at 10M rows (TPC-H and
-TPC-DS scale factor 1, 10M ClickBench rows), three rounds, measures every
+**Full** runs both development and held-out suites at 10M rows (PDS-H and
+TPC-DS at scale factor 1, 10M ClickBench rows), three rounds, measures every
 engine afresh and records fast-path coverage. `--all-suites` also selects
 all five with the quick tier; `--suites` can explicitly narrow either tier.
-The `--heldout` option adds TPC-DS and ClickBench to a run.
+The `--heldout` option adds the held-out suite, ClickBench, to a run.
 
 Both tiers give each (suite, variant, engine, round) its own process, which
 loads the tables once, untimed, then warms up and times each query. The
@@ -146,6 +146,20 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
+`benchmarks/tools/bench_metal_suites.py` separately checks exact CPU/Apple
+query results with every query `collect` forced onto Metal. Summarize one or
+more immutable receipt files with
+`python3 benchmarks/tools/metal_query_report.py RECEIPT.json --output REPORT.json`.
+The tool checks consistent engine, SDK, workload and runner identities,
+rejects duplicate cases, and derives catalog and translation counts from the
+retained query sources. Partial grids remain partial. JSON and text reports
+separate populated and empty matches, preserve unsupported and differing
+answers, and exclude source-audited hybrid cases from conservative counts.
+An unequal CPU repeat remains diagnostic evidence, not an exemption from the
+exact comparison. The case audit registry records q24's eager CPU mean;
+forcing its `collect` calls does not make that aggregate a GPU operation.
+Coverage `collection_ns` values are diagnostic and are not performance results.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join
@@ -163,7 +177,7 @@ showed one query 10% faster in every round. Prefer the geometric means over
 single cells, and confirm a single-query change on the full tier.
 
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
-this size), `dev` (1M rows), `default` (10M) or `large` (100M).
+this size), `dev` (1M rows, scale factor 0.1), `default` (10M) or `large` (100M).
 
 ## Keeping holdouts useful
 
@@ -192,6 +206,20 @@ PDS-H is therefore a development suite from that date, and the quick tier
 runs it. TPC-DS takes its place as the held-out suite for join plans.
 Reports made before the change keep the note they were made under
 (`bench_policy.EARLIER_NOTES`); their PDS-H numbers were held-out numbers.
+
+### TPC-DS became a development suite on 2026-10-15
+
+By then H2O and PDS-H were within 1.5x of both Polars and DuckDB on every
+query except PDS-H q2, while 10 of the 12 queries still outside 1.5x were
+TPC-DS queries. With TPC-DS held out, the development suites gave no
+evidence to choose the next piece of work from, and the results that did
+show the gaps could not be used.
+
+TPC-DS is therefore a development suite from that date, and the quick tier
+runs it at scale factor 0.1. Its per-query timings may now be used to
+choose work. ClickBench remains held out, and stays the only held-out suite
+until another suite is added. Reports made before the change keep the note
+they were made under; their TPC-DS numbers were held-out numbers.
 
 ### TPC-DS coverage
 

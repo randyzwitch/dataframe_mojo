@@ -379,33 +379,11 @@ def parse_float64(text: String) raises -> Float64:
     return parse_float64(StringSlice(text))
 
 
-def _parse_float64_strict(text: StringSlice) raises -> Float64:
-    """The reference implementation: check the grammar, then convert.
-
-    Grammar validation reads the borrowed CSV field directly.  Mojo's current
-    Float64 conversion materializes an owned string for a StringSlice, so
-    this fallback is correct but not allocation-free for long fields.
-    """
-    if edge_ascii_whitespace(text):
-        raise Error("Float64 fields cannot have surrounding whitespace")
-    if not _is_decimal(text) and not _is_special_float(text):
-        raise Error("invalid Float64 value '" + String(text) + "'")
-    var value: Float64
-    try:
-        value = Float64(text)
-    except:
-        raise Error("invalid Float64 value '" + String(text) + "'")
-    if isinf(value) and not _is_special_float(text):
-        raise Error("Float64 overflow for '" + String(text) + "'")
-    return value
-
-
 def _checked_float64(text: StringSlice) raises -> Float64:
     """Validate strict grammar before using the borrowed standard converter.
 
     Successful conversion does not construct an owned String. Error text is
-    materialized only on failure. Keep the strict reference independent so
-    tests catch changes in the private standard-library entry point.
+    materialized only on failure.
     """
     if edge_ascii_whitespace(text):
         raise Error("Float64 fields cannot have surrounding whitespace")

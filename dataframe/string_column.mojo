@@ -20,10 +20,6 @@ from .string_view import (
 from .dtype import DataType
 from .column import (
     Column,
-    _append_bits,
-    _bit,
-    _copy_bits,
-    _count_set,
     _pack_bits,
     _validity_bit,
     _count_valid,
@@ -208,12 +204,6 @@ struct StringColumn(Copyable, Sized):
     def _row_bytes(self, i: Int) -> Span[UInt8, ImmutAnyOrigin]:
         """Unchecked borrowed read of a row's raw bytes (text or binary)."""
         return self._get(i).as_bytes()
-
-    def _equal_at(self, other: Self, i: Int, j: Int) -> Bool:
-        """Compare two row values, treating nulls as unequal."""
-        if not self._valid(i) or not other._valid(j):
-            return False
-        return self._equal_at_valid(other, i, j)
 
     def _equal_at_valid(self, other: Self, i: Int, j: Int) -> Bool:
         """Compare rows known to be valid without repeat bitmap checks."""
@@ -584,7 +574,6 @@ struct StringColumn(Copyable, Sized):
         # prefix, then buffer 0 and the offset (#395).
         var views = List[StringView](unsafe_uninit_length=n)
         var words = views.unsafe_ptr().unsafe_bitcast[UInt64]()
-        var total = 0
         var missing = False
         for k in range(n):
             var row = rows.unsafe_offset(k)[]
@@ -599,7 +588,6 @@ struct StringColumn(Copyable, Sized):
                 raise Error("Column index out of bounds")
             var start = Int(source.unsafe_offset(row)[])
             var length = Int(source.unsafe_offset(row + 1)[]) - start
-            total += length
             var bytes = data.unsafe_offset(start)
             var low = UInt64(length)
             var high = UInt64(0)
@@ -633,9 +621,7 @@ struct StringColumn(Copyable, Sized):
         var buffers = List[ArcPointer[List[UInt8]]]()
         buffers.append(self._bytes.copy())
         var result = Self(
-            StringViewStorage(
-                views^, buffers^, bits^, n, total, len(self._bytes[])
-            )
+            StringViewStorage(views^, buffers^, bits^, n, len(self._bytes[]))
         )
         self._carry_codes(result, indices, first, last, base, shared)
         return result^
@@ -871,19 +857,6 @@ struct StringBuilder(Copyable):
     def append_null(mut self):
         self._offsets.append(Int64(len(self._bytes)))
         self._push_bit(False)
-
-    def _pop(mut self):
-        """Drop the last row (the CSV reader discards partial records)."""
-        _ = self._offsets.pop()
-        self._bytes.resize(Int(self._offsets[len(self._offsets) - 1]), 0)
-        self._length -= 1
-        if len(self._bits) != 0:
-            if self._length % 8 == 0:
-                _ = self._bits.pop()
-            else:
-                self._bits[len(self._bits) - 1] &= ~(
-                    UInt8(1) << UInt8(self._length % 8)
-                )
 
     def _append_row(mut self, column: StringColumn, i: Int):
         """Copy row i of column, including its validity."""

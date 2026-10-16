@@ -16,7 +16,7 @@ in parallel chunks that are then merged.
 from std.memory import bitcast
 
 from .column import Column
-from .dtype import DataType, NUMERIC_DTYPES
+from .dtype import NUMERIC_DTYPES
 from .parallel import Job, configured_workers, run_jobs
 from .series import Series
 from .trace import trace_path
@@ -28,7 +28,6 @@ comptime _DENSE = 3
 comptime _AVERAGE = 4
 
 comptime _SIGN = UInt64(1) << 63
-comptime _LOW = (UInt128(1) << 64) - 1
 # A partition this large is sorted on all workers rather than one.
 comptime _LARGE = 1 << 16
 # Below this many rows, insertion sort beats the general sorter.
@@ -74,16 +73,6 @@ def _pack(key: UInt64, row: Int) -> UInt128:
     return (UInt128(key) << 64) | UInt128(row)
 
 
-def _sort_small(mut values: List[UInt128]):
-    for i in range(1, len(values)):
-        var item = values[i]
-        var j = i
-        while j > 0 and values[j - 1] > item:
-            values[j] = values[j - 1]
-            j -= 1
-        values[j] = item
-
-
 struct _Outputs(ImplicitlyCopyable, Movable):
     """Addresses of the shared result buffers; rows never overlap."""
 
@@ -97,18 +86,6 @@ struct _Outputs(ImplicitlyCopyable, Movable):
         self.floats = floats
         self.valid = valid
         self.method = method
-
-    def assign(self, sorted: Span[UInt128, _]):
-        """Rank one sorted partition."""
-        self.assign_runs(
-            sorted.unsafe_ptr()
-            .unsafe_mut_cast[True]()
-            .unsafe_origin_cast[MutAnyOrigin](),
-            len(sorted),
-            0,
-            len(sorted),
-            0,
-        )
 
     def assign_runs(
         self,

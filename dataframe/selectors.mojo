@@ -9,7 +9,6 @@ from .expr import (
     SELECT_DTYPE,
     SELECT_EXCLUDE,
     SELECTOR,
-    SEP,
     Expr,
     _node,
 )

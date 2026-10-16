@@ -5,7 +5,7 @@ are independent literal fixtures verified against pinned Polars 1.44.2.
 """
 from std.math import abs, isnan
 from std.testing import assert_equal, assert_true
-from dataframe import DataFrame, Series
+from dataframe import DataFrame
 from tests.support.coverage_compare import assert_value
 
 

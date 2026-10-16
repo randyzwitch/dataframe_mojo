@@ -332,11 +332,6 @@ def _parse_avx_17_to_20(
 
 
 @always_inline
-def _parse_simd_16(bytes: Span[UInt8, _], start: Int) raises -> UInt64:
-    return _parse_sse_madd(bytes, start, 16)
-
-
-@always_inline
 def _parse_simd_at_most_16(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
