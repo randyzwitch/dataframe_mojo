@@ -279,6 +279,11 @@ def production_policy() -> SuitePolicy:
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_consumers_literals_layouts_nulls_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_checked_sum_consumers.mojo::test_mojo_gpu_checked_sum_scalar_when_and_numeric_mean_siblings",
             "metal",
         )
