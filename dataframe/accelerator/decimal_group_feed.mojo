@@ -28,6 +28,7 @@ from dataframe.expr import (
     DIV,
     CAST,
     WHEN,
+    FILL_NULL,
     IS_NULL,
     IS_NOT_NULL,
     EQ,
@@ -80,6 +81,28 @@ def narrow_value(bound: BoundExpr, at: Int) -> Bool:
     )
 
 
+def _selection_branch(bound: BoundExpr, child: Int, target: DataType) -> Bool:
+    if child < 0 or child >= len(bound.dtypes):
+        return False
+    var source = bound.dtypes[child]
+    if source == target:
+        return True
+    if (
+        not source.is_decimal()
+        or not target.is_decimal()
+        or source.scale() != target.scale()
+        or bound.expr._nodes[child].op != LIT_INT
+        or not narrow_value(bound, child)
+    ):
+        return False
+    # CPU casts both valid branches before selecting, even when unchosen.
+    # A canonical signed64 literal at the same scale needs no word rescale
+    # and cannot raise if its exact raw value fits the target precision.
+    var raw = Int128(bound.expr._nodes[child].integer)
+    var limit = pow10(target.precision())
+    return raw > -limit and raw < limit
+
+
 def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
     if not ordered_rows.eligible(bound):
         return (False, False)
@@ -95,14 +118,20 @@ def operand(bound: BoundExpr) -> Tuple[Bool, Bool]:
         if node.op == CAST and proven[at]:
             continue
         if node.op == WHEN:
-            # A Decimal common dtype can implicitly rescale both branches.
-            # That introduces separate cast observations and requires its own
-            # alignment certificate; raw WHEN selection cannot prove them.
             if (
                 node.extra < 0
                 or bound.dtypes[node.left] != DataType.BOOL
-                or bound.dtypes[node.right] != dtype
-                or bound.dtypes[node.extra] != dtype
+                or not _selection_branch(bound, node.right, dtype)
+                or not _selection_branch(bound, node.extra, dtype)
+            ):
+                return (False, False)
+            continue
+        if node.op == FILL_NULL:
+            if (
+                node.left < 0
+                or node.right < 0
+                or not _selection_branch(bound, node.left, dtype)
+                or not _selection_branch(bound, node.right, dtype)
             ):
                 return (False, False)
             continue
