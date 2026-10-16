@@ -1287,13 +1287,25 @@ def lower_join_dag(
     # UInt32 is the existing admitted GROUP-input row bound, never a base
     # SCAN count (a JOIN may multiply rows). The receipt is only consumed
     # behind the original successful observed GROUP task.
+    var original = query.copy()
+    var candidates = List[Bool](length=len(query._nodes), fill=False)
+    for at in range(len(original._nodes)):
+        if _decimal_group_producer(
+            original, at
+        ) and decimal_sum_receipts.needs_bounds(original, at):
+            candidates[at] = True
+            for ancestor in producer_phases._ancestors(original, at):
+                if not original._nodes[ancestor].lineage_anchor:
+                    original._nodes[ancestor].lineage_anchor = ArcPointer(
+                        ancestor
+                    )
     var sum_origins = List[Optional[ArcPointer[decimal_sum_receipts.Origin]]](
         length=len(query._nodes), fill=None
     )
     for at in range(len(query._nodes)):
-        if _decimal_group_producer(query, at):
-            sum_origins[at] = decimal_sum_receipts.capture(query, at)
-    var projected = query.copy()
+        if candidates[at]:
+            sum_origins[at] = decimal_sum_receipts.capture(original, at)
+    var projected = original.copy()
     if producer_phases.has_certified(projected):
         # Original-entry normalization records the annotations as part of
         # each immutable prefix. No optimizer or marker may mutate it later.
@@ -1318,6 +1330,15 @@ def lower_join_dag(
         prune_projections(projected)
         _mark_decimal_producers(projected)
         _mark_integer_producers(projected)
+    var mapped_origins = List[
+        Optional[ArcPointer[decimal_sum_receipts.Origin]]
+    ](length=len(projected._nodes), fill=None)
+    for origin in sum_origins:
+        if not origin:
+            continue
+        for at in range(len(projected._nodes)):
+            if decimal_sum_receipts.matches(origin.value()[], projected, at):
+                mapped_origins[at] = origin.value()
     var tasks = List[DagTask]()
     var root = _task(
         projected,
@@ -1325,7 +1346,7 @@ def lower_join_dag(
         True,
         capabilities,
         tasks,
-        sum_origins=sum_origins,
+        sum_origins=mapped_origins,
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )

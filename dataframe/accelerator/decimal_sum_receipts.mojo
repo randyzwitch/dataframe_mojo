@@ -3,19 +3,34 @@
 Issuance is metadata-only. Authorization is conditional on the DAG executor
 successfully observing the exact producer task before its consumer runs.
 """
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from dataframe import Series, DataFrame
 from dataframe.binding import bind, BoundExpr
 from dataframe.dtype import DataType
-from dataframe.expr import SUM
-from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG
+from dataframe.expr import SUM, COL, Expr, ADD, SUB, MUL, is_comparison
+from dataframe.lazy import (
+    LazyFrame,
+    PlanNode,
+    SCAN_FRAME,
+    AGG,
+    SELECT,
+    FILTER,
+    WITH_COLUMNS,
+)
 from . import decimal_sum_bounds as raw
 from . import decimal_group_feed
 from .implode_ordered import signature
 from .metadata import schema_frame
 from .decimal_prefix import prefix_infallible
-from .producer_phases import _ancestors, _prefix_signature, _bound_bytes
+from .producer_phases import (
+    _ancestors,
+    _prefix_signature,
+    _bound_bytes,
+    _source_layout,
+)
+from .window_keys import WindowKey
+from .code_domains import TextField
 from .memory import checked_add, checked_mul
 
 
@@ -30,6 +45,9 @@ struct Origin(Movable):
     var signatures: List[String]
     var source_owners: List[Series]
     var prefix_signatures: List[String]
+    var prefix_indices: List[Int]
+    var prefix_nodes: List[PlanNode]
+    var source_counts: List[Int]
     var outputs: List[Series]
     var maxima: List[raw.Magnitude]
     var retained_bytes: Int
@@ -81,14 +99,36 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
         raise Error("Decimal SUM bound original GROUP operand proof missing")
     var owners = List[Series]()
     var prefixes = List[String]()
+    var indices = List[Int]()
+    var snapshots = List[PlanNode]()
+    var source_counts = List[Int]()
     for at in _ancestors(query, group):
         prefixes.append(_prefix_signature(query, at))
+        indices.append(at)
+        snapshots.append(query._nodes[at].copy())
+        source_counts.append(0)
         ref ancestor = query._nodes[at]
+        if not ancestor.lineage_anchor:
+            raise Error("Decimal SUM bound original occurrence anchor missing")
         if ancestor.kind == SCAN_FRAME:
+            source_counts[len(source_counts) - 1] = query._frames[
+                ancestor.offset
+            ].width()
             for column in query._frames[ancestor.offset]._columns:
                 owners.append(column.copy())
     var keys = node.names.copy()
     var retained = size_of[Origin]() + 8
+    retained = checked_add(
+        retained,
+        checked_mul(
+            indices.capacity() + source_counts.capacity(), size_of[Int]()
+        ),
+    )
+    retained = checked_add(
+        retained, checked_mul(snapshots.capacity(), size_of[PlanNode]())
+    )
+    for at in indices:
+        retained = checked_add(retained, _snapshot_bytes(query, at))
     retained = checked_add(
         retained, checked_mul(maxima.capacity(), size_of[raw.Magnitude]())
     )
@@ -139,6 +179,9 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
             signatures^,
             owners^,
             prefixes^,
+            indices^,
+            snapshots^,
+            source_counts^,
             outputs^,
             maxima^,
             retained,
@@ -147,12 +190,11 @@ def capture(query: LazyFrame, group: Int) raises -> ArcPointer[Origin]:
 
 
 def matches(origin: Origin, query: LazyFrame, group: Int) raises -> Bool:
-    if group != origin.original_root:
+    if not prefix_matches(origin, query, group):
         return False
     ref node = query._nodes[group]
     if (
-        node.left != origin.original_input
-        or node.maintain_order != origin.maintain_order
+        node.maintain_order != origin.maintain_order
         or node.names != origin.keys
         or len(node.exprs) != len(origin.original)
     ):
@@ -200,6 +242,7 @@ def validate(
     ref producer = producer_query._nodes[len(producer_query._nodes) - 1]
     if (
         producer.text != decimal_group_feed.MATERIALIZATION
+        or not _same_anchor(producer, origin.prefix_nodes[0])
         or producer.names != origin.keys
         or producer.maintain_order != origin.maintain_order
         or len(producer.exprs) != len(origin.original)
@@ -214,3 +257,247 @@ def validate(
             raise Error("Decimal SUM bound original operand differs")
     if not schema_matches(origin, consumer_query._frames[0]):
         raise Error("Decimal SUM bound consumer slot or dtype differs")
+
+
+def _snapshot_bytes(query: LazyFrame, at: Int) raises -> Int:
+    ref node = query._nodes[at]
+    var retained = 8  # shared original occurrence anchor
+    retained = checked_add(
+        retained,
+        checked_mul(
+            node.exprs.capacity() + node.partition_exprs.capacity(),
+            size_of[Expr](),
+        ),
+    )
+    retained = checked_add(
+        retained,
+        checked_mul(
+            node.names.capacity()
+            + node.names2.capacity()
+            + node.right_keys.capacity(),
+            size_of[String](),
+        ),
+    )
+    retained = checked_add(
+        retained, checked_mul(node.flags.capacity(), size_of[Bool]())
+    )
+    retained = checked_add(
+        retained, checked_mul(node.window_keys.capacity(), size_of[WindowKey]())
+    )
+    retained = checked_add(
+        retained, checked_mul(node.text_fields.capacity(), size_of[TextField]())
+    )
+    retained = checked_add(
+        retained,
+        checked_mul(node.partition_columns.capacity(), size_of[Series]()),
+    )
+    retained = checked_add(
+        retained,
+        checked_mul(
+            node.text.byte_length() + node.source_failure.byte_length() + 64, 2
+        ),
+    )
+    for name in node.names:
+        retained = checked_add(
+            retained, checked_mul(name.byte_length() + 32, 2)
+        )
+    for name in node.names2:
+        retained = checked_add(
+            retained, checked_mul(name.byte_length() + 32, 2)
+        )
+    for name in node.right_keys:
+        retained = checked_add(
+            retained, checked_mul(name.byte_length() + 32, 2)
+        )
+    for key in node.window_keys:
+        retained = checked_add(
+            retained, checked_mul(key.name.byte_length() + 32, 2)
+        )
+    for field in node.text_fields:
+        retained = checked_add(
+            retained, checked_mul(field.name.byte_length() + 32, 2)
+        )
+    for column in node.partition_columns:
+        retained = checked_add(
+            retained, checked_mul(column.name().byte_length() + 32, 2)
+        )
+    if len(node.exprs) or len(node.partition_exprs):
+        var input = schema_frame(query, node.left)
+        for expression in node.exprs:
+            retained = checked_add(
+                retained, _bound_bytes(bind(expression, input._columns))
+            )
+        for expression in node.partition_exprs:
+            retained = checked_add(
+                retained, _bound_bytes(bind(expression, node.partition_columns))
+            )
+    return retained
+
+
+def _same_anchor(left: PlanNode, right: PlanNode) -> Bool:
+    return (
+        left.lineage_anchor
+        and right.lineage_anchor
+        and Int(Pointer(to=left.lineage_anchor.value()[]))
+        == Int(Pointer(to=right.lineage_anchor.value()[]))
+    )
+
+
+def _plain_transport(node: PlanNode) -> Bool:
+    # Exactly the additional SELECT emitted by prune_projections: no checked
+    # expression, alias, source fault, counter, state or alternate input.
+    if (
+        node.kind != SELECT
+        or node.lineage_anchor
+        or node.left < 0
+        or node.right != -1
+        or node.text
+        or len(node.names)
+        or len(node.names2)
+        or len(node.flags)
+        or node.source_failure
+        or node._executions
+        or node.producer_origin
+        or node.producer_region
+        or node.asof_tolerance
+        or len(node.window_keys)
+        or len(node.partition_exprs)
+        or len(node.partition_columns)
+        or not len(node.exprs)
+    ):
+        return False
+    var names = List[String]()
+    for expression in node.exprs:
+        if len(expression._nodes) != 1:
+            return False
+        ref part = expression._nodes[0]
+        if (
+            part.op != COL
+            or expression._name != part.text
+            or part.text in names
+        ):
+            return False
+        names.append(part.text)
+    return True
+
+
+def _original_edge(origin: Origin, query: LazyFrame, child: Int) -> Int:
+    if child == -1:
+        return -1
+    # Projection pruning inserts unanchored plain column transports and can
+    # reorder indices. Strip only those transports, retaining every original
+    # checked occurrence and resolving edges by the original anchor identity.
+    var remaining = len(query._nodes)
+    while child >= 0 and child < len(query._nodes) and remaining:
+        remaining -= 1
+        ref node = query._nodes[child]
+        for at in range(len(origin.prefix_nodes)):
+            if _same_anchor(node, origin.prefix_nodes[at]):
+                return origin.prefix_indices[at]
+        if not _plain_transport(node):
+            return -2
+        child = node.left
+    return -2
+
+
+def prefix_matches(origin: Origin, query: LazyFrame, group: Int) raises -> Bool:
+    if (
+        group < 0
+        or group >= len(query._nodes)
+        or not len(origin.prefix_nodes)
+        or not _same_anchor(query._nodes[group], origin.prefix_nodes[0])
+    ):
+        return False
+    var live = _ancestors(query, group)
+    # No extra computation can be smuggled in as projection transport.
+    for at in live:
+        var anchored = False
+        for original in origin.prefix_nodes:
+            anchored |= _same_anchor(query._nodes[at], original)
+        if not anchored and not _plain_transport(query._nodes[at]):
+            return False
+    var staged = query.copy()
+    var source_slot = 0
+    for i in range(len(origin.prefix_nodes)):
+        ref original = origin.prefix_nodes[i]
+        var current = -1
+        for at in live:
+            if _same_anchor(query._nodes[at], original):
+                if current >= 0:
+                    return False
+                current = at
+        if current < 0:
+            return False
+        var normalized = query._nodes[current].copy()
+        normalized.left = _original_edge(origin, query, normalized.left)
+        normalized.right = _original_edge(origin, query, normalized.right)
+        if normalized.left == -2 or normalized.right == -2:
+            return False
+        if original.kind == SCAN_FRAME:
+            if normalized.offset < 0 or normalized.offset >= len(query._frames):
+                return False
+            ref frame = query._frames[normalized.offset]
+            if frame.width() != origin.source_counts[i]:
+                return False
+            # Compare the retained ORIGINAL source owners, offsets, chunks,
+            # validity owners and metadata, including unused physical columns.
+            # Equal values from a replacement allocation are not provenance.
+            for column in frame._columns:
+                if source_slot >= len(origin.source_owners) or _source_layout(
+                    column
+                ) != _source_layout(origin.source_owners[source_slot]):
+                    return False
+                source_slot += 1
+            var allowed = original.names.copy()
+            if not len(allowed):
+                allowed = frame.columns()
+            var previous = -1
+            for name in normalized.names:
+                var position = -1
+                for at in range(len(allowed)):
+                    if allowed[at] == name:
+                        position = at
+                if position <= previous:
+                    return False
+                previous = position
+            if len(original.names) and not len(normalized.names):
+                return False
+            normalized.names = original.names.copy()
+        if i == 0:
+            # The observed GROUP marker is checked separately by matches().
+            normalized.text = original.text
+            normalized.names2 = original.names2.copy()
+        staged._nodes[current] = normalized^
+        if _prefix_signature(staged, current) != origin.prefix_signatures[i]:
+            return False
+    return source_slot == len(origin.source_owners)
+
+
+def needs_bounds(query: LazyFrame, group: Int) raises -> Bool:
+    """Capture only a direct first Decimal arithmetic consumer.
+
+    Pure transports, terminal groups and unrelated integer/float expressions
+    do not create anchors or retained provider receipts. A later replacing
+    projection is intentionally outside this first-consumer proof.
+    """
+    var output = schema_frame(query, group)
+    for node in query._nodes:
+        if node.left != group or node.kind not in [
+            SELECT,
+            FILTER,
+            WITH_COLUMNS,
+        ]:
+            continue
+        for expression in node.exprs:
+            var bound = bind(expression, output._columns)
+            for at in range(len(bound.expr._nodes)):
+                ref part = bound.expr._nodes[at]
+                if part.op in [ADD, SUB, MUL] and bound.dtypes[at].is_decimal():
+                    return True
+                if (
+                    is_comparison(part.op)
+                    and part.left >= 0
+                    and bound.dtypes[part.left].is_decimal()
+                ):
+                    return True
+    return False

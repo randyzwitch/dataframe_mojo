@@ -1,11 +1,13 @@
 """Original successful SUM bounds authorize only infallible consumers."""
+from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
 from dataframe.binding import bind
 from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.joins import lower_join_dag
+from dataframe.accelerator.joins import lower_join_dag, _mark_decimal_producers
+from dataframe.accelerator.metadata import prune_projections
 from dataframe.accelerator import decimal_sum_bounds as raw
 from dataframe.accelerator import decimal_sum_receipts
 from dataframe.accelerator.gpu.runtime import capabilities, _preflight
@@ -101,6 +103,7 @@ def test_sum_output_bound_raw_math_and_original_slots() raises:
                     receipt[], task.source, dag.tasks[task.source].query, forged
                 )
     assert_equal(receipts, 1)
+    _guarded_prefix_cases()
 
 
 def test_mojo_gpu_sum_output_bounds_scaled_literal_nulls_layouts() raises:
@@ -230,3 +233,92 @@ def test_sum_output_bounds_refuse_arbitrary_wide_columns_and_scale18_products() 
             ),
             capabilities(),
         )
+
+
+def _guarded_prefix_cases() raises:
+    var frame = source().with_column(
+        Series("unused", Column[Int32]([7, 8, 9, 10]))
+    )
+    var right = DataFrame(
+        [
+            Series("g", Column[Int32]([-2, 0])),
+            Series("right_unused", Column[Int32]([70, 80])),
+        ]
+    )
+    var dtype = frame.column("sale").dtype()
+    var original = fold_literal_text_parsing(
+        frame.lazy()
+        .filter(col("g") >= lit(Int32(-10)))
+        .join(right.lazy(), on="g")
+        .group_by("g", maintain_order=True)
+        .agg(
+            [
+                col("sale").sum(min_count=1).alias("sale"),
+                (col("refund") + col("zero")).sum(min_count=1).alias("refund"),
+            ]
+        )
+        .filter(col("sale") > lit("2").cast(dtype) * col("refund"))
+        .select(["g"])
+    )
+    for at in range(len(original._nodes)):
+        original._nodes[at].lineage_anchor = ArcPointer(at)
+    var group = 4
+    var origin = decimal_sum_receipts.capture(original, group)
+    var projected = original.copy()
+    prune_projections(projected)
+    _mark_decimal_producers(projected)
+    var mapped = -1
+    var prefix_filter = -1
+    var transport = -1
+    for at in range(len(projected._nodes)):
+        if decimal_sum_receipts._same_anchor(
+            projected._nodes[at], original._nodes[group]
+        ):
+            mapped = at
+        if decimal_sum_receipts._same_anchor(
+            projected._nodes[at], original._nodes[1]
+        ):
+            prefix_filter = at
+        if decimal_sum_receipts._plain_transport(projected._nodes[at]):
+            transport = at
+    assert_true(mapped > group)
+    assert_true(prefix_filter >= 0)
+    assert_true(transport >= 0)
+    assert_true(decimal_sum_receipts.matches(origin[], projected, mapped))
+    # This real prune bridge inserts SELECT above a filtered JOIN arm,
+    # narrows SCAN.names, and reorders indices. No original computation moves.
+    var dag = lower_join_dag(
+        original._with_accelerator_settings(False, True, 17), capabilities()
+    )
+    var count = 0
+    for task in dag.tasks:
+        count += Int(Bool(task.sum_receipt))
+    assert_equal(count, 1)
+    # Equal content in a newly allocated ORIGINAL source column is rejected,
+    # including an unused column. Values/dtype equality never waives owners.
+    var changed_source = projected.copy()
+    changed_source._frames[0] = frame.with_column(
+        Series("unused", Column[Int32]([7, 8, 9, 10]))
+    )
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], changed_source, mapped)
+    )
+    var changed_prefix = projected.copy()
+    changed_prefix._nodes[prefix_filter].exprs = [col("g") >= lit(Int32(0))]
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], changed_prefix, mapped)
+    )
+    var removed_checked = projected.copy()
+    removed_checked._nodes[mapped].exprs[1] = (
+        col("refund").sum(min_count=1).alias("refund")
+    )
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], removed_checked, mapped)
+    )
+    var changed_transport = projected.copy()
+    changed_transport._nodes[transport].exprs[0] = (
+        col("g") + lit(Int32(0))
+    ).alias("g")
+    assert_true(
+        not decimal_sum_receipts.matches(origin[], changed_transport, mapped)
+    )
