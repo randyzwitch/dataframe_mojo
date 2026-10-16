@@ -3133,6 +3133,31 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_decimal_group_feed_certificate_preserves_whole_original_agg",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_mojo_gpu_decimal_group_feed_literals_nulls_layouts_and_masks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_mojo_gpu_decimal_group_feed_stream_workers_and_precision_faults",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo::test_mojo_gpu_decimal_group_feed_budget_precedes_device",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -3190,6 +3215,7 @@ def production_policy() -> SuitePolicy:
             "execution.apple_parity",
             [
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
                 "tests/public_contracts/test_partition_cut_capture.mojo",
@@ -3648,6 +3674,7 @@ def production_policy() -> SuitePolicy:
             "execution.backends",
             [
                 "tests/execution_modes/test_mojo_gpu_checked_decimal_feed.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_group_feed.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_foundations.mojo",
                 "tests/public_contracts/test_partition_cut_capture.mojo",

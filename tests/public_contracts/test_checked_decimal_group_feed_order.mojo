@@ -1,7 +1,8 @@
 """CPU group/OVER feed and occurrence order, independent of GPU lowering."""
-from std.testing import assert_raises
+from std.testing import assert_raises, assert_true, assert_equal
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe.decimal import pow10
+from dataframe.hashing import _encode_dense
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.public_contracts.test_checked_decimal_feed_order import (
     feed_expression,
@@ -99,10 +100,12 @@ def test_checked_decimal_over_partition_job_order_precedes_source_fault_order() 
         groups[row] = Int32(1 - row % 2)
     var left = List[Int128](length=rows, fill=0)
     var right = List[Int128](length=rows, fill=1)
-    left[0] = pow10(38) - 1
-    right[0] = 2
-    left[1] = 6 * pow10(37)
-    left[3] = 6 * pow10(37)
+    # Dense ids are assigned in first-seen order (key 1 precedes key 0).
+    # Partition 0's prefix is therefore rows 0,2; row 1 belongs to job 1.
+    left[1] = pow10(38) - 1
+    right[1] = 2
+    left[0] = 6 * pow10(37)
+    left[2] = 6 * pow10(37)
     var frame = DataFrame(
         [
             Series("g", Column[Int32](groups^)),
@@ -114,13 +117,20 @@ def test_checked_decimal_over_partition_job_order_precedes_source_fault_order() 
             ),
         ]
     )
+    var partitions = _encode_dense(frame.column("g"), True)
+    assert_true(Bool(partitions))
+    assert_equal(partitions.value().ids[0], 0)
+    assert_equal(partitions.value().ids[1], 1)
+    assert_equal(partitions.value().ids[2], 0)
     var serial = WorkerSetting(1)
+    print("CPU OVER serial: source batch row 1 multiplication fault")
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(feed_expression().over("g"))
     _ = serial^
     var parallel = WorkerSetting(2)
-    # Dense key 0 is the first whole-partition job; its rows 1,3 overflow a
-    # prefix. Key 1's earlier source-row product fault belongs to job 1.
+    # The first-seen key 1 is the first whole-partition job; its rows 0,2
+    # overflow a prefix before job 1 observes source row 1's product fault.
+    print("CPU OVER two workers: first-seen partition rows 0,2 prefix fault")
     with assert_raises(contains="decimal precision 38"):
         _ = frame.select(feed_expression().over("g"))
     _ = parallel^

@@ -81,6 +81,16 @@ before merging partials, and keeps the original nulls and result dtype. This
 certificate does not cover streaming morsels, grouped/OVER feeds, multiple
 fallible operand occurrences or fallible sibling expressions.
 
+Grouped SUM/MEAN and count siblings additionally accept multiple checked
+Decimal ADD/SUB/MUL occurrences when every operand/intermediate uses at most
+64-bit physical storage and scale 18. All possible arithmetic failures then
+have the same precision category, and every UInt32-bounded SUM prefix/merge
+fits precision 38. The whole original AGG is observed before any downstream
+head or join, including streaming collections; this proof does not assume a
+worker or morsel assignment. Nullable operands and supported Boolean masks
+retain their original evaluation. Wide Decimal intermediates, other fallible
+operations/states, categorical keys and OVER feeds require separate proofs.
+
 Sorts preserve source order on ties, configured per-key null placement, and
 original value encodings. Nulls, NaNs and signed zeros retain the CPU grouping
 and join equivalence rules. Rank direction follows the CPU rank contract,

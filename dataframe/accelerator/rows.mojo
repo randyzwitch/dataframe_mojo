@@ -13,6 +13,7 @@ from . import (
     iana_certificate,
     producer_phases,
     decimal_feed,
+    decimal_group_feed,
 )
 from dataframe.producer_origin import RegionProof
 from .code_domains import TextField
@@ -1277,7 +1278,10 @@ def lower_rows(
                     "ordered decimal", "invalid observed producer"
                 )
             ordered_mode = 4
-        var observed_group = node.text == "metal_group_materialization"
+        var ordered_group = node.text == decimal_group_feed.MATERIALIZATION
+        var observed_group = (
+            node.text == "metal_group_materialization" or ordered_group
+        )
         if observed_group:
             if (
                 len(chain) != 1
@@ -1296,6 +1300,23 @@ def lower_rows(
             for at in range(len(node.names)):
                 if node.names2[2 + at] != node.names[at]:
                     capabilities.reject("observed group", "group key changed")
+        if ordered_group:
+            for field in query._nodes[node.left].text_fields:
+                if field.name in node.names and field.category:
+                    capabilities.reject(
+                        "decimal group feed",
+                        "original code keys require their own certificate",
+                    )
+            var original_bounds = List[BoundExpr]()
+            for expression in node.exprs:
+                original_bounds.append(bind(expression, schema))
+            if not decimal_group_feed.eligible(
+                original_bounds, schema, node.names
+            ):
+                capabilities.reject(
+                    "decimal group feed", "original whole-group proof changed"
+                )
+            ordered_mode = decimal_group_feed.ORDERED_MODE
         var grouped_expression = 0
         var decimal_expression = 0
         var ordered_producer = Bool(node.producer_origin)
@@ -1386,6 +1407,7 @@ def lower_rows(
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
@@ -1632,6 +1654,7 @@ def lower_rows(
                         and (part.op == MUL or part.op == DIV)
                     )
                     and not proven[part_index]
+                    and not ordered_group
                     and (
                         not terminal_boundary
                         or k != 0
@@ -2559,16 +2582,24 @@ def lower_rows(
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
-                ordered_ranks.extend(expression_ranks.copy())
+                if ordered_group:
+                    # AGG strips the reduction root before emitting its operand.
+                    # Preserve precisely those original occurrence ranks.
+                    for at in range(count):
+                        ordered_ranks.append(expression_ranks[at])
+                else:
+                    ordered_ranks.extend(expression_ranks.copy())
             if (
                 ordered_scalar
                 or ordered_terminal
                 or ordered_private
                 or ordered_decimal
                 or ordered_producer
+                or ordered_group
             ):
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
@@ -2893,6 +2924,21 @@ def lower_rows(
                 capabilities.reject(
                     "ordered rows", "requires direct terminal row projections"
                 )
+    if ordered_mode == decimal_group_feed.ORDERED_MODE:
+        # Header/key/reducer descriptors are not evaluated row occurrences.
+        while len(ordered_ranks) < len(literals):
+            ordered_ranks.append(UInt32(0))
+        var grouped_steps = 0
+        for step in steps:
+            if step.filter or (step.order and not grouped_steps):
+                capabilities.reject(
+                    "decimal group feed", "row movement escaped original AGG"
+                )
+            grouped_steps += Int(step.grouped)
+        if grouped_steps != 1 or reduced or len(ordered_ranks) != len(literals):
+            capabilities.reject(
+                "decimal group feed", "invalid original AGG geometry"
+            )
     for step_index in range(len(steps)):
         ref step = steps[step_index]
         for occurrence in range(step.start, step.start + step.nodes):
