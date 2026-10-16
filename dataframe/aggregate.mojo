@@ -11,14 +11,9 @@ from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
-from .string_column import StringColumn, StringBuilder
+from .string_column import StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
-from .decimal import (
-    check_limit,
-    check_precision,
-    decimal_mean,
-    precision_limit,
-)
+from .decimal import check_limit, decimal_mean, precision_limit
 from .series import Series
 from .expr import (
     SUM,
@@ -45,7 +40,6 @@ from .expr import (
     CORR,
     COV,
     VALUE_COUNTS,
-    SEP,
     split_names,
 )
 from .reductions import (

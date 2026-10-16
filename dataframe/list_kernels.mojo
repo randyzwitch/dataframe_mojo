@@ -9,7 +9,6 @@ from .expr import (
     LIST_GET,
     LIST_JOIN,
     LIST_LEN,
-    LIST_MAX,
     LIST_MEAN,
     LIST_MIN,
     LIST_SUM,

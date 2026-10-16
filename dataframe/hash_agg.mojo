@@ -16,7 +16,6 @@ row and first/tie semantics match a single pass. The first version serves
 one Int64 key without nulls and SUM, MEAN, MIN, MAX, COUNT and LEN of Int64
 or Float64 columns; anything else returns None and takes the other paths.
 """
-from std.collections import Optional
 from std.memory import Pointer, bitcast
 
 from .aggregate import Reducer
@@ -28,7 +27,6 @@ from .execution import _new_reducer
 from .expr import COL, COUNT, LEN, MAX, MEAN, MIN, SUM
 from .parallel import Job, partitions, run_jobs
 from .partition import _mix
-from .reductions import FloatSumState, IntSumState
 from .series import Series
 
 

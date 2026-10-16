@@ -37,7 +37,7 @@ from std.sys import bit_width_of
 
 from .bool_column import BoolColumn
 from .column import Column
-from .dtype import DataType, NUMERIC_DTYPES
+from .dtype import NUMERIC_DTYPES
 from .parallel import Job, Pool, configured_workers
 from .series import Series
 from .string_bytes import _Bytes

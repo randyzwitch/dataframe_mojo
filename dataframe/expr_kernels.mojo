@@ -30,7 +30,6 @@ from .expr import (
     LT,
     GE,
     LE,
-    NE,
     DIV,
     FLOORDIV,
     MOD,
@@ -44,7 +43,6 @@ from .expr import (
     LOG,
     FLOOR,
     CEIL,
-    ROUND,
     AND,
     OR,
     XOR,
@@ -455,34 +453,6 @@ def _numeric_int[
         return Series("", Column[Float64](floats^, valid))
     else:
         return Series("", Column[Scalar[D]](values^, valid))
-
-
-def _compare[
-    op: Int, T: Copyable & Deinitable & Comparable
-](left: Column[T], right: Column[T]) raises -> Series:
-    var n = _length(len(left), len(right))
-    var values = List[Bool](length=n, fill=False)
-    var valid = List[Bool](length=n, fill=False)
-    for i in range(n):
-        var a = 0 if len(left) == 1 else i
-        var b = 0 if len(right) == 1 else i
-        valid[i] = left._valid(a) and right._valid(b)
-        if valid[i]:
-            ref x = left._get(a)
-            ref y = right._get(b)
-            comptime if op == GT:
-                values[i] = x > y
-            elif op == LT:
-                values[i] = x < y
-            elif op == GE:
-                values[i] = x >= y
-            elif op == LE:
-                values[i] = x <= y
-            elif op == EQ:
-                values[i] = x == y
-            else:
-                values[i] = x != y
-    return Series("", BoolColumn(values^, valid))
 
 
 def _compare_bools[
