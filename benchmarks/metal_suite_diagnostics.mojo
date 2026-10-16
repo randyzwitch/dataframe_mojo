@@ -136,7 +136,7 @@ def column_metrics(
             x / scale - y / scale
         )
         result.max_relative = max(result.max_relative, relative)
-    return result
+    return result^
 
 
 def _bool(prefix: String, name: String, value: Bool):
