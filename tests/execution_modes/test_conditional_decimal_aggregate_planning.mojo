@@ -1,6 +1,7 @@
 """Aggregate lifting retains WHEN operands and guards conditional scalars."""
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
+from dataframe.lazy import LazyFrame
 from dataframe.expr import SUM, WHEN
 from dataframe.accelerator.aggregates import (
     _conditional_reductions,
@@ -83,3 +84,42 @@ def test_shared_reduction_retains_any_conditional_ancestor() raises:
     var query = source().lazy().select(expression.alias("v"))
     with assert_raises(contains="conditional checked decimal arithmetic"):
         _ = lower_aggregate_compositions(query)
+
+
+def ratio_query() raises -> LazyFrame:
+    var frame = DataFrame(
+        [
+            Series("price", Column[Int32]([100, 200, 300])).with_dtype(
+                DataType.decimal(4, 0, 32)
+            ),
+            Series("discount", Column[Int32]([0, 5, 0])).with_dtype(
+                DataType.decimal(2, 1, 32)
+            ),
+            Series("one", Column[Int32]([10, 10, 10])).with_dtype(
+                DataType.decimal(2, 1, 32)
+            ),
+            Series("p", Column[Bool]([True, False, True])),
+        ]
+    )
+    var discounted = col("price") * (col("one") - col("discount"))
+    var numerator = (
+        when(col("p"))
+        .then(discounted.cast(DataType.FLOAT64))
+        .otherwise(lit(0.0))
+        .sum()
+    )
+    return frame.lazy().select(
+        (
+            lit(100.0) * numerator / discounted.sum().cast(DataType.FLOAT64)
+        ).alias("ratio")
+    )
+
+
+def test_checked_decimal_conditional_ratio_literal() raises:
+    # Discounted values are 100, 100, 300. Selected sum400 / total500.
+    var query = ratio_query()
+    var actual = query.collect(engine="cpu", optimize=False)
+    assert_equal(actual.column("ratio").float64()._get(0), Float64(80))
+    var lowered = lower_aggregate_compositions(query)
+    var normalized = lowered.collect(engine="cpu", optimize=False)
+    assert_equal(normalized.column("ratio").float64()._get(0), Float64(80))
