@@ -214,3 +214,65 @@ def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression
                 ["long external group alpha", "long external group beta"][row],
             )
         assert_equal(result.item(row, "total").int64(), Int64([3, 7, 9][row]))
+
+
+def _join_below(plan: LazyFrame) raises -> Tuple[Int, List[Int]]:
+    """The topmost join of `plan` and every node's parent."""
+    var root = len(plan._nodes) - 1
+    var parents = plan._live_parents(root)
+    var top = -1
+    for i in range(len(plan._nodes)):
+        if parents[i] != -2 and plan._nodes[i].kind == JOIN:
+            if top < 0 or i > top:
+                top = i
+    return (top, parents^)
+
+
+def test_a_sort_leaves_the_joins_below_it_free_to_reorder_unless_ties_keep_order() raises:
+    # Equal sort keys owe no order (Polars and DuckDB promise none), so the
+    # rows a join below a sort makes may arrive in any order; with
+    # `maintain_order` their input order shows in the ties.
+    var inputs = _inputs()
+    var joined = (
+        inputs[0].lazy().join(inputs[1].lazy(), left_on=["a"], right_on=["b"])
+    )
+    var free = joined.sort("label")
+    var found = _join_below(free)
+    assert_true(free._order_free_above(found[0], found[1]))
+    var kept = joined.sort("label", maintain_order=True)
+    found = _join_below(kept)
+    assert_true(not kept._order_free_above(found[0], found[1]))
+    # Aggregates over partitions read no position; a running sum does.
+    var partitioned = joined.with_columns(
+        [col("value").mean().over("a").alias("m")]
+    ).sort("label")
+    found = _join_below(partitioned)
+    assert_true(partitioned._order_free_above(found[0], found[1]))
+    var running = joined.with_columns([col("value").cum_sum().alias("c")]).sort(
+        "label"
+    )
+    found = _join_below(running)
+    assert_true(not running._order_free_above(found[0], found[1]))
+
+
+def test_maintain_order_keeps_input_order_among_equal_sort_keys() raises:
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64]([2, 1, 2, 1, 2, 1])),
+            Series("row", Column[Int64]([0, 1, 2, 3, 4, 5])),
+        ]
+    )
+    var expected: List[Int64] = [1, 3, 5, 0, 2, 4]
+    var eager = frame.sort("k", maintain_order=True)
+    var lazy = frame.lazy().sort("k", maintain_order=True).collect()
+    for row in range(6):
+        assert_equal(eager.item(row, "row").int64(), expected[row])
+        assert_equal(lazy.item(row, "row").int64(), expected[row])
+    # Without it the same rows come out, ordered by key.
+    var free = frame.lazy().sort("k").collect()
+    var seen = List[Bool](length=6, fill=False)
+    for row in range(6):
+        assert_equal(free.item(row, "k").int64(), Int64(1 if row < 3 else 2))
+        seen[Int(free.item(row, "row").int64())] = True
+    for row in range(6):
+        assert_true(seen[row])

@@ -1721,7 +1721,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         by: List[String],
         descending: Bool = False,
         nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) -> Self:
+        """Sort by `by`. Rows with equal keys come out in no particular order
+        unless `maintain_order` keeps their input order (Polars'
+        `maintain_order`; DuckDB's ORDER BY makes no promise either)."""
         var n = len(by)
         return self._push(
             _plan_node(
@@ -1729,6 +1734,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 names=by,
                 flags=List[Bool](length=n, fill=descending)
                 + List[Bool](length=n, fill=nulls_last),
+                maintain_order=maintain_order,
             )
         )
 
@@ -1738,17 +1744,30 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         *,
         descending: List[Bool],
         nulls_last: List[Bool],
+        maintain_order: Bool = False,
     ) raises -> Self:
         """Sort with a direction and null placement per key, as the eager
-        DataFrame.sort takes them."""
+        DataFrame.sort takes them; equal keys in no particular order unless
+        `maintain_order`."""
         if len(descending) != len(by) or len(nulls_last) != len(by):
             raise Error("sort needs one descending and nulls_last flag per key")
         return self._push(
-            _plan_node(SORT, names=by, flags=descending + nulls_last.copy())
+            _plan_node(
+                SORT,
+                names=by,
+                flags=descending + nulls_last.copy(),
+                maintain_order=maintain_order,
+            )
         )
 
-    def sort(self, by: String, descending: Bool = False) -> Self:
-        return self.sort([by], descending)
+    def sort(
+        self,
+        by: String,
+        descending: Bool = False,
+        *,
+        maintain_order: Bool = False,
+    ) -> Self:
+        return self.sort([by], descending, maintain_order=maintain_order)
 
     def slice(self, offset: Int, length: Int = -1) -> Self:
         return self._push(_plan_node(SLICE, offset=offset, length=length))
@@ -5469,16 +5488,25 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return not node.maintain_order and _order_insensitive(
                     node.exprs
                 )
+            if node.kind == SORT:
+                # The sort sets the order; equal keys owe none (unless
+                # `maintain_order`), so how rows arrived does not show.
+                return not node.maintain_order
             if node.kind == SELECT and not _row_local(node.exprs):
-                return _stream_reductions(node.exprs) and _order_insensitive(
-                    node.exprs
-                )
+                if _stream_reductions(node.exprs):
+                    return _order_insensitive(node.exprs)
+                if not _partitioned_order_free(node.exprs):
+                    return False
+                cursor = parents[cursor]
+                continue
             if (
                 node.kind == FILTER
                 or node.kind == SELECT
                 or node.kind == WITH_COLUMNS
             ):
-                if not _row_local(node.exprs):
+                if not _row_local(node.exprs) and not _partitioned_order_free(
+                    node.exprs
+                ):
                     return False
             elif node.kind != DROP:
                 return False
@@ -7424,6 +7452,37 @@ def _counts_distinct(expressions: List[Expr]) -> Bool:
             if node.op == N_UNIQUE:
                 return True
     return False
+
+
+def _partitioned_order_free(exprs: List[Expr]) -> Bool:
+    """Whether every row's values come out the same whatever order the rows
+    arrive in: row-local steps, and aggregates (over partitions, `over`, or
+    the whole input) that read no position. A window that does (cumulative,
+    shift, rank, rolling) or a positional reduction does not."""
+    for e in exprs:
+        for node in e._nodes:
+            if is_window(node.op):
+                return False
+            if is_reduction(node.op) and node.op not in [
+                SUM,
+                COUNT,
+                MIN,
+                MAX,
+                MEAN,
+                STD,
+                VAR,
+                LEN,
+                ANY,
+                ALL,
+                NULL_COUNT,
+                N_UNIQUE,
+                MEDIAN,
+                QUANTILE,
+                CORR,
+                COV,
+            ]:
+                return False
+    return True
 
 
 def _order_insensitive(exprs: List[Expr]) -> Bool:

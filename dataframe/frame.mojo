@@ -1052,18 +1052,31 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=self._height)
 
     def sort(
-        self, by: String, descending: Bool = False, nulls_last: Bool = True
+        self,
+        by: String,
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Stable single-column sort. NaNs follow non-null numbers."""
-        return self.sort([by], descending, nulls_last)
+        """Single-column sort. NaNs follow non-null numbers. Rows with equal
+        keys come out in no particular order unless `maintain_order` keeps
+        their input order."""
+        return self.sort(
+            [by], descending, nulls_last, maintain_order=maintain_order
+        )
 
     def sort(
         self,
         by: List[String],
         descending: Bool = False,
         nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Stable lexicographic sort by several columns, one direction."""
+        """Lexicographic sort by several columns, one direction; equal keys
+        in no particular order unless `maintain_order`."""
+        _ = maintain_order
         return self.take(self.arg_sort(by, descending, nulls_last))
 
     def sort(
@@ -1072,8 +1085,11 @@ struct DataFrame(Copyable, Sized, Writable):
         *,
         descending: List[Bool],
         nulls_last: List[Bool],
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Per-column direction and null placement; list lengths match by."""
+        """Per-column direction and null placement; list lengths match by.
+        Equal keys in no particular order unless `maintain_order`."""
+        _ = maintain_order
         return self.take(
             self.arg_sort(by, descending=descending, nulls_last=nulls_last)
         )

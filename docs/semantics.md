@@ -201,7 +201,10 @@ lexicographically by those columns, ascending by default. `descending` and
 keywords, one list entry per key: `sort(["a", "b"], descending=[False, True],
 nulls_last=[True, False])`. An empty key list or a length mismatch raises.
 
-Sorting is stable: rows with equal keys keep input order, in either direction.
+Rows with equal keys come out in no particular order unless the sort is
+given `maintain_order=True`, which keeps their input order in either
+direction (Polars' `maintain_order`; DuckDB's `ORDER BY` promises no tie
+order either). Leaving ties free lets the planner reorder joins below a sort.
 Null placement is independent of direction and defaults to last. NaNs follow
 all non-null non-NaN numeric values in either direction; nulls remain first or
 last according to the option. `-0.0` and `0.0` are equal keys. Strings use
