@@ -131,6 +131,48 @@ def test_progression_found_once_per_buffer_holds_for_its_windows() raises:
     assert_true(int64_progression(nulls.slice(0, 3))[0])
 
 
+def test_unordered_left_build_over_many_chunks_gathers_every_left_row() raises:
+    # A left side smaller than the right builds the hash table; an inner
+    # join whose consumers ignore order then gets its pairs in the order the
+    # right side probed, not in left row order. A left of many chunks must
+    # still gather each pair's own left row.
+    var right_keys = List[Int64]()
+    var right_values = List[Int64]()
+    for i in range(20_000):
+        var key = Int64((i * 7_919) % 20_011)
+        right_keys.append(key)
+        right_values.append(key * 7)
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    var keys = List[Series]()
+    var values = List[Series]()
+    for c in range(32):
+        var chunk_keys = List[Int64]()
+        var chunk_values = List[Int64]()
+        for i in range(12):
+            var at = ((c * 12 + i) * 104_729) % 20_000
+            var key = Int64((at * 7_919) % 20_011)
+            chunk_keys.append(key)
+            chunk_values.append(key * 10)
+        keys.append(Series("k", Column[Int64](chunk_keys^)))
+        values.append(Series("l", Column[Int64](chunk_values^)))
+    var left = DataFrame(
+        [Series._from_chunks(keys), Series._from_chunks(values)]
+    )
+    var joined = left._join_impl(
+        right, left_on=["k"], right_on=["k"], keep_order=False
+    )
+    assert_equal(joined.height(), 384)
+    for row in range(joined.height()):
+        var key = joined.item(row, "k").int64()
+        assert_equal(joined.item(row, "l").int64(), key * 10)
+        assert_equal(joined.item(row, "r").int64(), key * 7)
+
+
 def test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell() raises:
     var setting = WorkerSetting(4)
     var n = 196609
