@@ -1,4 +1,5 @@
 """Decimal duration windows retain scale, output precision and observed prefixes."""
+# contract-group: expr.order_windows
 from std.math import abs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, Expr, col

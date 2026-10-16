@@ -1,4 +1,5 @@
 """Cardinality routing and partitioned distinct counts have scalar witnesses."""
+# contract-group: kernel.order_keys
 from std.math import isnan
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import (

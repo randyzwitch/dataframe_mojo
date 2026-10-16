@@ -1,4 +1,6 @@
 """Public original-domain keys; grouping and List production remain on GPU."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import (
@@ -187,6 +189,7 @@ def _check_multiple_lookup_bases() raises:
     _ = domains^
 
 
+# requires: metal
 def test_mojo_gpu_grouped_original_key_domains_duplicates_bytes_metadata_layouts() raises:
     _check_multiple_lookup_bases()
     var dictionary = CategoricalDictionary()
@@ -263,6 +266,7 @@ def test_mojo_gpu_grouped_original_key_domains_duplicates_bytes_metadata_layouts
     )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_original_key_hash_worker_bucket_heavy_fault_priority() raises:
     var n = 262145
     var hot = 2 * n // 5
@@ -334,6 +338,7 @@ def test_mojo_gpu_grouped_original_key_hash_worker_bucket_heavy_fault_priority()
     )
 
 
+# requires: metal
 def test_mojo_gpu_grouped_key_staging_budget_empty_checked_feeds_and_metadata_admission() raises:
     var frame = DataFrame(
         [

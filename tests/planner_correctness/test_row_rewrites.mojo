@@ -1,4 +1,5 @@
 """Rewrite correctness uses the same executor with optimization disabled."""
+# contract-group: planner.row_rewrites
 from dataframe import col
 from tests.support.coverage_generators import generated_frame, chunk_layout
 from tests.support.reference_model import generated_model

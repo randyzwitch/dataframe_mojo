@@ -75,6 +75,7 @@ def _source(scope: Scope, fail: Bool = False) raises -> Table:
     return Table(matrix^, _schema(), columns^, 3, 1)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_residency_lazy_empty_identity_and_zero_column_cardinality() raises:
     var scope = Scope(999999, 0)
     assert_true(not scope.initialized())
@@ -196,6 +197,7 @@ def _copy_branch(scope: Scope) raises -> HostMatrix:
     return host^
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_residency_shared_paired_matrix_device_copy_and_lifetime() raises:
     var scope = Scope()
     var host = _copy_branch(scope)
@@ -207,6 +209,7 @@ def test_mojo_gpu_residency_shared_paired_matrix_device_copy_and_lifetime() rais
     assert_equal(info[2], "metal")
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_residency_export_budget_and_deferred_errors() raises:
     with assert_raises(contains="decimal multiplication overflow"):
         raise_value_error(4, "generic")
@@ -238,6 +241,7 @@ def test_mojo_gpu_residency_export_budget_and_deferred_errors() raises:
     assert_equal(failed.head(1).readback().rows, 1)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_residency_structural_identity_lazy_upload_and_target_offset() raises:
     var scope = Scope()
     var schema = DataFrame(

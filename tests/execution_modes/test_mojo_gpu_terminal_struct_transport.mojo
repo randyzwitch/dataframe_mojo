@@ -1,4 +1,6 @@
 """Primitive struct fields execute on GPU before terminal host owner assembly."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe import Column, DataFrame, Series, as_struct, col, lit
 from dataframe.metal import MetalRuntime
@@ -12,6 +14,7 @@ from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
+# requires: metal
 def test_mojo_gpu_terminal_struct_pack_primitive_exports_nullable_children_and_budget() raises:
     var raw = source_frame()
     for layout in range(3):
@@ -47,6 +50,7 @@ def test_mojo_gpu_terminal_struct_pack_primitive_exports_nullable_children_and_b
                     )
 
 
+# requires: metal
 def test_mojo_gpu_terminal_struct_scalar_only_empty_input_keeps_valid_parent() raises:
     var frame = DataFrame([Series("x", Column[Int64]([]))])
     var query = frame.lazy().select(

@@ -1,4 +1,6 @@
 """Public resident partition CUT/QCUT, literal outputs and CPU fault order."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -30,6 +32,7 @@ def _check(query: LazyFrame) raises:
     same(actual, expected)
 
 
+# requires: metal
 def test_public_partition_cut_qcut_resident_outputs() raises:
     _ = require_metal()
     var nan = bitcast[DType.float64](UInt64(0x7FF8000000000042))
@@ -136,6 +139,7 @@ def test_public_partition_cut_qcut_resident_outputs() raises:
     print("PASS public partition CUT/QCUT resident literal outputs")
 
 
+# requires: metal
 def test_public_partition_cut_qcut_eager_fault_order() raises:
     _ = require_metal()
     var values = List[Int64](length=8192, fill=0)
@@ -167,6 +171,7 @@ def test_public_partition_cut_qcut_eager_fault_order() raises:
     print("PASS public partition CUT/QCUT eager state/run fault order")
 
 
+# requires: metal
 def test_public_partition_cuts_original_categorical_keys() raises:
     from dataframe.dtype import CategoricalDictionary, DataType
 
@@ -208,6 +213,7 @@ def test_public_partition_cuts_original_categorical_keys() raises:
     )
 
 
+# requires: metal
 def test_public_partition_cuts_nested_numeric_scopes() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -284,6 +290,7 @@ def _literal_fault(
         )
 
 
+# requires: metal
 def test_public_partition_when_head_and_sibling_error_contracts() raises:
     _ = require_metal()
     var frame = DataFrame(
@@ -423,6 +430,7 @@ def test_public_partition_when_head_and_sibling_error_contracts() raises:
     )
 
 
+# requires: metal
 def test_public_partition_qcut_signed_zero_breakpoint_literals() raises:
     _ = require_metal()
     var negative_zero = bitcast[DType.float64](UInt64(0x8000000000000000))
@@ -463,6 +471,7 @@ def test_public_partition_qcut_signed_zero_breakpoint_literals() raises:
     print("PASS public partition qcut literal signed-zero breakpoint words")
 
 
+# requires: metal
 def test_public_partition_native_execution_profile() raises:
     var frame = DataFrame(
         [

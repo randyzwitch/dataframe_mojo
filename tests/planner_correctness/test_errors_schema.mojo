@@ -1,4 +1,6 @@
 """Binding is schema-dependent; execution errors retain their query boundary."""
+# contract-group: planner.row_rewrites
+# contract-group: planner.errors_schema
 from std.os import getenv
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -182,6 +184,11 @@ def test_late_cast_errors_are_preserved_across_materialization_boundaries() rais
                 _error(plan, False, optimize, "invalid-last-row")
 
 
+# expected-failure: Predicate pushdown suppresses a checked arithmetic
+# expected-failure: overflow that occurs before the later filter in the
+# expected-failure: unoptimized plan.
+# expected-diagnostic: optimizer must preserve an overflow before a later
+# expected-diagnostic: filter
 def test_filter_pushdown_preserves_preceding_arithmetic_errors() raises:
     var source = DataFrame([Series("i", Column[Int64]([1, Int64.MAX]))])
     var plan = (

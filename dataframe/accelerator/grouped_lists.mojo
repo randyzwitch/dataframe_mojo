@@ -61,6 +61,8 @@ from .rows import RowPlan
 from .window_keys import WindowKey
 from .grouped_feeds import FeedPlan, prepare_feed
 from .gpu.runtime import _preflight
+from .grouped_key_queries import KeyQuery
+from .opaque_dictionary import ByteDomain
 
 
 @fieldwise_init
@@ -88,6 +90,17 @@ struct GroupedListsPlan(Movable):
     var scan: PlanNode
     var scheduled: Bool
     var key_provenance: List[WindowKey]
+    var original_keys: Optional[ArcPointer[KeyQuery]]
+    var publication_bytes: Optional[ArcPointer[ByteDomain]]
+
+
+def _retain_key_proofs(mut query: LazyFrame, scan: PlanNode, group: PlanNode):
+    for index in range(len(query._nodes)):
+        ref node = query._nodes[index]
+        node.code_domain = scan.code_domain
+        node.text_fields = scan.text_fields.copy()
+        if node.kind == AGG:
+            node.window_keys = group.window_keys.copy()
 
 
 def has_grouped_implode(query: LazyFrame) -> Bool:
@@ -351,6 +364,7 @@ def prepare(
         ).agg(
             expression
         )
+        _retain_key_proofs(producer, scan, operation)
         if feed_plan:
             producers.append(feed_plan.value().operand.copy())
         else:
@@ -363,16 +377,17 @@ def prepare(
         if column.name() in needed:
             names.append(column.name())
             columns.append(col(column.name()))
-    var input = _preflight(
-        frame.lazy().select_exprs(columns), source_rows=source_rows_override
-    )
-    var keys = _preflight(
+    var input_query = frame.lazy().select_exprs(columns)
+    _retain_key_proofs(input_query, scan, operation)
+    var input = _preflight(input_query, source_rows=source_rows_override)
+    var key_query = (
         frame.clear()
         .lazy()
         .group_by(operation.names, maintain_order=True)
-        .agg(List[Expr]()),
-        source_rows=rows,
+        .agg(List[Expr]())
     )
+    _retain_key_proofs(key_query, scan, operation)
+    var keys = _preflight(key_query, source_rows=rows)
     var slices = List[PlanNode]()
     for index in range(len(reverse)):
         slices.append(reverse[len(reverse) - 1 - index].copy())
@@ -392,4 +407,6 @@ def prepare(
         scan.copy(),
         scheduled,
         operation.window_keys.copy(),
+        operation.grouped_keys.copy(),
+        operation.grouped_byte_domain.copy(),
     )

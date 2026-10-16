@@ -1,4 +1,5 @@
 """Prepared hash, bounded membership and physical build routes retain typed rows."""
+# contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn
 from dataframe.dtype import NUMERIC_DTYPES

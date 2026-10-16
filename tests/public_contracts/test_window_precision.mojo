@@ -1,4 +1,5 @@
 """Long-lived rolling states retain small variance beside a large exact baseline."""
+# contract-group: expr.order_windows
 from std.math import abs
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col

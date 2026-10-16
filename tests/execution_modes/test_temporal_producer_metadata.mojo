@@ -1,4 +1,7 @@
 """CPU certificates for original resident temporal producer phases."""
+# contract-group: execution.apple_parity
+# contract-group: execution.iana_producers
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.lazy import SELECT

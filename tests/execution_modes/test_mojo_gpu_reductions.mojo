@@ -84,6 +84,7 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
     same(actual, query.collect(engine="cpu", streaming=False))
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_integer_reductions_layouts_empty_nulls_and_exact_results() raises:
     comptime types = (
         DType.int8,
@@ -101,6 +102,7 @@ def test_mojo_gpu_integer_reductions_layouts_empty_nulls_and_exact_results() rai
             _integer_case[types[i]](n, True)
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_wide_reduction_cancellation_overflow_and_mean() raises:
     var runtime = MetalRuntime()
     for n in [4, 257, 65_536, 65_537]:
@@ -191,6 +193,7 @@ def test_mojo_gpu_wide_reduction_cancellation_overflow_and_mean() raises:
     )
 
 
+# requires: mojo_gpu
 def test_mojo_gpu_float_boolean_extrema_and_filtered_reductions() raises:
     var nan = Float64("nan")
     var inf = Float64("inf")

@@ -1,4 +1,5 @@
 """Large join index chains and nonidentity assembly obey exact row positions."""
+# contract-group: kernel.order_keys
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series

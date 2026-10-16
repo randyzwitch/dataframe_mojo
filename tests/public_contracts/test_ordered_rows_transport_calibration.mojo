@@ -1,4 +1,5 @@
 """Uncalibrated transport adapters cannot acquire direct ordered provenance."""
+# contract-group: public.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,

@@ -1,4 +1,5 @@
 """Seeded sampling has broad distribution checks in addition to row invariants."""
+# contract-group: api.inspect
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 

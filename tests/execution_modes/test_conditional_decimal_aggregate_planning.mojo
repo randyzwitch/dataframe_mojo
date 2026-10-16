@@ -1,4 +1,6 @@
 """Aggregate lifting retains WHEN operands and guards conditional scalars."""
+# contract-group: execution.backends
+# contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame

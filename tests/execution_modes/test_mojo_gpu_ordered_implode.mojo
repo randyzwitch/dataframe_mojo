@@ -1,4 +1,6 @@
 """Certified private IMPLODE row producers preserve checked AST fault order."""
+# contract-group: execution.apple_parity
+# contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
@@ -56,6 +58,7 @@ def _fails(query: LazyFrame, cpu: String, gpu: String) raises:
         _ = query.collect(accelerator=MetalRuntime(), optimize=False)
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_checked_categories_batches_and_occurrences() raises:
     var numbers = DataFrame(
         [
@@ -126,6 +129,7 @@ def test_mojo_gpu_ordered_implode_checked_categories_batches_and_occurrences() r
     )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_masks_empty_and_later_eager_states() raises:
     var frame = _frame([0, Int64.MAX], [128, 0]).with_column(
         Series("keep", Column[Bool]([False, True]))
@@ -234,6 +238,7 @@ def test_mojo_gpu_ordered_implode_masks_empty_and_later_eager_states() raises:
             )
 
 
+# requires: metal
 def test_mojo_gpu_ordered_implode_resources_provenance_and_foreign_flags() raises:
     var frame = _frame([-1, 0, 1], [-2, 0, 2])
     var query = frame.lazy().select((_time() + _cast()).implode().alias("v"))

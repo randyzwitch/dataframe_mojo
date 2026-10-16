@@ -1,4 +1,6 @@
 """Join aggregate cardinality and physical scan projections use scalar row pairs."""
+# contract-group: planner.row_rewrites
+# contract-group: planner.relational
 from std.os import getenv
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (

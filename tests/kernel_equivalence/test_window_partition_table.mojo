@@ -3,6 +3,7 @@
 Unicode and null, with equal strings read at the end of their byte buffer
 (by bytes) and inside it (by masked word loads), an integer key with nulls,
 and a mean over a partition and a rank within one."""
+# contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit

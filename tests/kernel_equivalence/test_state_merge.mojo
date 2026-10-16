@@ -1,4 +1,5 @@
 """Actual reduction-state APIs under independent partition/association laws."""
+# contract-group: kernel.state_merge
 from std.math import abs, isnan, sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series

@@ -1,4 +1,5 @@
 """Native joins follow independent typed composite-key row-pair enumeration."""
+# contract-group: execution.backends
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col
 from dataframe.metal import MetalRuntime
@@ -243,6 +244,7 @@ def all_typed_cases(runtime: MetalRuntime, native: Bool) raises:
     typed_cases[DType.int32](runtime, native, DataType.decimal(9, 2, 32))
 
 
+# requires: metal
 def test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs() raises:
     all_typed_cases(require_metal(), True)
 
@@ -251,6 +253,7 @@ def verify_metal_join_cpu_models() raises:
     all_typed_cases(MetalRuntime(), False)
 
 
+# requires: metal
 def test_native_metal_bounded_cross_product_heads_preserve_pair_order_without_materializing_fanout() raises:
     var runtime = require_metal()
     var values = List[Int32]()

@@ -1,4 +1,5 @@
 """Whole duration units retain signed storage semantics across native consumers."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.program import Program
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
@@ -158,6 +159,7 @@ def test_duration_totals_capability_metadata_units_and_minimum_cpu_sign() raises
         )
 
 
+# requires: metal
 def test_native_metal_duration_totals_all_storage_units_full_domain_and_nulls() raises:
     var runtime = require_metal()
     for unit in List[String](["ms", "us", "ns"]):
@@ -190,6 +192,7 @@ def test_native_metal_duration_totals_all_storage_units_full_domain_and_nulls() 
         )
 
 
+# requires: metal
 def test_native_metal_duration_totals_conditions_filters_groups_windows_and_joins() raises:
     var runtime = require_metal()
     var frame = fixture("ns")
@@ -233,6 +236,7 @@ def test_native_metal_duration_totals_conditions_filters_groups_windows_and_join
     )
 
 
+# requires: metal
 def test_native_metal_duration_totals_profiles_cost_budget_and_runtime_reuse() raises:
     var runtime = require_metal()
     var query = fixture("ms").lazy().select_exprs(expressions())

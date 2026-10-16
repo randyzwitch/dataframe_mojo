@@ -1,4 +1,5 @@
 """Each predicate selects scalar true rows; unknown and false rows are dropped."""
+# contract-group: table.filter
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, Expr, col
 from tests.support.reference_model import generated_model

@@ -3,6 +3,9 @@
 Expected strings/bytes are literal semantic examples. Layouts deliberately
 include UTF8View inline and external descriptors, offsets and chunk boundaries.
 """
+# contract-group: expr.text_binary
+# contract-group: types.cast
+# contract-group: reference.anchors
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,

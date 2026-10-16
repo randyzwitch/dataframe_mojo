@@ -1,4 +1,5 @@
 """Distinct counts reuse resident grouping, including null categories."""
+# contract-group: execution.backends
 from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
@@ -66,6 +67,7 @@ def sibling_expressions() -> List[Expr]:
     ]
 
 
+# requires: metal
 def test_native_metal_distinct_siblings_null_order_empty_and_composition() raises:
     _ = require_metal()
     var input = frame()
@@ -102,6 +104,7 @@ def test_native_metal_distinct_siblings_null_order_empty_and_composition() raise
     )
 
 
+# requires: metal
 def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() raises:
     _ = require_metal()
     var input = DataFrame(
@@ -153,6 +156,7 @@ def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() rai
     )
 
 
+# requires: metal
 def test_native_metal_distinct_siblings_join_profile_budget_and_collision() raises:
     _ = require_metal()
     var input = frame().with_columns(
@@ -174,6 +178,7 @@ def test_native_metal_distinct_siblings_join_profile_budget_and_collision() rais
     check_siblings(query)
 
 
+# requires: metal
 def test_native_metal_distinct_siblings_multikey_hash_slices_and_null_text() raises:
     _ = require_metal()
     var gs = List[Int32]()
