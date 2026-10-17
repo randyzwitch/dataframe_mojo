@@ -89,7 +89,8 @@ comptime FILL_NULL = 33
 comptime FILL_NAN = 34
 # Right's values where left is valid, null where left is null.
 comptime KEEP_NULLS = 35
-# String concatenation with the separator in `text`; nulls propagate.
+# String concatenation with the separator in `text`; nulls propagate, or
+# with `integer` 1 a null side is skipped (null only if both are).
 comptime STR_CONCAT = 36
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
@@ -251,6 +252,30 @@ comptime ROLLING_MAX_BY = 178
 comptime ROLLING_STD_BY = 179
 comptime ROLLING_VAR_BY = 180
 
+# String functions that need no regular expressions (#798), unary on a
+# string input (text_functions.mojo). `text` holds a literal, or several
+# packed by `pack_literals`; `text2` packed replacements; `integer` flags;
+# `min_count` a count or a base.
+comptime STR_TITLECASE = 230
+comptime STR_STRIP_PREFIX = 231
+comptime STR_STRIP_SUFFIX = 232
+# Byte offset of the first occurrence (UInt32), or null; integer 1: literal.
+comptime STR_FIND = 233
+# Non-overlapping occurrences (UInt32); integer 1: literal.
+comptime STR_COUNT_MATCHES = 234
+# integer bit 0: ASCII case-insensitive.
+comptime STR_CONTAINS_ANY = 235
+# integer bit 0: ASCII case-insensitive; bit 1: leftmost-first matches.
+comptime STR_REPLACE_MANY = 236
+# text: "hex" or "base64"; for STR_DECODE, integer 1 is strict.
+comptime STR_ENCODE = 237
+comptime STR_DECODE = 238
+# min_count: base (2 to 36); integer 1: strict.
+comptime STR_TO_INTEGER = 239
+# A struct of min_count string fields. integer bit 0: inclusive; bit 1:
+# the last field keeps the remainder (splitn).
+comptime STR_SPLIT_FIELDS = 240
+
 
 def is_rolling_by(op: Int) -> Bool:
     return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
@@ -289,6 +314,20 @@ def is_string_op(op: Int) -> Bool:
         or op == STR_IS_IN
         or op == STR_LIKE
     )
+
+
+def is_text_function(op: Int) -> Bool:
+    """Whether op is one of the string functions in text_functions.mojo."""
+    return op >= STR_TITLECASE and op <= STR_SPLIT_FIELDS
+
+
+def pack_literals(values: List[String]) -> String:
+    """Values in one String, each as its byte length, ':' and its bytes
+    (string_predicates.decode_values reads them back)."""
+    var packed = String()
+    for value in values:
+        packed += String(value.byte_length()) + ":" + value
+    return packed^
 
 
 def is_dt_op(op: Int) -> Bool:
@@ -1733,6 +1772,118 @@ struct StrNamespace(Copyable):
         inclusive, each part but the last keeps the separator."""
         return self._op(STR_SPLIT, by, Int64(1) if inclusive else Int64(0))
 
+    def split_exact(self, by: String, n: Int, inclusive: Bool = False) -> Expr:
+        """Split on a literal separator into a struct of n + 1 String fields
+        named field_0 to field_n. Parts past the last field are dropped and
+        missing parts are null. An empty separator splits into code points.
+        With inclusive, each part but the last keeps the separator."""
+        return self._op(STR_SPLIT_FIELDS, by, Int64(inclusive), min_count=n + 1)
+
+    def splitn(self, by: String, n: Int) -> Expr:
+        """Split on a literal separator into at most n parts, as a struct of
+        n String fields named field_0 onwards; the last field keeps the rest
+        of the string, and missing parts are null."""
+        return self._op(STR_SPLIT_FIELDS, by, 2, min_count=n)
+
+    def to_titlecase(self) -> Expr:
+        """Lowercase, then uppercase each letter that follows a character
+        that is not alphabetic (a space, digit or punctuation), as Polars
+        does: "hello wORLD 1st" becomes "Hello World 1St"."""
+        return self._op(STR_TITLECASE)
+
+    def strip_prefix(self, prefix: String) -> Expr:
+        """Remove the prefix once if the string starts with it."""
+        return self._op(STR_STRIP_PREFIX, prefix)
+
+    def strip_suffix(self, suffix: String) -> Expr:
+        """Remove the suffix once if the string ends with it."""
+        return self._op(STR_STRIP_SUFFIX, suffix)
+
+    def find(self, pattern: String, literal: Bool = False) -> Expr:
+        """Byte offset (UInt32) of the first occurrence of the pattern, or
+        null when it does not occur; an empty pattern is found at 0. Offsets
+        count bytes, as in Polars. Regular expressions are not supported
+        yet: without literal=True, a pattern holding regex syntax raises."""
+        return self._op(STR_FIND, pattern, Int64(literal))
+
+    def count_matches(self, pattern: String, literal: Bool = False) -> Expr:
+        """Number of non-overlapping occurrences (UInt32); an empty pattern
+        matches at every code point boundary. Regular expressions are not
+        supported yet: without literal=True, a pattern holding regex syntax
+        raises."""
+        return self._op(STR_COUNT_MATCHES, pattern, Int64(literal))
+
+    def contains_any(
+        self, patterns: List[String], ascii_case_insensitive: Bool = False
+    ) -> Expr:
+        """Whether any of the literal patterns occurs. With
+        ascii_case_insensitive, ASCII letters match either case."""
+        return self._op(
+            STR_CONTAINS_ANY,
+            pack_literals(patterns),
+            Int64(ascii_case_insensitive),
+        )
+
+    def replace_many(
+        self,
+        patterns: List[String],
+        replace_with: List[String],
+        ascii_case_insensitive: Bool = False,
+        leftmost: Bool = False,
+    ) -> Expr:
+        """Replace every occurrence of each literal pattern in one pass;
+        `replace_with` holds one replacement per pattern, or one for all of
+        them. Scanning left to right, the match that ends first wins, the
+        longer one when two end together (Polars' default); with leftmost,
+        the match that starts first wins, the earlier pattern when two start
+        together."""
+        return self._op(
+            STR_REPLACE_MANY,
+            pack_literals(patterns),
+            Int64(ascii_case_insensitive) | (Int64(leftmost) << 1),
+            text2=pack_literals(replace_with),
+        )
+
+    def replace_many(
+        self,
+        patterns: List[String],
+        replace_with: String,
+        ascii_case_insensitive: Bool = False,
+        leftmost: Bool = False,
+    ) -> Expr:
+        """Replace every occurrence of each literal pattern with one string."""
+        return self.replace_many(
+            patterns, [replace_with], ascii_case_insensitive, leftmost
+        )
+
+    def encode(self, encoding: String) -> Expr:
+        """The UTF-8 bytes as "hex" (lowercase) or "base64" text."""
+        return self._op(STR_ENCODE, encoding)
+
+    def decode(self, encoding: String, strict: Bool = True) -> Expr:
+        """Decode "hex" or "base64" text into Binary. Invalid text raises
+        when strict, or is null otherwise."""
+        return self._op(STR_DECODE, encoding, Int64(strict))
+
+    def to_integer(self, base: Int = 10, strict: Bool = True) -> Expr:
+        """Parse an optionally signed integer in base 2 to 36 as Int64.
+        Unparseable or overflowing text raises when strict, or is null
+        otherwise."""
+        return self._op(STR_TO_INTEGER, "", Int64(strict), min_count=base)
+
+    def join(self, delimiter: String = "", ignore_nulls: Bool = True) -> Expr:
+        """Aggregate: every value joined into one string (per group inside
+        agg). Nulls are skipped, or with ignore_nulls=False make the result
+        null; no values give ""."""
+        var joined = self._expr.implode().list().join(delimiter)
+        if ignore_nulls:
+            return joined^
+        return (
+            when(self._expr.null_count() == 0)
+            .then(joined)
+            .otherwise(null(DataType.STRING))
+        )
+
 
 @fieldwise_init
 struct ListNamespace(Copyable):
@@ -1805,8 +1956,12 @@ struct ListNamespace(Copyable):
         return self._op(LIST_MEAN)
 
 
-def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:
-    """Join String expressions row-wise; any null input makes the row null."""
+def concat_str(
+    exprs: List[Expr], separator: String = "", ignore_nulls: Bool = False
+) raises -> Expr:
+    """Join String expressions row-wise; any null input makes the row null.
+    With ignore_nulls, null inputs are skipped along with their separator,
+    and a row whose inputs are all null is "" (DuckDB's concat_ws)."""
     if len(exprs) == 0:
         raise Error("concat_str requires at least one expression")
     var result = exprs[0].copy()
@@ -1815,9 +1970,17 @@ def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:
         var offset = len(nodes)
         _append_shifted(nodes, exprs[i]._nodes, offset)
         nodes.append(
-            _node(STR_CONCAT, offset - 1, len(nodes) - 1, text=separator)
+            _node(
+                STR_CONCAT,
+                offset - 1,
+                len(nodes) - 1,
+                text=separator,
+                integer=Int64(ignore_nulls),
+            )
         )
         result = Expr(nodes^, result._name)
+    if ignore_nulls:
+        return result.fill_null(lit(""))
     return result^
 
 

@@ -117,6 +117,18 @@ from .expr import (
     STR_SLICE,
     STR_PAD,
     is_string_op,
+    is_text_function,
+    STR_TITLECASE,
+    STR_STRIP_PREFIX,
+    STR_STRIP_SUFFIX,
+    STR_FIND,
+    STR_COUNT_MATCHES,
+    STR_CONTAINS_ANY,
+    STR_REPLACE_MANY,
+    STR_ENCODE,
+    STR_DECODE,
+    STR_TO_INTEGER,
+    STR_SPLIT_FIELDS,
     is_nested_op,
     IMPLODE,
     STRUCT_PACK,
@@ -166,7 +178,33 @@ struct BoundExpr(Copyable):
         return self.shapes[len(self.shapes) - 1]
 
 
+def _text_function_name(op: Int) -> String:
+    if op == STR_TITLECASE:
+        return "str.to_titlecase"
+    if op == STR_STRIP_PREFIX:
+        return "str.strip_prefix"
+    if op == STR_STRIP_SUFFIX:
+        return "str.strip_suffix"
+    if op == STR_FIND:
+        return "str.find"
+    if op == STR_COUNT_MATCHES:
+        return "str.count_matches"
+    if op == STR_CONTAINS_ANY:
+        return "str.contains_any"
+    if op == STR_REPLACE_MANY:
+        return "str.replace_many"
+    if op == STR_ENCODE:
+        return "str.encode"
+    if op == STR_DECODE:
+        return "str.decode"
+    if op == STR_TO_INTEGER:
+        return "str.to_integer"
+    return "str.split_exact"
+
+
 def op_name(op: Int) -> String:
+    if is_text_function(op):
+        return _text_function_name(op)
     if op == ADD:
         return "+"
     if op == SUB:
@@ -774,6 +812,104 @@ def _target(other: DataType) -> DataType:
     return DataType.INT64 if other.is_temporal() else other
 
 
+def _packed_count(text: String) -> Int:
+    """How many values `pack_literals` packed into text."""
+    var bytes = text.as_bytes()
+    var count = 0
+    var at = 0
+    while at < len(bytes):
+        var length = 0
+        while bytes[at] != 58:
+            length = length * 10 + Int(bytes[at]) - 48
+            at += 1
+        at += 1 + length
+        count += 1
+    return count
+
+
+def _has_regex_syntax(pattern: String) -> Bool:
+    """Whether a pattern holds a character with a meaning in a regular
+    expression, so that matching it literally could differ from Polars."""
+    for byte in pattern.as_bytes():
+        # \ . + * ? ( ) | [ ] { } ^ $
+        if (
+            byte == 92
+            or byte == 46
+            or byte == 43
+            or byte == 42
+            or byte == 63
+            or byte == 40
+            or byte == 41
+            or byte == 124
+            or byte == 91
+            or byte == 93
+            or byte == 123
+            or byte == 125
+            or byte == 94
+            or byte == 36
+        ):
+            return True
+    return False
+
+
+def _text_function_dtype(node: Node) raises -> DataType:
+    """The result dtype of a text_functions.mojo operation, after checking
+    its arguments."""
+    var op = node.op
+    if op == STR_FIND or op == STR_COUNT_MATCHES:
+        if node.integer == 0 and _has_regex_syntax(node.text):
+            raise Error(
+                op_name(op) + ": regular expressions are not supported; pass"
+                " literal=True to match the pattern as text"
+            )
+        return DataType.UINT32
+    if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:
+        var patterns = _packed_count(node.text)
+        if patterns == 0:
+            raise Error(op_name(op) + " needs at least one pattern")
+        if op == STR_CONTAINS_ANY:
+            return DataType.BOOL
+        var replacements = _packed_count(node.text2)
+        if replacements != 1 and replacements != patterns:
+            raise Error(
+                "str.replace_many needs one replacement, or one per pattern;"
+                " found "
+                + String(replacements)
+                + " for "
+                + String(patterns)
+                + " patterns"
+            )
+        return DataType.STRING
+    if op == STR_ENCODE or op == STR_DECODE:
+        if node.text != "hex" and node.text != "base64":
+            raise Error(
+                op_name(op)
+                + " encoding must be 'hex' or 'base64', found '"
+                + node.text
+                + "'"
+            )
+        return DataType.STRING if op == STR_ENCODE else DataType.BINARY
+    if op == STR_TO_INTEGER:
+        if node.min_count < 2 or node.min_count > 36:
+            raise Error(
+                "str.to_integer base must be between 2 and 36, found "
+                + String(node.min_count)
+            )
+        return DataType.INT64
+    if op == STR_SPLIT_FIELDS:
+        if node.min_count < 1:
+            raise Error(
+                "str.split_exact needs n >= 0 and str.splitn needs n >= 1"
+            )
+        var names = List[String]()
+        var dtypes = List[DataType]()
+        for k in range(node.min_count):
+            names.append("field_" + String(k))
+            dtypes.append(DataType.STRING)
+        return DataType.struct(names, dtypes)
+    return DataType.STRING
+
+
 def bind(
     expr: Expr, columns: List[Series], fuse: Bool = True
 ) raises -> BoundExpr:
@@ -1160,6 +1296,17 @@ def bind(
                 dtype = DataType.BOOL
             else:
                 dtype = DataType.STRING
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+        elif is_text_function(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid string expression input")
+            if types[node.left] != DataType.STRING:
+                raise Error(
+                    "str operations require a string expression, found "
+                    + types[node.left].name()
+                )
+            dtype = _text_function_dtype(node)
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif node.op == STRUCT_PACK:
