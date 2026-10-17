@@ -77,7 +77,15 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .execution import WindowLayouts, evaluate, _ReduceJob, _ColumnStats
+from .execution import (
+    WindowLayouts,
+    evaluate,
+    _ReduceJob,
+    _ColumnStats,
+    _new_reducer,
+    reduce_rows,
+)
+from .perfect_aggregate import PerfectLayout, perfect_layout, perfect_slots
 from .aggregate import Reducer
 from .sampling import sample_size, sample_indices
 from .mask_filter import filter_columns
@@ -5831,6 +5839,93 @@ struct _RangeAggJob(Job):
             self.state = state^
 
 
+# Rows a perfect hash aggregate gives slots at a time. Their slots (8
+# bytes each) take 128 KB, within a core's L2, so every reduction reads
+# them back from cache, as DuckDB updates each aggregate from one vector's
+# group addresses before it takes the next vector.
+comptime _PERFECT_WINDOW = 16384
+
+
+struct _PerfectAggJob(Job):
+    """Reduce rows [start, end) into the slots of a perfect hash table
+    (`perfect_aggregate.mojo`): each window of rows gets its slots, then
+    every reduction folds the window in, as DuckDB's
+    `PerfectAggregateHashTable::AddChunk` does a vector. `firsts` keeps
+    each slot's first row, -1 while it is empty."""
+
+    var frame: DataFrame
+    var keys: List[Series]
+    var layout: PerfectLayout
+    var plan: _ReductionPlan
+    var start: Int
+    var end: Int
+    var states: List[Reducer]
+    var firsts: List[Int]
+
+    def __init__(
+        out self,
+        frame: DataFrame,
+        keys: List[Series],
+        layout: PerfectLayout,
+        plan: _ReductionPlan,
+        start: Int,
+        end: Int,
+    ):
+        self.frame = frame.copy()
+        self.keys = keys.copy()
+        self.layout = layout.copy()
+        self.plan = plan.copy()
+        self.start = start
+        self.end = end
+        self.states = List[Reducer](capacity=len(plan.bounds))
+        for r in range(len(plan.bounds)):
+            ref bound = plan.bounds[r]
+            self.states.append(
+                _new_reducer(
+                    bound, bound.expr._nodes[plan.nodes[r]], layout.slots()
+                )
+            )
+        self.firsts = List[Int](length=layout.slots(), fill=-1)
+
+    def run(mut self) raises:
+        var slots = List[Int](length=_PERFECT_WINDOW, fill=0)
+        # Only the columns the reductions read are cut to each window.
+        var read = List[Int]()
+        for bound in self.plan.bounds:
+            for source in bound.sources:
+                if source >= 0 and source not in read:
+                    read.append(source)
+        var columns = self.frame._columns.copy()
+        var first = self.firsts.unsafe_ptr()
+        var at = self.start
+        while at < self.end:
+            var length = min(_PERFECT_WINDOW, self.end - at)
+            perfect_slots(self.keys, self.layout, at, length, slots)
+            var slot = slots.unsafe_ptr()
+            for i in range(length):
+                ref seen = first[unsafe_offset=slot[unsafe_offset=i]]
+                if seen < 0:
+                    seen = at + i
+            for c in read:
+                columns[c] = self.frame._columns[c].slice(at, length)
+            for r in range(len(self.states)):
+                ref bound = self.plan.bounds[r]
+                reduce_rows[8](
+                    self.states[r],
+                    bound,
+                    columns,
+                    List[Series](),
+                    bound.expr._nodes[self.plan.nodes[r]],
+                    0,
+                    length,
+                    _reduction_batch(True),
+                    True,
+                    slots,
+                    ArcPointer(List[_ColumnStats]()),
+                )
+            at += length
+
+
 struct _BucketJob(Job):
     """Group one hash bucket on its own: encode its keys, evaluate the
     aggregates, and remember each group's first row for reordering."""
@@ -6065,6 +6160,12 @@ struct GroupBy(Copyable):
             worker_count(height),
             min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
         )
+        if _stream_reductions(expressions) and not self._many_distinct(
+            expressions
+        ):
+            var perfect = self._agg_perfect(expressions, key_names, workers)
+            if perfect:
+                return perfect.take()
         var result: DataFrame
         # Keys are unchanged throughout this aggregation. Reuse the sampled
         # preference across hash, range and partitioned strategy selection.
@@ -6229,6 +6330,97 @@ struct GroupBy(Copyable):
                 if 10 * distinct > sample:
                     return True
         return False
+
+    def _agg_perfect(
+        self,
+        expressions: List[Expr],
+        key_names: Dict[String, Bool],
+        workers: Int,
+    ) raises -> Optional[DataFrame]:
+        """DuckDB's perfect hash aggregate (`PhysicalPerfectHashAggregate`):
+        integer keys spanning few enough values (`perfect_layout`) give each
+        row its group's slot directly, with no table to probe and no group
+        ids to number or store; each worker reduces its range into its own
+        slots, the workers' slots merge in row order, and the occupied
+        slots come out in first-occurrence order. None when the keys do
+        not qualify."""
+        var height = self._frame.height()
+        if height == 0:
+            return None
+        var layout = perfect_layout(self._keys)
+        if not layout:
+            return None
+        trace_path("group_by.perfect_hash")
+        var plan = _ReductionPlan(self._frame, expressions, key_names)
+        var bounds = partitions(height, workers, 64)
+        var jobs = List[_PerfectAggJob](capacity=workers)
+        for w in range(workers):
+            if bounds[w] < bounds[w + 1]:
+                jobs.append(
+                    _PerfectAggJob(
+                        self._frame,
+                        self._keys,
+                        layout.value(),
+                        plan,
+                        bounds[w],
+                        bounds[w + 1],
+                    )
+                )
+        run_jobs(jobs)
+        # DuckDB's `Combine`: every worker's slots fold into the first's,
+        # in row order, so first and last keep a single pass's answer.
+        var merged = jobs.pop(0)
+        for w in range(len(jobs)):
+            ref job = jobs[w]
+            for r in range(len(merged.states)):
+                merged.states[r].merge(job.states[r])
+            for s in range(len(merged.firsts)):
+                if merged.firsts[s] < 0:
+                    merged.firsts[s] = job.firsts[s]
+        # DuckDB's `Scan` takes the occupied slots in slot order; these keep
+        # the first-occurrence order of the other routes.
+        var occupied = List[Int]()
+        var rows = List[Int]()
+        for s in range(len(merged.firsts)):
+            if merged.firsts[s] >= 0:
+                occupied.append(s)
+                rows.append(merged.firsts[s])
+        var order = sort_indices([rows.copy()])
+        var picked = List[Int](capacity=len(order))
+        var firsts = List[Int](capacity=len(order))
+        for o in order:
+            picked.append(occupied[o])
+            firsts.append(rows[o])
+        var count = len(picked)
+        var states = List[Reducer](capacity=len(merged.states))
+        for r in range(len(merged.states)):
+            ref source = merged.states[r]
+            var state = Reducer(
+                source.op,
+                source.input,
+                count,
+                source.min_count,
+                source.integer,
+                source.floating,
+                source.text,
+                source.logical,
+            )
+            state.merge(source, sources=picked)
+            states.append(state^)
+        var keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            keys.append(key.take(firsts))
+        var reduction = _StreamReduction(
+            keys=DataFrame(keys^, height=count),
+            states=states^,
+            names=plan.names,
+            dtypes=plan.dtypes,
+            outputs=plan.outputs,
+            grouped=True,
+            firsts=firsts^,
+            rows=height,
+        )
+        return reduction.finish()
 
     def _agg_ranges(
         self,
@@ -7265,6 +7457,65 @@ def table_frame(
     return DataFrame(columns^, height=height)
 
 
+def _reduction_batch(grouped: Bool) -> Int:
+    """Rows a reduction evaluates at a time: 16K ungrouped, 4K grouped.
+    The evaluator's fixed cost per batch (a column slice and a validity
+    window per node) is paid a few times per stream batch instead of 64.
+    TPC-DS q9's fifteen conditional sums took 90 ms at 1,024 rows and 25
+    ms at 16K. A grouped reduction also touches its group states per
+    batch, and ClickBench q27 (string lengths by CounterID) was 12% slower
+    at 16K and level at 4K, where q59 keeps most of its gain (178 ms at
+    1,024, 150 at 4K, 137 at 8K)."""
+    return 4096 if grouped else 16384
+
+
+struct _ReductionPlan(Copyable, Movable):
+    """The reductions inside a list of aggregate expressions, each bound to
+    a frame's columns, and the expressions that finish the outputs from
+    their states (named `__stream_reduction_<i>`)."""
+
+    var bounds: List[BoundExpr]
+    # The reduction's node within its bound expression.
+    var nodes: List[Int]
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
+
+    def __init__(
+        out self,
+        frame: DataFrame,
+        expressions: List[Expr],
+        key_names: Dict[String, Bool],
+    ) raises:
+        self.bounds = List[BoundExpr]()
+        self.nodes = List[Int]()
+        self.names = List[String]()
+        self.dtypes = List[DataType]()
+        self.outputs = List[Expr]()
+        for expression in expressions:
+            var bound = bind(expression, frame._columns)
+            if bound.shape() != AGGREGATE:
+                raise Error(
+                    "Streaming aggregate requires scalar aggregate expressions"
+                )
+            if expression._name in key_names:
+                raise Error(
+                    "Aggregate output name collides with grouping key: "
+                    + expression._name
+                )
+            var rewritten = expression.copy()
+            for i in range(len(expression._nodes)):
+                if not is_reduction(expression._nodes[i].op):
+                    continue
+                var name = "__stream_reduction_" + String(len(self.names))
+                self.bounds.append(bound.copy())
+                self.nodes.append(i)
+                self.names.append(name)
+                self.dtypes.append(bound.dtypes[i])
+                rewritten._nodes[i] = col(name)._nodes[0].copy()
+            self.outputs.append(subtree(rewritten, len(rewritten._nodes) - 1))
+
+
 struct _StreamReduction(Movable):
     var keys: DataFrame
     var states: List[Reducer]
@@ -7344,58 +7595,30 @@ struct _StreamReduction(Movable):
         else:
             self.keys = DataFrame(List[Series](), height=1)
             self.firsts = [0]
-        self.outputs = List[Expr]()
+        var plan = _ReductionPlan(frame, expressions, key_names)
+        self.outputs = plan.outputs.copy()
+        self.names = plan.names.copy()
+        self.dtypes = plan.dtypes.copy()
         self.states = List[Reducer]()
-        self.names = List[String]()
-        self.dtypes = List[DataType]()
         var shared = ArcPointer(ids^)
         # Column statistics the batch's expressions share (`_ColumnStats`).
         var column_stats = ArcPointer(List[_ColumnStats]())
-        for expression in expressions:
-            var bound = bind(expression, frame._columns)
-            if bound.shape() != AGGREGATE:
-                raise Error(
-                    "Streaming aggregate requires scalar aggregate expressions"
-                )
-            if expression._name in key_names:
-                raise Error(
-                    "Aggregate output name collides with grouping key: "
-                    + expression._name
-                )
-            var rewritten = expression.copy()
-            for i in range(len(expression._nodes)):
-                if not is_reduction(expression._nodes[i].op):
-                    continue
-                # Evaluated 16K rows at a time ungrouped, 4K grouped: the
-                # evaluator's fixed cost per batch (a column slice and a
-                # validity window per node) is paid a few times per stream
-                # batch instead of 64. TPC-DS q9's fifteen conditional sums
-                # took 90 ms at 1,024 rows and 25 ms at 16K. A grouped
-                # reduction also touches its group states per batch, and
-                # ClickBench q27 (string lengths by CounterID) was 12%
-                # slower at 16K and level at 4K, where q59 keeps most of
-                # its gain (178 ms at 1,024, 150 at 4K, 137 at 8K).
-                var batch = 4096 if self.grouped else 16384
-                var job = _ReduceJob[8](
-                    bound,
-                    frame._columns,
-                    List[Series](),
-                    expression._nodes[i],
-                    0,
-                    frame.height(),
-                    batch,
-                    self.grouped,
-                    shared,
-                    count,
-                    Optional(column_stats),
-                )
-                job.run()
-                var name = "__stream_reduction_" + String(len(self.states))
-                self.states.append(job^.into_reducer())
-                self.names.append(name)
-                self.dtypes.append(bound.dtypes[i])
-                rewritten._nodes[i] = col(name)._nodes[0].copy()
-            self.outputs.append(subtree(rewritten, len(rewritten._nodes) - 1))
+        for r in range(len(plan.bounds)):
+            var job = _ReduceJob[8](
+                plan.bounds[r],
+                frame._columns,
+                List[Series](),
+                plan.bounds[r].expr._nodes[plan.nodes[r]],
+                0,
+                frame.height(),
+                _reduction_batch(self.grouped),
+                self.grouped,
+                shared,
+                count,
+                Optional(column_stats),
+            )
+            job.run()
+            self.states.append(job^.into_reducer())
 
     def merge_all(mut self, others: List[Self], parallel: Bool = True) raises:
         """Merge several partial states in one pass.

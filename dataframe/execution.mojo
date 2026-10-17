@@ -1030,51 +1030,63 @@ struct _ReduceJob[width: Int](Job):
         return self.reducer^
 
     def run(mut self) raises:
-        if _direct_grouped_count(
+        reduce_rows[Self.width](
             self.reducer,
             self.bound,
             self.columns,
+            self.states,
             self.node,
             self.start,
             self.end,
+            self.batch_size,
             self.grouped,
             self.groups[],
-        ):
-            return
-        if _direct_grouped_sum(
-            self.reducer,
-            self.bound,
-            self.columns,
-            self.node,
-            self.start,
-            self.end,
-            self.grouped,
-            self.groups[],
-        ):
-            return
-        if _direct_numeric_reduction(
-            self.reducer,
-            self.bound,
-            self.columns,
-            self.node,
-            self.start,
-            self.end,
-            self.grouped,
             self.stats,
-        ):
-            return
-        for offset in range(self.start, self.end, self.batch_size):
-            _feed[Self.width](
-                self.reducer,
-                self.bound,
-                self.columns,
-                self.states,
-                self.node,
-                offset,
-                min(self.batch_size, self.end - offset),
-                self.grouped,
-                self.groups[],
-            )
+        )
+
+
+def reduce_rows[
+    width: Int
+](
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    batch_size: Int,
+    grouped: Bool,
+    groups: List[Int],
+    stats: ArcPointer[List[_ColumnStats]],
+) raises:
+    """Fold rows [start, end) of one reduction's input into `reducer`,
+    whose groups `groups` gives by row (`_ReduceJob`); a reducer fed
+    windows of rows in order holds the state of all of them."""
+    if _direct_grouped_count(
+        reducer, bound, columns, node, start, end, grouped, groups
+    ):
+        return
+    if _direct_grouped_sum(
+        reducer, bound, columns, node, start, end, grouped, groups
+    ):
+        return
+    if _direct_numeric_reduction(
+        reducer, bound, columns, node, start, end, grouped, stats
+    ):
+        return
+    for offset in range(start, end, batch_size):
+        _feed[width](
+            reducer,
+            bound,
+            columns,
+            states,
+            node,
+            offset,
+            min(batch_size, end - offset),
+            grouped,
+            groups,
+        )
 
 
 struct _RowsJob[width: Int](Job):
