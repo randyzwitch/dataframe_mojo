@@ -857,7 +857,8 @@ struct Expr(Copyable):
 
     def cum_sum(self, reverse: Bool = False) -> Self:
         """Running sum of non-null values; null rows stay null. Int64 is
-        checked for overflow."""
+        checked for overflow. A Bool gives a UInt32 running count of true
+        values."""
         return self._window(CUM_SUM, reverse=reverse)
 
     def cum_min(self, reverse: Bool = False) -> Self:
@@ -1230,7 +1231,8 @@ struct Expr(Copyable):
         return self._unary(MAX)
 
     def mean(self) -> Self:
-        """Arithmetic mean of non-null values as Float64; null when empty."""
+        """Arithmetic mean of non-null values as Float64; null when empty.
+        A Bool's mean is the share of true values."""
         return self._unary(MEAN)
 
     def first(self) -> Self:
@@ -1282,7 +1284,8 @@ struct Expr(Copyable):
         return self._unary(LEN)
 
     def sum(self, min_count: Int = 0) -> Self:
-        """Skip nulls; zero when empty unless fewer than min_count are valid."""
+        """Skip nulls; zero when empty unless fewer than min_count are valid.
+        A Bool sums to its number of true values, as UInt32 (Polars)."""
         var nodes = self._nodes.copy()
         nodes.append(_node(SUM, len(nodes) - 1, min_count=min_count))
         return Self(nodes^, self._name)

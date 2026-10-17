@@ -515,6 +515,10 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     if op == SUM:
         if input.is_duration():
             return input
+        if input == DataType.BOOL:
+            # The number of true values, as UInt32 like Polars' sum of a
+            # Boolean (its index type), not the Int64 of count and len.
+            return DataType.UINT32
         if not _numeric(input):
             raise Error(
                 "sum requires a numeric expression, found " + input.name()
@@ -560,6 +564,9 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         if op == MEAN and input.is_decimal():
             # Float64, as Polars returns (#341): a mean rarely has the
             # input's scale, and truncating to it lost digits.
+            return DataType.FLOAT64
+        if op == MEAN and input == DataType.BOOL:
+            # The share of true values among the valid ones.
             return DataType.FLOAT64
         if not _numeric(input):
             raise Error(
@@ -1153,6 +1160,9 @@ def bind(
                     dtype = input.sum_type()
                 elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
                     dtype = DataType.FLOAT64
+            elif node.op == CUM_SUM and input == DataType.BOOL:
+                # A running count of true values, UInt32 as in Polars.
+                dtype = DataType.UINT32
             elif node.op == CUM_SUM or node.op == ROLLING_SUM:
                 if not _numeric(input) and not input.is_duration():
                     raise Error(

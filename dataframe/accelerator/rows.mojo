@@ -1959,6 +1959,15 @@ def lower_rows(
                         "plan", "cumulative windows require backend support"
                     )
                 if (
+                    window_op == CUM_SUM
+                    and bound.dtypes[ranked._nodes[r].left] == DataType.BOOL
+                ):
+                    # Counts of true values (#790) run on the CPU until a
+                    # device contract covers them.
+                    capabilities.reject(
+                        "dtype", "cum_sum of a Bool requires CPU execution"
+                    )
+                if (
                     not cumulative
                     and not shift_fill
                     and not rolling

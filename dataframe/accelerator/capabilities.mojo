@@ -317,6 +317,10 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if (op == SUM or op == MEAN) and dtype == DataType.BOOL:
+            # Counts and shares of true values (#790) run on the CPU until
+            # a device contract covers them.
+            self.reject("dtype", "Bool sums and means require CPU execution")
         if op == MEDIAN or op == QUANTILE:
             if not self.quantiles:
                 self.reject("reduction", "quantiles require backend support")

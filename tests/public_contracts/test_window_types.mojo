@@ -2,7 +2,7 @@
 # contract-group: expr.order_windows
 from std.sys import size_of
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Series, col
+from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_float, assert_value
@@ -285,3 +285,58 @@ def test_shift_and_directional_fill_preserve_string_bool_and_temporal_types() ra
                             actual.item(row, names[column]),
                             original.item(source, name),
                         )
+
+
+def test_bool_cumulative_sums_count_true_values_as_uint32() raises:
+    # Polars casts a Boolean to UInt32 for cum_sum: a running count of the
+    # true values, null rows null (#790).
+    var original = DataFrame(
+        [
+            Series("g", Column[Int64]([1, 2, 1, 2, 1, 1, 2])),
+            Series(
+                "b",
+                Column[Bool](
+                    [True, True, False, True, True, True, False],
+                    [True, True, True, False, True, True, True],
+                ),
+            ),
+        ]
+    )
+    # Expected running counts, -1 for null rows.
+    var forward: List[Int] = [1, 2, 2, -1, 3, 4, 4]
+    var backward: List[Int] = [4, 3, 2, -1, 2, 1, 0]
+    var by_group: List[Int] = [1, 1, 1, -1, 2, 3, 1]
+    var by_group_back: List[Int] = [3, 1, 2, -1, 2, 1, 0]
+    var expected: List[List[Int]] = [
+        forward^,
+        backward^,
+        by_group^,
+        by_group_back^,
+    ]
+    for layout in range(3):
+        var frame = (
+            original.copy() if layout
+            == 0 else offset_layout(original) if layout
+            == 1 else chunk_layout(original)
+        )
+        var expressions: List[Expr] = [
+            col("b").cum_sum().alias("forward"),
+            col("b").cum_sum(reverse=True).alias("backward"),
+            col("b").cum_sum().over("g").alias("by_group"),
+            col("b").cum_sum(reverse=True).over("g").alias("by_group_back"),
+        ]
+        for lazy in [False, True]:
+            var actual = (
+                frame.lazy()
+                .select_exprs(expressions)
+                .collect() if lazy else frame.select_exprs(expressions)
+            )
+            for k in range(4):
+                var column = actual.column(expressions[k]._name)
+                assert_true(column.dtype() == DataType.UINT32)
+                for row in range(7):
+                    var want = expected[k][row]
+                    var item = actual.item(row, expressions[k]._name)
+                    assert_equal(item.is_null(), want < 0)
+                    if want >= 0:
+                        assert_equal(item.numeric[DType.uint32](), UInt32(want))

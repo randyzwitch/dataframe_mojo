@@ -127,12 +127,14 @@ def test_unsupported_reduction_type_combinations_reject_even_empty_inputs() rais
     for source in typed_reduction_columns(reduction_validity(0)):
         var dtype = source.dtype()
         var invalid = List[Expr]()
-        if not dtype.is_numeric() and not dtype.is_duration():
+        var is_bool = dtype == DataType.BOOL
+        if not dtype.is_numeric() and not dtype.is_duration() and not is_bool:
             invalid.append(col("x").sum())
+        if not dtype.is_numeric() and not is_bool:
+            invalid.append(col("x").mean())
         if not dtype.is_numeric():
             invalid.extend(
                 [
-                    col("x").mean(),
                     col("x").var(),
                     col("x").std(),
                     col("x").median(),
@@ -293,7 +295,7 @@ def _advertised_decimal_scalar(operation: String) raises:
 
 # expected-failure: Advertised decimal reduction aborts while accessing
 # expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: aggregate.mojo:1303:39: get: wrong variant type
+# expected-diagnostic: aggregate.mojo:1346:39: get: wrong variant type
 # expected-exit: variant-abort
 def test_decimal_variance_retains_numeric_scale() raises:
     _advertised_decimal_scalar("var")
@@ -301,7 +303,7 @@ def test_decimal_variance_retains_numeric_scale() raises:
 
 # expected-failure: Advertised decimal reduction aborts while accessing
 # expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: aggregate.mojo:1303:39: get: wrong variant type
+# expected-diagnostic: aggregate.mojo:1346:39: get: wrong variant type
 # expected-exit: variant-abort
 def test_decimal_standard_deviation_retains_numeric_scale() raises:
     _advertised_decimal_scalar("std")
