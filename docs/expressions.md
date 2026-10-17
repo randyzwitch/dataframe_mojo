@@ -311,15 +311,18 @@ same method convention. Inputs must be String and nulls propagate.
 | `len_chars()`, `len_bytes()` | Int64 | Unicode code points / UTF-8 bytes |
 | `to_uppercase()`, `to_lowercase()` | String | Mojo's Unicode case mapping, no locale rules |
 | `strip_chars(chars="")`, `strip_chars_start`, `strip_chars_end` | String | empty `chars` means ASCII whitespace; otherwise any listed code point |
-| `starts_with(p)`, `ends_with(p)`, `contains(p)` | Bool | literal text; no regular expressions |
-| `replace(p, v)`, `replace_all(p, v)` | String | literal; an empty pattern inserts once for `replace` and is a no-op for `replace_all` |
+| `starts_with(p)`, `ends_with(p)` | Bool | literal text |
+| `contains(p, literal=False, strict=True)` | Bool | regex match anywhere; an invalid pattern raises, or gives null with `strict=False` |
+| `replace(p, v, literal=False, n=1)`, `replace_all(p, v, literal=False)` | String | regex; `v` may use `$1`, `${name}`; see below for when the pattern counts as literal; an empty pattern matches at every code point boundary |
+| `extract(p, group_index=1)` | String | capture group of the first match; null without a match or when the group took no part |
+| `extract_all(p)` | List[String] | every non-overlapping match |
 | `slice(offset, length=-1)`, `head(n)`, `tail(n)` | String | by code point; a negative offset counts from the end; out-of-range parts clip |
 | `reverse()` | String | by code point |
 | `pad_start(w, c=" ")`, `pad_end(w, c)`, `zfill(w)` | String | pad to `w` code points with one fill character; `zfill` keeps a leading sign first |
 | `to_titlecase()` | String | lowercase, then uppercase each character after a non-alphabetic one (Unicode `Alphabetic`): `"a_b 1st"` gives `"A_B 1St"`, `"ßa"` gives `"SSa"` |
 | `strip_prefix(p)`, `strip_suffix(s)` | String | remove the literal once if present (not a character set) |
-| `find(p, literal=False)` | UInt32 | **byte** offset of the first occurrence, null if none; an empty pattern is at 0 |
-| `count_matches(p, literal=False)` | UInt32 | non-overlapping occurrences; an empty pattern counts code points + 1 |
+| `find(p, literal=False)` | UInt32 | **byte** offset of the first regex match, null if none; an empty pattern is at 0 |
+| `count_matches(p, literal=False)` | UInt32 | non-overlapping regex matches; an empty pattern counts code points + 1 |
 | `contains_any(patterns, ascii_case_insensitive=False)` | Bool | any literal pattern occurs |
 | `replace_many(patterns, replace_with, ascii_case_insensitive=False, leftmost=False)` | String | one pass over all literal patterns; `replace_with` is one string or one per pattern |
 | `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
@@ -336,10 +339,7 @@ of only nulls is `""` (DuckDB's `concat_ws`). Character operations work on
 code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
 combining mark.
 
-These follow Polars 1.44. Regular expressions are not supported yet (#219):
-`find` and `count_matches` match their pattern as text and, unless
-`literal=True`, raise for a pattern holding regex syntax (`\ . + * ? ( ) | [ ]
-{ } ^ $`), where Polars would read it as a regex. Polars' `normalize`,
+These follow Polars 1.44. Polars' `normalize`,
 `json_decode` and `json_path_match` are not available. Where DuckDB differs:
 `strpos`/`instr` count code points from 1 and give 0 when absent (`find`
 counts bytes from 0 and gives null), `split_part` gives `""` for a missing
@@ -350,6 +350,43 @@ storage alike; stripped affixes and split fields are views into the input's
 buffers rather than copies, and a categorical input runs each function once
 per dictionary value when it has few values. The accelerator backends run none of these and leave
 them to the CPU.
+
+#### Regular expressions
+
+`contains`, `count_matches`, `extract`, `extract_all`, `replace`, `replace_all`
+and `split(literal=False)` take patterns in the syntax of Rust's `regex` crate,
+which Polars uses, and return what Polars returns: leftmost-first matches,
+non-overlapping and searched left to right, with Rust's rule that an empty match
+right after the previous match is skipped. The engine (`dataframe/regex`) is in
+the RE2 / Rust family: a Thompson NFA, a lazily built DFA for match ends and a
+reverse DFA for match starts, a Pike VM for capture groups, and literal
+prefilters. Nothing backtracks, so every search is linear in the string. One
+compiled pattern is shared by all workers; each worker has its own DFA cache.
+
+| Syntax | Meaning |
+|---|---|
+| `a`, `\.`, `\n \t \r \f \v \a`, `\x7F`, `\x{1F600}`, `é`, `\U0001F600` | literals; any ASCII punctuation can be escaped |
+| `.` | any code point except `\n` (any at all with `(?s)`) |
+| `[abc]`, `[a-z]`, `[^a-z]`, `[a[0-9]]`, `[a-z&&[^aeiou]]`, `[a-z--b]`, `[a-c~~b-d]` | classes: ranges, negation, nesting, intersection, difference, symmetric difference |
+| `[[:alpha:]]`, `[[:^digit:]]` | ASCII classes: alnum alpha ascii blank cntrl digit graph lower print punct space upper word xdigit |
+| `\d \w \s`, `\D \W \S` | Unicode digits (Nd), word characters and white space, and their negations |
+| `^ $`, `\A \z` | start and end of text (start and end of line with `(?m)`) |
+| `\b \B` | Unicode word boundary and its negation |
+| `x\|y`, `(x)`, `(?:x)`, `(?P<name>x)`, `(?<name>x)` | alternation; capturing, non-capturing and named groups |
+| `x* x+ x? x{n} x{n,} x{n,m}` and `x*? x+? x?? x{n,m}?` | greedy and lazy repetition |
+| `(?i) (?m) (?s) (?U) (?x)`, `(?i:x)`, `(?-i)` | case-insensitive (Unicode simple case folding), multi-line, dot matches newline, swap greed, verbose |
+
+Matching works on code points: `.` and classes consume a whole character, and
+matches start and end on character boundaries. Look-around and backreferences
+raise an error, as they do in Rust. Not supported yet: Unicode property classes
+(`\p{Greek}`, `\pL`), `\<` and `\>`, `(?-u)` byte matching and `(?R)`.
+
+Replacement values refer to groups as `$1`, `${1}`, `$name` or `${name}`;
+`$name` takes the longest run of letters, digits and `_`, so write `${1}x` for
+group 1 followed by `x`; `$$` is a dollar sign. As in Polars, a pattern without
+ASCII punctuation is replaced literally and its value is not expanded, and
+`literal=True` treats any pattern as text. A pattern that matches one literal
+string is searched as a substring.
 
 ### Conditionals
 
@@ -562,10 +599,13 @@ improvements to pursue with benchmarks, not reasons to change expression semanti
 
 ## List and struct expressions
 
-`col(x).str().split(by, inclusive=False)` turns a string column into
+`col(x).str().split(by, inclusive=False, literal=True, strict=True)` turns a string column into
 `list[string]`: an empty string gives one empty part, a separator at either
 end gives an empty part there, and a null string gives a null list. With
-`inclusive=True` each part but the last keeps the separator.
+`inclusive=True` each part but the last keeps the separator. With
+`literal=False` the separator is a regular expression, split as Rust's
+`Regex::split` does; an empty pattern splits into code points.
+`str().extract_all(p)` also gives `list[string]`.
 
 The `.list()` namespace works on any list column. `len()` counts elements
 (Int64); `get(i)` returns element `i`, counting from the end when negative and

@@ -1530,7 +1530,13 @@ A window onto shared UTF-8 bytes, Int64 offsets, and validity.
 
 ## `StrNamespace`
 
-String expressions. Character operations work on Unicode code points; there is no grapheme clustering or locale-specific case mapping. Nulls propagate. Patterns are literal text; regular expressions are not supported.
+String expressions. Character operations work on Unicode code points; there is no grapheme clustering or locale-specific case mapping. Nulls propagate.
+
+`contains`, `count_matches`, `extract`, `extract_all`, `replace`,
+`replace_all` and `split(literal=False)` take regular expressions in
+the syntax of Rust's `regex` crate, as Polars does; see
+docs/expressions.md for what is supported. A pattern that is plain text
+is searched as a substring.
 
 - `def len_chars(self) -> Expr`
   Number of Unicode code points, as Int64.
@@ -1544,13 +1550,18 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def strip_chars_end(self, characters: String = "") -> Expr`
 - `def starts_with(self, prefix: String) -> Expr`
 - `def ends_with(self, suffix: String) -> Expr`
-- `def contains(self, literal: String) -> Expr`
-  Literal substring test; regular expressions are not supported.
+- `def contains(self, pattern: String, literal: Bool = False, strict: Bool = True) -> Expr`
+  Whether the regular expression matches anywhere in the string (with `literal`, whether the text occurs). An invalid pattern raises when `strict`, or gives null otherwise.
+- `def extract(self, pattern: String, group_index: Int = Int(1)) -> Expr`
+  Capture group `group_index` of the first match (0 is the whole match); null when nothing matches or the group took no part.
+- `def extract_all(self, pattern: String) -> Expr`
+  Every non-overlapping match, as a list of strings.
 - `def like(self, pattern: String) -> Expr`
   SQL LIKE: '%' matches any run of characters (including none) and '_' exactly one; every other character matches itself. There is no escape character. `like("%special%requests%")` is SQL's `LIKE '%special%requests%'`.
-- `def replace(self, pattern: String, value: String) -> Expr`
-  Replace the first occurrence of a literal pattern.
-- `def replace_all(self, pattern: String, value: String) -> Expr`
+- `def replace(self, pattern: String, value: String, literal: Bool = False, n: Int = Int(1)) -> Expr`
+  Replace the first `n` matches of the pattern. `value` may refer to capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a dollar sign) unless the pattern is literal; as in Polars, a pattern without ASCII punctuation counts as literal. A regex `n` above 1 is not supported.
+- `def replace_all(self, pattern: String, value: String, literal: Bool = False) -> Expr`
+  Replace every non-overlapping match, as `replace`.
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Expr`
   Code points [offset, offset + length); a negative offset counts from the end and length=-1 takes the rest. Out-of-range parts clip.
 - `def head(self, n: Int) -> Expr`
@@ -1567,8 +1578,8 @@ String expressions. Character operations work on Unicode code points; there is n
   Parse as a datetime. A format with %z gives UTC-aware values; with `time_zone`, text without an offset is local time there.
 - `def zfill(self, width: Int) -> Expr`
   Left-pad with zeros, after a leading + or - sign.
-- `def split(self, by: String, inclusive: Bool = False) -> Expr`
-  Split on a literal separator into a list of strings. With inclusive, each part but the last keeps the separator.
+- `def split(self, by: String, inclusive: Bool = False, literal: Bool = True, strict: Bool = True) -> Expr`
+  Split into a list of strings on a separator, or with `literal=False` on a regular expression's matches (an empty pattern splits into code points; an invalid one raises when `strict`, or gives null otherwise). With inclusive, each part but the last keeps its separator.
 - `def split_exact(self, by: String, n: Int, inclusive: Bool = False) -> Expr`
   Split on a literal separator into a struct of n + 1 String fields named field_0 to field_n. Parts past the last field are dropped and missing parts are null. An empty separator splits into code points. With inclusive, each part but the last keeps the separator.
 - `def splitn(self, by: String, n: Int) -> Expr`
@@ -1580,9 +1591,9 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def strip_suffix(self, suffix: String) -> Expr`
   Remove the suffix once if the string ends with it.
 - `def find(self, pattern: String, literal: Bool = False) -> Expr`
-  Byte offset (UInt32) of the first occurrence of the pattern, or null when it does not occur; an empty pattern is found at 0. Offsets count bytes, as in Polars. Regular expressions are not supported yet: without literal=True, a pattern holding regex syntax raises.
+  Byte offset (UInt32) of the first occurrence of the pattern, or null when it does not occur; an empty pattern is found at 0. Offsets count bytes, as in Polars. The pattern is a regular expression unless `literal`.
 - `def count_matches(self, pattern: String, literal: Bool = False) -> Expr`
-  Number of non-overlapping occurrences (UInt32); an empty pattern matches at every code point boundary. Regular expressions are not supported yet: without literal=True, a pattern holding regex syntax raises.
+  Number of non-overlapping occurrences (UInt32); an empty pattern matches at every code point boundary. The pattern is a regular expression unless `literal`.
 - `def contains_any(self, patterns: List[String], ascii_case_insensitive: Bool = False) -> Expr`
   Whether any of the literal patterns occurs. With ascii_case_insensitive, ASCII letters match either case.
 - `def replace_many(self, patterns: List[String], replace_with: List[String], ascii_case_insensitive: Bool = False, leftmost: Bool = False) -> Expr`
