@@ -99,6 +99,10 @@ from .expr import (
     AND,
     COL,
     EQ,
+    GE,
+    GT,
+    LE,
+    LT,
     NE,
     NOT,
     WHEN,
@@ -5899,6 +5903,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             providers.append(found)
         if not any:
             return False
+        # Read before the plan changes: the join's inequality conditions,
+        # as (large side column, comparison, small side column).
+        var comparisons = self._side_comparisons(j, small_left)
         var result = self._execute(small, False, streaming, batch_size)
         if not small_left and not self._any_selective(
             result, small_keys, providers
@@ -5942,6 +5949,50 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             else:
                 self._nodes[j].left = len(self._nodes) - 1
             added = True
+        # An inequality condition passes the small side's greatest value
+        # (for < and <=) or least (for > and >=) to the large side as a
+        # bound, as DuckDB's join filters do for these comparisons
+        # (`JoinFilterPushdownInfo::FinalizeFilters`). TPC-DS q72's stock
+        # on hand below the quantity ordered keeps the inventory rows
+        # under the largest quantity.
+        for comparison in comparisons:
+            var name = comparison[0]
+            var found = self._provider_scan(large, name)
+            if found[0] < 0:
+                continue
+            ref source = self._frames[self._nodes[found[0]].offset]
+            var dtype = source.column(found[1]).dtype()
+            var other = result.column(comparison[2])
+            if (
+                not (dtype == DataType.INT64 or dtype == DataType.INT32)
+                or other.dtype() != dtype
+            ):
+                continue
+            var bounds = _int_bounds(other)
+            if not bounds:
+                continue
+            var op = comparison[1]
+            var bound = (
+                bounds.value()[1] if op == LT or op == LE else bounds.value()[0]
+            )
+            var sampled = _bound_filter(found[1], op, bound, dtype)
+            if not self._selective_on(found[0], sampled):
+                continue
+            var target = (
+                self._nodes[j].right if small_left else self._nodes[j].left
+            )
+            self._nodes.append(
+                _plan_node(
+                    FILTER,
+                    target,
+                    exprs=[_bound_filter(name, op, bound, dtype)],
+                )
+            )
+            if small_left:
+                self._nodes[j].right = len(self._nodes) - 1
+            else:
+                self._nodes[j].left = len(self._nodes) - 1
+            added = True
         self._reorder()
         if not added:
             return True
@@ -5975,6 +6026,70 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     break
             self._reorder()
         return True
+
+    def _side_comparisons(
+        self, j: Int, small_left: Bool
+    ) raises -> List[Tuple[String, Int, String]]:
+        """The inequalities between a column of each input of the inner
+        join at `j` in the filters right above it, which DuckDB plans as
+        join conditions: each as (large side column, its comparison with
+        the small side column, small side column), the large side being
+        the right input when `small_left`. Only columns that one input
+        alone names."""
+        var found = List[Tuple[String, Int, String]]()
+        if self._nodes[j].how != JOIN_INNER:
+            return found^
+        var parents = self._live_parents(len(self._nodes) - 1)
+        var pairs = List[Tuple[String, Int, String]]()
+        var at = parents[j]
+        while at >= 0 and self._nodes[at].kind == FILTER:
+            for part in conjuncts(self._nodes[at].exprs[0]):
+                if len(part._nodes) != 3:
+                    continue
+                ref root = part._nodes[2]
+                if not (
+                    root.op == LT
+                    or root.op == LE
+                    or root.op == GT
+                    or root.op == GE
+                ):
+                    continue
+                if root.left < 0 or root.right < 0:
+                    continue
+                ref a = part._nodes[root.left]
+                ref b = part._nodes[root.right]
+                if a.op == COL and b.op == COL:
+                    pairs.append((a.text, root.op, b.text))
+            at = parents[at]
+        if len(pairs) == 0:
+            return found^
+        var large_cols = self._columns_of(
+            self._nodes[j].right if small_left else self._nodes[j].left
+        )
+        var small_cols = self._columns_of(
+            self._nodes[j].left if small_left else self._nodes[j].right
+        )
+        for pair in pairs:
+            var a = pair[0]
+            var op = pair[1]
+            var b = pair[2]
+            var a_large = a in large_cols and a not in small_cols
+            var b_large = b in large_cols and b not in small_cols
+            var a_small = a in small_cols and a not in large_cols
+            var b_small = b in small_cols and b not in large_cols
+            if a_large and b_small:
+                found.append((a, op, b))
+            elif b_large and a_small:
+                # `a op b` is `b flipped a`.
+                var flipped = GT
+                if op == LE:
+                    flipped = GE
+                elif op == GT:
+                    flipped = LT
+                elif op == GE:
+                    flipped = LE
+                found.append((b, flipped, a))
+        return found^
 
     def _filtered_table(self, index: Int) -> Bool:
         """Whether node `index` is an in-memory table under row-local
@@ -8609,6 +8724,19 @@ def _key_set_filter(
                         literals.append(lit(column._get(i)))
                 return Optional(col(name).is_in(literals))
     return None
+
+
+def _bound_filter(name: String, op: Int, bound: Int64, dtype: DataType) -> Expr:
+    """`col(name) op bound`, the bound a literal of the column's integer
+    type (Int64 or Int32)."""
+    var value = lit(bound) if dtype == DataType.INT64 else lit(Int32(bound))
+    if op == LT:
+        return col(name) < value
+    if op == LE:
+        return col(name) <= value
+    if op == GT:
+        return col(name) > value
+    return col(name) >= value
 
 
 def _covers(columns: List[String], reads: List[String]) -> Bool:
