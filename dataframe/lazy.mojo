@@ -87,6 +87,8 @@ from .expr import (
     LIT_NULL,
 )
 from .frame import concat
+from .frame import _describe_percentiles
+from .expr import null
 from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
@@ -208,6 +210,12 @@ comptime SHIFT = 18
 # A leading Int64 row number named `names[0]`, starting at `offset`
 # (DataFrame.with_row_index).
 comptime ROW_INDEX = 19
+# The left input's columns, then the right's, side by side (a horizontal
+# concat, Polars' HCONCAT); the heights must match.
+comptime HCONCAT = 40
+# The left input's rows at the positions the right input's one integer
+# column lists (Polars' Gather); `flags[0]` is null_on_oob.
+comptime GATHER = 41
 
 
 @fieldwise_init
@@ -1830,6 +1838,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         selection above reaches both scans. The inputs must have the same
         column names and types; `other`'s columns are taken in this plan's
         order. SQL UNION is `concat` followed by `unique`."""
+        return self._binary(other, _plan_node(CONCAT))
+
+    def _binary(self, other: Self, var node: PlanNode) -> Self:
+        """`node` over this plan (left) and `other`'s (right), as one plan."""
         var result = self.copy()
         var left_root = len(result._nodes) - 1
         var shift = len(result._nodes)
@@ -1847,10 +1859,96 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if _is_scan(copied.kind):
                 copied.offset += frame_shift
             result._nodes.append(copied^)
-        result._nodes.append(
-            _plan_node(CONCAT, left_root, len(result._nodes) - 1)
-        )
+        node.left = left_root
+        node.right = len(result._nodes) - 1
+        result._nodes.append(node^)
         return result^
+
+    def describe(
+        self,
+        percentiles: List[Float64] = [0.25, 0.5, 0.75],
+        interpolation: String = "nearest",
+    ) raises -> DataFrame:
+        """DataFrame.describe's summary of this plan's result, computed as
+        Polars computes it: one select of the summary reductions over the
+        plan, collected, so the rows are never materialized whole."""
+        var schema = self._input_schema()
+        var qs = _describe_percentiles(percentiles)
+        var exprs = schema._describe_exprs(qs, interpolation)
+        var stats = self.select_exprs(exprs).collect() if len(
+            exprs
+        ) > 0 else DataFrame(List[Series](), height=1)
+        return schema._described(qs, stats)
+
+    def clear(self, n: Int = 0) raises -> Self:
+        """This plan's schema with n rows of nulls, as DataFrame.clear. With
+        n = 0 it is head(0) of this plan; otherwise, as in Polars, a new
+        plan over a frame of nulls built from the schema."""
+        if n < 0:
+            raise Error("clear: n must be nonnegative")
+        if n == 0:
+            return self.head(0)
+        return Self(self._input_schema().clear(n))
+
+    def gather(
+        self, indices: List[Int], *, null_on_oob: Bool = False
+    ) raises -> Self:
+        """The rows at `indices`, in that order; see DataFrame.gather."""
+        var values = List[Int64](capacity=len(indices))
+        for i in indices:
+            values.append(Int64(i))
+        return self.gather(
+            Self(DataFrame([Series("index", Column[Int64](values^))])),
+            null_on_oob=null_on_oob,
+        )
+
+    def gather(self, indices: Self, *, null_on_oob: Bool = False) -> Self:
+        """The rows at the positions `indices` (a plan with one integer
+        column) lists, in its order, as Polars' gather: a negative index
+        counts from the end, a null index gives a row of nulls, and an
+        index out of range raises when the plan runs, or with
+        null_on_oob=True gives a row of nulls. Filters and slices above it
+        stay above it."""
+        return self._binary(indices, _plan_node(GATHER, flags=[null_on_oob]))
+
+    def top_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows DataFrame.top_k gives: as Polars builds it, a sort by
+        `by` descending (ascending with reverse=True), nulls last, then
+        head(k), which the optimizer runs as one top-k selection."""
+        if k < 0:
+            raise Error("k must be nonnegative")
+        var n = len(by)
+        return self.sort(
+            by,
+            descending=List[Bool](length=n, fill=not reverse),
+            nulls_last=List[Bool](length=n, fill=True),
+        ).head(k)
+
+    def top_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.top_k(k, [by], reverse=reverse)
+
+    def bottom_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows DataFrame.bottom_k gives: a sort by `by` ascending
+        (descending with reverse=True), nulls last, then head(k)."""
+        if k < 0:
+            raise Error("k must be nonnegative")
+        var n = len(by)
+        return self.sort(
+            by,
+            descending=List[Bool](length=n, fill=reverse),
+            nulls_last=List[Bool](length=n, fill=True),
+        ).head(k)
+
+    def bottom_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.bottom_k(k, [by], reverse=reverse)
 
     def tail(self, n: Int = 5) -> Self:
         """The last n rows; a negative n drops the first -n rows. See
@@ -4829,6 +4927,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 )
         if node.kind == CONCAT:
             return self._concat(index, empty, streaming, batch_size)
+        if node.kind == HCONCAT or node.kind == GATHER:
+            var both = self._both_inputs(index, empty, streaming, batch_size)
+            var left = both[0].copy()
+            var right = both[1].copy()
+            if empty:
+                # Only the types matter here; a scalar input still has a
+                # row, which would not line up with the other's none.
+                left = left.clear()
+                right = right.clear()
+            if node.kind == HCONCAT:
+                return concat([left^, right^], "horizontal")
+            return _gathered(left, right, node.flags[0])
         if (
             node.kind == JOIN
             and not _is_scan(self._nodes[node.left].kind)
@@ -7432,6 +7542,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or node.kind == UNNEST
                 or node.kind == CONCAT
                 or _row_order_step(node.kind)
+                or node.kind == HCONCAT
+                or node.kind == GATHER
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -7466,7 +7578,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for child in [node.left, node.right]:
                 if child < 0:
                     continue
-                if reads_all or node.kind == JOIN or node.kind == ASOF:
+                if (
+                    reads_all
+                    or node.kind == JOIN
+                    or node.kind == ASOF
+                    or (node.kind == GATHER and child == node.right)
+                ):
                     all_needed[child] = True
                 elif needed[child]:
                     var merged = needed[child].value().copy()
@@ -7586,6 +7703,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SCAN CSV " + node.text
         elif node.kind == SCAN_PARQUET:
             label = "SCAN PARQUET " + node.text
+        elif node.kind == HCONCAT:
+            label = "HCONCAT"
+        elif node.kind == GATHER:
+            label = "GATHER" + (" null_on_oob" if node.flags[0] else "")
         elif node.kind == FILTER:
             label = "FILTER"
         elif node.kind == SELECT:
@@ -8311,3 +8432,79 @@ def scan_parquet(path: String) raises -> LazyFrame:
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
+
+
+def _gathered(
+    frame: DataFrame, indices: DataFrame, null_on_oob: Bool
+) raises -> DataFrame:
+    """A GATHER node's result: `frame`'s rows at the positions in the one
+    integer column of `indices`, checked as Polars checks its indices
+    plan."""
+    if indices.width() != 1:
+        raise Error("gather indices must be a single column")
+    var column = indices._columns[0].copy()
+    if not column.dtype().is_integer():
+        raise Error(
+            "gather indices must have an integer dtype, not "
+            + column.dtype().name()
+        )
+    column = column.cast(DataType.INT64)
+    var rows = List[Int](capacity=len(column))
+    var valid = List[Bool](capacity=len(column))
+    for k in range(len(column)):
+        var value = column.get(k)
+        valid.append(not value.is_null())
+        rows.append(0 if value.is_null() else Int(value.int64()))
+    return frame._gather(rows, valid, null_on_oob)
+
+
+def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
+    """The plan `concat(frames, how)` builds (see frame.concat)."""
+    if len(frames) == 0:
+        raise Error("concat requires at least one dataframe")
+    if how != "vertical" and how != "diagonal" and how != "horizontal":
+        raise Error(
+            "concat how must be 'vertical', 'diagonal', or 'horizontal'"
+        )
+    var inputs = frames.copy()
+    if how == "diagonal":
+        # The union of the columns in first-seen order; a name shared by
+        # inputs must have one type in all of them.
+        var names = List[String]()
+        var dtypes = Dict[String, DataType]()
+        var schemas = List[DataFrame](capacity=len(frames))
+        for f in range(len(frames)):
+            schemas.append(frames[f]._input_schema())
+            for field in schemas[f].schema():
+                if field.name not in dtypes:
+                    dtypes[field.name] = field.dtype
+                    names.append(field.name)
+                elif dtypes[field.name] != field.dtype:
+                    raise Error(
+                        "concat diagonal: column "
+                        + field.name
+                        + " is "
+                        + field.dtype.name()
+                        + " in frame "
+                        + String(f)
+                        + ", expected "
+                        + dtypes[field.name].name()
+                    )
+        for f in range(len(frames)):
+            var present = schemas[f].columns()
+            if _same_names(present, names):
+                continue
+            var exprs = List[Expr](capacity=len(names))
+            for name in names:
+                if name in present:
+                    exprs.append(col(name))
+                else:
+                    exprs.append(null(dtypes[name]).alias(name))
+            inputs[f] = frames[f].select_exprs(exprs)
+    var result = inputs[0].copy()
+    for f in range(1, len(inputs)):
+        if how == "horizontal":
+            result = result._binary(inputs[f], _plan_node(HCONCAT))
+        else:
+            result = result.concat(inputs[f])
+    return result^
