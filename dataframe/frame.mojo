@@ -634,10 +634,14 @@ struct DataFrame(Copyable, Sized, Writable):
                 columns.append(column.copy())
         return Self(columns^, height=self._height)
 
-    def rename(self, mapping: Dict[String, String]) raises -> Self:
-        """Rename columns by old name; all names are validated first."""
-        for item in mapping.items():
-            _ = self._index(item.key)
+    def rename(
+        self, mapping: Dict[String, String], *, strict: Bool = True
+    ) raises -> Self:
+        """Rename columns by old name; all names are validated first. With
+        strict=False, names this frame lacks are ignored, as in Polars."""
+        if strict:
+            for item in mapping.items():
+                _ = self._index(item.key)
         var columns = List[Series](capacity=self.width())
         var seen = Dict[String, Bool]()
         for column in self._columns:
@@ -6474,6 +6478,93 @@ struct GroupBy(Copyable):
         )
         columns.append(Series(name, Column[Int64](counts^)))
         return _pack_struct_keys(DataFrame(columns^, height=groups.count()))
+
+    def _each(
+        self,
+        reduction: String,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> DataFrame:
+        """`reduction` of every column that is not a key, as Polars builds
+        these methods: an agg of `all()` reduced, keys excluded."""
+        var keys = self._key_names()
+        var exprs = List[Expr]()
+        for column in self._frame._columns:
+            if column.name() not in keys:
+                exprs.append(
+                    _reduce_column(
+                        column.name(), reduction, quantile, interpolation
+                    )
+                )
+        return self.agg(exprs)
+
+    def sum(self) raises -> DataFrame:
+        """Each other column's sum per group."""
+        return self._each("sum")
+
+    def mean(self) raises -> DataFrame:
+        """Each other column's mean per group, as Float64."""
+        return self._each("mean")
+
+    def min(self) raises -> DataFrame:
+        """Each other column's minimum per group."""
+        return self._each("min")
+
+    def max(self) raises -> DataFrame:
+        """Each other column's maximum per group."""
+        return self._each("max")
+
+    def median(self) raises -> DataFrame:
+        """Each other column's median per group, as Float64."""
+        return self._each("median")
+
+    def first(self) raises -> DataFrame:
+        """Each other column's first value per group (null when that row's
+        value is null)."""
+        return self._each("first")
+
+    def last(self) raises -> DataFrame:
+        """Each other column's last value per group (null when that row's
+        value is null)."""
+        return self._each("last")
+
+    def n_unique(self) raises -> DataFrame:
+        """Each other column's distinct values per group, null counted once,
+        as Int64."""
+        return self._each("n_unique")
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> DataFrame:
+        """Each other column's quantile per group, as Float64; the
+        interpolation defaults to "nearest", as in Polars."""
+        return self._each("quantile", quantile, interpolation)
+
+
+def _reduce_column(
+    name: String, reduction: String, quantile: Float64, interpolation: String
+) raises -> Expr:
+    """`col(name)` reduced by a GroupBy convenience method's reduction."""
+    var c = col(name)
+    if reduction == "sum":
+        return c.sum()
+    if reduction == "mean":
+        return c.mean()
+    if reduction == "min":
+        return c.min()
+    if reduction == "max":
+        return c.max()
+    if reduction == "median":
+        return c.median()
+    if reduction == "first":
+        return c.first()
+    if reduction == "last":
+        return c.last()
+    if reduction == "n_unique":
+        return c.n_unique()
+    if reduction == "quantile":
+        return c.quantile(quantile, interpolation)
+    raise Error("Unknown group reduction: " + reduction)
 
 
 def _keeps_every_row(mask: BoolColumn) -> Bool:

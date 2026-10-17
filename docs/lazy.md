@@ -3,7 +3,7 @@
 `frame.lazy()`, `scan_csv(path[, schema])` or `scan_parquet(path)` starts a `LazyFrame`. Its methods
 (`filter`, `select`, `select_exprs`, `with_columns`, `group_by(...).agg(...)`,
 `join`, `sort`, `slice`, `head`, `limit`, `tail`, `reverse`, `shift`,
-`with_row_index`, `unique`, `drop`) only record plan nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
+`with_row_index`, `unique`, `drop`, `rename`, `cast`) only record plan nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
 
@@ -27,6 +27,27 @@ or explicitly passed with `accelerator=...`. Explicit acceleration never
 falls back to CPU. An explicitly passed provider owns automatic selection
 when `engine="auto"` is supplied; omitting `engine` on these explicit-provider
 overloads retains forced acceleration for compatibility.
+
+`rename(mapping, strict=True)` and `cast(dtypes, strict=True)` give the eager
+methods' results. As Polars builds them, `rename` is a `select` of every input
+column, aliased where renamed (the input's names are resolved when it is
+called, as `collect_schema` resolves them), and `cast` is a `with_columns` of
+`col(name).cast(dtype, strict)` per entry, so both let filters and column
+selections through (see Optimizations); a filter moved below a `rename`
+reads the input's names. `strict=False` makes `rename` ignore
+names the input lacks; a strict cast that fails raises when the plan runs.
+
+`group_by` takes column names or expressions, as `DataFrame.group_by` does.
+An expression key is evaluated once and named by its output name, and the
+aggregations still read the input's columns: computed keys become a
+`with_columns` below the group_by (DuckDB moves group expressions into a
+projection under its aggregate the same way), under a placeholder name that
+is renamed afterwards when an aggregation reads a column of the key's name.
+Besides `agg`, a `LazyGroupBy` has `len(name="len")` (rows per group as
+Int64) and `sum`, `mean`, `min`, `max`, `median`, `first`, `last`,
+`n_unique` and `quantile(q, interpolation="nearest")`, which reduce every
+column that is not a key, as Polars' do; the eager `GroupBy` has the same
+methods.
 
 `join(other, on, how)` joins on keys named alike on both sides;
 `join(other, left_on=[...], right_on=[...], how, suffix, coalesce)` pairs
@@ -112,7 +133,10 @@ raw samples and reproduction commands.
   uses; CSV scans pass them as `columns=`, so other fields are never decoded.
   A join passes each input only its own keys (the left keys to the left
   input, the right keys to the right) and the columns read above it from that
-  side. Selectors, and joins with `coalesce=False`, keep every column. A plain column
+  side. A `select` or `with_columns` drops the expressions whose output
+  nothing above reads (a `select` only when every expression is row-local and
+  one it keeps reads a column), so a column selection passes through a
+  `rename` or `cast` and an unread cast is never computed. Selectors, and joins with `coalesce=False`, keep every column. A plain column
   projection directly after a sort keeps the sorted row permutation and gathers
   only the selected output columns; sort-only key columns are not materialized
   in the result.

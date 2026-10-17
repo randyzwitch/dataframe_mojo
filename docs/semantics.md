@@ -50,7 +50,8 @@ Zero-column frames keep a correctly clipped height through all of these.
 `drop` and `rename` validate every name before building output: unknown names
 raise, `drop` rejects a name listed twice, and `rename` raises if the result
 would contain duplicate names. Renames apply simultaneously, so swapping two
-names works. `with_row_index(name="index", offset=0)` prepends an Int64 column
+names works; `rename(mapping, strict=False)` ignores names the frame lacks, as
+in Polars. `with_row_index(name="index", offset=0)` prepends an Int64 column
 and raises if the name already exists.
 
 `shape()` is `(height, width)`. `null_count()` returns a one-row frame of Int64
@@ -194,7 +195,12 @@ rows whose predicate is true (false and null are dropped) and preserves input
 order. Sums skip nulls, return zero for empty or all-null input unless
 `min_count` is set, accumulate Int64 exactly in 128 bits, and raise only when
 the final result overflows. Grouped output order is unspecified unless
-`maintain_order=True`.
+`maintain_order=True`. Besides `agg`, a `GroupBy` has `len(name="len")` and
+`sum`, `mean`, `min`, `max`, `median`, `first`, `last`, `n_unique` and
+`quantile(q, interpolation="nearest")`, each the reduction of every column
+that is not a key (Polars' `all()` reduced, keys excluded); a key computed
+from an expression keeps its output name, so `group_by([col("a") % 2]).sum()`
+does not sum `a`.
 Categorical expressions operate on decoded String values, so expression
 reductions such as first/last and min/max return String. A bare column selection
 and direct table row operations retain categorical metadata.

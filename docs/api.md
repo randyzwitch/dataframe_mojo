@@ -312,8 +312,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def drop(self, name: String) -> Self`
 - `def drop(self, names: List[String]) -> Self`
   Remove columns; every name must exist and appear once.
-- `def rename(self, mapping: Dict[String, String]) -> Self`
-  Rename columns by old name; all names are validated first.
+- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
+  Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored, as in Polars.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row index starting at offset.
 - `def select(self, names: List[String]) -> Self`
@@ -871,6 +871,24 @@ It owns a snapshot of the input and the evaluated key columns.
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def len(self, name: String = "len") -> DataFrame`
   Row count per group, including rows with null values.
+- `def sum(self) -> DataFrame`
+  Each other column's sum per group.
+- `def mean(self) -> DataFrame`
+  Each other column's mean per group, as Float64.
+- `def min(self) -> DataFrame`
+  Each other column's minimum per group.
+- `def max(self) -> DataFrame`
+  Each other column's maximum per group.
+- `def median(self) -> DataFrame`
+  Each other column's median per group, as Float64.
+- `def first(self) -> DataFrame`
+  Each other column's first value per group (null when that row's value is null).
+- `def last(self) -> DataFrame`
+  Each other column's last value per group (null when that row's value is null).
+- `def n_unique(self) -> DataFrame`
+  Each other column's distinct values per group, null counted once, as Int64.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> DataFrame`
+  Each other column's quantile per group, as Float64; the interpolation defaults to "nearest", as in Polars.
 
 ## `GroupIndices`
 
@@ -947,6 +965,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def with_columns(self, exprs: List[Expr]) -> Self`
 - `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
+- `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False) -> LazyGroupBy`
+  Group by computed keys, as DataFrame.group_by(List[Expr]): each key is evaluated once and named by its output name, and the aggregations still read the input's columns. Keys that are columns under their own names group as names do.
 - `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Sort by `by`. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order (Polars' `maintain_order`; DuckDB's ORDER BY makes no promise either).
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
@@ -957,6 +977,10 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
+- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
+  Rename columns by old name, with the result and errors of DataFrame.rename. As Polars builds it, this is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
+- `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
+  Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, as Polars builds it, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
 - `def tail(self, n: Int = Int(5)) -> Self`
@@ -1034,10 +1058,31 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 
 ## `LazyGroupBy`
 
-A pending lazy grouping; finish it with agg.
+A pending lazy grouping; finish it with agg, len or a reduction of every other column such as sum.
 
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
+  One row per group: the keys, then the aggregations; see GroupBy.agg.
 - `def agg(self, expr: Expr) -> LazyFrame`
+- `def len(self, name: String = "len") -> LazyFrame`
+  Rows per group as Int64, rows with nulls included; see GroupBy.len.
+- `def sum(self) -> LazyFrame`
+  Each other column's sum per group; see GroupBy.sum.
+- `def mean(self) -> LazyFrame`
+  Each other column's mean per group; see GroupBy.mean.
+- `def min(self) -> LazyFrame`
+  Each other column's minimum per group; see GroupBy.min.
+- `def max(self) -> LazyFrame`
+  Each other column's maximum per group; see GroupBy.max.
+- `def median(self) -> LazyFrame`
+  Each other column's median per group; see GroupBy.median.
+- `def first(self) -> LazyFrame`
+  Each other column's first value per group; see GroupBy.first.
+- `def last(self) -> LazyFrame`
+  Each other column's last value per group; see GroupBy.last.
+- `def n_unique(self) -> LazyFrame`
+  Each other column's distinct values per group; see GroupBy.n_unique.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> LazyFrame`
+  Each other column's quantile per group; see GroupBy.quantile.
 
 ## `LazyTimeGroupBy`
 
