@@ -197,10 +197,14 @@ def string_op(node: Node, input: Series) raises -> Series:
 
 
 def concat_strings(
-    left: Series, right: Series, separator: String
+    left: Series, right: Series, separator: String, skip_nulls: Bool = False
 ) raises -> Series:
+    """Rows joined with the separator; a null side makes the row null, or
+    with skip_nulls is left out (null only when both sides are)."""
     if left.is_chunked() or right.is_chunked():
-        return concat_strings(left.rechunk(), right.rechunk(), separator)
+        return concat_strings(
+            left.rechunk(), right.rechunk(), separator, skip_nulls
+        )
     ref a = left._data[StringColumn]
     ref b = right._data[StringColumn]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:
@@ -212,6 +216,10 @@ def concat_strings(
         var y = 0 if len(b) == 1 else i
         if a._valid(x) and b._valid(y):
             out.append(String(a._get(x)) + separator + String(b._get(y)))
+        elif skip_nulls and a._valid(x):
+            out.append(a._get(x))
+        elif skip_nulls and b._valid(y):
+            out.append(b._get(y))
         else:
             out.append_null()
     return Series("", out^.finish())

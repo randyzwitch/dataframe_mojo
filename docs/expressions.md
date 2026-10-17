@@ -316,10 +316,40 @@ same method convention. Inputs must be String and nulls propagate.
 | `slice(offset, length=-1)`, `head(n)`, `tail(n)` | String | by code point; a negative offset counts from the end; out-of-range parts clip |
 | `reverse()` | String | by code point |
 | `pad_start(w, c=" ")`, `pad_end(w, c)`, `zfill(w)` | String | pad to `w` code points with one fill character; `zfill` keeps a leading sign first |
+| `to_titlecase()` | String | lowercase, then uppercase each character after a non-alphabetic one (Unicode `Alphabetic`): `"a_b 1st"` gives `"A_B 1St"`, `"ßa"` gives `"SSa"` |
+| `strip_prefix(p)`, `strip_suffix(s)` | String | remove the literal once if present (not a character set) |
+| `find(p, literal=False)` | UInt32 | **byte** offset of the first occurrence, null if none; an empty pattern is at 0 |
+| `count_matches(p, literal=False)` | UInt32 | non-overlapping occurrences; an empty pattern counts code points + 1 |
+| `contains_any(patterns, ascii_case_insensitive=False)` | Bool | any literal pattern occurs |
+| `replace_many(patterns, replace_with, ascii_case_insensitive=False, leftmost=False)` | String | one pass over all literal patterns; `replace_with` is one string or one per pattern |
+| `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
+| `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 must be canonical and padded |
+| `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36, as Rust's `from_str_radix`; failures raise, or are null with `strict=False` |
+| `split_exact(by, n, inclusive=False)` | Struct | `n + 1` String fields `field_0`..`field_n`; extra parts are dropped, missing parts null |
+| `splitn(by, n)` | Struct | `n` String fields; the last keeps the rest of the string |
+| `join(delimiter="", ignore_nulls=True)` | String | an aggregation: every value (per group in `agg`) joined; nulls skipped, or with `ignore_nulls=False` a null makes the result null; no values give `""` |
 
-`concat_str([exprs], separator="")` joins String expressions row-wise and is
-null when any input is null. Character operations work on code points, not
-grapheme clusters: `"e\u0301"` has length 2 and reverses its combining mark.
+`concat_str([exprs], separator="", ignore_nulls=False)` joins String
+expressions row-wise and is null when any input is null. With
+`ignore_nulls=True` null inputs are left out with their separator and a row
+of only nulls is `""` (DuckDB's `concat_ws`). Character operations work on
+code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
+combining mark.
+
+These follow Polars 1.44. Regular expressions are not supported yet (#219):
+`find` and `count_matches` match their pattern as text and, unless
+`literal=True`, raise for a pattern holding regex syntax (`\ . + * ? ( ) | [ ]
+{ } ^ $`), where Polars would read it as a regex. Polars' `normalize`,
+`json_decode` and `json_path_match` are not available. Where DuckDB differs:
+`strpos`/`instr` count code points from 1 and give 0 when absent (`find`
+counts bytes from 0 and gives null), `split_part` gives `""` for a missing
+part (null here), and `to_hex` writes uppercase digits. `splitn(by, 0)`
+raises; Polars returns a struct with no fields. The `Alphabetic` table behind
+`to_titlecase` is Unicode 15.0. Row kernels read offsets and string-view
+storage alike; stripped affixes and split fields are views into the input's
+buffers rather than copies, and a categorical input runs each function once
+per dictionary value when it has few values. The accelerator backends run none of these and leave
+them to the CPU.
 
 ### Conditionals
 

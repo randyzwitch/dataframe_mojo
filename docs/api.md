@@ -190,10 +190,10 @@ def concat(frames: List[DataFrame], how: String = "vertical") -> DataFrame
 
 ## `concat_str`
 
-Join String expressions row-wise; any null input makes the row null.
+Join String expressions row-wise; any null input makes the row null. With ignore_nulls, null inputs are skipped along with their separator, and a row whose inputs are all null is "" (DuckDB's concat_ws).
 
 ```mojo
-def concat_str(exprs: List[Expr], separator: String = "") -> Expr
+def concat_str(exprs: List[Expr], separator: String = "", ignore_nulls: Bool = False) -> Expr
 ```
 
 ## `corr`
@@ -1500,6 +1500,34 @@ String expressions. Character operations work on Unicode code points; there is n
   Left-pad with zeros, after a leading + or - sign.
 - `def split(self, by: String, inclusive: Bool = False) -> Expr`
   Split on a literal separator into a list of strings. With inclusive, each part but the last keeps the separator.
+- `def split_exact(self, by: String, n: Int, inclusive: Bool = False) -> Expr`
+  Split on a literal separator into a struct of n + 1 String fields named field_0 to field_n. Parts past the last field are dropped and missing parts are null. An empty separator splits into code points. With inclusive, each part but the last keeps the separator.
+- `def splitn(self, by: String, n: Int) -> Expr`
+  Split on a literal separator into at most n parts, as a struct of n String fields named field_0 onwards; the last field keeps the rest of the string, and missing parts are null.
+- `def to_titlecase(self) -> Expr`
+  Lowercase, then uppercase each letter that follows a character that is not alphabetic (a space, digit or punctuation), as Polars does: "hello wORLD 1st" becomes "Hello World 1St".
+- `def strip_prefix(self, prefix: String) -> Expr`
+  Remove the prefix once if the string starts with it.
+- `def strip_suffix(self, suffix: String) -> Expr`
+  Remove the suffix once if the string ends with it.
+- `def find(self, pattern: String, literal: Bool = False) -> Expr`
+  Byte offset (UInt32) of the first occurrence of the pattern, or null when it does not occur; an empty pattern is found at 0. Offsets count bytes, as in Polars. Regular expressions are not supported yet: without literal=True, a pattern holding regex syntax raises.
+- `def count_matches(self, pattern: String, literal: Bool = False) -> Expr`
+  Number of non-overlapping occurrences (UInt32); an empty pattern matches at every code point boundary. Regular expressions are not supported yet: without literal=True, a pattern holding regex syntax raises.
+- `def contains_any(self, patterns: List[String], ascii_case_insensitive: Bool = False) -> Expr`
+  Whether any of the literal patterns occurs. With ascii_case_insensitive, ASCII letters match either case.
+- `def replace_many(self, patterns: List[String], replace_with: List[String], ascii_case_insensitive: Bool = False, leftmost: Bool = False) -> Expr`
+  Replace every occurrence of each literal pattern in one pass; `replace_with` holds one replacement per pattern, or one for all of them. Scanning left to right, the match that ends first wins, the longer one when two end together (Polars' default); with leftmost, the match that starts first wins, the earlier pattern when two start together.
+- `def replace_many(self, patterns: List[String], replace_with: String, ascii_case_insensitive: Bool = False, leftmost: Bool = False) -> Expr`
+  Replace every occurrence of each literal pattern with one string.
+- `def encode(self, encoding: String) -> Expr`
+  The UTF-8 bytes as "hex" (lowercase) or "base64" text.
+- `def decode(self, encoding: String, strict: Bool = True) -> Expr`
+  Decode "hex" or "base64" text into Binary. Invalid text raises when strict, or is null otherwise.
+- `def to_integer(self, base: Int = Int(10), strict: Bool = True) -> Expr`
+  Parse an optionally signed integer in base 2 to 36 as Int64. Unparseable or overflowing text raises when strict, or is null otherwise.
+- `def join(self, delimiter: String = "", ignore_nulls: Bool = True) -> Expr`
+  Aggregate: every value joined into one string (per group inside agg). Nulls are skipped, or with ignore_nulls=False make the result null; no values give "".
 
 ## `StructColumn`
 
