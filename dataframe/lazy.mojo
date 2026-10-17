@@ -7807,8 +7807,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _align_union_inputs(
         mut self, unions: List[Int], columns: List[List[String]]
     ) raises -> Bool:
-        """Give every input of each union the same columns, in the union's
-        order, as a vertical union needs. Pruning an input's projection
+        """Give the inputs of each union whose inputs disagree the same
+        columns, in its first input's order, as a vertical union needs. Pruning an input's projection
         can leave it wider than another: a select of only typed nulls
         (diagonal concat's padding for a column the input lacks) is not
         pruned, as it would lose its row count. A plain column selection
@@ -7821,6 +7821,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for r in range(len(unions)):
             var k = len(unions) - 1 - r
             var union = unions[k]
+            # Inputs that already agree are left as they are.
+            if self._columns_of(self._nodes[union].left) == self._columns_of(
+                self._nodes[union].right
+            ):
+                continue
             # In its first input's order: the union's own schema would
             # stack the inputs as they are, which is what fails.
             var keep = List[String]()
