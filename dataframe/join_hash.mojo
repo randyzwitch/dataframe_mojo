@@ -13,7 +13,7 @@ from std.sys import size_of
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
 from .huge_pages import huge_list, huge_uninit
 from .parallel import Job, partitions, run_jobs, worker_count
@@ -1871,19 +1871,39 @@ struct _DirectProbeJob(Job):
     def run(mut self) raises:
         ref values = self.key._data[Column[Int64]]
         var right_count = len(self.prepared.right[0])
-        self.left_rows = List[Int](capacity=self.stop - self.start)
-        self.right_rows = List[Int](capacity=self.stop - self.start)
+        var n = self.stop - self.start
+        # Keys and validity read through pointers, rows written into
+        # buffers sized once and the counts kept in locals, as DuckDB's
+        # perfect hash probe fills its selection vectors: a bounds check on
+        # every key and validity read and a capacity check on every append
+        # made this loop most of TPC-DS q23's store sales joins.
+        var left_rows = List[Int](unsafe_uninit_length=n)
+        var right_rows = List[Int](unsafe_uninit_length=n)
+        var lefts = left_rows.unsafe_ptr()
+        var rights = right_rows.unsafe_ptr()
+        var keys = values._ptr()
+        var nulls = len(values._bits[]) > 0
+        var bits = values._bits[].unsafe_ptr()
+        var include = self.include_unmatched
+        var count = 0
+        var matched = 0
         for i in range(self.start, self.stop):
             var first = -1
-            if values._valid(i):
+            if not nulls or _validity_at(bits, values._offset + i):
                 first = self.prepared.progression_row(
-                    values._get(i), right_count
+                    keys[unsafe_offset=i], right_count
                 )
             if first >= 0:
-                self.matched += 1
-            if first >= 0 or self.include_unmatched:
-                self.left_rows.append(i)
-                self.right_rows.append(first)
+                matched += 1
+            if first >= 0 or include:
+                lefts[unsafe_offset=count] = i
+                rights[unsafe_offset=count] = first
+                count += 1
+        left_rows.shrink(count)
+        right_rows.shrink(count)
+        self.left_rows = left_rows^
+        self.right_rows = right_rows^
+        self.matched = matched
 
 
 def prepared_hash_join_rows(
