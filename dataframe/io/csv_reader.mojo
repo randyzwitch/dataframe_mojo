@@ -12,6 +12,7 @@ from std.memory import ArcPointer, Pointer
 from .csv_types import (
     CsvSchema,
     CsvOptions,
+    _CsvScanOptions,
     _Mapping,
     _map_file,
     _options,
@@ -535,6 +536,9 @@ struct _CsvBatches(Movable):
     var remaining: Int
     var batch_size: Int
     var emitted: Bool
+    # The quote byte line ends are found outside of, if quoting.
+    var quote: UInt8
+    var quoting: Bool
 
     def __init__(
         out self,
@@ -543,25 +547,35 @@ struct _CsvBatches(Movable):
         columns: List[String],
         limit: Int,
         batch_size: Int,
+        scan: _CsvScanOptions = _CsvScanOptions.defaults(),
     ) raises:
         self.mapping = mapping^
         if self.mapping.address == 0:
             raise Error("Streaming CSV requires a nonempty regular mapped file")
-        var options = _options(
-            ",", '"', "", 0, -1, List[String](), False, False, "utf8", 65536
-        )
+        var options = scan.reader()
+        self.quoting = options.quote_char.byte_length() != 0
+        self.quote = options.quote_char.as_bytes()[
+            0
+        ] if self.quoting else UInt8(34)
         var selected: CsvSchema
         if schema:
             selected = schema.value().copy()
             _validate_explicit_header(
-                self.mapping.span(), selected, options, True
+                self.mapping.span(), selected, options, scan.has_header
             )
-            var prelude = _prelude(self.mapping.span(), options, True)
+            var prelude = _prelude(
+                self.mapping.span(), options, scan.has_header
+            )
             self.offset = prelude[0]
             self.record = prelude[1]
         else:
             var inferred = infer_csv_schema(
-                self.mapping.span(), options, has_header=True
+                self.mapping.span(),
+                options,
+                has_header=scan.has_header,
+                infer_schema_length=scan.infer_schema_length,
+                try_parse_dates=scan.try_parse_dates,
+                schema_overrides=scan.schema_overrides,
             )
             selected = inferred.schema.copy()
             self.offset = inferred.data_offset
@@ -574,7 +588,11 @@ struct _CsvBatches(Movable):
                 Optional[Expr](),
             )
         )
-        self.remaining = limit
+        # Batches are cut at line ends, and a comment line is a line but
+        # no row, so with comments a count of lines bounds no row count:
+        # read on and leave a positive limit to the slice above the scan.
+        var comments = options.comment_prefix.byte_length() > 0
+        self.remaining = -1 if comments and limit > 0 else limit
         self.batch_size = batch_size
         self.emitted = False
 
@@ -590,7 +608,7 @@ struct _CsvBatches(Movable):
         var count = 0
         var end = self.offset
         if size > 0:
-            var found = CountLines().take_rows(
+            var found = CountLines(self.quote, self.quoting).take_rows(
                 self.mapping.span()[self.offset :], size
             )
             count = found.rows

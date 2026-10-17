@@ -1,6 +1,7 @@
 # Lazy queries
 
-`frame.lazy()`, `scan_csv(path[, schema])` or `scan_parquet(path)` starts a `LazyFrame`. Its methods
+`frame.lazy()`, `scan_csv(path[, schema], ...)` (with `read_csv`'s options; see
+[CSV](csv.md)) or `scan_parquet(path)` starts a `LazyFrame`. Its methods
 (`filter`, `select`, `select_exprs`, `with_columns`, `group_by(...).agg(...)`,
 `join`, `sort`, `slice`, `head`, `limit`, `tail`, `reverse`, `shift`,
 `with_row_index`, `unique`, `drop`) only record plan nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
