@@ -78,7 +78,7 @@ def _dictionary(
         raise Error("Categorical comparison requires text provenance")
     var entries = len(domain[].dtype.dictionary()[])
     _ = scope.check(checked_add(workspace, checked_mul(entries, 24)))
-    var controls = List[UInt32]()
+    var controls: List[UInt32]
     if entries and rows:
         comptime if not METAL_TARGET:
             raise Error(

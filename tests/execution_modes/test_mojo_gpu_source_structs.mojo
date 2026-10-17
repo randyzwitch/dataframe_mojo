@@ -286,7 +286,8 @@ def _check_missing_file_prefix_and_error_only_observation() raises:
     # Only public error words cross to the host. Parent-null MAX and hidden
     # Decimal128 poison are masked on the GPU before this observation.
     assert_equal(
-        observed[1].item(0, "download_bytes").int64(), Int64(4 * 2 * 4)
+        observed[1].item(0, "download_bytes").int64(),
+        Int64(4 * 2 * 4 + 4),  # error words plus the region's fault word
     )
     assert_true(observed[1].item(0, "kernel_launches").int64() > 0)
     var work = temporary_directory("/tmp/mojo-source-struct-missing-prefix")

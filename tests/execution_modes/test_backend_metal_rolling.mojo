@@ -22,6 +22,7 @@ from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from dataframe.accelerator.windows import lower_partition_aggregates
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_shift_fill import exact, check
 from tests.execution_modes.test_backend_metal_float64_emulation import same
@@ -381,8 +382,7 @@ def test_native_metal_rolling_wide_sum_failures_observation_and_unsigned_inputs(
         .lazy()
         .select((col("x") + lit(Int64(1))).rolling_min(3))
     )
-    with assert_raises(contains="checked rank inputs"):
-        _ = unsafe.collect(accelerator=runtime)
+    same_outcome(unsafe)
     check(wide.lazy().select(col("x").rolling_sum(2, 100)), runtime)
 
 
