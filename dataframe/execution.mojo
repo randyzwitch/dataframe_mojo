@@ -110,7 +110,7 @@ from .string_column import StringColumn, StringBuilder
 from .string_predicates import _flip
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
-from .aggregate import Reducer
+from .aggregate import Reducer, _sum_bools
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -1806,6 +1806,13 @@ def _direct_numeric_part(
         # A decimal32 or decimal64 array is stored in Int32 or Int64, but
         # its states are decimal ones: the reducer widens and sums it.
         return False
+    if (op == SUM or op == MEAN) and part._data.isa[BoolColumn]():
+        # Booleans sum as counts of set bits (`Reducer`'s `_sum_bools`).
+        var window = part._data[BoolColumn].copy()
+        window._offset += start
+        window._length = end - start
+        _sum_bools(window, 0, False, List[Int](), reducer.int_sums)
+        return True
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if part._data.isa[Column[Scalar[D]]]():

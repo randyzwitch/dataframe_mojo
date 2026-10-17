@@ -120,7 +120,7 @@ row-valued. See the Narwhals order-dependence notes cited above.
 
 | Method | Result | Nulls |
 |---|---|---|
-| `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked | null rows stay null and are skipped |
+| `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked; Bool gives UInt32, a running count of true values | null rows stay null and are skipped |
 | `cum_min`, `cum_max` | same dtype; NaN sorts above numbers | as `cum_sum` |
 | `cum_count(reverse=False)` | Int64, never null | counts non-null values |
 | `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
@@ -370,10 +370,10 @@ columns outside grouping.
 
 | Reduction | Input | Result | Empty or all-null | Mergeable state |
 |---|---|---|---|---|
-| `sum(min_count=0)` | numeric | same; 8/16-bit integers give Int64 | 0, or null below `min_count` | yes (128-bit exact for integers) |
+| `sum(min_count=0)` | numeric or Bool | same; 8/16-bit integers give Int64; Bool gives UInt32, the number of true values | 0, or null below `min_count` | yes (128-bit exact for integers) |
 | `count()`, `null_count()`, `len()` | any | Int64 | 0 | yes |
 | `min()`, `max()` | any | same | null | yes |
-| `mean()` | numeric | Float64 | null | yes (sum + count) |
+| `mean()` | numeric or Bool | Float64; for Bool the share of true values | null | yes (sum + count) |
 | `first()`, `last()` | any | same | null | needs partition order |
 | `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
 | `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
@@ -389,6 +389,10 @@ columns outside grouping.
 NaN sorts above every number, as in `sort`: `max` is NaN if any valid value is
 NaN, and `min` is NaN only when every valid value is. Ties keep the first value.
 `mean` of Int64 input divides the exact 128-bit total, so it cannot overflow.
+A Bool sums as zeros and ones, as in Polars: `sum` and `cum_sum` count the true
+values as UInt32 (Polars' index type; `count`, `len` and `null_count` stay
+Int64 here), and `mean` is the share of true values among the valid ones.
+Ungrouped sums count set bits 64 rows at a time without unpacking them.
 `first` and `last` return the first or last row's value even when it is null.
 `n_unique` counts null as one value, treats every NaN as one value, and treats
 `-0.0` as equal to `0.0`. `var` and `std` convert Int64 to Float64; infinities

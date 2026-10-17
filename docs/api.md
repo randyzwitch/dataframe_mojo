@@ -709,7 +709,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def cast(self, dtype: String, strict: Bool = True) -> Self`
   Convert to any dtype by name (numeric, bool, string, temporal).
 - `def cum_sum(self, reverse: Bool = False) -> Self`
-  Running sum of non-null values; null rows stay null. Int64 is checked for overflow.
+  Running sum of non-null values; null rows stay null. Int64 is checked for overflow. A Bool gives a UInt32 running count of true values.
 - `def cum_min(self, reverse: Bool = False) -> Self`
 - `def cum_max(self, reverse: Bool = False) -> Self`
 - `def cum_count(self, reverse: Bool = False) -> Self`
@@ -784,7 +784,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def max(self) -> Self`
   Largest non-null value; any valid NaN makes the maximum NaN.
 - `def mean(self) -> Self`
-  Arithmetic mean of non-null values as Float64; null when empty.
+  Arithmetic mean of non-null values as Float64; null when empty. A Bool's mean is the share of true values.
 - `def first(self) -> Self`
   The first row's value, which may be null. Order-dependent.
 - `def last(self) -> Self`
@@ -801,7 +801,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def len(self) -> Self`
   Number of rows including nulls, as Int64.
 - `def sum(self, min_count: Int = Int(0)) -> Self`
-  Skip nulls; zero when empty unless fewer than min_count are valid.
+  Skip nulls; zero when empty unless fewer than min_count are valid. A Bool sums to its number of true values, as UInt32 (Polars).
 - `def arg_min(self) -> Self`
   Index of the first minimum, as UInt32; nulls are skipped and NaN counts only when every value is NaN. Null for no values. Inside group_by().agg() or over(), the index is within the group.
 - `def arg_max(self) -> Self`

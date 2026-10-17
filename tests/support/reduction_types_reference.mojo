@@ -84,10 +84,12 @@ def typed_scalar_reductions(
     if not dtype.is_decimal():
         result.append(col("x").arg_min().alias("arg_min"))
         result.append(col("x").arg_max().alias("arg_max"))
-    if dtype.is_numeric() or dtype.is_duration():
+    # A Bool sums and averages as zeros and ones (#790).
+    var is_bool = dtype == DataType.BOOL
+    if dtype.is_numeric() or dtype.is_duration() or is_bool:
         result.append(col("x").sum().alias("sum"))
         result.append(col("x").sum(min_count=3).alias("sum3"))
-    if dtype.is_numeric():
+    if dtype.is_numeric() or is_bool:
         result.append(col("x").mean().alias("mean"))
     # Decimal mean/sum/extrema are implemented; the binder also advertises
     # other numeric statistics, whose Int128 runtime path currently aborts.
@@ -205,10 +207,14 @@ def assert_typed_reductions(
                 UInt32(max_index if high else min_index),
             )
     var divisor = 100.0 if source.dtype().is_decimal() else 1.0
-    if source.dtype().is_numeric() or source.dtype().is_duration():
+    var is_bool = source.dtype() == DataType.BOOL
+    if source.dtype().is_numeric() or source.dtype().is_duration() or is_bool:
         var expected_dtype = source.dtype()
         if expected_dtype.is_integer() and expected_dtype.bit_width() <= 16:
             expected_dtype = DataType.INT64
+        if is_bool:
+            # The number of true values, as UInt32 in Polars.
+            expected_dtype = DataType.UINT32
         if expected_dtype.is_decimal():
             # Any decimal sums to decimal(38) at its scale, as in DuckDB.
             expected_dtype = DataType.decimal(38, expected_dtype.scale())
@@ -249,6 +255,15 @@ def assert_typed_reductions(
                     assert_equal(
                         actual.item(output, name).bool(), not no if all else yes
                     )
+        # The share of true values among the valid ones.
+        assert_true(actual.column("mean").dtype() == DataType.FLOAT64)
+        assert_equal(actual.item(output, "mean").is_null(), count == 0)
+        if count:
+            near(
+                actual.item(output, "mean").float64(),
+                Float64(total) / Float64(count),
+                "bool mean",
+            )
     if not source.dtype().is_numeric():
         return
     var mean = Float64(total) / Float64(max(1, count)) / divisor
