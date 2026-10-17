@@ -3312,6 +3312,14 @@ struct DataFrame(Copyable, Sized, Writable):
         adopt (an integer: every numeric column; a float: every float
         column), range-checked per column.
         """
+        return self.with_columns(self._fill_null_exprs(value, subset))
+
+    def _fill_null_exprs(
+        self, value: Expr, subset: List[String]
+    ) raises -> List[Expr]:
+        """`fill_null`'s per-column fills, chosen from the column names and
+        types alone, so LazyFrame.fill_null makes the same choice from its
+        input's schema."""
         var bound = bind(value, self._columns)
         if bound.shape() == ROWS:
             raise Error("fill_null on a dataframe requires a scalar value")
@@ -3352,7 +3360,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var fills = List[Expr]()
         for name in names:
             fills.append(col(name).fill_null(value))
-        return self.with_columns(fills)
+        return fills^
 
     def group_by_dynamic(
         self,

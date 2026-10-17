@@ -180,6 +180,12 @@ comptime UNNEST = 13
 comptime ASOF = 14
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
+# Wide to long (DataFrame.unpivot): `names` the value columns (every
+# non-index column when empty), `names2` the index columns and
+# `right_keys` the variable and value column names. A breaker: its rows
+# come out by value column, then input row, so it needs its whole input,
+# as Polars' unpivot is a map function over a materialized frame.
+comptime UNPIVOT = 20
 # Time windows (`DataFrame.group_by_dynamic` and `DataFrame.rolling`, then
 # `agg`). `names` holds the index column then the `by` keys, `names2` the
 # window settings (every, period, offset, closed, label) with their
@@ -1863,6 +1869,120 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def unnest(self, column: String) -> Self:
         """Replace a struct column with its fields; see DataFrame.unnest."""
         return self._push(_plan_node(UNNEST, text=column))
+
+    def unpivot(
+        self,
+        on: List[String] = List[String](),
+        index: List[String] = List[String](),
+        *,
+        variable_name: String = "variable",
+        value_name: String = "value",
+    ) -> Self:
+        """Wide to long: one row per (input row, `on` column), with the
+        same output and errors as DataFrame.unpivot. `on` defaults to every
+        non-index column. Filters and slices above it stay above it."""
+        return self._push(
+            _plan_node(
+                UNPIVOT,
+                names=on,
+                names2=index,
+                right_keys=[variable_name, value_name],
+            )
+        )
+
+    def _input_schema(self) raises -> DataFrame:
+        """This plan's output names and types with no rows, computed as
+        `collect_schema` computes them (every scan yields no rows), for
+        the methods below that choose columns by type or take every
+        column, as Polars expands their selectors against the input
+        schema."""
+        return self._execute(len(self._nodes) - 1, True).clear()
+
+    def fill_null(
+        self, value: String, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls in string columns with a string; see the Expr
+        overload."""
+        return self.fill_null(lit(value), subset)
+
+    def fill_null(
+        self, value: Expr, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls with a scalar value, choosing the columns as
+        DataFrame.fill_null does from this plan's schema: a with_columns of
+        `col(c).fill_null(value)` for each, as Polars' LazyFrame.fill_null
+        is a with_columns over the columns its dtype selector matches.
+        Unknown subset names raise here, while the plan is built."""
+        var fills = self._input_schema()._fill_null_exprs(value, subset)
+        if len(fills) == 0:
+            return self.copy()
+        return self.with_columns(fills)
+
+    def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
+        """Keep rows with no null in subset (default: every column), as a
+        filter on each column's `is_not_null`, as Polars builds it."""
+        var names = subset.copy()
+        if len(names) == 0:
+            names = self._input_schema().columns()
+        if len(names) == 0:
+            return self.copy()
+        var keep = col(names[0]).is_not_null()
+        for k in range(1, len(names)):
+            keep = keep & col(names[k]).is_not_null()
+        return self.filter(keep)
+
+    def null_count(self) raises -> Self:
+        """One row holding each column's null count as Int64, as
+        DataFrame.null_count: a select of `col(c).null_count()` per
+        column, as Polars builds it."""
+        var counts = List[Expr]()
+        for name in self._input_schema().columns():
+            counts.append(col(name).null_count())
+        return self.select_exprs(counts)
+
+    def n_unique(self, subset: List[String] = List[String]()) raises -> Self:
+        """One row, one Int64 column "n_unique": the number of distinct
+        rows on subset (default: every column), the value
+        DataFrame.n_unique returns. Built as the subset's unique rows
+        counted."""
+        var keys = subset.copy()
+        if len(keys) == 0:
+            keys = self._input_schema().columns()
+        if len(keys) == 0:
+            raise Error("n_unique requires at least one column")
+        return (
+            self.select(keys)
+            .unique()
+            .select(col(keys[0]).len().alias("n_unique"))
+        )
+
+    def is_duplicated(
+        self, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """One Boolean column "is_duplicated", true for every row whose key
+        on subset (default: every column) occurs more than once: the
+        Series DataFrame.is_duplicated returns, as a frame."""
+        return self._key_occurs(subset, "is_duplicated")
+
+    def is_unique(self, subset: List[String] = List[String]()) raises -> Self:
+        """One Boolean column "is_unique", true for every row whose key on
+        subset (default: every column) occurs exactly once: the Series
+        DataFrame.is_unique returns, as a frame."""
+        return self._key_occurs(subset, "is_unique")
+
+    def _key_occurs(self, subset: List[String], name: String) raises -> Self:
+        # Each row's key count is a row count over the key's partition
+        # (nulls are one key, as in DataFrame.is_duplicated).
+        var keys = subset.copy()
+        if len(keys) == 0:
+            keys = self._input_schema().columns()
+        if len(keys) == 0:
+            raise Error(name + " requires at least one column")
+        var occurs = col(keys[0]).len().over(keys)
+        var flag = occurs == lit(Int64(1))
+        if name == "is_duplicated":
+            flag = occurs > lit(Int64(1))
+        return self.select_exprs([flag.alias(name)])
 
     def group_by_dynamic(
         self,
@@ -4719,6 +4839,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return input.explode(node.names)
         if node.kind == UNNEST:
             return input.unnest(node.text)
+        if node.kind == UNPIVOT:
+            return input.unpivot(
+                node.names,
+                node.names2,
+                variable_name=node.right_keys[0],
+                value_name=node.right_keys[1],
+            )
         if _is_time_window(node.kind):
             return _run_time_window(node, input)
         if node.kind == TAIL:
@@ -7240,7 +7367,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 reads.append(node.text)
             if node.kind == UNIQUE and len(node.names) == 0:
                 reads_all = True
-            if _is_time_window(node.kind):
+            if node.kind == UNPIVOT:
+                # Its output is the index columns and the `on` columns'
+                # values, whatever is read above it; with no `on`, every
+                # column is a value column.
+                reads_all = len(node.names) == 0
+                reads = node.names + node.names2.copy()
+            elif _is_time_window(node.kind):
                 # Only what the windows read, whatever is wanted above:
                 # their outputs are new columns.
                 var window_reads = _time_window_reads(node)
@@ -7416,6 +7549,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "UNNEST " + node.text
         elif node.kind == CONCAT:
             label = "CONCAT"
+        elif node.kind == UNPIVOT:
+            label = (
+                "UNPIVOT on "
+                + (_joined(node.names) if len(node.names) else "*")
+                + " index "
+                + _joined(node.names2)
+                + " as "
+                + _joined(node.right_keys)
+            )
         elif node.kind == GROUP_BY_DYNAMIC:
             label = (
                 "GROUP_BY_DYNAMIC "

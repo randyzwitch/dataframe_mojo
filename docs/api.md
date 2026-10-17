@@ -971,6 +971,22 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def explode(self, column: String) -> Self`
 - `def unnest(self, column: String) -> Self`
   Replace a struct column with its fields; see DataFrame.unnest.
+- `def unpivot(self, on: List[String] = List(), index: List[String] = List(), *, variable_name: String = "variable", value_name: String = "value") -> Self`
+  Wide to long: one row per (input row, `on` column), with the same output and errors as DataFrame.unpivot. `on` defaults to every non-index column. Filters and slices above it stay above it.
+- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
+  Fill nulls in string columns with a string; see the Expr overload.
+- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
+  Fill nulls with a scalar value, choosing the columns as DataFrame.fill_null does from this plan's schema: a with_columns of `col(c).fill_null(value)` for each, as Polars' LazyFrame.fill_null is a with_columns over the columns its dtype selector matches. Unknown subset names raise here, while the plan is built.
+- `def drop_nulls(self, subset: List[String] = List()) -> Self`
+  Keep rows with no null in subset (default: every column), as a filter on each column's `is_not_null`, as Polars builds it.
+- `def null_count(self) -> Self`
+  One row holding each column's null count as Int64, as DataFrame.null_count: a select of `col(c).null_count()` per column, as Polars builds it.
+- `def n_unique(self, subset: List[String] = List()) -> Self`
+  One row, one Int64 column "n_unique": the number of distinct rows on subset (default: every column), the value DataFrame.n_unique returns. Built as the subset's unique rows counted.
+- `def is_duplicated(self, subset: List[String] = List()) -> Self`
+  One Boolean column "is_duplicated", true for every row whose key on subset (default: every column) occurs more than once: the Series DataFrame.is_duplicated returns, as a frame.
+- `def is_unique(self, subset: List[String] = List()) -> Self`
+  One Boolean column "is_unique", true for every row whose key on subset (default: every column) occurs exactly once: the Series DataFrame.is_unique returns, as a frame.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> LazyTimeGroupBy`
   Group rows into calendar-aligned, possibly overlapping windows of the index column; see DataFrame.group_by_dynamic.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> LazyTimeGroupBy`
