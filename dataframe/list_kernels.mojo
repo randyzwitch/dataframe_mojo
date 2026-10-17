@@ -12,11 +12,19 @@ from .expr import (
     LIST_MEAN,
     LIST_MIN,
     LIST_SUM,
+    STR_EXTRACT_ALL,
     STR_SPLIT,
     STRUCT_FIELD,
     Node,
 )
 from .nested_column import ListColumn
+from .regex import Regex
+from .regex_kernels import (
+    compile_pattern,
+    regex_extract_all,
+    regex_split,
+    split_codepoints,
+)
 from .series import Series
 from .string_column import StringBuilder, StringColumn
 
@@ -27,7 +35,13 @@ def nested_op(
     if input.is_chunked():
         return nested_op(node, input.rechunk(), input_dtype)
     if node.op == STR_SPLIT:
+        if node.min_count > 0:
+            return _split_regex(input, node)
         return _split(input, node.text, node.integer == 1)
+    if node.op == STR_EXTRACT_ALL:
+        return regex_extract_all(
+            input._data[StringColumn], compile_pattern(node.text, False)
+        )
     if node.op == STRUCT_FIELD:
         return _struct_field(input, node.text)
     var lists = input.list_column()
@@ -41,6 +55,32 @@ def nested_op(
     if node.op == LIST_JOIN:
         return _join(lists, node.text)
     return _reduce(lists, node.op)
+
+
+def _split_regex(input: Series, node: Node) raises -> Series:
+    """`str.split(literal=False)`: on a regular expression's matches; an
+    empty pattern splits into code points, and with strict=False an invalid
+    pattern gives null lists."""
+    ref column = input._data[StringColumn]
+    var pattern = node.text
+    if pattern.byte_length() == 0:
+        return split_codepoints(column)
+    var regex: Regex
+    try:
+        regex = compile_pattern(pattern, False)
+    except e:
+        if node.min_count == 1:
+            raise e^
+        var n = len(column)
+        var offsets = List[Int64](length=n + 1, fill=0)
+        var child = Series("item", StringBuilder().finish())
+        return Series(
+            "",
+            ListColumn(
+                offsets^, child^, List[UInt8](length=(n + 7) // 8, fill=0)
+            ),
+        )
+    return regex_split(column, regex, node.integer == 1)
 
 
 def _split(input: Series, by: String, inclusive: Bool) raises -> Series:
