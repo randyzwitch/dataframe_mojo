@@ -92,6 +92,8 @@ comptime KEEP_NULLS = 35
 # String concatenation with the separator in `text`; nulls propagate, or
 # with `integer` 1 a null side is skipped (null only if both are).
 comptime STR_CONCAT = 36
+# arctan2(y, x): left is y, right is x; x is cast to y's float type.
+comptime ARCTAN2 = 37
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
 comptime NEG = 50
@@ -109,6 +111,30 @@ comptime IS_NAN = 63
 comptime IS_NOT_NAN = 64
 comptime IS_FINITE = 65
 comptime IS_INFINITE = 66
+
+# Elementwise math functions occupy 190..209 (unary as well). They return
+# Float64, or Float32 for Float32 input, except SIGN and TRUNCATE, which
+# keep the input type. LOG_BASE keeps its base in `floating`.
+comptime LOG_BASE = 190
+comptime LOG1P = 191
+comptime SIGN = 192
+comptime CBRT = 193
+comptime TRUNCATE = 194
+comptime SIN = 195
+comptime COS = 196
+comptime TAN = 197
+comptime ARCSIN = 198
+comptime ARCCOS = 199
+comptime ARCTAN = 200
+comptime SINH = 201
+comptime COSH = 202
+comptime TANH = 203
+comptime ARCSINH = 204
+comptime ARCCOSH = 205
+comptime ARCTANH = 206
+comptime COT = 207
+comptime DEGREES = 208
+comptime RADIANS = 209
 
 # String operations (unary, parameters in text/text2/integer/min_count).
 comptime STR_LEN_CHARS = 67
@@ -192,6 +218,8 @@ comptime INTERPOLATE_BY = 124
 # integer bit 0 is left_closed and bit 1 is include_breaks.
 comptime CUT = 125
 comptime QCUT = 126
+# Running product; integer products are checked for overflow.
+comptime CUM_PROD = 127
 
 # Temporal field and conversion operations occupy 130..149 (text holds an
 # interval, format, or unit; text2 a target dtype name).
@@ -235,6 +263,8 @@ comptime COV = 161
 # text: value field SEP count field; integer: bit 0 sort by count, bit 1
 # normalize (proportions).
 comptime VALUE_COUNTS = 162
+# Product of the non-null values; 1 when there are none.
+comptime PRODUCT = 163
 # Time zones of datetimes (#222). text: the zone ("" for naive). For
 # DT_REPLACE_TZ, text2 is "<ambiguous>,<non_existent>".
 comptime DT_REPLACE_TZ = 157
@@ -286,7 +316,12 @@ def is_binary(op: Int) -> Bool:
 
 
 def is_unary(op: Int) -> Bool:
-    return op >= 50 and op < 80
+    return (op >= 50 and op < 80) or is_math(op)
+
+
+def is_math(op: Int) -> Bool:
+    """Whether op is one of the elementwise math functions (log10, sin...)."""
+    return op >= LOG_BASE and op <= RADIANS
 
 
 def is_reduction(op: Int) -> Bool:
@@ -296,6 +331,7 @@ def is_reduction(op: Int) -> Bool:
         or (op >= 80 and op < 100)
         or is_pair_reduction(op)
         or op == VALUE_COUNTS
+        or op == PRODUCT
     )
 
 
@@ -339,7 +375,7 @@ def is_dt_op(op: Int) -> Bool:
 
 
 def is_window(op: Int) -> Bool:
-    return (op >= CUM_SUM and op <= QCUT and op != OVER) or (
+    return (op >= CUM_SUM and op <= CUM_PROD and op != OVER) or (
         op >= ROLLING_STD and op <= ROLLING_VAR_BY
     )
 
@@ -617,6 +653,96 @@ struct Expr(Copyable):
         """Natural logarithm."""
         return self._unary(LOG)
 
+    def log(self, base: Float64) -> Self:
+        """Logarithm to `base`: ln(x) / ln(base), with log10 and log2
+        exact at powers of their base. Float64, or Float32 for Float32
+        input; log(0) is -inf and negative input NaN, as in IEEE."""
+        var nodes = self._nodes.copy()
+        nodes.append(_node(LOG_BASE, len(nodes) - 1, floating=base))
+        return Self(nodes^, self._name)
+
+    def log10(self) -> Self:
+        """Base-10 logarithm; see log(base)."""
+        return self.log(10.0)
+
+    def log1p(self) -> Self:
+        """ln(1 + x), accurate near zero; -inf at -1, NaN below."""
+        return self._unary(LOG1P)
+
+    def sign(self) -> Self:
+        """-1, 0 or 1 in the input's type. A float NaN stays NaN and a
+        signed zero keeps its sign, as in Polars."""
+        return self._unary(SIGN)
+
+    def cbrt(self) -> Self:
+        """Cube root (negative for negative input)."""
+        return self._unary(CBRT)
+
+    def truncate(self) -> Self:
+        """Round toward zero, keeping the input's type; integers are
+        unchanged."""
+        return self._unary(TRUNCATE)
+
+    def sin(self) -> Self:
+        """Sine of radians, as Float64 (Float32 for Float32 input)."""
+        return self._unary(SIN)
+
+    def cos(self) -> Self:
+        """Cosine of radians; see sin."""
+        return self._unary(COS)
+
+    def tan(self) -> Self:
+        """Tangent of radians; see sin."""
+        return self._unary(TAN)
+
+    def cot(self) -> Self:
+        """Cotangent, 1 / tan(x): inf at 0 and -inf at -0.0."""
+        return self._unary(COT)
+
+    def arcsin(self) -> Self:
+        """Inverse sine in radians; NaN outside [-1, 1]."""
+        return self._unary(ARCSIN)
+
+    def arccos(self) -> Self:
+        """Inverse cosine in radians; NaN outside [-1, 1]."""
+        return self._unary(ARCCOS)
+
+    def arctan(self) -> Self:
+        """Inverse tangent in radians."""
+        return self._unary(ARCTAN)
+
+    def sinh(self) -> Self:
+        """Hyperbolic sine."""
+        return self._unary(SINH)
+
+    def cosh(self) -> Self:
+        """Hyperbolic cosine."""
+        return self._unary(COSH)
+
+    def tanh(self) -> Self:
+        """Hyperbolic tangent."""
+        return self._unary(TANH)
+
+    def arcsinh(self) -> Self:
+        """Inverse hyperbolic sine."""
+        return self._unary(ARCSINH)
+
+    def arccosh(self) -> Self:
+        """Inverse hyperbolic cosine; NaN below 1."""
+        return self._unary(ARCCOSH)
+
+    def arctanh(self) -> Self:
+        """Inverse hyperbolic tangent; +-inf at +-1, NaN outside."""
+        return self._unary(ARCTANH)
+
+    def degrees(self) -> Self:
+        """Radians converted to degrees."""
+        return self._unary(DEGREES)
+
+    def radians(self) -> Self:
+        """Degrees converted to radians."""
+        return self._unary(RADIANS)
+
     def floor(self) -> Self:
         return self._unary(FLOOR)
 
@@ -860,6 +986,14 @@ struct Expr(Copyable):
         checked for overflow. A Bool gives a UInt32 running count of true
         values."""
         return self._window(CUM_SUM, reverse=reverse)
+
+    def cum_prod(self, reverse: Bool = False) -> Self:
+        """Running product of non-null values; null rows stay null.
+
+        Int64 for Bool and integers up to 32 bits, UInt64, Int64 and Float
+        types keep theirs, decimals give Float64. Integer products raise on
+        overflow."""
+        return self._window(CUM_PROD, reverse=reverse)
 
     def cum_min(self, reverse: Bool = False) -> Self:
         return self._window(CUM_MIN, reverse=reverse)
@@ -1289,6 +1423,14 @@ struct Expr(Copyable):
         var nodes = self._nodes.copy()
         nodes.append(_node(SUM, len(nodes) - 1, min_count=min_count))
         return Self(nodes^, self._name)
+
+    def product(self) -> Self:
+        """Product of the non-null values; 1 when there are none.
+
+        Int64 for Bool and integers up to 32 bits, UInt64, Int64 and Float
+        types keep theirs, decimals give Float64. Integer products raise on
+        overflow."""
+        return self._unary(PRODUCT)
 
     def arg_min(self) -> Self:
         """Index of the first minimum, as UInt32; nulls are skipped and NaN
@@ -1957,6 +2099,16 @@ struct ListNamespace(Copyable):
 
     def mean(self) -> Expr:
         return self._op(LIST_MEAN)
+
+
+def arctan2(y: Expr, x: Expr) -> Expr:
+    """The angle of the point (x, y) in radians, in [-pi, pi], as Float64,
+    or Float32 when y is Float32 (x is cast to y's float type)."""
+    var nodes = y._nodes.copy()
+    var offset = len(nodes)
+    _append_shifted(nodes, x._nodes, offset)
+    nodes.append(_node(ARCTAN2, offset - 1, len(nodes) - 1))
+    return Expr(nodes^, y._name)
 
 
 def concat_str(

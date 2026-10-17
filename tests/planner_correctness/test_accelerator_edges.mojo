@@ -211,3 +211,49 @@ def test_accelerator_cpu_work_is_value_blind_and_custom_launch_geometry_covers_e
                 _ = row_memory(plan, threads=invalid)
             with assert_raises(contains="must be positive"):
                 _ = row_memory(plan, max_blocks=invalid)
+
+
+def test_math_functions_product_and_cum_prod_stay_on_the_cpu() raises:
+    # No device kernels exist for these (#791): the Metal lowering refuses
+    # them, so engine="auto" runs them on the CPU and a forced Metal run
+    # reports them unsupported instead of computing a wrong value.
+    from dataframe import Expr, arctan2
+    from dataframe.accelerator.gpu.runtime import capabilities
+    from dataframe.metal import MetalRuntime
+
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2, 1])),
+            Series("x", Column[Float32]([0.5, 2, 4])),
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("x").log10(),
+        col("x").log(3.0),
+        col("x").log1p(),
+        col("x").sign(),
+        col("x").cbrt(),
+        col("x").truncate(),
+        col("x").sin(),
+        col("x").cot(),
+        col("x").arctanh(),
+        col("x").degrees(),
+        arctan2(col("x"), col("x")),
+        col("x").product(),
+        col("x").cum_prod(),
+    ]
+    for expression in expressions:
+        var query = frame.lazy().select(expression)
+        with assert_raises(contains="unsupported"):
+            _ = lower_rows(query, capabilities())
+        assert_true(
+            "unsupported" in MetalRuntime(device_id=999999).describe(query)
+        )
+    var grouped = frame.lazy().group_by("k").agg([col("x").product()])
+    assert_true(
+        "unsupported" in MetalRuntime(device_id=999999).describe(grouped)
+    )
+    var automatic = (
+        frame.lazy().select(col("x").cum_prod()).collect(engine="auto")
+    )
+    assert_equal(automatic.item(2, "x").numeric[DType.float32](), 4)

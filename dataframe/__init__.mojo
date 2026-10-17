@@ -36,6 +36,7 @@ from .expr import (
     corr,
     cov,
     concat_str,
+    arctan2,
     lit,
     null,
     when,

@@ -63,6 +63,8 @@ from .expr import (
     CUT,
     is_binary,
     is_unary,
+    is_math,
+    ARCTAN2,
     STR_CONCAT,
     CAST,
     OVER,
@@ -111,7 +113,14 @@ from .column import Column, _copy_validity, _count_valid, _validity_at
 from .string_column import StringColumn, StringBuilder
 from .string_predicates import _flip
 from .series import Series
-from .expr_kernels import binary, unary, choose, fit_mask
+from .expr_kernels import (
+    binary,
+    unary,
+    choose,
+    fit_mask,
+    math_unary,
+    arctan2_series,
+)
 from .aggregate import Reducer, _sum_bools
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
@@ -327,6 +336,15 @@ def _binary_op[
     raise Error("Unsupported binary expression node")
 
 
+def _logical(values: Series, dtype: DataType) raises -> Series:
+    """A kernel's output under its bound decimal type: decimal kernels tag
+    their results with the physical storage type, and a cast to Float64
+    must read the scale."""
+    if dtype.is_decimal() and values.dtype() != dtype:
+        return values.with_dtype(dtype)
+    return values.copy()
+
+
 def _unary_op[
     width: Int
 ](op: Int, input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
@@ -473,12 +491,22 @@ def _eval[
     if is_nested_op(node.op):
         return nested_op(node, left, bound.dtypes[node.left])
     if node.right < 0:
+        if is_math(node.op):
+            return math_unary[width](
+                node.op, _logical(left, bound.dtypes[node.left]), node.floating
+            )
         return _unary_op[width](node.op, left, node.integer, mask)
     var right = _eval[width](
         bound, columns, aggregates, node.right, offset, length, grouped, mask
     )
     if node.op == STR_CONCAT:
         return concat_strings(left, right, node.text, node.integer == 1)
+    if node.op == ARCTAN2:
+        return arctan2_series(
+            _logical(left, bound.dtypes[node.left]),
+            _logical(right, bound.dtypes[node.right]),
+            bound.dtypes[index],
+        )
     var left_type = bound.dtypes[node.left]
     var right_type = bound.dtypes[node.right]
     if (left_type.is_temporal() or right_type.is_temporal()) and (
