@@ -136,6 +136,30 @@ from .expr import (
     is_unary,
     is_reduction,
     is_comparison,
+    is_math,
+    ARCTAN2,
+    LOG_BASE,
+    LOG1P,
+    SIGN,
+    CBRT,
+    TRUNCATE,
+    SIN,
+    COS,
+    TAN,
+    ARCSIN,
+    ARCCOS,
+    ARCTAN,
+    SINH,
+    COSH,
+    TANH,
+    ARCSINH,
+    ARCCOSH,
+    ARCTANH,
+    COT,
+    DEGREES,
+    RADIANS,
+    PRODUCT,
+    CUM_PROD,
 )
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
@@ -205,6 +229,52 @@ def op_name(op: Int) -> String:
         return "ceil"
     if op == ROUND:
         return "round"
+    if op == LOG_BASE:
+        return "log"
+    if op == LOG1P:
+        return "log1p"
+    if op == SIGN:
+        return "sign"
+    if op == CBRT:
+        return "cbrt"
+    if op == TRUNCATE:
+        return "truncate"
+    if op == SIN:
+        return "sin"
+    if op == COS:
+        return "cos"
+    if op == TAN:
+        return "tan"
+    if op == ARCSIN:
+        return "arcsin"
+    if op == ARCCOS:
+        return "arccos"
+    if op == ARCTAN:
+        return "arctan"
+    if op == SINH:
+        return "sinh"
+    if op == COSH:
+        return "cosh"
+    if op == TANH:
+        return "tanh"
+    if op == ARCSINH:
+        return "arcsinh"
+    if op == ARCCOSH:
+        return "arccosh"
+    if op == ARCTANH:
+        return "arctanh"
+    if op == COT:
+        return "cot"
+    if op == DEGREES:
+        return "degrees"
+    if op == RADIANS:
+        return "radians"
+    if op == ARCTAN2:
+        return "arctan2"
+    if op == PRODUCT:
+        return "product"
+    if op == CUM_PROD:
+        return "cum_prod"
     if op == AND:
         return "and"
     if op == OR:
@@ -440,7 +510,9 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
         raise Error(
             op_name(op) + " requires a numeric operand, found " + input.name()
         )
-    if op == SQRT or op == EXP or op == LOG:
+    if op == SIGN or op == TRUNCATE:
+        return input
+    if op == SQRT or op == EXP or op == LOG or is_math(op):
         return (
             DataType.FLOAT32 if input == DataType.FLOAT32 else DataType.FLOAT64
         )
@@ -482,6 +554,12 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
                 "sum requires a numeric expression, found " + input.name()
             )
         return input.sum_type()
+    if op == PRODUCT:
+        if not _numeric(input) and input != DataType.BOOL:
+            raise Error(
+                "product requires a numeric expression, found " + input.name()
+            )
+        return input.product_type()
     if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
         return DataType.INT64
     if op == ANY or op == ALL:
@@ -1017,6 +1095,13 @@ def bind(
                     dtype = input.sum_type()
                 elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
                     dtype = DataType.FLOAT64
+            elif node.op == CUM_PROD:
+                if not _numeric(input) and input != DataType.BOOL:
+                    raise Error(
+                        "cum_prod requires a numeric expression, found "
+                        + input.name()
+                    )
+                dtype = input.product_type()
             elif node.op == CUM_SUM or node.op == ROLLING_SUM:
                 if not _numeric(input) and not input.is_duration():
                     raise Error(
@@ -1267,6 +1352,34 @@ def bind(
                 dtype = _unary_dtype(node.op, types[node.left])
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
+        elif node.op == ARCTAN2:
+            if (
+                node.left < 0
+                or node.right < 0
+                or node.left >= i
+                or node.right >= i
+            ):
+                raise Error("Invalid arctan2 inputs")
+            _default(nodes, types, node.left)
+            _default(nodes, types, node.right)
+            var y = types[node.left]
+            var x = types[node.right]
+            if not _numeric(y) or not _numeric(x):
+                raise Error(
+                    "arctan2 requires numeric operands, found "
+                    + y.name()
+                    + " and "
+                    + x.name()
+                )
+            # Polars casts x to y's float type, Float64 for any other y.
+            dtype = DataType.FLOAT32 if y == DataType.FLOAT32 else (
+                DataType.FLOAT64
+            )
+            has_aggregate = aggregated[node.left] or aggregated[node.right]
+            if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
+                shape = ROWS
+            elif has_aggregate:
+                shape = AGGREGATE
         elif is_binary(node.op):
             if (
                 node.left < 0
