@@ -134,6 +134,11 @@ from .expr import (
     STRUCT_PACK,
     struct_pack_children,
     struct_pack_names,
+    HORIZONTAL,
+    HORIZONTAL_ARGS,
+    H_ANY,
+    H_ALL,
+    horizontal_inputs,
     STR_SPLIT,
     STRUCT_FIELD,
     LIST_LEN,
@@ -152,6 +157,11 @@ from .expr import (
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
+from .horizontal import (
+    horizontal_input,
+    horizontal_result,
+    horizontal_supertype,
+)
 from .temporal import (
     ambiguous_code,
     non_existent_code,
@@ -813,6 +823,18 @@ def _stays_untyped(op: Int) -> Bool:
     )
 
 
+def _horizontal_target(untyped: DataType, other: DataType) -> DataType:
+    """What an untyped input of a horizontal reduction adopts beside a
+    typed one: an integer takes a number's type, a float a float's, and
+    otherwise the literal keeps its own default (Int64 or Float64) for the
+    supertype to combine."""
+    if other.is_float() or (
+        untyped == DataType.UNTYPED_INT and other.is_integer()
+    ):
+        return other
+    return untyped.default()
+
+
 def _target(other: DataType) -> DataType:
     """What an untyped operand adopts next to `other`: Int64 beside temporal
     types (for duration * n), otherwise `other` itself."""
@@ -933,7 +955,11 @@ def bind(
         # Operations other than binary arithmetic/comparison, negation, and
         # when/then branches give untyped inputs their default types first.
         if not (
-            is_binary(node.op) or is_conditional(node.op) or node.op == NEG
+            is_binary(node.op)
+            or is_conditional(node.op)
+            or node.op == NEG
+            or node.op == HORIZONTAL_ARGS
+            or node.op == HORIZONTAL
         ):
             _default(nodes, types, node.left)
             _default(nodes, types, node.right)
@@ -1306,6 +1332,56 @@ def bind(
                 dtype = DataType.BOOL
             else:
                 dtype = DataType.STRING
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+        elif node.op == HORIZONTAL_ARGS:
+            # Two runs of a horizontal reduction's inputs, typed as their
+            # supertype; untyped literals adopt the other side's type.
+            if (
+                node.left < 0
+                or node.right < 0
+                or node.left >= i
+                or node.right >= i
+            ):
+                raise Error("Invalid horizontal expression inputs")
+            var kind = Int(node.integer)
+            var left = types[node.left]
+            var right = types[node.right]
+            if kind == H_ANY or kind == H_ALL:
+                _default(nodes, types, node.left)
+                _default(nodes, types, node.right)
+                dtype = DataType.BOOL
+            elif left.is_untyped() and right.is_untyped():
+                dtype = _join_untyped(left, right)
+            else:
+                if left.is_untyped():
+                    _adopt(
+                        nodes, types, node.left, _horizontal_target(left, right)
+                    )
+                elif right.is_untyped():
+                    _adopt(
+                        nodes,
+                        types,
+                        node.right,
+                        _horizontal_target(right, left),
+                    )
+                dtype = horizontal_supertype(
+                    kind, types[node.left], types[node.right]
+                )
+            has_aggregate = aggregated[node.left] or aggregated[node.right]
+            if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
+                shape = ROWS
+            elif has_aggregate:
+                shape = AGGREGATE
+        elif node.op == HORIZONTAL:
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid horizontal expression input")
+            _default(nodes, types, node.left)
+            var kind = Int(node.integer)
+            var inputs = horizontal_inputs(nodes, i)
+            for input in inputs:
+                horizontal_input(kind, types[input])
+            dtype = horizontal_result(kind, types[node.left], len(inputs))
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_text_function(node.op):
