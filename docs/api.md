@@ -1294,11 +1294,11 @@ def read_shapefile(path: String, *, geometry_name: String = "geometry", encoding
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
 
 ```mojo
-def scan_csv(path: String) -> LazyFrame
+def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False) -> LazyFrame
 ```
 
 ```mojo
-def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
+def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8") -> LazyFrame
 ```
 
 ## `scan_parquet`

@@ -91,6 +91,7 @@ from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
 from .io.csv import CsvSchema, read_csv
+from .io.csv_types import _CsvScanOptions
 from .io.csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
     AND,
@@ -4120,6 +4121,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     source.names,
                     source.length,
                     batch_size,
+                    _scan_options(source),
                 )
             )
         elif source.kind == SCAN_PARQUET:
@@ -4887,20 +4889,47 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         node.names,
                         0,
                         batch_size,
+                        _scan_options(node),
                     )
                     var next = batches.next()
                     var job = next.take()
                     job.run()
                     return job^.into_frame()
             var rows = 0 if empty else node.length
+            var scan = _scan_options(node)
             if self._schemas[node.offset]:
                 return read_csv(
                     node.text,
                     self._schemas[node.offset].value(),
+                    has_header=scan.has_header,
+                    separator=scan.separator,
+                    quote_char=scan.quote_char,
+                    comment_prefix=scan.comment_prefix,
+                    skip_rows=scan.skip_rows,
                     n_rows=rows,
                     columns=node.names,
+                    null_values=scan.null_values,
+                    ignore_errors=scan.ignore_errors,
+                    truncate_ragged_lines=scan.truncate_ragged_lines,
+                    encoding=scan.encoding,
                 )
-            return read_csv(node.text, n_rows=rows, columns=node.names)
+            return read_csv(
+                node.text,
+                infer_schema_length=scan.infer_schema_length,
+                schema_overrides=scan.schema_overrides,
+                try_parse_dates=scan.try_parse_dates,
+                has_header=scan.has_header,
+                separator=scan.separator,
+                quote_char=scan.quote_char,
+                comment_prefix=scan.comment_prefix,
+                skip_rows=scan.skip_rows,
+                n_rows=rows,
+                columns=node.names,
+                null_values=scan.null_values,
+                ignore_errors=scan.ignore_errors,
+                truncate_ragged_lines=scan.truncate_ragged_lines,
+                encoding=scan.encoding,
+            )
         if node.kind == SCAN_PARQUET:
             if empty:
                 return read_parquet(
@@ -4950,16 +4979,38 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     source.text, columns=source.names, row_groups=groups
                 ).filter(node.exprs[0])
             if source.kind == SCAN_CSV and source.length < 0:
+                var scan = _scan_options(source)
                 if self._schemas[source.offset]:
                     return read_csv_explicit(
                         source.text,
                         self._schemas[source.offset].value(),
+                        has_header=scan.has_header,
+                        separator=scan.separator,
+                        quote_char=scan.quote_char,
+                        comment_prefix=scan.comment_prefix,
+                        skip_rows=scan.skip_rows,
                         columns=source.names,
+                        null_values=scan.null_values,
+                        ignore_errors=scan.ignore_errors,
+                        truncate_ragged_lines=scan.truncate_ragged_lines,
+                        encoding=scan.encoding,
                         predicate=Optional(node.exprs[0].copy()),
                     )
                 return read_csv_inferred(
                     source.text,
+                    infer_schema_length=scan.infer_schema_length,
+                    schema_overrides=scan.schema_overrides,
+                    has_header=scan.has_header,
+                    separator=scan.separator,
+                    quote_char=scan.quote_char,
+                    comment_prefix=scan.comment_prefix,
+                    skip_rows=scan.skip_rows,
                     columns=source.names,
+                    null_values=scan.null_values,
+                    ignore_errors=scan.ignore_errors,
+                    truncate_ragged_lines=scan.truncate_ragged_lines,
+                    encoding=scan.encoding,
+                    try_parse_dates=scan.try_parse_dates,
                     predicate=Optional(node.exprs[0].copy()),
                 )
         if node.kind == CONCAT:
@@ -8637,23 +8688,172 @@ struct LazyTimeGroupBy(Copyable):
         return self.agg([expr.copy()], batch_size=batch_size)
 
 
-def scan_csv(path: String) raises -> LazyFrame:
+def scan_csv(
+    path: String,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
-    collect; projection and head() are pushed into the reader."""
+    collect; projection and head() are pushed into the reader.
+
+    The options are read_csv's, with the same meaning, and reach the reader
+    however the plan runs (eagerly, streaming, or for its schema); invalid
+    ones raise here, as read_csv would raise them.
+    """
+    var options = _CsvScanOptions(
+        has_header,
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        infer_schema_length,
+        schema_overrides.copy(),
+        try_parse_dates,
+    )
     # Scan slots are parallel: frames[k] and schemas[k] belong to one scan.
     return LazyFrame(
-        [_plan_node(SCAN_CSV, text=path, offset=0)],
+        [_csv_scan_node(path, options)],
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
 
 
-def scan_csv(path: String, schema: CsvSchema) raises -> LazyFrame:
+def scan_csv(
+    path: String,
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+) raises -> LazyFrame:
+    """Lazily read a CSV file with an explicit schema, which labels the
+    fields by position; the options are read_csv's (see the overload
+    above)."""
+    var options = _CsvScanOptions.defaults()
+    options.has_header = has_header
+    options.separator = separator
+    options.quote_char = quote_char
+    options.comment_prefix = comment_prefix
+    options.skip_rows = skip_rows
+    options.null_values = null_values.copy()
+    options.ignore_errors = ignore_errors
+    options.truncate_ragged_lines = truncate_ragged_lines
+    options.encoding = encoding
     return LazyFrame(
-        [_plan_node(SCAN_CSV, text=path, offset=0)],
+        [_csv_scan_node(path, options)],
         [DataFrame([])],
         [Optional[CsvSchema](schema.copy())],
     )
+
+
+def _csv_scan_node(path: String, options: _CsvScanOptions) raises -> PlanNode:
+    """A CSV scan node holding its reader options, checked here: `flags`
+    the switches, `names2` the text and numeric settings followed by the
+    schema overrides as name, dtype pairs, `right_keys` the null values.
+    A scan with read_csv's defaults keeps none of them, so plans built
+    without options are unchanged."""
+    _ = options.reader()
+    var defaults = _CsvScanOptions.defaults()
+    var overrides = List[String]()
+    for item in options.schema_overrides.items():
+        overrides.append(item.key)
+        overrides.append(item.value)
+    var settings: List[String] = [
+        options.separator,
+        options.quote_char,
+        options.comment_prefix,
+        options.encoding,
+        String(options.skip_rows),
+        String(options.infer_schema_length),
+    ]
+    var flags: List[Bool] = [
+        options.has_header,
+        options.ignore_errors,
+        options.truncate_ragged_lines,
+        options.try_parse_dates,
+    ]
+    var default_settings: List[String] = [
+        defaults.separator,
+        defaults.quote_char,
+        defaults.comment_prefix,
+        defaults.encoding,
+        String(defaults.skip_rows),
+        String(defaults.infer_schema_length),
+    ]
+    var default_flags: List[Bool] = [
+        defaults.has_header,
+        defaults.ignore_errors,
+        defaults.truncate_ragged_lines,
+        defaults.try_parse_dates,
+    ]
+    if (
+        _same_names(settings, default_settings)
+        and _same_flags(flags, default_flags)
+        and len(overrides) == 0
+        and len(options.null_values) == 0
+    ):
+        return _plan_node(SCAN_CSV, text=path, offset=0)
+    return _plan_node(
+        SCAN_CSV,
+        text=path,
+        offset=0,
+        names2=settings + overrides^,
+        flags=flags,
+        right_keys=options.null_values,
+    )
+
+
+def _same_flags(a: List[Bool], b: List[Bool]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+def _scan_options(node: PlanNode) raises -> _CsvScanOptions:
+    """The reader options a CSV scan node holds (see `_csv_scan_node`)."""
+    var options = _CsvScanOptions.defaults()
+    if len(node.names2) < 6:
+        return options^
+    options.separator = node.names2[0]
+    options.quote_char = node.names2[1]
+    options.comment_prefix = node.names2[2]
+    options.encoding = node.names2[3]
+    options.skip_rows = Int(node.names2[4])
+    options.infer_schema_length = Int(node.names2[5])
+    var k = 6
+    while k + 1 < len(node.names2):
+        options.schema_overrides[node.names2[k]] = node.names2[k + 1]
+        k += 2
+    options.has_header = node.flags[0]
+    options.ignore_errors = node.flags[1]
+    options.truncate_ragged_lines = node.flags[2]
+    options.try_parse_dates = node.flags[3]
+    options.null_values = node.right_keys.copy()
+    return options^
 
 
 def scan_parquet(path: String) raises -> LazyFrame:

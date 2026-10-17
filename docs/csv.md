@@ -118,6 +118,18 @@ of `buffer_size`. Numeric buffers and StringView storage transfer into output
 columns. Results may retain multiple chunks; `rechunk()` explicitly requests
 contiguous storage.
 
+`scan_csv(path, ...)` and `scan_csv(path, schema, ...)` take the same options
+except `n_rows`, `columns` and `buffer_size`, which the plan supplies (a
+`head` becomes `n_rows`; projection pushdown chooses the columns). The
+inferred-schema overload also takes `infer_schema_length`,
+`schema_overrides` and `try_parse_dates`. Invalid options raise when
+`scan_csv` is called. The options reach the reader however the plan runs:
+the materializing executor, a filter run on each decoded range, streaming
+batches, and the zero-row schema probe, so every one gives `read_csv`'s
+frame. Streaming batches stop early for a `head` only when there is no
+`comment_prefix`, since a comment line is a line but not a row; with
+comments the slice above the scan still limits the result.
+
 ## Writing
 
 `write_csv(frame, path, has_header=True, separator=",", quote_style="necessary",
