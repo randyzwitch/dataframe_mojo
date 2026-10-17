@@ -85,7 +85,11 @@ from .expr import (
     STRUCT_FIELD,
     struct_pack_children,
     struct_pack_names,
+    HORIZONTAL,
+    HORIZONTAL_ARGS,
+    horizontal_inputs,
 )
+from .horizontal import horizontal
 from .str_kernels import string_op, concat_strings
 from .text_functions import text_function
 from .expr_kernels import integer_is_in
@@ -407,6 +411,12 @@ def _eval[
         return _pack_struct[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
         )
+    if node.op == HORIZONTAL:
+        return _horizontal[width](
+            bound, columns, aggregates, index, offset, length, grouped, mask
+        )
+    if node.op == HORIZONTAL_ARGS:
+        raise Error("horizontal inputs are evaluated by their reduction")
     if bound.fusible[index] and node.left >= 0:
         return fused[width](bound, columns, index, offset, length)
     if (
@@ -541,6 +551,45 @@ def _pack_struct[
             value = value.with_dtype(bound.dtypes[children[k]])
         fields.append(value.renamed(names[k]))
     return Series("", StructColumn(fields^))
+
+
+def _horizontal[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    mask: List[Bool],
+) raises -> Series:
+    """Evaluate a horizontal reduction's inputs and reduce them row-wise
+    (see horizontal.mojo); one-row inputs broadcast."""
+    ref node = bound.expr._nodes[index]
+    var inputs = List[Series]()
+    for child in horizontal_inputs(bound.expr._nodes, index):
+        var value = _eval[width](
+            bound, columns, aggregates, child, offset, length, grouped, mask
+        )
+        # Kernel outputs carry physical tags; restore the bound logical type.
+        if value.dtype() != bound.dtypes[child]:
+            value = value.with_dtype(bound.dtypes[child])
+        inputs.append(value^)
+    var result = horizontal(
+        Int(node.integer),
+        node.min_count != 0,
+        inputs^,
+        bound.dtypes[node.left],
+        bound.dtypes[index],
+        offset,
+        length,
+        mask,
+    )
+    if result.dtype() != bound.dtypes[index]:
+        result = result.with_dtype(bound.dtypes[index])
+    return result^
 
 
 def _implode[
@@ -2006,6 +2055,8 @@ def _row_wise(op: Int) -> Bool:
         or op == CUT
         or is_dt_op(op)
         or is_nested_op(op)
+        or op == HORIZONTAL
+        or op == HORIZONTAL_ARGS
     )
 
 

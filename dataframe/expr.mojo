@@ -276,6 +276,51 @@ comptime STR_TO_INTEGER = 239
 # the last field keeps the remainder (splitn).
 comptime STR_SPLIT_FIELDS = 240
 
+# Row-wise reductions across expressions (#221): sum_horizontal and the
+# rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
+# whose leaves, read left to right, are the inputs; both keep the kind
+# (H_SUM ...) in `integer`, and HORIZONTAL keeps ignore_nulls in min_count.
+# Each input is one operand, so a selector among them expands into more
+# inputs rather than more expressions.
+comptime HORIZONTAL = 190
+comptime HORIZONTAL_ARGS = 191
+comptime H_SUM = 0
+comptime H_MIN = 1
+comptime H_MAX = 2
+comptime H_MEAN = 3
+comptime H_ANY = 4
+comptime H_ALL = 5
+
+
+def horizontal_name(kind: Int) -> String:
+    if kind == H_SUM:
+        return "sum_horizontal"
+    if kind == H_MIN:
+        return "min_horizontal"
+    if kind == H_MAX:
+        return "max_horizontal"
+    if kind == H_MEAN:
+        return "mean_horizontal"
+    if kind == H_ANY:
+        return "any_horizontal"
+    return "all_horizontal"
+
+
+def horizontal_inputs(nodes: List[Node], index: Int) -> List[Int]:
+    """The input roots of the HORIZONTAL node at `index`, in order."""
+    var inputs = List[Int]()
+    var pending = List[Int]()
+    pending.append(nodes[index].left)
+    while len(pending) > 0:
+        var at = pending.pop()
+        if nodes[at].op == HORIZONTAL_ARGS:
+            # Right is pushed first so the left side is read first.
+            pending.append(nodes[at].right)
+            pending.append(nodes[at].left)
+        else:
+            inputs.append(at)
+    return inputs^
+
 
 def is_rolling_by(op: Int) -> Bool:
     return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
@@ -1538,6 +1583,84 @@ def cov(a: Expr, b: Expr, ddof: Int = 1) -> Expr:
     var result = a._binary(b, COV)
     result._nodes[len(result._nodes) - 1].integer = Int64(ddof)
     return result^
+
+
+def _horizontal(
+    exprs: List[Expr], kind: Int, ignore_nulls: Bool = True
+) raises -> Expr:
+    if len(exprs) == 0:
+        raise Error(horizontal_name(kind) + " requires at least one expression")
+    var nodes = exprs[0]._nodes.copy()
+    for i in range(1, len(exprs)):
+        var offset = len(nodes)
+        _append_shifted(nodes, exprs[i]._nodes, offset)
+        nodes.append(
+            _node(
+                HORIZONTAL_ARGS,
+                offset - 1,
+                len(nodes) - 1,
+                integer=Int64(kind),
+            )
+        )
+    nodes.append(
+        _node(
+            HORIZONTAL,
+            len(nodes) - 1,
+            integer=Int64(kind),
+            min_count=Int(ignore_nulls),
+        )
+    )
+    return Expr(nodes^, exprs[0]._name)
+
+
+def sum_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) raises -> Expr:
+    """Sum of the inputs in each row, named after the first input.
+
+    Inputs are cast to their common type first (Polars' supertype; an
+    integer meeting a decimal becomes a decimal, as in DuckDB); Bool alone
+    sums as UInt32. With ignore_nulls a null counts as zero, so a row of
+    nulls sums to 0; without it any null makes the row null. Selectors
+    among `exprs` expand into more inputs.
+    """
+    return _horizontal(exprs, H_SUM, ignore_nulls)
+
+
+def min_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Least input in each row, at the inputs' common type. Nulls and NaN
+    are skipped; a row with no other value is null (NaN when only NaN).
+    """
+    return _horizontal(exprs, H_MIN)
+
+
+def max_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Greatest input in each row, at the inputs' common type. Nulls and
+    NaN are skipped; a row with no other value is null (NaN when only NaN).
+    """
+    return _horizontal(exprs, H_MAX)
+
+
+def mean_horizontal(
+    exprs: List[Expr], ignore_nulls: Bool = True
+) raises -> Expr:
+    """Mean of the inputs in each row: Float32 when their common type is
+    Float32, otherwise Float64. With ignore_nulls the mean is over the
+    row's non-null values, null when there are none; without it any null
+    makes the row null."""
+    return _horizontal(exprs, H_MEAN, ignore_nulls)
+
+
+def any_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Kleene OR across the inputs in each row: true if any is true, else
+    null if any is null, else false. Numeric inputs read nonzero as true.
+    A selector matching no columns gives a literal false."""
+    return _horizontal(exprs, H_ANY)
+
+
+def all_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Kleene AND across the inputs in each row: false if any is false,
+    else null if any is null, else true. Numeric inputs read nonzero as
+    true. A selector matching no columns gives a literal true."""
+    return _horizontal(exprs, H_ALL)
 
 
 def coalesce(exprs: List[Expr]) raises -> Expr:
