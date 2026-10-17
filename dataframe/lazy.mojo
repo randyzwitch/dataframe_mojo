@@ -3186,8 +3186,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _ends_in_breaker(self, index: Int) -> Bool:
         """Whether node `index` is a pipeline breaker (an aggregate, a
         unique, a sort or a row-order operator such as tail), or row-local
-        steps over one: it is computed in
-        full before any of its rows stream on."""
+        steps over one: it is computed in full before any of its rows stream
+        on. A selection that reads its whole input (aggregates over all
+        rows, as DuckDB's ungrouped aggregate sink, or windows) is one too:
+        TPC-DS q28's six one-row bands, cross joined, ran one after
+        another."""
         var at = index
         while at >= 0:
             ref node = self._nodes[at]
@@ -3198,6 +3201,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or _is_time_window(node.kind)
                 or _row_order_step(node.kind)
             ):
+                return True
+            if (
+                node.kind == SELECT or node.kind == WITH_COLUMNS
+            ) and not _row_local(node.exprs):
                 return True
             if node.kind == DROP or _stream_rows(node):
                 at = node.left
