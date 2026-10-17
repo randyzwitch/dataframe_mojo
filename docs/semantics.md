@@ -39,6 +39,12 @@ past the end returns zero rows. `length=-1` means all remaining rows, and any
 other negative length raises. `head(n)` and `tail(n)` default to five rows; a
 negative `n` drops `-n` rows from the other end, as in Polars. `limit` is
 `head`. `reverse` reverses row order and `clear` keeps the schema with zero rows.
+`shift(n=1, fill_value=None)` moves every column's values `n` rows later
+(earlier for a negative `n`), as Polars' `DataFrame.shift`: height and schema
+stay, and the `min(|n|, height)` vacated rows are null, or `fill_value` cast to
+each column's type. `fill_value` must be a scalar (a literal or a reduction
+such as `col("a").max()`); the input's own nulls are not filled. The lazy
+`tail`, `reverse`, `shift` and `with_row_index` give the same results.
 Zero-column frames keep a correctly clipped height through all of these.
 
 `drop` and `rename` validate every name before building output: unknown names

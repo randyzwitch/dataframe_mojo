@@ -562,13 +562,14 @@ def test_native_metal_pair_moments_nested_consumers_checked_inputs_budget_cost_a
         frame.lazy().select(cov(col("x") + lit(Int32(1)), col("y"))).head(1)
     )
     assert_true(
-        "unsupported" in MetalRuntime(device_id=999999).describe(unproven)
+        "unsupported" not in MetalRuntime(device_id=999999).describe(unproven)
     )
     var unproven_right = (
         frame.lazy().select(corr(col("y"), col("x") + lit(Int32(1)))).head(1)
     )
     assert_true(
-        "unsupported" in MetalRuntime(device_id=999999).describe(unproven_right)
+        "unsupported"
+        not in MetalRuntime(device_id=999999).describe(unproven_right)
     )
     var query = frame.lazy().select_exprs(
         [

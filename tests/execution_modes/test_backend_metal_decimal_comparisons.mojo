@@ -8,6 +8,7 @@ from dataframe.decimal import pow10
 from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
@@ -221,8 +222,7 @@ def test_native_metal_decimal_comparison_overflow_observation_budget_and_reuse()
         _ = query.collect(engine="cpu")
     with assert_raises(contains="decimal multiplication overflow"):
         _ = query.collect(accelerator=runtime)
-    with assert_raises(contains="checked decimal comparisons"):
-        _ = query.head(1).collect(accelerator=runtime)
+    same_outcome(query.head(1))
     for predicate in List[Expr]([lit(False), lit(True)]):
         var conditional = frame.lazy().select(
             when(predicate).then(col("a") > col("b")).otherwise(lit(False))

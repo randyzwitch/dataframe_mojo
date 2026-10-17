@@ -1320,8 +1320,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     ) raises -> List[Int]:
         """Dense per-row ranks encoding direction, NaN, and null placement.
 
-        Non-null, non-NaN values rank 0..d-1 (reversed when descending).
-        NaN ranks d in either direction; null ranks -1 or d + 1.
+        NaN is the largest value, as in Polars and DuckDB. Ascending,
+        numbers rank 0..d-1 and NaN ranks d; descending, NaN ranks 0 and
+        numbers rank d..1. Null ranks -1 or d + 1 in either direction.
         """
         if self.is_chunked():
             return self.rechunk()._sort_ranks(descending, nulls_last)
@@ -1362,13 +1363,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             for i in range(n):
                 valid[i] = column._valid(i)
             distinct = _dense_string_ranks(column, valid, ranks)
+        var null_rank = distinct + 1 if nulls_last else -1
+        var nan_rank = 0 if descending else distinct
         for i in range(n):
             if not valid[i]:
-                ranks[i] = distinct + 1 if nulls_last else -1
+                ranks[i] = null_rank
             elif nan[i]:
-                ranks[i] = distinct
+                ranks[i] = nan_rank
             elif descending:
-                ranks[i] = distinct - 1 - ranks[i]
+                ranks[i] = distinct - ranks[i]
         return ranks^
 
     def slice(self, offset: Int, length: Int) raises -> Self:

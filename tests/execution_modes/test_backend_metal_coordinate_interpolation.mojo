@@ -69,13 +69,16 @@ def test_coordinate_interpolation_capability_private_axis_metadata_and_checked_i
             frame.lazy().select(col("x").interpolate_by(lit(1))),
             _capabilities(),
         )
+    # Metal decides faults on the CPU, so it needs no fault-order boundary;
+    # a backend without that still refuses.
+    var checked_axis = frame.lazy().select(
+        col("x").interpolate_by(col("x") + lit(Int64.MAX))
+    )
+    var strict = _capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="checked interpolation axes"):
-        _ = lower_rows(
-            frame.lazy().select(
-                col("x").interpolate_by(col("x") + lit(Int64.MAX))
-            ),
-            _capabilities(),
-        )
+        _ = lower_rows(checked_axis, strict)
+    _ = lower_rows(checked_axis, _capabilities())
 
 
 # requires: metal

@@ -154,7 +154,8 @@ def test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_s
                             var an = floating and a % 20003 == 19
                             var bn = floating and b % 20003 == 19
                             if an != bn:
-                                return not an
+                                # NaN is the largest value.
+                                return an if descending else not an
                             if replaced:
                                 x = -x
                                 y = -y

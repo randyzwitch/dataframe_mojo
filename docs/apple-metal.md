@@ -43,6 +43,29 @@ Forced accelerator queries reject unsupported work rather than retrying on the
 CPU. The complete reachable plan is bound before device initialization. Queries
 with `engine="cpu"` ignore accelerator policy and device configuration.
 
+### Data faults
+
+A data fault is a failure caused by input values: integer or Decimal
+overflow, a failed strict cast, a temporal value out of range or a
+nonexistent local time. Metal computes every checked value, including values
+the CPU executor never evaluates because a head, filter or HAVING step prunes
+their rows first, and it does not reproduce the CPU's batch and expression
+order. So when any kernel writes a fault, Metal reruns the query on the CPU
+with the same settings and returns the CPU's outcome: its error, or its
+result when the faulting values are never evaluated there. A fault-free run
+returns Metal's own result. Profiles of a decided query carry
+`fault_adjudication="cpu"`. Device, budget and planning failures still raise
+as they are; only errors marked as data faults
+(`dataframe/accelerator/faults.mojo`) are decided this way.
+
+Each region flags a fault in any step's output slot as soon as the step
+writes it, and checks grouped outputs and reduction states, so no pruned
+fault goes unseen. Checked work therefore needs no fault-order proof: checked
+integer and Decimal arithmetic, strict casts, checked rank, window-axis and
+temporal operands, and checked sums run before heads, filters, joins and other
+regions. Conditional Decimal branches remain restricted: the CPU evaluates
+both branches where Metal masks the unselected one.
+
 ## Operations and precision
 
 The existing lazy expression and plan APIs are preserved. Supported work
@@ -282,9 +305,8 @@ dictionaries remain pending.
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
 branches remain unobserved. Intermediate region boundaries observe public
-errors without downloading values. Some checked expressions and reductions
-still require a terminal boundary when metadata cannot prove safe evaluation
-under downstream pruning. Rejection is an explicit capability restriction.
+errors without downloading values, and any fault a region writes is decided
+on the CPU (see Data faults).
 
 Direct source List `len` and constant-index `get` support primitive row outputs.
 The backend stages each used child once, consumes offsets and parent validity

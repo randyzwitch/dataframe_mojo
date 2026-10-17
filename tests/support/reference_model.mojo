@@ -181,12 +181,13 @@ def precedes(
             return lv if nulls_last[k] else rv
         if not lv:
             continue
-        # NaN remains after numbers in either direction, as specified.
+        # NaN is the largest value: after numbers ascending, before them
+        # descending (Polars and DuckDB).
         if keys[k] == "f":
             var ln = left.f != left.f
             var rn = right.f != right.f
             if ln != rn:
-                return not ln
+                return ln if descending[k] else not ln
         var order = compare_field(left, right, keys[k])
         if order:
             return order > 0 if descending[k] else order < 0

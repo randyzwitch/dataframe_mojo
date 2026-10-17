@@ -23,8 +23,11 @@ def _source(overflow: Bool = False) raises -> DataFrame:
 
 
 def _collect(query: LazyFrame, gpu: Bool) raises -> DataFrame:
+    # Same settings on both engines: a Metal data fault is decided by the CPU
+    # with the query's own settings, and the streaming CPU never evaluates a
+    # join's probe side when its build side is empty.
     return query.collect(
-        accelerator=MetalRuntime(), optimize=False
+        accelerator=MetalRuntime(), streaming=False, optimize=False
     ) if gpu else query.collect(engine="cpu", streaming=False, optimize=False)
 
 

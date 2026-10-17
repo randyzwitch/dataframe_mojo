@@ -117,8 +117,8 @@ def test_scalar_broadcast_rejects_file_reads_and_checked_integer_children() rais
         .then((col("x") + lit(Int64(1))).mean())
         .otherwise(col("x").cast(DataType.FLOAT64))
     )
-    with assert_raises(contains="checked integer arithmetic"):
-        _ = invalid_child.collect(accelerator=runtime)
+    # Admitted: any fault is decided on the CPU after execution.
+    assert_true("unsupported" not in runtime.describe(invalid_child))
     assert_true(
         "unsupported"
         not in runtime.describe(

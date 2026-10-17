@@ -156,8 +156,8 @@ def _rank_less(
         var bn = _nan(bw, dtype)
         var descending = last and code[unsafe_offset=4 * node + 2] != 0
         if an != bn:
-            # Rank reverses the NaN category along with numbers; ordinary
-            # dataframe sorting deliberately keeps NaNs last both ways.
+            # NaN is the largest value, so it ranks first descending, as in
+            # sorting.
             return an if descending else not an
         if _word_less(bw, aw, dtype) if descending else _word_less(
             aw, bw, dtype

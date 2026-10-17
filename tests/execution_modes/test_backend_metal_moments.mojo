@@ -432,7 +432,7 @@ def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse()
     )
     var unproven = frame.lazy().select((col("x") + lit(Int32(1))).var()).head(1)
     assert_true(
-        "unsupported" in MetalRuntime(device_id=999999).describe(unproven)
+        "unsupported" not in MetalRuntime(device_id=999999).describe(unproven)
     )
     var query = frame.lazy().select(col("x").var().over("k"))
     var estimate = runtime.estimate_auto(frame.lazy().select(col("x").var()))

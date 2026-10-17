@@ -4,6 +4,7 @@ from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.decimal import pow10
 from dataframe.metal import MetalRuntime
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal_decimal128 import (
     wide_fixture,
     sums_fixture,
@@ -342,24 +343,9 @@ def test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation() raises:
             ),
         ]
     )
-    with assert_raises(contains="decimal precision"):
-        _ = (
-            overflow.lazy()
-            .select(col("a") + col("b"))
-            .collect(accelerator=MetalRuntime(), engine="accel")
-        )
-    with assert_raises(contains="decimal multiplication overflow"):
-        _ = (
-            overflow.lazy()
-            .select(col("a") * col("two"))
-            .collect(accelerator=MetalRuntime(), engine="accel")
-        )
-    with assert_raises(contains="strict cast"):
-        _ = (
-            overflow.lazy()
-            .select(col("a").cast(DataType.INT32))
-            .collect(accelerator=MetalRuntime(), engine="accel")
-        )
+    same_outcome(overflow.lazy().select(col("a") + col("b")))
+    same_outcome(overflow.lazy().select(col("a") * col("two")))
+    same_outcome(overflow.lazy().select(col("a").cast(DataType.INT32)))
     var unary = DataFrame(
         [
             Series("v", Column[Int128]([Int128(1) << 127])).with_dtype(
@@ -367,9 +353,4 @@ def test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation() raises:
             )
         ]
     )
-    with assert_raises(contains="integer overflow"):
-        _ = (
-            unary.lazy()
-            .select(-col("v"))
-            .collect(accelerator=MetalRuntime(), engine="accel")
-        )
+    same_outcome(unary.lazy().select(-col("v")))

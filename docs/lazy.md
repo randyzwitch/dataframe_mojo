@@ -2,8 +2,8 @@
 
 `frame.lazy()`, `scan_csv(path[, schema])` or `scan_parquet(path)` starts a `LazyFrame`. Its methods
 (`filter`, `select`, `select_exprs`, `with_columns`, `group_by(...).agg(...)`,
-`join`, `sort`, `slice`, `head`, `limit`, `unique`, `drop`) only record plan
-nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
+`join`, `sort`, `slice`, `head`, `limit`, `tail`, `reverse`, `shift`,
+`with_row_index`, `unique`, `drop`) only record plan nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
 
@@ -71,8 +71,11 @@ validate field/plan structure without evaluating data values.
   state, rather than total input rows.
 - Inner/left/semi/anti/cross joins retain the build side once and stream probe
   batches. Right/full joins, sort (except a sort cut short by a slice, which
-  keeps each batch's first rows), unique, windows, median/quantile, implode
-  and unsupported aggregate compositions retain materialization boundaries.
+  keeps each batch's first rows), unique, `tail`, `reverse`, `shift`,
+  `with_row_index`, windows, median/quantile, implode and unsupported
+  aggregate compositions retain materialization boundaries. The four
+  row-order operators take their whole input in order and run the eager
+  DataFrame method on it.
   Pipelines resume after these boundaries. Collect itself retains its final
   output, so collecting all rows is not a constant-memory operation.
 - Positive slices preserve global row offsets and may stop the input after a
@@ -101,8 +104,10 @@ raw samples and reproduction commands.
   sorted rows preserves their relative order. Whole-column filters stay above
   the sort. A row-local filter directly above a CSV scan without a row limit
   runs on each decoded range before the ranges are assembled. Filters never
-  move past a slice, unique, group_by, or right/full join, since that would
-  change which rows those operators see.
+  move past a slice, unique, group_by, right/full join, `tail`, `reverse`,
+  `shift` or `with_row_index`, since that would change which rows those
+  operators see (or, for `with_row_index`, the numbers they give). Slices
+  do not move below them either.
 - **Projection pushdown.** Scans read only the columns some operator above them
   uses; CSV scans pass them as `columns=`, so other fields are never decoded.
   A join passes each input only its own keys (the left keys to the left
