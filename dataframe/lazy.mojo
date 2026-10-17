@@ -111,6 +111,7 @@ from .expr import (
     Expr,
     col,
     conjuncts,
+    exclude,
     lit,
     is_reduction,
     is_window,
@@ -120,6 +121,7 @@ from .aggregate_table import reduction_supported
 from .frame import (
     DataFrame,
     _bind_all,
+    _reduce_column,
     _row_local,
     _stream_reductions,
     table_supported,
@@ -373,6 +375,15 @@ def _plain_or_constant(expr: Expr) -> Bool:
     if node.op == LIT_INT or node.op == LIT_FLOAT:
         return node.text != UNTYPED
     return False
+
+
+def _bare_column(expr: Expr) -> Bool:
+    """A column read under its own name, with nothing applied."""
+    return (
+        len(expr._nodes) == 1
+        and expr._nodes[0].op == COL
+        and expr._nodes[0].text == expr._name
+    )
 
 
 def _same_literal(a: Node, b: Node) -> Int:
@@ -1739,12 +1750,33 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def group_by(
         self, keys: List[String], *, maintain_order: Bool = False
     ) -> LazyGroupBy:
-        return LazyGroupBy(self.copy(), keys.copy(), maintain_order)
+        return LazyGroupBy(
+            self.copy(), keys.copy(), maintain_order, List[Expr]()
+        )
 
     def group_by(
         self, key: String, *, maintain_order: Bool = False
     ) -> LazyGroupBy:
-        return LazyGroupBy(self.copy(), [key], maintain_order)
+        return LazyGroupBy(self.copy(), [key], maintain_order, List[Expr]())
+
+    def group_by(
+        self, keys: List[Expr], *, maintain_order: Bool = False
+    ) -> LazyGroupBy:
+        """Group by computed keys, as DataFrame.group_by(List[Expr]): each
+        key is evaluated once and named by its output name, and the
+        aggregations still read the input's columns. Keys that are columns
+        under their own names group as names do."""
+        var names = List[String](capacity=len(keys))
+        var computed = False
+        for key in keys:
+            names.append(key._name)
+            computed = computed or not _bare_column(key)
+        return LazyGroupBy(
+            self.copy(),
+            names^,
+            maintain_order,
+            keys.copy() if computed else List[Expr](),
+        )
 
     def sort(
         self,
@@ -1823,6 +1855,53 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def drop(self, names: List[String]) -> Self:
         return self._push(_plan_node(DROP, names=names))
+
+    def rename(
+        self, mapping: Dict[String, String], *, strict: Bool = True
+    ) raises -> Self:
+        """Rename columns by old name, with the result and errors of
+        DataFrame.rename. As Polars builds it, this is a select of every
+        input column, aliased where renamed, so filters and column
+        selections above it move below it in the input's names. The
+        input's names are resolved here, as collect_schema resolves them,
+        without reading rows. With strict=False, names the input lacks are
+        ignored."""
+        var names = self._input_schema().columns()
+        if strict:
+            for old in mapping.keys():
+                if old not in names:
+                    raise Error("Unknown column: " + old)
+        var exprs = List[Expr](capacity=len(names))
+        var seen = Dict[String, Bool]()
+        var renamed = False
+        for name in names:
+            var output = mapping.get(name, name)
+            if output in seen:
+                raise Error("Rename produces duplicate column name: " + output)
+            seen[output] = True
+            if output != name:
+                exprs.append(col(name).alias(output))
+                renamed = True
+            else:
+                exprs.append(col(name))
+        if not renamed:
+            return self.copy()
+        return self.select_exprs(exprs)
+
+    def cast(
+        self, dtypes: Dict[String, String], *, strict: Bool = True
+    ) -> Self:
+        """Cast named columns in place, as DataFrame.cast: a with_columns of
+        `col(name).cast(dtype, strict)` per entry, as Polars builds it, so
+        filters on other columns move below it and a cast column nothing
+        above reads is not computed. An unknown name raises when the plan
+        runs."""
+        var casts = List[Expr](capacity=len(dtypes))
+        for item in dtypes.items():
+            casts.append(col(item.key).cast(item.value, strict))
+        if len(casts) == 0:
+            return self.copy()
+        return self.with_columns(casts)
 
     def concat(self, other: Self) -> Self:
         """This plan's rows followed by `other`'s (SQL UNION ALL), as one
@@ -7387,6 +7466,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var narrow_columns = List[List[String]]()
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
+            if not all_needed[i] and needed[i]:
+                self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
                 var sides = self._join_input_columns(i, needed[i].value())
@@ -7477,6 +7558,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     needed[child] = reads.copy()
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
         self._schema_memo = None
+
+    def _prune_outputs(mut self, index: Int, wanted: List[String]):
+        """Drop the expressions of a select or with_columns whose outputs
+        nothing above reads, as Polars' projection pushdown prunes a
+        projection's expressions, so the columns only they read are not
+        scanned (a rename's select, a cast's with_columns). A select keeps
+        its row count: it is pruned only when every expression is
+        row-local and one it keeps reads a column."""
+        ref node = self._nodes[index]
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return
+        for e in node.exprs:
+            if not _references(e):
+                return
+        if node.kind == SELECT and not _row_local(node.exprs):
+            return
+        var kept = List[Expr]()
+        for k in range(len(node.exprs)):
+            var name = node.exprs[k]._name
+            if name in wanted and _produced_at(node.exprs, name) == k:
+                kept.append(node.exprs[k].copy())
+        if len(kept) == len(node.exprs):
+            return
+        if node.kind == SELECT and not _reads_input(kept):
+            return
+        node.exprs = kept^
+        if self._schema_memo:
+            try:
+                _ = self._schema_memo.value()[].pop(index)
+            except:
+                pass
 
     def _join_input_columns(
         self, index: Int, wanted: List[String]
@@ -8244,24 +8356,148 @@ def _covers_exclusive(
 
 @fieldwise_init
 struct LazyGroupBy(Copyable):
-    """A pending lazy grouping; finish it with agg."""
+    """A pending lazy grouping; finish it with agg, len or a reduction of
+    every other column such as sum."""
 
     var _frame: LazyFrame
     var _keys: List[String]
     var _maintain_order: Bool
+    # A group_by on expressions: its keys, parallel to `_keys` (their
+    # output names); empty when every key is a column under its own name.
+    var _key_exprs: List[Expr]
+
+    def _grouped(
+        self, reads: List[String], every_column: Bool
+    ) -> Tuple[LazyFrame, List[String], Bool]:
+        """The input with computed keys added as columns, the names to
+        group by, and whether some key has a placeholder name.
+
+        Computed keys become a with_columns below the group_by, as DuckDB
+        moves group expressions into a projection under its aggregate
+        (`ExtractAggregateExpressions`). A key named like a column the
+        aggregations read (`reads`, or any column when `every_column`)
+        would hide that column from them, so it is computed under a
+        placeholder name and renamed after."""
+        if len(self._key_exprs) == 0:
+            return (self._frame.copy(), self._keys.copy(), False)
+        var computed = List[Expr]()
+        var grouped = List[String](capacity=len(self._keys))
+        var hidden = False
+        for k in range(len(self._key_exprs)):
+            ref key = self._key_exprs[k]
+            var name = self._keys[k]
+            if _bare_column(key):
+                grouped.append(name)
+            elif every_column or name in reads:
+                var placeholder = "__group_key_" + String(k)
+                computed.append(key.alias(placeholder))
+                grouped.append(placeholder)
+                hidden = True
+            else:
+                computed.append(key.copy())
+                grouped.append(name)
+        return (self._frame.with_columns(computed), grouped^, hidden)
 
     def agg(self, exprs: List[Expr]) -> LazyFrame:
-        return self._frame._push(
+        """One row per group: the keys, then the aggregations; see
+        GroupBy.agg."""
+        var reads = List[String]()
+        var every_column = False
+        for e in exprs:
+            var r = _references(e)
+            if r:
+                reads += r.value().copy()
+            else:
+                every_column = True
+        var grouped = self._grouped(reads, every_column)
+        var plan = grouped[0]._push(
             _plan_node(
                 AGG,
                 exprs=exprs,
-                names=self._keys,
+                names=grouped[1],
+                maintain_order=self._maintain_order,
+            )
+        )
+        if not grouped[2]:
+            return plan^
+        var outputs = List[Expr](capacity=len(self._keys) + 1)
+        for k in range(len(self._keys)):
+            outputs.append(col(grouped[1][k]).alias(self._keys[k]))
+        outputs.append(exclude(grouped[1]))
+        return plan.select_exprs(outputs)
+
+    def agg(self, expr: Expr) -> LazyFrame:
+        return self.agg([expr.copy()])
+
+    def len(self, name: String = "len") -> LazyFrame:
+        """Rows per group as Int64, rows with nulls included; see
+        GroupBy.len."""
+        var grouped = self._grouped(List[String](), False)
+        return grouped[0]._push(
+            _plan_node(
+                AGG,
+                exprs=[col(grouped[1][0]).len().alias(name)],
+                names=grouped[1],
                 maintain_order=self._maintain_order,
             )
         )
 
-    def agg(self, expr: Expr) -> LazyFrame:
-        return self.agg([expr.copy()])
+    def _each(
+        self,
+        reduction: String,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> LazyFrame:
+        """`reduction` of every column that is not a key, as Polars builds
+        these methods (an agg of `all()` reduced, keys excluded); the
+        columns are resolved here from the input's schema."""
+        var columns = self._frame._input_schema().columns()
+        var exprs = List[Expr]()
+        for name in columns:
+            if name not in self._keys:
+                exprs.append(
+                    _reduce_column(name, reduction, quantile, interpolation)
+                )
+        return self.agg(exprs)
+
+    def sum(self) raises -> LazyFrame:
+        """Each other column's sum per group; see GroupBy.sum."""
+        return self._each("sum")
+
+    def mean(self) raises -> LazyFrame:
+        """Each other column's mean per group; see GroupBy.mean."""
+        return self._each("mean")
+
+    def min(self) raises -> LazyFrame:
+        """Each other column's minimum per group; see GroupBy.min."""
+        return self._each("min")
+
+    def max(self) raises -> LazyFrame:
+        """Each other column's maximum per group; see GroupBy.max."""
+        return self._each("max")
+
+    def median(self) raises -> LazyFrame:
+        """Each other column's median per group; see GroupBy.median."""
+        return self._each("median")
+
+    def first(self) raises -> LazyFrame:
+        """Each other column's first value per group; see GroupBy.first."""
+        return self._each("first")
+
+    def last(self) raises -> LazyFrame:
+        """Each other column's last value per group; see GroupBy.last."""
+        return self._each("last")
+
+    def n_unique(self) raises -> LazyFrame:
+        """Each other column's distinct values per group; see
+        GroupBy.n_unique."""
+        return self._each("n_unique")
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> LazyFrame:
+        """Each other column's quantile per group; see GroupBy.quantile."""
+        return self._each("quantile", quantile, interpolation)
 
 
 @fieldwise_init
