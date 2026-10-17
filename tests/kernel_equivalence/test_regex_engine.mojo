@@ -138,6 +138,22 @@ def test_capture_slots() raises:
     for k in range(len(expected)):
         assert_equal(matcher.slots[k], expected[k])
     _ = text
+    # A span too long for the backtracker's visited set: the Pike VM
+    # reports the same groups.
+    var long = Regex("^(a+)(b*)(x|y)$")
+    var both = Matcher(long)
+    var short = String("aaab") + "x"
+    var wide = String("a") * 200000 + String("b") * 3 + "y"
+    assert_true(both.captures(_span(short)))
+    expected = [0, 5, 0, 3, 3, 4, 4, 5]
+    for k in range(len(expected)):
+        assert_equal(both.slots[k], expected[k])
+    assert_true(both.captures(_span(wide)))
+    expected = [0, 200004, 0, 200000, 200000, 200003, 200003, 200004]
+    for k in range(len(expected)):
+        assert_equal(both.slots[k], expected[k])
+    _ = short
+    _ = wide
 
 
 def test_replacement_templates() raises:

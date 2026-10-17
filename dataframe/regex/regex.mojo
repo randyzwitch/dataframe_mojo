@@ -13,14 +13,16 @@ engine goes:
    input with a literal prefix or first-byte prefilter while it sits in its
    start state.
 4. The reverse DFA, run back from that end, finds where it starts.
-5. Only when capture groups are needed does the Pike VM run, anchored to
-   the match just found.
+5. Only when capture groups are needed does a capture engine run,
+   anchored to the match just found: the bounded backtracker for spans
+   whose visited set fits in 256 KiB, the Pike VM otherwise.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
 """
 from std.memory import ArcPointer
 
+from .backtrack import Backtracker
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode
@@ -557,6 +559,7 @@ struct Matcher(Movable):
     var forward: LazyDFA
     var reverse: LazyDFA
     var pike: PikeVM
+    var backtracker: Backtracker
     var slots: List[Int]
     var _position: Int
     var _last_end: Int
@@ -568,6 +571,7 @@ struct Matcher(Movable):
         self.forward.accel_enabled = c.prefilter.active() and not c.anchored
         self.reverse = LazyDFA(c.reverse, True)
         self.pike = PikeVM(c.forward, c.forward.slot_count)
+        self.backtracker = Backtracker()
         self.slots = List[Int](length=c.forward.slot_count, fill=-1)
         self._position = 0
         self._last_end = -1
@@ -638,6 +642,10 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
+        if Backtracker.fits(c.forward, begin, end):
+            return self.backtracker.search(
+                c.forward, text, begin, end, self.slots
+            )
         return self.pike.search(c.forward, text, begin, end, True, self.slots)
 
     def reset(mut self):

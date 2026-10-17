@@ -1,7 +1,8 @@
 """A linear-time regular expression engine in the family of RE2 and Rust's
 `regex` crate: a parser for Rust's syntax, a Thompson NFA, a lazily built
-DFA (forward for match ends, reverse for match starts), a Pike VM for
-capture groups, and literal prefilters. There is no backtracking, so
+DFA (forward for match ends, reverse for match starts), a bounded
+backtracker and a Pike VM for capture groups, and literal prefilters. No
+search revisits a state, so every search is linear in the haystack;
 look-around and backreferences are not supported.
 
     var regex = Regex("([a-z]+)-([0-9]+)")
