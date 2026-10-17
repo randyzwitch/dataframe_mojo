@@ -9,7 +9,7 @@ median/quantile keep every valid value of a group.
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
-from .bool_column import BoolColumn
+from .bool_column import BoolColumn, true_count
 from .column import Column, _validity_at
 from .string_column import StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
@@ -196,6 +196,36 @@ def _checked_product(a: Int128, b: Int128, unsigned: Bool) raises -> Int128:
     if product > high or product < low:
         raise Error(("UInt64" if unsigned else "Int64") + " product overflow")
     return product
+
+
+def _sum_bools(
+    column: BoolColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    mut sums: List[IntSumState],
+):
+    """Booleans summed as zeros and ones: per valid row, one added to its
+    group's count and its value bit to the total. Ungrouped, both are
+    counts of set bits, 64 rows at a time (`true_count`)."""
+    var n = len(column)
+    if not grouped:
+        sums[0].total += Int128(true_count(column))
+        sums[0].count += Int64(n - column.null_count())
+        return
+    var values = column._data[].unsafe_ptr()
+    var bits = column._bits[].unsafe_ptr()
+    var nulls = column.null_count() > 0
+    var at = column._offset
+    var g = groups.unsafe_ptr().unsafe_offset(offset)
+    var s = sums.unsafe_ptr()
+    for i in range(n):
+        if nulls and not _validity_at(bits, at + i):
+            continue
+        ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+        if _validity_at(values, at + i):
+            state.total += 1
+        state.count += 1
 
 
 def _sum_floats[
@@ -921,8 +951,14 @@ struct Reducer(Movable):
         self.op = op
         self.input = input_dtype
         self.logical = logical.value() if logical else input_dtype
+        if (op == SUM or op == MEAN) and input_dtype == DataType.BOOL:
+            # A sum of Booleans counts the true values, as a UInt32 sum of
+            # zeros and ones would (Polars casts to its index type); the
+            # bits are read as they are, never widened (`_sum_bools`).
+            self.input = DataType.UINT32
+            self.logical = DataType.UINT32
         self.dtype = self.logical if self.logical.is_decimal() else _state_type(
-            input_dtype
+            self.input
         )
         if self.dtype.is_decimal() and self.dtype.decimal_width() != 128:
             # Decimal states are 128-bit. A narrow decimal's sum widens to
@@ -1139,6 +1175,13 @@ struct Reducer(Movable):
             return
         if self.input == self.dtype:
             self._update(chunk, offset, grouped, groups)
+            return
+        if (self.op == SUM or self.op == MEAN) and chunk._data.isa[
+            BoolColumn
+        ]():
+            _sum_bools(
+                chunk._data[BoolColumn], offset, grouped, groups, self.int_sums
+            )
             return
         if self.op == SUM or self.op == MEAN:
             # A narrow, unsigned or Float32 column sums at its own type:

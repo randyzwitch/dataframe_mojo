@@ -189,6 +189,59 @@ def _options(
     return options^
 
 
+@fieldwise_init
+struct _CsvScanOptions(Copyable):
+    """The read_csv options a lazy CSV scan keeps (see scan_csv); its plan
+    supplies n_rows and the columns. The inference settings apply only to
+    a scan without an explicit schema."""
+
+    var has_header: Bool
+    var separator: String
+    var quote_char: String
+    var comment_prefix: String
+    var skip_rows: Int
+    var null_values: List[String]
+    var ignore_errors: Bool
+    var truncate_ragged_lines: Bool
+    var encoding: String
+    var infer_schema_length: Int
+    var schema_overrides: Dict[String, String]
+    var try_parse_dates: Bool
+
+    @staticmethod
+    def defaults() -> Self:
+        """read_csv's defaults."""
+        return Self(
+            True,
+            ",",
+            '"',
+            "",
+            0,
+            List[String](),
+            False,
+            False,
+            "utf8",
+            100,
+            Dict[String, String](),
+            False,
+        )
+
+    def reader(self, n_rows: Int = -1) raises -> CsvOptions:
+        """The validated reader options, reading at most n_rows (-1: all)."""
+        return _options(
+            self.separator,
+            self.quote_char,
+            self.comment_prefix,
+            self.skip_rows,
+            n_rows,
+            self.null_values,
+            self.ignore_errors,
+            self.truncate_ragged_lines,
+            self.encoding,
+            65536,
+        )
+
+
 def _projection(schema: CsvSchema, columns: List[String]) raises -> List[Bool]:
     var keep = List[Bool](length=len(schema), fill=len(columns) == 0)
     var requested = Dict[String, Bool]()

@@ -432,6 +432,12 @@ def lower_dictionary_operations(
     for operation in query._nodes:
         for expression in operation.exprs:
             for node in expression._nodes:
+                # The concat lookup tables join two valid sides only.
+                if node.op == STR_CONCAT and node.integer != 0:
+                    raise Error(
+                        "Metal unsupported [dictionary]: concat_str with"
+                        " ignore_nulls"
+                    )
                 needed |= is_string_op(node.op) or node.op == STR_CONCAT
     if not needed:
         return (query.copy(), 0, 0)

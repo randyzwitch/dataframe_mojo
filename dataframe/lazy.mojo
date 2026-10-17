@@ -87,10 +87,13 @@ from .expr import (
     LIT_NULL,
 )
 from .frame import concat
+from .frame import _describe_percentiles
+from .expr import null
 from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
 from .io.csv import CsvSchema, read_csv
+from .io.csv_types import _CsvScanOptions
 from .io.csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
     AND,
@@ -111,6 +114,7 @@ from .expr import (
     Expr,
     col,
     conjuncts,
+    exclude,
     lit,
     is_reduction,
     is_window,
@@ -120,6 +124,7 @@ from .aggregate_table import reduction_supported
 from .frame import (
     DataFrame,
     _bind_all,
+    _reduce_column,
     _row_local,
     _stream_reductions,
     table_supported,
@@ -133,6 +138,7 @@ from .column import Column
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
+from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
 from .binding import ROWS, bind
@@ -208,6 +214,12 @@ comptime SHIFT = 18
 # A leading Int64 row number named `names[0]`, starting at `offset`
 # (DataFrame.with_row_index).
 comptime ROW_INDEX = 19
+# The left input's columns, then the right's, side by side (a horizontal
+# concat, Polars' HCONCAT); the heights must match.
+comptime HCONCAT = 40
+# The left input's rows at the positions the right input's one integer
+# column lists (Polars' Gather); `flags[0]` is null_on_oob.
+comptime GATHER = 41
 
 
 @fieldwise_init
@@ -373,6 +385,15 @@ def _plain_or_constant(expr: Expr) -> Bool:
     if node.op == LIT_INT or node.op == LIT_FLOAT:
         return node.text != UNTYPED
     return False
+
+
+def _bare_column(expr: Expr) -> Bool:
+    """A column read under its own name, with nothing applied."""
+    return (
+        len(expr._nodes) == 1
+        and expr._nodes[0].op == COL
+        and expr._nodes[0].text == expr._name
+    )
 
 
 def _same_literal(a: Node, b: Node) -> Int:
@@ -1739,12 +1760,33 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def group_by(
         self, keys: List[String], *, maintain_order: Bool = False
     ) -> LazyGroupBy:
-        return LazyGroupBy(self.copy(), keys.copy(), maintain_order)
+        return LazyGroupBy(
+            self.copy(), keys.copy(), maintain_order, List[Expr]()
+        )
 
     def group_by(
         self, key: String, *, maintain_order: Bool = False
     ) -> LazyGroupBy:
-        return LazyGroupBy(self.copy(), [key], maintain_order)
+        return LazyGroupBy(self.copy(), [key], maintain_order, List[Expr]())
+
+    def group_by(
+        self, keys: List[Expr], *, maintain_order: Bool = False
+    ) -> LazyGroupBy:
+        """Group by computed keys, as DataFrame.group_by(List[Expr]): each
+        key is evaluated once and named by its output name, and the
+        aggregations still read the input's columns. Keys that are columns
+        under their own names group as names do."""
+        var names = List[String](capacity=len(keys))
+        var computed = False
+        for key in keys:
+            names.append(key._name)
+            computed = computed or not _bare_column(key)
+        return LazyGroupBy(
+            self.copy(),
+            names^,
+            maintain_order,
+            keys.copy() if computed else List[Expr](),
+        )
 
     def sort(
         self,
@@ -1808,6 +1850,61 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def limit(self, n: Int = 5) -> Self:
         return self.head(n)
 
+    def pivot(
+        self,
+        on: String,
+        on_columns: List[String],
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String = "",
+    ) raises -> Self:
+        """Long to wide, as DataFrame.pivot, with the new columns named up
+        front, as Polars' LazyFrame.pivot takes them, so the plan's schema
+        is known before it runs: one column per entry of `on_columns`, in
+        that order, holding the cells whose `on` value reads as that name
+        ("null" for a null). A name no row has gives a column of nulls;
+        rows whose `on` value is not listed still give their index key a
+        row. Filters above it on index columns alone move below it."""
+        var seen = Dict[String, Bool]()
+        for name in index:
+            seen[name] = True
+        for name in on_columns:
+            if name in seen:
+                raise Error("pivot column name collides: " + name)
+            seen[name] = True
+        return self._push(
+            _plan_node(
+                PIVOT,
+                names=index + [on, values],
+                text=aggregate_function,
+                offset=len(index),
+                right_keys=on_columns,
+            )
+        )
+
+    def pivot(
+        self,
+        on: String,
+        on_columns: Series,
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String = "",
+    ) raises -> Self:
+        """`pivot` with the new columns given as `on` values, named as
+        DataFrame.pivot names them."""
+        var names = List[String](capacity=len(on_columns))
+        for k in range(len(on_columns)):
+            names.append(String(on_columns.get(k)))
+        return self.pivot(
+            on,
+            names,
+            index=index,
+            values=values,
+            aggregate_function=aggregate_function,
+        )
+
     def unique(
         self,
         subset: List[String] = List[String](),
@@ -1824,12 +1921,63 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def drop(self, names: List[String]) -> Self:
         return self._push(_plan_node(DROP, names=names))
 
+    def rename(
+        self, mapping: Dict[String, String], *, strict: Bool = True
+    ) raises -> Self:
+        """Rename columns by old name, with the result and errors of
+        DataFrame.rename. As Polars builds it, this is a select of every
+        input column, aliased where renamed, so filters and column
+        selections above it move below it in the input's names. The
+        input's names are resolved here, as collect_schema resolves them,
+        without reading rows. With strict=False, names the input lacks are
+        ignored."""
+        var names = self._input_schema().columns()
+        if strict:
+            for old in mapping.keys():
+                if old not in names:
+                    raise Error("Unknown column: " + old)
+        var exprs = List[Expr](capacity=len(names))
+        var seen = Dict[String, Bool]()
+        var renamed = False
+        for name in names:
+            var output = mapping.get(name, name)
+            if output in seen:
+                raise Error("Rename produces duplicate column name: " + output)
+            seen[output] = True
+            if output != name:
+                exprs.append(col(name).alias(output))
+                renamed = True
+            else:
+                exprs.append(col(name))
+        if not renamed:
+            return self.copy()
+        return self.select_exprs(exprs)
+
+    def cast(
+        self, dtypes: Dict[String, String], *, strict: Bool = True
+    ) -> Self:
+        """Cast named columns in place, as DataFrame.cast: a with_columns of
+        `col(name).cast(dtype, strict)` per entry, as Polars builds it, so
+        filters on other columns move below it and a cast column nothing
+        above reads is not computed. An unknown name raises when the plan
+        runs."""
+        var casts = List[Expr](capacity=len(dtypes))
+        for item in dtypes.items():
+            casts.append(col(item.key).cast(item.value, strict))
+        if len(casts) == 0:
+            return self.copy()
+        return self.with_columns(casts)
+
     def concat(self, other: Self) -> Self:
         """This plan's rows followed by `other`'s (SQL UNION ALL), as one
         plan: both inputs are optimized with the rest of it, and a column
         selection above reaches both scans. The inputs must have the same
         column names and types; `other`'s columns are taken in this plan's
         order. SQL UNION is `concat` followed by `unique`."""
+        return self._binary(other, _plan_node(CONCAT))
+
+    def _binary(self, other: Self, var node: PlanNode) -> Self:
+        """`node` over this plan (left) and `other`'s (right), as one plan."""
         var result = self.copy()
         var left_root = len(result._nodes) - 1
         var shift = len(result._nodes)
@@ -1847,10 +1995,96 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if _is_scan(copied.kind):
                 copied.offset += frame_shift
             result._nodes.append(copied^)
-        result._nodes.append(
-            _plan_node(CONCAT, left_root, len(result._nodes) - 1)
-        )
+        node.left = left_root
+        node.right = len(result._nodes) - 1
+        result._nodes.append(node^)
         return result^
+
+    def describe(
+        self,
+        percentiles: List[Float64] = [0.25, 0.5, 0.75],
+        interpolation: String = "nearest",
+    ) raises -> DataFrame:
+        """DataFrame.describe's summary of this plan's result, computed as
+        Polars computes it: one select of the summary reductions over the
+        plan, collected, so the rows are never materialized whole."""
+        var schema = self._input_schema()
+        var qs = _describe_percentiles(percentiles)
+        var exprs = schema._describe_exprs(qs, interpolation)
+        var stats = self.select_exprs(exprs).collect() if len(
+            exprs
+        ) > 0 else DataFrame(List[Series](), height=1)
+        return schema._described(qs, stats)
+
+    def clear(self, n: Int = 0) raises -> Self:
+        """This plan's schema with n rows of nulls, as DataFrame.clear. With
+        n = 0 it is head(0) of this plan; otherwise, as in Polars, a new
+        plan over a frame of nulls built from the schema."""
+        if n < 0:
+            raise Error("clear: n must be nonnegative")
+        if n == 0:
+            return self.head(0)
+        return Self(self._input_schema().clear(n))
+
+    def gather(
+        self, indices: List[Int], *, null_on_oob: Bool = False
+    ) raises -> Self:
+        """The rows at `indices`, in that order; see DataFrame.gather."""
+        var values = List[Int64](capacity=len(indices))
+        for i in indices:
+            values.append(Int64(i))
+        return self.gather(
+            Self(DataFrame([Series("index", Column[Int64](values^))])),
+            null_on_oob=null_on_oob,
+        )
+
+    def gather(self, indices: Self, *, null_on_oob: Bool = False) -> Self:
+        """The rows at the positions `indices` (a plan with one integer
+        column) lists, in its order, as Polars' gather: a negative index
+        counts from the end, a null index gives a row of nulls, and an
+        index out of range raises when the plan runs, or with
+        null_on_oob=True gives a row of nulls. Filters and slices above it
+        stay above it."""
+        return self._binary(indices, _plan_node(GATHER, flags=[null_on_oob]))
+
+    def top_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows DataFrame.top_k gives: as Polars builds it, a sort by
+        `by` descending (ascending with reverse=True), nulls last, then
+        head(k), which the optimizer runs as one top-k selection."""
+        if k < 0:
+            raise Error("k must be nonnegative")
+        var n = len(by)
+        return self.sort(
+            by,
+            descending=List[Bool](length=n, fill=not reverse),
+            nulls_last=List[Bool](length=n, fill=True),
+        ).head(k)
+
+    def top_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.top_k(k, [by], reverse=reverse)
+
+    def bottom_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows DataFrame.bottom_k gives: a sort by `by` ascending
+        (descending with reverse=True), nulls last, then head(k)."""
+        if k < 0:
+            raise Error("k must be nonnegative")
+        var n = len(by)
+        return self.sort(
+            by,
+            descending=List[Bool](length=n, fill=reverse),
+            nulls_last=List[Bool](length=n, fill=True),
+        ).head(k)
+
+    def bottom_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.bottom_k(k, [by], reverse=reverse)
 
     def tail(self, n: Int = 5) -> Self:
         """The last n rows; a negative n drops the first -n rows. See
@@ -3985,6 +4219,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     source.names,
                     source.length,
                     batch_size,
+                    _scan_options(source),
                 )
             )
         elif source.kind == SCAN_PARQUET:
@@ -4752,20 +4987,47 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         node.names,
                         0,
                         batch_size,
+                        _scan_options(node),
                     )
                     var next = batches.next()
                     var job = next.take()
                     job.run()
                     return job^.into_frame()
             var rows = 0 if empty else node.length
+            var scan = _scan_options(node)
             if self._schemas[node.offset]:
                 return read_csv(
                     node.text,
                     self._schemas[node.offset].value(),
+                    has_header=scan.has_header,
+                    separator=scan.separator,
+                    quote_char=scan.quote_char,
+                    comment_prefix=scan.comment_prefix,
+                    skip_rows=scan.skip_rows,
                     n_rows=rows,
                     columns=node.names,
+                    null_values=scan.null_values,
+                    ignore_errors=scan.ignore_errors,
+                    truncate_ragged_lines=scan.truncate_ragged_lines,
+                    encoding=scan.encoding,
                 )
-            return read_csv(node.text, n_rows=rows, columns=node.names)
+            return read_csv(
+                node.text,
+                infer_schema_length=scan.infer_schema_length,
+                schema_overrides=scan.schema_overrides,
+                try_parse_dates=scan.try_parse_dates,
+                has_header=scan.has_header,
+                separator=scan.separator,
+                quote_char=scan.quote_char,
+                comment_prefix=scan.comment_prefix,
+                skip_rows=scan.skip_rows,
+                n_rows=rows,
+                columns=node.names,
+                null_values=scan.null_values,
+                ignore_errors=scan.ignore_errors,
+                truncate_ragged_lines=scan.truncate_ragged_lines,
+                encoding=scan.encoding,
+            )
         if node.kind == SCAN_PARQUET:
             if empty:
                 return read_parquet(
@@ -4815,20 +5077,54 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     source.text, columns=source.names, row_groups=groups
                 ).filter(node.exprs[0])
             if source.kind == SCAN_CSV and source.length < 0:
+                var scan = _scan_options(source)
                 if self._schemas[source.offset]:
                     return read_csv_explicit(
                         source.text,
                         self._schemas[source.offset].value(),
+                        has_header=scan.has_header,
+                        separator=scan.separator,
+                        quote_char=scan.quote_char,
+                        comment_prefix=scan.comment_prefix,
+                        skip_rows=scan.skip_rows,
                         columns=source.names,
+                        null_values=scan.null_values,
+                        ignore_errors=scan.ignore_errors,
+                        truncate_ragged_lines=scan.truncate_ragged_lines,
+                        encoding=scan.encoding,
                         predicate=Optional(node.exprs[0].copy()),
                     )
                 return read_csv_inferred(
                     source.text,
+                    infer_schema_length=scan.infer_schema_length,
+                    schema_overrides=scan.schema_overrides,
+                    has_header=scan.has_header,
+                    separator=scan.separator,
+                    quote_char=scan.quote_char,
+                    comment_prefix=scan.comment_prefix,
+                    skip_rows=scan.skip_rows,
                     columns=source.names,
+                    null_values=scan.null_values,
+                    ignore_errors=scan.ignore_errors,
+                    truncate_ragged_lines=scan.truncate_ragged_lines,
+                    encoding=scan.encoding,
+                    try_parse_dates=scan.try_parse_dates,
                     predicate=Optional(node.exprs[0].copy()),
                 )
         if node.kind == CONCAT:
             return self._concat(index, empty, streaming, batch_size)
+        if node.kind == HCONCAT or node.kind == GATHER:
+            var both = self._both_inputs(index, empty, streaming, batch_size)
+            var left = both[0].copy()
+            var right = both[1].copy()
+            if empty:
+                # Only the types matter here; a scalar input still has a
+                # row, which would not line up with the other's none.
+                left = left.clear()
+                right = right.clear()
+            if node.kind == HCONCAT:
+                return concat([left^, right^], "horizontal")
+            return _gathered(left, right, node.flags[0])
         if (
             node.kind == JOIN
             and not _is_scan(self._nodes[node.left].kind)
@@ -4892,6 +5188,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )
         if node.kind == SLICE:
             return input.slice(node.offset, node.length)
+        if node.kind == PIVOT:
+            return _pivoted(input, node)
         if node.kind == UNIQUE:
             return input.unique(
                 node.names, keep=node.text, maintain_order=node.maintain_order
@@ -7169,6 +7467,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # and first-occurrence order (Polars and DuckDB push it down
             # too; TPC-DS q39 filters d_moy after grouping 2.3M rows).
             return 0
+        if (
+            below.kind == PIVOT
+            and _row_local(self._nodes[filter].exprs)
+            and _covers(
+                List[String](below.names[: below.offset]), reads.value()
+            )
+        ):
+            # As for a group_by's keys: each output row is one index key,
+            # so a filter on index columns keeps the same rows before it.
+            return 0
         if below.kind == SORT and _row_local(self._nodes[filter].exprs):
             # Stable sorting and a row-local filter commute: the surviving
             # rows retain the same relative sort order.
@@ -7387,6 +7695,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var narrow_columns = List[List[String]]()
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
+            if not all_needed[i] and needed[i]:
+                self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
                 var sides = self._join_input_columns(i, needed[i].value())
@@ -7432,6 +7742,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 or node.kind == UNNEST
                 or node.kind == CONCAT
                 or _row_order_step(node.kind)
+                or node.kind == HCONCAT
+                or node.kind == GATHER
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -7466,7 +7778,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for child in [node.left, node.right]:
                 if child < 0:
                     continue
-                if reads_all or node.kind == JOIN or node.kind == ASOF:
+                if (
+                    reads_all
+                    or node.kind == JOIN
+                    or node.kind == ASOF
+                    or (node.kind == GATHER and child == node.right)
+                ):
                     all_needed[child] = True
                 elif needed[child]:
                     var merged = needed[child].value().copy()
@@ -7477,6 +7794,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     needed[child] = reads.copy()
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
         self._schema_memo = None
+
+    def _prune_outputs(mut self, index: Int, wanted: List[String]):
+        """Drop the expressions of a select or with_columns whose outputs
+        nothing above reads, as Polars' projection pushdown prunes a
+        projection's expressions, so the columns only they read are not
+        scanned (a rename's select, a cast's with_columns). A select keeps
+        its row count: it is pruned only when every expression is
+        row-local and one it keeps reads a column."""
+        ref node = self._nodes[index]
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return
+        for e in node.exprs:
+            if not _references(e):
+                return
+        if node.kind == SELECT and not _row_local(node.exprs):
+            return
+        var kept = List[Expr]()
+        for k in range(len(node.exprs)):
+            var name = node.exprs[k]._name
+            if name in wanted and _produced_at(node.exprs, name) == k:
+                kept.append(node.exprs[k].copy())
+        if len(kept) == len(node.exprs):
+            return
+        if node.kind == SELECT and not _reads_input(kept):
+            return
+        node.exprs = kept^
+        if self._schema_memo:
+            try:
+                _ = self._schema_memo.value()[].pop(index)
+            except:
+                pass
 
     def _join_input_columns(
         self, index: Int, wanted: List[String]
@@ -7586,6 +7934,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SCAN CSV " + node.text
         elif node.kind == SCAN_PARQUET:
             label = "SCAN PARQUET " + node.text
+        elif node.kind == HCONCAT:
+            label = "HCONCAT"
+        elif node.kind == GATHER:
+            label = "GATHER" + (" null_on_oob" if node.flags[0] else "")
         elif node.kind == FILTER:
             label = "FILTER"
         elif node.kind == SELECT:
@@ -7613,6 +7965,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SLICE " + String(node.offset) + " " + String(node.length)
         elif node.kind == UNIQUE:
             label = "UNIQUE " + _joined(node.names)
+        elif node.kind == PIVOT:
+            label = (
+                "PIVOT on "
+                + node.names[node.offset]
+                + " index "
+                + _joined(List[String](node.names[: node.offset]))
+                + " values "
+                + node.names[node.offset + 1]
+                + " columns "
+                + _joined(node.right_keys)
+            )
+            if node.text.byte_length() > 0:
+                label += " AGG " + node.text
         elif node.kind == EXPLODE:
             label = "EXPLODE " + _joined(node.names)
         elif node.kind == UNNEST:
@@ -8155,6 +8520,43 @@ def _joined(names: List[String]) -> String:
     return out^
 
 
+# Long to wide with the output columns given up front (Polars 1.44's
+# LazyFrame.pivot): `names` the index columns, then the column whose values
+# name the new columns, then the values column; `offset` the number of
+# index columns; `text` the aggregate function; `right_keys` the new
+# columns' names in order. One row per distinct index key, so it runs on
+# its whole input.
+comptime PIVOT = 42
+
+
+def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:
+    """A PIVOT node's result: DataFrame.pivot's, its columns chosen and
+    ordered by the node's names, a name the input has no cell for filled
+    with nulls of the aggregate's type."""
+    var index = List[String](node.names[: node.offset])
+    var values = node.names[node.offset + 1]
+    var wide = input.pivot(
+        node.names[node.offset],
+        index=index,
+        values=values,
+        aggregate_function=node.text,
+    )
+    var bound = bind(_pivot_aggregate(values, node.text), input._columns)
+    var dtype = bound.dtypes[len(bound.dtypes) - 1]
+    var present = Dict[String, Bool]()
+    for name in wide.columns():
+        present[name] = True
+    var columns = List[Series](capacity=len(index) + len(node.right_keys))
+    for name in index:
+        columns.append(wide.column(name))
+    for name in node.right_keys:
+        if name in present:
+            columns.append(wide.column(name))
+        else:
+            columns.append(Series.full_null(name, dtype, wide.height()))
+    return DataFrame(columns^, height=wide.height())
+
+
 def _key_set_filter(
     keys: Series, name: String, dtype: DataType
 ) raises -> Optional[Expr]:
@@ -8244,24 +8646,148 @@ def _covers_exclusive(
 
 @fieldwise_init
 struct LazyGroupBy(Copyable):
-    """A pending lazy grouping; finish it with agg."""
+    """A pending lazy grouping; finish it with agg, len or a reduction of
+    every other column such as sum."""
 
     var _frame: LazyFrame
     var _keys: List[String]
     var _maintain_order: Bool
+    # A group_by on expressions: its keys, parallel to `_keys` (their
+    # output names); empty when every key is a column under its own name.
+    var _key_exprs: List[Expr]
+
+    def _grouped(
+        self, reads: List[String], every_column: Bool
+    ) -> Tuple[LazyFrame, List[String], Bool]:
+        """The input with computed keys added as columns, the names to
+        group by, and whether some key has a placeholder name.
+
+        Computed keys become a with_columns below the group_by, as DuckDB
+        moves group expressions into a projection under its aggregate
+        (`ExtractAggregateExpressions`). A key named like a column the
+        aggregations read (`reads`, or any column when `every_column`)
+        would hide that column from them, so it is computed under a
+        placeholder name and renamed after."""
+        if len(self._key_exprs) == 0:
+            return (self._frame.copy(), self._keys.copy(), False)
+        var computed = List[Expr]()
+        var grouped = List[String](capacity=len(self._keys))
+        var hidden = False
+        for k in range(len(self._key_exprs)):
+            ref key = self._key_exprs[k]
+            var name = self._keys[k]
+            if _bare_column(key):
+                grouped.append(name)
+            elif every_column or name in reads:
+                var placeholder = "__group_key_" + String(k)
+                computed.append(key.alias(placeholder))
+                grouped.append(placeholder)
+                hidden = True
+            else:
+                computed.append(key.copy())
+                grouped.append(name)
+        return (self._frame.with_columns(computed), grouped^, hidden)
 
     def agg(self, exprs: List[Expr]) -> LazyFrame:
-        return self._frame._push(
+        """One row per group: the keys, then the aggregations; see
+        GroupBy.agg."""
+        var reads = List[String]()
+        var every_column = False
+        for e in exprs:
+            var r = _references(e)
+            if r:
+                reads += r.value().copy()
+            else:
+                every_column = True
+        var grouped = self._grouped(reads, every_column)
+        var plan = grouped[0]._push(
             _plan_node(
                 AGG,
                 exprs=exprs,
-                names=self._keys,
+                names=grouped[1],
+                maintain_order=self._maintain_order,
+            )
+        )
+        if not grouped[2]:
+            return plan^
+        var outputs = List[Expr](capacity=len(self._keys) + 1)
+        for k in range(len(self._keys)):
+            outputs.append(col(grouped[1][k]).alias(self._keys[k]))
+        outputs.append(exclude(grouped[1]))
+        return plan.select_exprs(outputs)
+
+    def agg(self, expr: Expr) -> LazyFrame:
+        return self.agg([expr.copy()])
+
+    def len(self, name: String = "len") -> LazyFrame:
+        """Rows per group as Int64, rows with nulls included; see
+        GroupBy.len."""
+        var grouped = self._grouped(List[String](), False)
+        return grouped[0]._push(
+            _plan_node(
+                AGG,
+                exprs=[col(grouped[1][0]).len().alias(name)],
+                names=grouped[1],
                 maintain_order=self._maintain_order,
             )
         )
 
-    def agg(self, expr: Expr) -> LazyFrame:
-        return self.agg([expr.copy()])
+    def _each(
+        self,
+        reduction: String,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> LazyFrame:
+        """`reduction` of every column that is not a key, as Polars builds
+        these methods (an agg of `all()` reduced, keys excluded); the
+        columns are resolved here from the input's schema."""
+        var columns = self._frame._input_schema().columns()
+        var exprs = List[Expr]()
+        for name in columns:
+            if name not in self._keys:
+                exprs.append(
+                    _reduce_column(name, reduction, quantile, interpolation)
+                )
+        return self.agg(exprs)
+
+    def sum(self) raises -> LazyFrame:
+        """Each other column's sum per group; see GroupBy.sum."""
+        return self._each("sum")
+
+    def mean(self) raises -> LazyFrame:
+        """Each other column's mean per group; see GroupBy.mean."""
+        return self._each("mean")
+
+    def min(self) raises -> LazyFrame:
+        """Each other column's minimum per group; see GroupBy.min."""
+        return self._each("min")
+
+    def max(self) raises -> LazyFrame:
+        """Each other column's maximum per group; see GroupBy.max."""
+        return self._each("max")
+
+    def median(self) raises -> LazyFrame:
+        """Each other column's median per group; see GroupBy.median."""
+        return self._each("median")
+
+    def first(self) raises -> LazyFrame:
+        """Each other column's first value per group; see GroupBy.first."""
+        return self._each("first")
+
+    def last(self) raises -> LazyFrame:
+        """Each other column's last value per group; see GroupBy.last."""
+        return self._each("last")
+
+    def n_unique(self) raises -> LazyFrame:
+        """Each other column's distinct values per group; see
+        GroupBy.n_unique."""
+        return self._each("n_unique")
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> LazyFrame:
+        """Each other column's quantile per group; see GroupBy.quantile."""
+        return self._each("quantile", quantile, interpolation)
 
 
 @fieldwise_init
@@ -8283,23 +8809,172 @@ struct LazyTimeGroupBy(Copyable):
         return self.agg([expr.copy()], batch_size=batch_size)
 
 
-def scan_csv(path: String) raises -> LazyFrame:
+def scan_csv(
+    path: String,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
-    collect; projection and head() are pushed into the reader."""
+    collect; projection and head() are pushed into the reader.
+
+    The options are read_csv's, with the same meaning, and reach the reader
+    however the plan runs (eagerly, streaming, or for its schema); invalid
+    ones raise here, as read_csv would raise them.
+    """
+    var options = _CsvScanOptions(
+        has_header,
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        infer_schema_length,
+        schema_overrides.copy(),
+        try_parse_dates,
+    )
     # Scan slots are parallel: frames[k] and schemas[k] belong to one scan.
     return LazyFrame(
-        [_plan_node(SCAN_CSV, text=path, offset=0)],
+        [_csv_scan_node(path, options)],
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
 
 
-def scan_csv(path: String, schema: CsvSchema) raises -> LazyFrame:
+def scan_csv(
+    path: String,
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+) raises -> LazyFrame:
+    """Lazily read a CSV file with an explicit schema, which labels the
+    fields by position; the options are read_csv's (see the overload
+    above)."""
+    var options = _CsvScanOptions.defaults()
+    options.has_header = has_header
+    options.separator = separator
+    options.quote_char = quote_char
+    options.comment_prefix = comment_prefix
+    options.skip_rows = skip_rows
+    options.null_values = null_values.copy()
+    options.ignore_errors = ignore_errors
+    options.truncate_ragged_lines = truncate_ragged_lines
+    options.encoding = encoding
     return LazyFrame(
-        [_plan_node(SCAN_CSV, text=path, offset=0)],
+        [_csv_scan_node(path, options)],
         [DataFrame([])],
         [Optional[CsvSchema](schema.copy())],
     )
+
+
+def _csv_scan_node(path: String, options: _CsvScanOptions) raises -> PlanNode:
+    """A CSV scan node holding its reader options, checked here: `flags`
+    the switches, `names2` the text and numeric settings followed by the
+    schema overrides as name, dtype pairs, `right_keys` the null values.
+    A scan with read_csv's defaults keeps none of them, so plans built
+    without options are unchanged."""
+    _ = options.reader()
+    var defaults = _CsvScanOptions.defaults()
+    var overrides = List[String]()
+    for item in options.schema_overrides.items():
+        overrides.append(item.key)
+        overrides.append(item.value)
+    var settings: List[String] = [
+        options.separator,
+        options.quote_char,
+        options.comment_prefix,
+        options.encoding,
+        String(options.skip_rows),
+        String(options.infer_schema_length),
+    ]
+    var flags: List[Bool] = [
+        options.has_header,
+        options.ignore_errors,
+        options.truncate_ragged_lines,
+        options.try_parse_dates,
+    ]
+    var default_settings: List[String] = [
+        defaults.separator,
+        defaults.quote_char,
+        defaults.comment_prefix,
+        defaults.encoding,
+        String(defaults.skip_rows),
+        String(defaults.infer_schema_length),
+    ]
+    var default_flags: List[Bool] = [
+        defaults.has_header,
+        defaults.ignore_errors,
+        defaults.truncate_ragged_lines,
+        defaults.try_parse_dates,
+    ]
+    if (
+        _same_names(settings, default_settings)
+        and _same_flags(flags, default_flags)
+        and len(overrides) == 0
+        and len(options.null_values) == 0
+    ):
+        return _plan_node(SCAN_CSV, text=path, offset=0)
+    return _plan_node(
+        SCAN_CSV,
+        text=path,
+        offset=0,
+        names2=settings + overrides^,
+        flags=flags,
+        right_keys=options.null_values,
+    )
+
+
+def _same_flags(a: List[Bool], b: List[Bool]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+def _scan_options(node: PlanNode) raises -> _CsvScanOptions:
+    """The reader options a CSV scan node holds (see `_csv_scan_node`)."""
+    var options = _CsvScanOptions.defaults()
+    if len(node.names2) < 6:
+        return options^
+    options.separator = node.names2[0]
+    options.quote_char = node.names2[1]
+    options.comment_prefix = node.names2[2]
+    options.encoding = node.names2[3]
+    options.skip_rows = Int(node.names2[4])
+    options.infer_schema_length = Int(node.names2[5])
+    var k = 6
+    while k + 1 < len(node.names2):
+        options.schema_overrides[node.names2[k]] = node.names2[k + 1]
+        k += 2
+    options.has_header = node.flags[0]
+    options.ignore_errors = node.flags[1]
+    options.truncate_ragged_lines = node.flags[2]
+    options.try_parse_dates = node.flags[3]
+    options.null_values = node.right_keys.copy()
+    return options^
 
 
 def scan_parquet(path: String) raises -> LazyFrame:
@@ -8311,3 +8986,79 @@ def scan_parquet(path: String) raises -> LazyFrame:
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
+
+
+def _gathered(
+    frame: DataFrame, indices: DataFrame, null_on_oob: Bool
+) raises -> DataFrame:
+    """A GATHER node's result: `frame`'s rows at the positions in the one
+    integer column of `indices`, checked as Polars checks its indices
+    plan."""
+    if indices.width() != 1:
+        raise Error("gather indices must be a single column")
+    var column = indices._columns[0].copy()
+    if not column.dtype().is_integer():
+        raise Error(
+            "gather indices must have an integer dtype, not "
+            + column.dtype().name()
+        )
+    column = column.cast(DataType.INT64)
+    var rows = List[Int](capacity=len(column))
+    var valid = List[Bool](capacity=len(column))
+    for k in range(len(column)):
+        var value = column.get(k)
+        valid.append(not value.is_null())
+        rows.append(0 if value.is_null() else Int(value.int64()))
+    return frame._gather(rows, valid, null_on_oob)
+
+
+def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
+    """The plan `concat(frames, how)` builds (see frame.concat)."""
+    if len(frames) == 0:
+        raise Error("concat requires at least one dataframe")
+    if how != "vertical" and how != "diagonal" and how != "horizontal":
+        raise Error(
+            "concat how must be 'vertical', 'diagonal', or 'horizontal'"
+        )
+    var inputs = frames.copy()
+    if how == "diagonal":
+        # The union of the columns in first-seen order; a name shared by
+        # inputs must have one type in all of them.
+        var names = List[String]()
+        var dtypes = Dict[String, DataType]()
+        var schemas = List[DataFrame](capacity=len(frames))
+        for f in range(len(frames)):
+            schemas.append(frames[f]._input_schema())
+            for field in schemas[f].schema():
+                if field.name not in dtypes:
+                    dtypes[field.name] = field.dtype
+                    names.append(field.name)
+                elif dtypes[field.name] != field.dtype:
+                    raise Error(
+                        "concat diagonal: column "
+                        + field.name
+                        + " is "
+                        + field.dtype.name()
+                        + " in frame "
+                        + String(f)
+                        + ", expected "
+                        + dtypes[field.name].name()
+                    )
+        for f in range(len(frames)):
+            var present = schemas[f].columns()
+            if _same_names(present, names):
+                continue
+            var exprs = List[Expr](capacity=len(names))
+            for name in names:
+                if name in present:
+                    exprs.append(col(name))
+                else:
+                    exprs.append(null(dtypes[name]).alias(name))
+            inputs[f] = frames[f].select_exprs(exprs)
+    var result = inputs[0].copy()
+    for f in range(1, len(inputs)):
+        if how == "horizontal":
+            result = result._binary(inputs[f], _plan_node(HCONCAT))
+        else:
+            result = result.concat(inputs[f])
+    return result^

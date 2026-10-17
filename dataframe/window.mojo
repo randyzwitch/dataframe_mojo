@@ -153,6 +153,10 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     var op_code = node.op
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
+    if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
+        # A running count of true values: the UInt32 zeros and ones Polars
+        # casts a Boolean to, summed as any UInt32 column is.
+        return window_op(node, input.cast(DataType.UINT32), ids)
     if input.dtype().is_decimal():
         if op_code == CUM_SUM:
             return _decimal_cum_sum(input, ids, node.min_count == 1)

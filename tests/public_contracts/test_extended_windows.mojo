@@ -546,13 +546,15 @@ def test_extended_windows_reject_nested_and_non_numeric_operations_even_when_emp
         for kind in [10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 28]:
             var frame = extended_frame(kind, n, 7, 1)
             var expressions: List[Expr] = [
-                col("x").cum_sum(),
                 col("x").rolling_sum(3, 1),
                 col("x").rolling_mean(3, 1),
                 col("x").rolling_var(3, 1),
                 col("x").rolling_std(3, 1),
                 col("x").interpolate("nearest"),
             ]
+            # A Bool's cum_sum counts its true values (#790).
+            if kind != 10:
+                expressions.append(col("x").cum_sum())
             for expression in expressions:
                 with assert_raises():
                     _ = frame.select(expression)

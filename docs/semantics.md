@@ -38,7 +38,11 @@ the frame. A negative offset counts from the end and clips at zero; an offset
 past the end returns zero rows. `length=-1` means all remaining rows, and any
 other negative length raises. `head(n)` and `tail(n)` default to five rows; a
 negative `n` drops `-n` rows from the other end, as in Polars. `limit` is
-`head`. `reverse` reverses row order and `clear` keeps the schema with zero rows.
+`head`. `reverse` reverses row order and `clear(n=0)` keeps the schema with
+`n` rows of nulls (zero rows by default). `gather(indices, null_on_oob=False)`
+returns the rows at `indices` in that order, as Polars' `gather`: a negative
+index counts from the end, and an index out of range raises, or with
+`null_on_oob=True` gives a row of nulls.
 `shift(n=1, fill_value=None)` moves every column's values `n` rows later
 (earlier for a negative `n`), as Polars' `DataFrame.shift`: height and schema
 stay, and the `min(|n|, height)` vacated rows are null, or `fill_value` cast to
@@ -50,7 +54,8 @@ Zero-column frames keep a correctly clipped height through all of these.
 `drop` and `rename` validate every name before building output: unknown names
 raise, `drop` rejects a name listed twice, and `rename` raises if the result
 would contain duplicate names. Renames apply simultaneously, so swapping two
-names works. `with_row_index(name="index", offset=0)` prepends an Int64 column
+names works; `rename(mapping, strict=False)` ignores names the frame lacks, as
+in Polars. `with_row_index(name="index", offset=0)` prepends an Int64 column
 and raises if the name already exists.
 
 `shape()` is `(height, width)`. `null_count()` returns a one-row frame of Int64
@@ -144,7 +149,11 @@ several rows raises; otherwise use `first`, `last`, `sum`, `mean`, `min`,
 reductions. Missing cells are null. New column names are the `on` values' text
 (`null` for a null key) and must not collide with index names. An empty index
 list yields a single row. `pivot` followed by `unpivot` on the same names
-restores the original rows up to order.
+restores the original rows up to order. The lazy `pivot` takes the new
+columns' names up front (`on_columns`) and gives the same cells. Polars 1.44
+differs on missing cells: its `sum`, `len` and `count` give 0 there, and its
+`count` counts rows like `len`; here a missing cell is null for every
+function and `count` skips null values.
 
 ## Concatenation
 
@@ -159,7 +168,11 @@ frame position and column.
   several frames must have one dtype; there is no promotion. Frames lacking a
   column contribute nulls.
 - `horizontal` requires equal heights and globally unique names. `hstack`
-  accepts a dataframe or a list of series.
+  accepts a dataframe or a list of series. Polars 1.44 still pads shorter
+  frames with nulls but has deprecated that in favor of equal heights.
+
+`concat` also takes a list of LazyFrames and gives the same results and errors
+as one plan (see [lazy queries](lazy.md)).
 
 `Series.append` returns a new series and requires matching dtypes; the result
 keeps the left name. `Series.full_null(name, dtype, length)` builds an all-null
@@ -194,7 +207,12 @@ rows whose predicate is true (false and null are dropped) and preserves input
 order. Sums skip nulls, return zero for empty or all-null input unless
 `min_count` is set, accumulate Int64 exactly in 128 bits, and raise only when
 the final result overflows. Grouped output order is unspecified unless
-`maintain_order=True`.
+`maintain_order=True`. Besides `agg`, a `GroupBy` has `len(name="len")` and
+`sum`, `mean`, `min`, `max`, `median`, `first`, `last`, `n_unique` and
+`quantile(q, interpolation="nearest")`, each the reduction of every column
+that is not a key (Polars' `all()` reduced, keys excluded); a key computed
+from an expression keeps its output name, so `group_by([col("a") % 2]).sum()`
+does not sum `a`.
 Categorical expressions operate on decoded String values, so expression
 reductions such as first/last and min/max return String. A bare column selection
 and direct table row operations retain categorical metadata.
@@ -221,8 +239,9 @@ Each key column is converted once into dense integer ranks that already encode
 direction, NaN, and null placement; a bottom-up mergesort then compares rank
 tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
 first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
-the first `k` rows of `sort(by)`; both select with a bounded heap in
-O(n log k) instead of sorting every row.
+the first `k` rows of `sort(by)`; `reverse=True` flips the direction (nulls
+stay last), as in Polars. Both select with a bounded heap in O(n log k)
+instead of sorting every row.
 
 ## Joins
 

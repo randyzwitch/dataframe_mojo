@@ -79,6 +79,7 @@ from .expr import (
     is_reduction,
     is_pair_reduction,
     is_string_op,
+    is_text_function,
     is_nested_op,
     IMPLODE,
     LIST_GET,
@@ -88,6 +89,7 @@ from .expr import (
     struct_pack_names,
 )
 from .str_kernels import string_op, concat_strings
+from .text_functions import text_function
 from .expr_kernels import integer_is_in
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
@@ -119,7 +121,7 @@ from .expr_kernels import (
     math_unary,
     arctan2_series,
 )
-from .aggregate import Reducer
+from .aggregate import Reducer, _sum_bools
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -484,6 +486,8 @@ def _eval[
         return integer_is_in(left, node.text)
     if is_string_op(node.op):
         return string_op(node, left)
+    if is_text_function(node.op):
+        return text_function(node, left)
     if is_nested_op(node.op):
         return nested_op(node, left, bound.dtypes[node.left])
     if node.right < 0:
@@ -496,7 +500,7 @@ def _eval[
         bound, columns, aggregates, node.right, offset, length, grouped, mask
     )
     if node.op == STR_CONCAT:
-        return concat_strings(left, right, node.text)
+        return concat_strings(left, right, node.text, node.integer == 1)
     if node.op == ARCTAN2:
         return arctan2_series(
             _logical(left, bound.dtypes[node.left]),
@@ -1834,6 +1838,13 @@ def _direct_numeric_part(
         # A decimal32 or decimal64 array is stored in Int32 or Int64, but
         # its states are decimal ones: the reducer widens and sums it.
         return False
+    if (op == SUM or op == MEAN) and part._data.isa[BoolColumn]():
+        # Booleans sum as counts of set bits (`Reducer`'s `_sum_bools`).
+        var window = part._data[BoolColumn].copy()
+        window._offset += start
+        window._length = end - start
+        _sum_bools(window, 0, False, List[Int](), reducer.int_sums)
+        return True
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if part._data.isa[Column[Scalar[D]]]():
@@ -2018,6 +2029,7 @@ def _row_wise(op: Int) -> Bool:
         or is_binary(op)
         or is_unary(op)
         or is_string_op(op)
+        or is_text_function(op)
         or op == WHEN
         or op == CUT
         or is_dt_op(op)

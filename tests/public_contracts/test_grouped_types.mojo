@@ -342,3 +342,137 @@ def test_categorical_count_distinct_and_arg_extrema_follow_decoded_value_semanti
                                 ](),
                                 UInt32(chosen),
                             )
+
+
+def _flags(n: Int) raises -> DataFrame:
+    """Seven groups of flags: true every third row, null every fifth."""
+    var groups = List[Int64](capacity=n)
+    var values = List[Bool](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        groups.append(Int64(i % 7))
+        values.append(i % 3 == 0)
+        valid.append(i % 5 != 0)
+    return DataFrame(
+        [
+            Series("g", Column[Int64](groups^)),
+            Series("b", Column[Bool](values^, valid^)),
+        ]
+    )
+
+
+def test_bool_sums_and_means_count_true_values_in_every_route() raises:
+    # Polars sums a Boolean as its UInt32 count of true values and
+    # averages it as the share of true values among the valid ones (#790).
+    from tests.support.group_strategy_reference import ScopedEnvironment
+
+    for n in [0, 50, 40_000]:
+        var frame = _flags(n)
+        var trues = List[Int](length=7, fill=0)
+        var valid = List[Int](length=7, fill=0)
+        for i in range(n):
+            if i % 5 != 0:
+                valid[i % 7] += 1
+                trues[i % 7] += Int(i % 3 == 0)
+        var all_trues = 0
+        var all_valid = 0
+        for g in range(7):
+            all_trues += trues[g]
+            all_valid += valid[g]
+        var reductions: List[Expr] = [
+            col("b").sum().alias("sum"),
+            col("b").mean().alias("mean"),
+            (col("g") > 3).sum().alias("above"),
+        ]
+        for threads in ["1", "4"]:
+            var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+            for lazy in [False, True]:
+                var whole = (
+                    frame.lazy()
+                    .select_exprs(reductions)
+                    .collect() if lazy else frame.select_exprs(reductions)
+                )
+                assert_true(whole.column("sum").dtype() == DataType.UINT32)
+                assert_true(whole.column("mean").dtype() == DataType.FLOAT64)
+                assert_equal(
+                    whole.item(0, "sum").numeric[DType.uint32](),
+                    UInt32(all_trues),
+                )
+                assert_equal(whole.item(0, "mean").is_null(), all_valid == 0)
+                if all_valid:
+                    assert_equal(
+                        whole.item(0, "mean").float64(),
+                        Float64(all_trues) / Float64(all_valid),
+                    )
+                var above = 0
+                for i in range(n):
+                    above += Int(i % 7 > 3)
+                assert_equal(
+                    whole.item(0, "above").numeric[DType.uint32](),
+                    UInt32(above),
+                )
+                var grouped = (
+                    frame.lazy()
+                    .group_by("g", maintain_order=True)
+                    .agg(reductions)
+                    .collect() if lazy else frame.group_by(
+                        "g", maintain_order=True
+                    )
+                    .agg(reductions)
+                )
+                assert_equal(grouped.height(), min(n, 7))
+                assert_true(grouped.column("sum").dtype() == DataType.UINT32)
+                for row in range(grouped.height()):
+                    var g = Int(grouped.item(row, "g").int64())
+                    assert_equal(g, row)
+                    assert_equal(
+                        grouped.item(row, "sum").numeric[DType.uint32](),
+                        UInt32(trues[g]),
+                    )
+                    assert_equal(
+                        grouped.item(row, "mean").float64(),
+                        Float64(trues[g]) / Float64(valid[g]),
+                    )
+                var windows: List[Expr] = [
+                    col("b").sum().over("g").alias("sum"),
+                    col("b").mean().over("g").alias("mean"),
+                ]
+                var spread = (
+                    frame.lazy()
+                    .with_columns(windows)
+                    .collect() if lazy else frame.with_columns(windows)
+                )
+                assert_true(spread.column("sum").dtype() == DataType.UINT32)
+                for i in range(n):
+                    assert_equal(
+                        spread.item(i, "sum").numeric[DType.uint32](),
+                        UInt32(trues[i % 7]),
+                    )
+                    assert_equal(
+                        spread.item(i, "mean").float64(),
+                        Float64(trues[i % 7]) / Float64(valid[i % 7]),
+                    )
+            _ = workers^
+
+
+def test_all_null_bool_sums_are_zero_and_means_are_null() raises:
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int64]([1, 1, 2])),
+            Series(
+                "b", Column[Bool]([True, False, True], [False, False, True])
+            ),
+        ]
+    )
+    var grouped = frame.group_by("g", maintain_order=True).agg(
+        [
+            col("b").sum().alias("sum"),
+            col("b").sum(min_count=1).alias("sum1"),
+            col("b").mean().alias("mean"),
+        ]
+    )
+    assert_equal(grouped.item(0, "sum").numeric[DType.uint32](), UInt32(0))
+    assert_true(grouped.item(0, "sum1").is_null())
+    assert_true(grouped.item(0, "mean").is_null())
+    assert_equal(grouped.item(1, "sum").numeric[DType.uint32](), UInt32(1))
+    assert_equal(grouped.item(1, "mean").float64(), 1.0)

@@ -350,3 +350,30 @@ def test_automatic_placement_rejects_ambiguous_nonfinite_or_unvalidated_estimate
             64,
             100,
         )
+
+
+def test_bool_sums_means_and_cumulative_sums_stay_on_the_cpu() raises:
+    # Bool sums count true values (#790); no device contract covers them,
+    # so Metal refuses them and engine="auto" runs them on the CPU.
+    from dataframe.accelerator.gpu.runtime import capabilities
+    from dataframe.metal import MetalRuntime
+
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 1])),
+            Series("b", Column[Bool]([True, False, True])),
+        ]
+    )
+    var queries: List[LazyFrame] = [
+        frame.lazy().select(col("b").sum()),
+        frame.lazy().select(col("b").mean()),
+        frame.lazy().select(col("b").cum_sum()),
+        frame.lazy().group_by("k").agg([col("b").sum(), col("b").mean()]),
+    ]
+    for query in queries:
+        _rejection(query, "Bool", capabilities())
+        assert_true(
+            "unsupported" in MetalRuntime(device_id=999999).describe(query)
+        )
+    var counted = frame.lazy().select(col("b").sum()).collect(engine="auto")
+    assert_equal(counted.item(0, "b").numeric[DType.uint32](), UInt32(2))
