@@ -141,7 +141,7 @@ from .hashing import encode_rows
 from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
-from .binding import ROWS, bind
+from .binding import AGGREGATE, ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
 from .accelerator.grouped_key_queries import KeyQuery
@@ -681,6 +681,8 @@ def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
             if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
                 return None
             return input.copy()
+        if node.kind == AGG:
+            return _aggregate_schema(node, input)
         if node.kind != SELECT and node.kind != WITH_COLUMNS:
             return None
         var bound = _bind_all(node.exprs, input._columns)
@@ -710,6 +712,90 @@ def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
         return DataFrame(columns^, height=0)
     except:
         return None
+
+
+def _aggregate_schema(
+    node: PlanNode, input: DataFrame
+) raises -> Optional[DataFrame]:
+    """A group_by's result on a zero-row `input`: its key columns as they
+    are, then each aggregation's name and bound type, as Polars derives a
+    group_by's schema from its expressions' fields. Running one on no rows
+    sets up a whole grouping for nothing (TPC-DS q4: 170 us a group_by,
+    each planned several times). None without keys (a global aggregation
+    has one row), for keys or results of nested or categorical type, and
+    for anything the aggregation would reject, which the caller then
+    runs."""
+    if len(node.names) == 0:
+        return None
+    var columns = List[Series](capacity=len(node.names) + len(node.exprs))
+    for name in node.names:
+        var key = input.column(name)
+        var dtype = key.dtype()
+        if dtype.is_nested() or dtype.is_categorical():
+            return None
+        columns.append(key.slice(0, 0))
+    for b in _bind_all(node.exprs, input._columns):
+        if b.shape() != AGGREGATE or b.expr._name in node.names:
+            return None
+        var dtype = b.dtypes[len(b.dtypes) - 1]
+        if dtype.is_nested() or dtype.is_categorical():
+            return None
+        columns.append(Series.full_null(b.expr._name, dtype, 0))
+    return DataFrame(columns^, height=0)
+
+
+def _join_schema(
+    node: PlanNode, left: DataFrame, right: DataFrame
+) raises -> Optional[DataFrame]:
+    """An inner, left, semi or anti join's result on zero-row inputs from
+    their columns alone, by the rules `DataFrame._join_impl` names its
+    output with (the left's columns, then the right's but its coalesced
+    keys, a name the left holds taking the suffix), as Polars derives a
+    join's schema from its inputs' without running it. Running one on no
+    rows prepares a hash join for nothing (TPC-DS q4: 60 us a join). None
+    for other join types, keys of differing, nested or categorical types,
+    and output names that still collide, which the caller then runs to
+    raise or handle as it does."""
+    var how = join_type(node.text)
+    if not (
+        how == JOIN_INNER
+        or how == JOIN_LEFT
+        or how == JOIN_SEMI
+        or how == JOIN_ANTI
+    ):
+        return None
+    if len(node.names) == 0 or len(node.names) != len(node.right_keys):
+        return None
+    var right_keys = List[Int]()
+    var seen = Dict[String, Bool]()
+    for i in range(len(node.names)):
+        if node.names[i] in seen:
+            return None
+        seen[node.names[i]] = True
+        var ltype = left.column(node.names[i]).dtype()
+        var at = right._index(node.right_keys[i])
+        var rtype = right._columns[at].dtype()
+        if ltype != rtype or ltype.is_nested() or ltype.is_categorical():
+            return None
+        right_keys.append(at)
+    if how == JOIN_SEMI or how == JOIN_ANTI:
+        return left.copy()
+    var columns = left._columns.copy()
+    var names = Dict[String, Bool]()
+    for column in left._columns:
+        names[column.name()] = True
+    var left_names = names.copy()
+    for i in range(right.width()):
+        if node.coalesce and i in right_keys:
+            continue
+        var name = right._columns[i].name()
+        if name in left_names:
+            name += node.names2[0]
+        if name in names:
+            return None
+        names[name] = True
+        columns.append(right._columns[i].slice(0, 0).renamed(name))
+    return DataFrame(columns^, height=0)
 
 
 def _pinned(node: PlanNode) -> Bool:
@@ -4885,6 +4971,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         ref node = self._nodes[index]
         if node.how == JOIN_CROSS:
             return input.join(right, how=node.text, suffix=node.names2[0])
+        if empty and input.height() == 0 and right.height() == 0:
+            var schema = _join_schema(node, input, right)
+            if schema:
+                return schema.take()
         # Consumers that ignore row order let the join skip restoring
         # left-major order after probing.
         # A schema has no row order to keep.
