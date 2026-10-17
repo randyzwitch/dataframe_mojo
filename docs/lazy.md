@@ -123,7 +123,8 @@ raw samples and reproduction commands.
   `slice(offset, k)`, SQL's `ORDER BY ... LIMIT`) needs only the sort's
   first `offset + k` rows, so the sort selects them instead of sorting every
   row, and `explain()` shows it as `TOP_K`. The result is exactly the full
-  sort's rows, including stable ties and null and NaN placement. When the
+  sort's rows, including null and NaN placement (and tie order under
+  `maintain_order=True`). When the
   plan streams, each batch keeps its own first rows, so memory stays at a
   batch plus those rows. At a tenth of the input or more, the full sort is
   used and cut short.

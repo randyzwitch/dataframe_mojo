@@ -338,12 +338,12 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Add a struct column built from existing columns (kept as they are); unnest(name) gives them back.
 - `def with_column(self, var column: Series) -> Self`
   Replace by name or append; the input dataframe is unchanged.
-- `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True) -> Self`
-  Stable single-column sort. NaN is the largest value: it follows the numbers ascending and precedes them descending.
-- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
-  Stable lexicographic sort by several columns, one direction.
-- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> Self`
-  Per-column direction and null placement; list lengths match by.
+- `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Single-column sort. NaNs follow non-null numbers. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order.
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Lexicographic sort by several columns, one direction; equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Per-column direction and null placement; list lengths match by. Equal keys in no particular order unless `maintain_order`.
 - `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
   Row order of a stable sort; equal keys keep input order.
@@ -947,10 +947,11 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def with_columns(self, exprs: List[Expr]) -> Self`
 - `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
-- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
-- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> Self`
-  Sort with a direction and null placement per key, as the eager DataFrame.sort takes them.
-- `def sort(self, by: String, descending: Bool = False) -> Self`
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by `by`. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order (Polars' `maintain_order`; DuckDB's ORDER BY makes no promise either).
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Sort with a direction and null placement per key, as the eager DataFrame.sort takes them; equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: String, descending: Bool = False, *, maintain_order: Bool = False) -> Self`
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
 - `def head(self, n: Int = Int(5)) -> Self`
 - `def limit(self, n: Int = Int(5)) -> Self`
