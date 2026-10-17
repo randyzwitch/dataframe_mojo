@@ -18,6 +18,8 @@ from dataframe.lazy import (
     UNNEST,
     CONCAT,
     UNPIVOT,
+    HCONCAT,
+    GATHER,
     _is_scan,
     _is_time_window,
     _time_window_reads,
@@ -140,6 +142,8 @@ def prune_projections(mut query: LazyFrame) raises:
             or node.kind == UNNEST
             or node.kind == CONCAT
             or _row_order_step(node.kind)
+            or node.kind == HCONCAT
+            or node.kind == GATHER
         )
         if node.kind == UNNEST:
             reads.append(node.text)
@@ -171,7 +175,12 @@ def prune_projections(mut query: LazyFrame) raises:
         for child in [node.left, node.right]:
             if child < 0:
                 continue
-            if reads_all or node.kind == JOIN or node.kind == ASOF:
+            if (
+                reads_all
+                or node.kind == JOIN
+                or node.kind == ASOF
+                or (node.kind == GATHER and child == node.right)
+            ):
                 all_needed[child] = True
             elif needed[child]:
                 var merged = needed[child].value().copy()

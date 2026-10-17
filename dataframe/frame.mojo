@@ -175,7 +175,7 @@ from .indexed_reduce import (
 )
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
-from .lazy import LazyFrame
+from .lazy import LazyFrame, _concat_plans
 from .display import render_frame, render_glimpse
 
 # A struct key groups, joins and deduplicates by its fields plus its own
@@ -613,9 +613,17 @@ struct DataFrame(Copyable, Sized, Writable):
     def hstack(self, columns: List[Series]) raises -> Self:
         return self.hstack(Self(columns.copy(), height=self._height))
 
-    def clear(self) raises -> Self:
-        """Zero rows with the same schema."""
-        return self.slice(0, 0)
+    def clear(self, n: Int = 0) raises -> Self:
+        """The same schema with n rows of nulls (zero rows by default), as
+        Polars' clear."""
+        if n < 0:
+            raise Error("clear: n must be nonnegative")
+        if n == 0:
+            return self.slice(0, 0)
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(Series.full_null(column.name(), column.dtype(), n))
+        return Self(columns^, height=n)
 
     def drop(self, name: String) raises -> Self:
         return self.drop([name])
@@ -717,16 +725,19 @@ struct DataFrame(Copyable, Sized, Writable):
         Nested columns give Float64 counts and nulls elsewhere. min and max
         skip NaN; mean and std propagate it.
         """
-        var qs = percentiles.copy()
-        for q in qs:
-            if not (q >= 0 and q <= 1):
-                raise Error("describe() percentiles must lie in [0, 1]")
-        sort(qs)
-        var labels: List[String] = ["count", "null_count", "mean", "std", "min"]
-        for q in qs:
-            labels.append(_percent_label(q))
-        labels.append("max")
-        var rows = len(labels)
+        var qs = _describe_percentiles(percentiles)
+        var exprs = self._describe_exprs(qs, interpolation)
+        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
+            List[Series](), height=1
+        )
+        return self._described(qs, stats)
+
+    def _describe_exprs(
+        self, qs: List[Float64], interpolation: String
+    ) -> List[Expr]:
+        """The reductions `describe` computes, chosen from the column names
+        and types alone, so LazyFrame.describe computes the same ones over
+        its plan."""
         var exprs = List[Expr]()
         for i in range(self.width()):
             ref column = self._columns[i]
@@ -765,9 +776,17 @@ struct DataFrame(Copyable, Sized, Writable):
                         .quantile(qs[k], interpolation)
                         .alias(p + "q" + String(k))
                     )
-        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
-            List[Series](), height=1
-        )
+        return exprs^
+
+    def _described(self, qs: List[Float64], stats: DataFrame) raises -> Self:
+        """`describe`'s frame from the reductions `_describe_exprs` named,
+        computed into one row of `stats`; only this frame's names and types
+        are read."""
+        var labels: List[String] = ["count", "null_count", "mean", "std", "min"]
+        for q in qs:
+            labels.append(_percent_label(q))
+        labels.append("max")
+        var rows = len(labels)
         var present = Dict[String, Bool]()
         for name in stats.columns():
             present[name] = True
@@ -903,6 +922,44 @@ struct DataFrame(Copyable, Sized, Writable):
                         valid.append(False)
             columns.append(Series(column.name(), StringColumn(texts, valid)))
         return Self(columns^, height=rows)
+
+    def gather(
+        self, indices: List[Int], *, null_on_oob: Bool = False
+    ) raises -> Self:
+        """The rows at `indices`, in that order, as Polars' gather: a
+        negative index counts from the end. An index out of range raises,
+        or with null_on_oob=True gives a row of nulls."""
+        return self._gather(indices, List[Bool](), null_on_oob)
+
+    def _gather(
+        self, indices: List[Int], valid: List[Bool], null_on_oob: Bool
+    ) raises -> Self:
+        """`gather`, where a false entry of `valid` (when given) is a null
+        index, which gives a row of nulls."""
+        var rows = List[Int](capacity=len(indices))
+        var nulls = False
+        for k in range(len(indices)):
+            var index = indices[k]
+            var row = index + self._height if index < 0 else index
+            if len(valid) > 0 and not valid[k]:
+                row = -1
+            elif row < 0 or row >= self._height:
+                if not null_on_oob:
+                    raise Error(
+                        "gather index "
+                        + String(index)
+                        + " is out of bounds for height "
+                        + String(self._height)
+                    )
+                row = -1
+            nulls = nulls or row < 0
+            rows.append(row)
+        if not nulls:
+            return self.take(rows)
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(column.take_or_null(rows))
+        return Self(columns^, height=len(rows))
 
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
@@ -1216,8 +1273,11 @@ struct DataFrame(Copyable, Sized, Writable):
         trace_path("sort.row_prefix")
         return row_arg_sort(keys, descending, nulls_last)
 
-    def top_k(self, k: Int, by: List[String]) raises -> Self:
-        """The k rows that sort(by, descending=True) would put first.
+    def top_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows that sort(by, descending=True) would put first
+        (sort(by) with reverse=True, as Polars' reverse flips the order).
 
         Nulls rank last. Selection is about one pass rather than a full sort.
         """
@@ -1225,22 +1285,27 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.take(
             self._arg_sort_head(
                 by,
-                List[Bool](length=n, fill=True),
+                List[Bool](length=n, fill=not reverse),
                 List[Bool](length=n, fill=True),
                 k,
             )
         )
 
-    def top_k(self, k: Int, by: String) raises -> Self:
-        return self.top_k(k, [by])
+    def top_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.top_k(k, [by], reverse=reverse)
 
-    def bottom_k(self, k: Int, by: List[String]) raises -> Self:
-        """The k rows that sort(by) would put first; nulls rank last."""
+    def bottom_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows that sort(by) would put first (sort(by,
+        descending=True) with reverse=True); nulls rank last."""
         var n = len(by)
         return self.take(
             self._arg_sort_head(
                 by,
-                List[Bool](length=n, fill=False),
+                List[Bool](length=n, fill=reverse),
                 List[Bool](length=n, fill=True),
                 k,
             )
@@ -1321,8 +1386,10 @@ struct DataFrame(Copyable, Sized, Writable):
             self._sort_ranks(by, descending, nulls_last), take
         )
 
-    def bottom_k(self, k: Int, by: String) raises -> Self:
-        return self.bottom_k(k, [by])
+    def bottom_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.bottom_k(k, [by], reverse=reverse)
 
     def _sort_ranks(
         self,
@@ -5607,6 +5674,21 @@ def concat(
     raise Error("concat how must be 'vertical', 'diagonal', or 'horizontal'")
 
 
+def concat(
+    frames: List[LazyFrame], how: String = "vertical"
+) raises -> LazyFrame:
+    """Combine lazy plans into one plan, with the eager concat's results
+    and errors for 'vertical', 'diagonal' and 'horizontal'.
+
+    As Polars plans them, a diagonal concat is a vertical one over inputs
+    each selected to the union of the columns (nulls filling those an
+    input lacks), so filters and column selections above it reach every
+    input, and a horizontal one is its own operator. The inputs' names and
+    types are resolved here, as collect_schema resolves them.
+    """
+    return _concat_plans(frames, how)
+
+
 def _bind_all(
     expressions: List[Expr], columns: List[Series]
 ) raises -> List[BoundExpr]:
@@ -7560,6 +7642,16 @@ struct _StreamReduction(Movable):
 def _round_ticks(value: Float64) -> Int64:
     """Nearest integer tick, halves away from zero."""
     return Int64(value + 0.5) if value >= 0 else -Int64(-value + 0.5)
+
+
+def _describe_percentiles(percentiles: List[Float64]) raises -> List[Float64]:
+    """describe()'s percentiles checked and in ascending order."""
+    var qs = percentiles.copy()
+    for q in qs:
+        if not (q >= 0 and q <= 1):
+            raise Error("describe() percentiles must lie in [0, 1]")
+    sort(qs)
+    return qs^
 
 
 def _percent_label(q: Float64) -> String:

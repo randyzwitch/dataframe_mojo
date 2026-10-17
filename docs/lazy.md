@@ -56,6 +56,27 @@ differently named keys (`o_custkey` with `c_custkey`), with the eager join's
 output rules. `explain()` shows the pairs as `JOIN inner on o_custkey =
 c_custkey`.
 
+`gather`, `top_k`, `bottom_k` and `clear` record plan nodes too.
+`describe(percentiles, interpolation)` returns `DataFrame.describe`'s summary,
+computed as Polars computes it: one `select` of the summary reductions over
+the plan, collected, so the rows are not materialized whole. `clear(n)` is
+`head(0)` for `n = 0` and otherwise, as in Polars, a new plan over `n` rows of
+nulls with the schema. `top_k(k, by, reverse=False)` and `bottom_k` are a
+sort with nulls last followed by `head(k)`, which runs as one top-k selection
+(see Optimizations). `gather(indices, null_on_oob=False)` takes a list of
+positions or a plan with one integer column (a null position gives a row of
+nulls); it is its own operator, like Polars' `Gather`, and filters and slices
+above it stay above it.
+
+`concat([lf1, lf2, ...], how)` combines plans with the eager `concat`'s
+results and errors. `vertical` stacks them (`lf1.concat(lf2)` is the
+two-plan form). `diagonal`, as Polars plans it, stacks the inputs each
+selected to the union of the columns, a typed null filling the columns an
+input lacks; the inputs' names and types are resolved when `concat` is
+called, and a filter or column selection above reaches every input.
+`horizontal` places the inputs side by side (an `HCONCAT` operator); a column
+selection above reaches each input, and the heights must match when it runs.
+
 `collect(streaming=True, batch_size=65536)` is the default. Contiguous
 row-wise operations run as ordered batches on a scoped worker pool. At most
 one wave of batches (one per active worker) is in flight; workers return
@@ -139,7 +160,7 @@ raw samples and reproduction commands.
   the sort. A row-local filter directly above a CSV scan without a row limit
   runs on each decoded range before the ranges are assembled. Filters never
   move past a slice, unique, group_by, right/full join, `tail`, `reverse`,
-  `shift` or `with_row_index`, since that would change which rows those
+  `shift`, `with_row_index`, `gather` or a horizontal concat, since that would change which rows those
   operators see (or, for `with_row_index`, the numbers they give). Slices
   do not move below them either.
 - **Projection pushdown.** Scans read only the columns some operator above them

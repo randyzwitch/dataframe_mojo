@@ -188,6 +188,10 @@ Combine frames: 'vertical', 'diagonal', or 'horizontal'.
 def concat(frames: List[DataFrame], how: String = "vertical") -> DataFrame
 ```
 
+```mojo
+def concat(frames: List[LazyFrame], how: String = "vertical") -> LazyFrame
+```
+
 ## `concat_str`
 
 Join String expressions row-wise; any null input makes the row null. With ignore_nulls, null inputs are skipped along with their separator, and a row whose inputs are all null is "" (DuckDB's concat_ws).
@@ -307,8 +311,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def hstack(self, other: Self) -> Self`
   Append other's columns; heights must match, names stay unique.
 - `def hstack(self, columns: List[Series]) -> Self`
-- `def clear(self) -> Self`
-  Zero rows with the same schema.
+- `def clear(self, n: Int = Int(0)) -> Self`
+  The same schema with n rows of nulls (zero rows by default), as Polars' clear.
 - `def drop(self, name: String) -> Self`
 - `def drop(self, names: List[String]) -> Self`
   Remove columns; every name must exist and appear once.
@@ -322,6 +326,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
   Summary statistics per column, laid out as Polars' describe().
+- `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
+  The rows at `indices`, in that order, as Polars' gather: a negative index counts from the end. An index out of range raises, or with null_on_oob=True gives a row of nulls.
 - `def take(self, indices: List[Int]) -> Self`
 - `def filter(self, mask: Column[Bool]) -> Self`
   Filter with a byte-per-value Boolean column (packed first).
@@ -347,12 +353,12 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
   Row order of a stable sort; equal keys keep input order.
-- `def top_k(self, k: Int, by: List[String]) -> Self`
-  The k rows that sort(by, descending=True) would put first.
-- `def top_k(self, k: Int, by: String) -> Self`
-- `def bottom_k(self, k: Int, by: List[String]) -> Self`
-  The k rows that sort(by) would put first; nulls rank last.
-- `def bottom_k(self, k: Int, by: String) -> Self`
+- `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
+  The k rows that sort(by, descending=True) would put first (sort(by) with reverse=True, as Polars' reverse flips the order).
+- `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
+- `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
+  The k rows that sort(by) would put first (sort(by, descending=True) with reverse=True); nulls rank last.
+- `def bottom_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
   Match each left row to an ordered right key, optionally within `by`.
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
@@ -987,6 +993,20 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, as Polars builds it, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+- `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> DataFrame`
+  DataFrame.describe's summary of this plan's result, computed as Polars computes it: one select of the summary reductions over the plan, collected, so the rows are never materialized whole.
+- `def clear(self, n: Int = Int(0)) -> Self`
+  This plan's schema with n rows of nulls, as DataFrame.clear. With n = 0 it is head(0) of this plan; otherwise, as in Polars, a new plan over a frame of nulls built from the schema.
+- `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
+  The rows at `indices`, in that order; see DataFrame.gather.
+- `def gather(self, indices: Self, *, null_on_oob: Bool = False) -> Self`
+  The rows at the positions `indices` (a plan with one integer column) lists, in its order, as Polars' gather: a negative index counts from the end, a null index gives a row of nulls, and an index out of range raises when the plan runs, or with null_on_oob=True gives a row of nulls. Filters and slices above it stay above it.
+- `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
+  The k rows DataFrame.top_k gives: as Polars builds it, a sort by `by` descending (ascending with reverse=True), nulls last, then head(k), which the optimizer runs as one top-k selection.
+- `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
+- `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
+  The k rows DataFrame.bottom_k gives: a sort by `by` ascending (descending with reverse=True), nulls last, then head(k).
+- `def bottom_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def tail(self, n: Int = Int(5)) -> Self`
   The last n rows; a negative n drops the first -n rows. See DataFrame.tail. Filters and slices written above it stay above it.
 - `def reverse(self) -> Self`

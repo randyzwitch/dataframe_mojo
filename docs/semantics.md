@@ -38,7 +38,11 @@ the frame. A negative offset counts from the end and clips at zero; an offset
 past the end returns zero rows. `length=-1` means all remaining rows, and any
 other negative length raises. `head(n)` and `tail(n)` default to five rows; a
 negative `n` drops `-n` rows from the other end, as in Polars. `limit` is
-`head`. `reverse` reverses row order and `clear` keeps the schema with zero rows.
+`head`. `reverse` reverses row order and `clear(n=0)` keeps the schema with
+`n` rows of nulls (zero rows by default). `gather(indices, null_on_oob=False)`
+returns the rows at `indices` in that order, as Polars' `gather`: a negative
+index counts from the end, and an index out of range raises, or with
+`null_on_oob=True` gives a row of nulls.
 `shift(n=1, fill_value=None)` moves every column's values `n` rows later
 (earlier for a negative `n`), as Polars' `DataFrame.shift`: height and schema
 stay, and the `min(|n|, height)` vacated rows are null, or `fill_value` cast to
@@ -164,7 +168,11 @@ frame position and column.
   several frames must have one dtype; there is no promotion. Frames lacking a
   column contribute nulls.
 - `horizontal` requires equal heights and globally unique names. `hstack`
-  accepts a dataframe or a list of series.
+  accepts a dataframe or a list of series. Polars 1.44 still pads shorter
+  frames with nulls but has deprecated that in favor of equal heights.
+
+`concat` also takes a list of LazyFrames and gives the same results and errors
+as one plan (see [lazy queries](lazy.md)).
 
 `Series.append` returns a new series and requires matching dtypes; the result
 keeps the left name. `Series.full_null(name, dtype, length)` builds an all-null
@@ -231,8 +239,9 @@ Each key column is converted once into dense integer ranks that already encode
 direction, NaN, and null placement; a bottom-up mergesort then compares rank
 tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
 first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
-the first `k` rows of `sort(by)`; both select with a bounded heap in
-O(n log k) instead of sorting every row.
+the first `k` rows of `sort(by)`; `reverse=True` flips the direction (nulls
+stay last), as in Polars. Both select with a bounded heap in O(n log k)
+instead of sorting every row.
 
 ## Joins
 
