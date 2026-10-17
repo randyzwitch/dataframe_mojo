@@ -135,6 +135,7 @@ from .column import Column
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
+from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
 from .binding import ROWS, bind
@@ -1839,6 +1840,61 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def limit(self, n: Int = 5) -> Self:
         return self.head(n)
+
+    def pivot(
+        self,
+        on: String,
+        on_columns: List[String],
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String = "",
+    ) raises -> Self:
+        """Long to wide, as DataFrame.pivot, with the new columns named up
+        front, as Polars' LazyFrame.pivot takes them, so the plan's schema
+        is known before it runs: one column per entry of `on_columns`, in
+        that order, holding the cells whose `on` value reads as that name
+        ("null" for a null). A name no row has gives a column of nulls;
+        rows whose `on` value is not listed still give their index key a
+        row. Filters above it on index columns alone move below it."""
+        var seen = Dict[String, Bool]()
+        for name in index:
+            seen[name] = True
+        for name in on_columns:
+            if name in seen:
+                raise Error("pivot column name collides: " + name)
+            seen[name] = True
+        return self._push(
+            _plan_node(
+                PIVOT,
+                names=index + [on, values],
+                text=aggregate_function,
+                offset=len(index),
+                right_keys=on_columns,
+            )
+        )
+
+    def pivot(
+        self,
+        on: String,
+        on_columns: Series,
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String = "",
+    ) raises -> Self:
+        """`pivot` with the new columns given as `on` values, named as
+        DataFrame.pivot names them."""
+        var names = List[String](capacity=len(on_columns))
+        for k in range(len(on_columns)):
+            names.append(String(on_columns.get(k)))
+        return self.pivot(
+            on,
+            names,
+            index=index,
+            values=values,
+            aggregate_function=aggregate_function,
+        )
 
     def unique(
         self,
@@ -4971,6 +5027,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )
         if node.kind == SLICE:
             return input.slice(node.offset, node.length)
+        if node.kind == PIVOT:
+            return _pivoted(input, node)
         if node.kind == UNIQUE:
             return input.unique(
                 node.names, keep=node.text, maintain_order=node.maintain_order
@@ -7248,6 +7306,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # and first-occurrence order (Polars and DuckDB push it down
             # too; TPC-DS q39 filters d_moy after grouping 2.3M rows).
             return 0
+        if (
+            below.kind == PIVOT
+            and _row_local(self._nodes[filter].exprs)
+            and _covers(
+                List[String](below.names[: below.offset]), reads.value()
+            )
+        ):
+            # As for a group_by's keys: each output row is one index key,
+            # so a filter on index columns keeps the same rows before it.
+            return 0
         if below.kind == SORT and _row_local(self._nodes[filter].exprs):
             # Stable sorting and a row-local filter commute: the surviving
             # rows retain the same relative sort order.
@@ -7725,6 +7793,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SLICE " + String(node.offset) + " " + String(node.length)
         elif node.kind == UNIQUE:
             label = "UNIQUE " + _joined(node.names)
+        elif node.kind == PIVOT:
+            label = (
+                "PIVOT on "
+                + node.names[node.offset]
+                + " index "
+                + _joined(List[String](node.names[: node.offset]))
+                + " values "
+                + node.names[node.offset + 1]
+                + " columns "
+                + _joined(node.right_keys)
+            )
+            if node.text.byte_length() > 0:
+                label += " AGG " + node.text
         elif node.kind == EXPLODE:
             label = "EXPLODE " + _joined(node.names)
         elif node.kind == UNNEST:
@@ -8265,6 +8346,43 @@ def _joined(names: List[String]) -> String:
             out += ", "
         out += names[i]
     return out^
+
+
+# Long to wide with the output columns given up front (Polars 1.44's
+# LazyFrame.pivot): `names` the index columns, then the column whose values
+# name the new columns, then the values column; `offset` the number of
+# index columns; `text` the aggregate function; `right_keys` the new
+# columns' names in order. One row per distinct index key, so it runs on
+# its whole input.
+comptime PIVOT = 42
+
+
+def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:
+    """A PIVOT node's result: DataFrame.pivot's, its columns chosen and
+    ordered by the node's names, a name the input has no cell for filled
+    with nulls of the aggregate's type."""
+    var index = List[String](node.names[: node.offset])
+    var values = node.names[node.offset + 1]
+    var wide = input.pivot(
+        node.names[node.offset],
+        index=index,
+        values=values,
+        aggregate_function=node.text,
+    )
+    var bound = bind(_pivot_aggregate(values, node.text), input._columns)
+    var dtype = bound.dtypes[len(bound.dtypes) - 1]
+    var present = Dict[String, Bool]()
+    for name in wide.columns():
+        present[name] = True
+    var columns = List[Series](capacity=len(index) + len(node.right_keys))
+    for name in index:
+        columns.append(wide.column(name))
+    for name in node.right_keys:
+        if name in present:
+            columns.append(wide.column(name))
+        else:
+            columns.append(Series.full_null(name, dtype, wide.height()))
+    return DataFrame(columns^, height=wide.height())
 
 
 def _key_set_filter(

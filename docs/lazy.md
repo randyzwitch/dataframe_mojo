@@ -62,6 +62,18 @@ results in source order, regardless of completion order. `streaming=False`
 retains the materializing executor for comparison. Eager operations keep
 their existing behavior.
 
+`pivot(on, on_columns, index=[...], values=..., aggregate_function="")` is
+`DataFrame.pivot` with the new columns named up front, as Polars 1.44's
+`LazyFrame.pivot(on, on_columns, ...)` takes them, so the plan's schema is
+known before it runs. The output is the index columns, then one column per
+entry of `on_columns` in that order (a list of names, or a Series of `on`
+values named by their text, `null` for a null), each holding the cells whose
+`on` value has that name. A name no row has gives a column of nulls of the
+aggregate's type; rows whose `on` value is not listed still give their index
+key a row. The pivot runs on its whole input; a filter on index columns alone
+moves below it, and the scan below reads only the index, `on` and values
+columns.
+
 The collected plan has the semantics documented in [semantics](semantics.md)
 and [expressions](expressions.md). `collect_schema()` returns `name: dtype`
 pairs by running with zero-row scans. CSV inference samples the usual rows,

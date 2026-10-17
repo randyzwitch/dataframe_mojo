@@ -975,6 +975,10 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
 - `def head(self, n: Int = Int(5)) -> Self`
 - `def limit(self, n: Int = Int(5)) -> Self`
+- `def pivot(self, on: String, on_columns: List[String], *, index: List[String], values: String, aggregate_function: String = "") -> Self`
+  Long to wide, as DataFrame.pivot, with the new columns named up front, as Polars' LazyFrame.pivot takes them, so the plan's schema is known before it runs: one column per entry of `on_columns`, in that order, holding the cells whose `on` value reads as that name ("null" for a null). A name no row has gives a column of nulls; rows whose `on` value is not listed still give their index key a row. Filters above it on index columns alone move below it.
+- `def pivot(self, on: String, on_columns: Series, *, index: List[String], values: String, aggregate_function: String = "") -> Self`
+  `pivot` with the new columns given as `on` values, named as DataFrame.pivot names them.
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
 - `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`

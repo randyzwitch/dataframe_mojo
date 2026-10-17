@@ -3039,35 +3039,7 @@ struct DataFrame(Copyable, Sized, Writable):
         count, len, or median. Missing cells are null. New column names are
         the `on` values' text, with null rendered as "null".
         """
-        var agg: Expr
-        var value = col(values)
-        var function = (
-            aggregate_function if aggregate_function.byte_length()
-            > 0 else "first"
-        )
-        if function == "first":
-            agg = value.first()
-        elif function == "last":
-            agg = value.last()
-        elif function == "sum":
-            agg = value.sum()
-        elif function == "mean":
-            agg = value.mean()
-        elif function == "min":
-            agg = value.min()
-        elif function == "max":
-            agg = value.max()
-        elif function == "count":
-            agg = value.count()
-        elif function == "len":
-            agg = value.len()
-        elif function == "median":
-            agg = value.median()
-        else:
-            raise Error(
-                "aggregate_function must be first, last, sum, mean, min, max,"
-                " count, len, or median"
-            )
+        var agg = _pivot_aggregate(values, aggregate_function)
         var seen = Dict[String, Bool]()
         for name in index:
             _ = self._index(name)
@@ -3562,6 +3534,37 @@ struct DataFrame(Copyable, Sized, Writable):
         return GroupBy(
             self.copy(), _expand_struct_keys(columns), maintain_order
         )
+
+
+def _pivot_aggregate(values: String, aggregate_function: String) raises -> Expr:
+    """The reduction `pivot` applies to each cell's `values` (first when
+    no aggregate_function is given, which then allows one row a cell)."""
+    var value = col(values)
+    var function = (
+        aggregate_function if aggregate_function.byte_length() > 0 else "first"
+    )
+    if function == "first":
+        return value.first()
+    if function == "last":
+        return value.last()
+    if function == "sum":
+        return value.sum()
+    if function == "mean":
+        return value.mean()
+    if function == "min":
+        return value.min()
+    if function == "max":
+        return value.max()
+    if function == "count":
+        return value.count()
+    if function == "len":
+        return value.len()
+    if function == "median":
+        return value.median()
+    raise Error(
+        "aggregate_function must be first, last, sum, mean, min, max,"
+        " count, len, or median"
+    )
 
 
 def _as_int64(values: List[Int]) -> List[Int64]:

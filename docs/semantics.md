@@ -145,7 +145,11 @@ several rows raises; otherwise use `first`, `last`, `sum`, `mean`, `min`,
 reductions. Missing cells are null. New column names are the `on` values' text
 (`null` for a null key) and must not collide with index names. An empty index
 list yields a single row. `pivot` followed by `unpivot` on the same names
-restores the original rows up to order.
+restores the original rows up to order. The lazy `pivot` takes the new
+columns' names up front (`on_columns`) and gives the same cells. Polars 1.44
+differs on missing cells: its `sum`, `len` and `count` give 0 there, and its
+`count` counts rows like `len`; here a missing cell is null for every
+function and `count` skips null values.
 
 ## Concatenation
 
