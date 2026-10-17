@@ -47,10 +47,12 @@ def test_ordered_rows_rank_resources_calibration_and_file_provenance() raises:
     var ranked = estimate_resources(plan)
     var ordinary = estimate_resources(legacy)
     assert_equal(ranked.peak_bytes - ordinary.peak_bytes, 8 * ranks + 24)
-    assert_equal(ranked.upload_bytes - ordinary.upload_bytes, 4 * ranks)
-    assert_equal(ranked.download_bytes - ordinary.download_bytes, 8)
-    assert_equal(ranked.kernel_launches - ordinary.kernel_launches, 2)
-    assert_equal(ranked.synchronizations - ordinary.synchronizations, 1)
+    # The plain plan observes its checked step itself (accelerator/faults.mojo):
+    # one launch, a 4-byte zero upload, one wait and a 4-byte read.
+    assert_equal(ranked.upload_bytes - ordinary.upload_bytes, 4 * ranks - 4)
+    assert_equal(ranked.download_bytes - ordinary.download_bytes, 8 - 4)
+    assert_equal(ranked.kernel_launches - ordinary.kernel_launches, 2 - 1)
+    assert_equal(ranked.synchronizations - ordinary.synchronizations, 1 - 1)
     var facts = estimate(query)
     assert_true(facts.family.find("ordered-errors-v1=2") >= 0)
     assert_equal(facts.peak_bytes, ranked.peak_bytes)

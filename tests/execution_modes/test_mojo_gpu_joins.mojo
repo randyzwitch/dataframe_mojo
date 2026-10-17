@@ -4,6 +4,7 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.metal import MetalRuntime
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal_join_domains import (
     join_frame,
     pairs,
@@ -350,9 +351,7 @@ def test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight() raises:
         .join(right.lazy(), on="k", how="left")
         .head(0)
     )
-    # The checked projection is admitted and observed before the join.
-    with assert_raises(contains="overflow"):
-        _ = overflowing.collect(accelerator=MetalRuntime(), engine="accel")
+    same_outcome(overflowing)
     var unsupported = left.lazy().join(
         right.lazy().with_columns(col("y").cast(DataType.STRING).alias("y")),
         on="k",

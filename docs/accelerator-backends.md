@@ -40,10 +40,15 @@ requires exact wide partials so intermediate overflow followed by cancellation
 does not reject a representable final result.
 
 Checked integer arithmetic remains at an observable terminal projection,
-without a final head. This preserves the current CPU optimizer's observable
-overflow behavior. Forced acceleration rejects unsupported regions before
-submission. Automatic selection may choose CPU, but execution errors after
-submission must propagate rather than retrying on CPU.
+without a final head, unless the backend sets `adjudicated_faults`. This
+preserves the current CPU optimizer's observable overflow behavior. Forced
+acceleration rejects unsupported regions before submission. Automatic
+selection may choose CPU, but execution errors after submission must
+propagate rather than retrying on CPU. The one exception is a data fault
+(`dataframe/accelerator/faults.mojo`): a backend with `adjudicated_faults`
+computes every checked value and lets the CPU decide a query whose kernels
+wrote a fault, since the CPU's evaluation order defines which error, if any,
+the query raises.
 
 ## Memory and execution ownership
 

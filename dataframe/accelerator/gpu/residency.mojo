@@ -23,6 +23,7 @@ from dataframe.accelerator.code_domains import (
 )
 
 from .grouped_key_owner import GroupedKeyField
+from dataframe.accelerator.faults import data_fault
 
 comptime CELL_BYTES = 21
 
@@ -30,17 +31,19 @@ comptime CELL_BYTES = 21
 def raise_value_error(code: UInt32, message: String) raises:
     """Report a deferred value fault without changing its failure category."""
     if code & 4:
-        raise Error("Mojo GPU decimal multiplication overflow")
+        raise data_fault("Mojo GPU decimal multiplication overflow")
     if code & 8:
-        raise Error("Mojo GPU decimal precision overflow")
+        raise data_fault("Mojo GPU decimal precision overflow")
     if code & 16:
-        raise Error("Mojo GPU integer overflow")
+        raise data_fault("Mojo GPU integer overflow")
     if code & 32:
-        raise Error("Mojo GPU integer power requires a nonnegative exponent")
+        raise data_fault(
+            "Mojo GPU integer power requires a nonnegative exponent"
+        )
     if code & 64:
-        raise Error("Mojo GPU temporal value overflows Int64")
+        raise data_fault("Mojo GPU temporal value overflows Int64")
     if code:
-        raise Error(message)
+        raise data_fault(message)
 
 
 def checked_add(a: Int, b: Int) raises -> Int:

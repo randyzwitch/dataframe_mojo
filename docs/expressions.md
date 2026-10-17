@@ -125,7 +125,7 @@ row-valued. See the Narwhals order-dependence notes cited above.
 | `cum_count(reverse=False)` | Int64, never null | counts non-null values |
 | `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
 | `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
-| `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN ranks after numbers |
+| `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN is the largest value, so it ranks after numbers ascending and before them descending |
 | `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null |
 | `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
 | `interpolate(method="linear"|"nearest")` | Float64 for linear, input dtype for nearest | fills only interior nulls; nearest ties choose the following value |

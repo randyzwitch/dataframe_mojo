@@ -47,7 +47,8 @@ def cell_less(
         var ln = isnan(left.floating)
         var rn = isnan(right.floating)
         if ln or rn:
-            return not ln and rn
+            # NaN is the largest value: last ascending, first descending.
+            return (ln and not rn) if descending else (not ln and rn)
         return (
             left.floating
             > right.floating if descending else left.floating

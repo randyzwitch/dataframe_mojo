@@ -55,16 +55,19 @@ def test_fixed_offset_capability_units_descriptors_and_observation_boundaries() 
                 frame.lazy().select(col("t").dt().offset_by(interval)),
                 _capabilities(),
             )
+    # Metal decides faults on the CPU, so it needs no fault-order boundary;
+    # a backend without that still refuses.
+    var strict = _capabilities()
+    strict.adjudicated_faults = False
+    var filtered = frame.lazy().filter(
+        col("t").dt().offset_by("1d") > lit(Int64(0)).cast(DataType.DATE)
+    )
     with assert_raises(contains="terminal projections without head"):
-        _ = lower_rows(query.head(1), _capabilities())
+        _ = lower_rows(query.head(1), strict)
     with assert_raises(contains="terminal projections without head"):
-        _ = lower_rows(
-            frame.lazy().filter(
-                col("t").dt().offset_by("1d")
-                > lit(Int64(0)).cast(DataType.DATE)
-            ),
-            _capabilities(),
-        )
+        _ = lower_rows(filtered, strict)
+    _ = lower_rows(query.head(1), _capabilities())
+    _ = lower_rows(filtered, _capabilities())
     var aware = source(DataType.datetime("us", "UTC"), [0], [True])
     var utc_query = aware.lazy().select(col("t").dt().offset_by("1h"))
     var without_utc = _capabilities()

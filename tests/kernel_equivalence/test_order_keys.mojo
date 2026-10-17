@@ -70,8 +70,12 @@ def test_key_reference_has_literal_null_nan_zero_and_stable_order_anchors() rais
     var nan = Float64(0) / Float64(0)
     assert_true(cell_equal(KeyCell(1, floating=-0.0), KeyCell(1, floating=0.0)))
     assert_true(cell_equal(KeyCell(1, floating=nan), KeyCell(1, floating=nan)))
+    # NaN is the largest value: last ascending, first descending.
     assert_true(
-        cell_less(KeyCell(1, floating=1), KeyCell(1, floating=nan), True, True)
+        cell_less(KeyCell(1, floating=1), KeyCell(1, floating=nan), False, True)
+    )
+    assert_true(
+        cell_less(KeyCell(1, floating=nan), KeyCell(1, floating=1), True, True)
     )
     var rows: List[List[KeyCell]] = [
         [KeyCell(0, integer=3)],

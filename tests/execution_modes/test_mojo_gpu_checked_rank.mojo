@@ -287,7 +287,12 @@ def test_mojo_gpu_checked_rank_year_month_sibling_and_resident_consumers() raise
 def test_checked_rank_phase_metadata_route_and_cache_guards() raises:
     var source = _rank_source()
     var query = source.lazy().select((col("x") + lit(Int64(1))).rank("min"))
-    var plan = lower_rows(query, _capabilities())
+    # The certificate route remains for backends that do not decide faults
+    # on the CPU; Metal itself observes the input step (ordered mode 0).
+    var certified = _capabilities()
+    certified.adjudicated_faults = False
+    assert_equal(lower_rows(query, _capabilities()).ordered_mode, 0)
+    var plan = lower_rows(query, certified)
     assert_equal(plan.ordered_mode, 10)
     assert_equal(len(plan.iana_mask_bases), len(plan.steps))
     assert_true(plan.iana_mask_bases[0] >= 0)
@@ -301,11 +306,11 @@ def test_checked_rank_phase_metadata_route_and_cache_guards() raises:
     )
     with assert_raises(contains="rank inside grouped aggregation"):
         _ = lower_rows(grouped_rank, _capabilities())
-    var ordinary = _capabilities()
+    var ordinary = certified.copy()
     ordinary.observed_rank_inputs = False
     with assert_raises(contains="checked rank inputs"):
         _ = lower_rows(query, ordinary)
-    var changed = lower_rows(query, _capabilities())
+    var changed = lower_rows(query, certified)
     changed.zone_words[changed.iana_mask_bases[0]] += 1
     with assert_raises(contains="geometry"):
         _ = estimate_resources(changed)
@@ -319,7 +324,7 @@ def test_checked_rank_phase_metadata_route_and_cache_guards() raises:
     with assert_raises(contains="phase is not certified"):
         _ = lower_rows(
             large.lazy().select((col("x") + lit(Int64(1))).rank().over("k")),
-            _capabilities(),
+            certified,
         )
     var competing = source.lazy().select_exprs(
         [
@@ -328,5 +333,6 @@ def test_checked_rank_phase_metadata_route_and_cache_guards() raises:
         ]
     )
     with assert_raises(contains="phase is not certified"):
-        _ = lower_rows(competing, _capabilities())
+        _ = lower_rows(competing, certified)
+    _ = lower_rows(competing, _capabilities())
     _ = setting^

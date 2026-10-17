@@ -1090,6 +1090,7 @@ def checked_boundary_preflight() raises:
     var checked_head = source.lazy().select(col("x") + 1).head(0)
     var restricted = gpu_capabilities()
     restricted.deferred_integer_errors = False
+    restricted.adjudicated_faults = False
     with assert_raises(contains="terminal projections without head"):
         _ = lower_rows(checked_head, restricted)
     # Mojo carries checked per-value errors through row selection, so this

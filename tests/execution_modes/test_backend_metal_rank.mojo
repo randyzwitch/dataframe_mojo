@@ -276,9 +276,12 @@ def test_rank_capability_and_checked_input_preflight() raises:
     assert_true(len(plan.steps) == 2)
     assert_true(plan.outputs[0].slot == plan.steps[1].slot)
     var invalid = frame.lazy().select((col("x") + lit(Int32(1))).rank())
-    var observed = lower_rows(invalid, _capabilities())
+    var certified = _capabilities()
+    certified.adjudicated_faults = False
+    var observed = lower_rows(invalid, certified)
     assert_true(observed.ordered_mode == 10)
-    var unchecked = _capabilities()
+    assert_true(lower_rows(invalid, _capabilities()).ordered_mode == 0)
+    var unchecked = certified.copy()
     unchecked.observed_rank_inputs = False
     with assert_raises(contains="checked rank inputs"):
         _ = lower_rows(invalid, unchecked)

@@ -70,11 +70,14 @@ def test_calendar_truncation_capability_month_metadata_and_checked_boundaries() 
             time.lazy().select(col("t").dt().truncate("1mo")), _capabilities()
         )
     var datetime = fixture(DataType.datetime("ns"))
+    # Metal decides faults on the CPU, so it needs no fault-order boundary;
+    # a backend without that still refuses.
+    var headed = datetime.lazy().select(col("t").dt().truncate("1mo")).head(1)
+    var strict = _capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="terminal projections without head"):
-        _ = lower_rows(
-            datetime.lazy().select(col("t").dt().truncate("1mo")).head(1),
-            _capabilities(),
-        )
+        _ = lower_rows(headed, strict)
+    _ = lower_rows(headed, _capabilities())
 
 
 # requires: metal

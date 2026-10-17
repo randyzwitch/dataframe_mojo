@@ -112,11 +112,12 @@ def order_less(
             continue
         var an = _nan(aw, dtype)
         var bn = _nan(bw, dtype)
-        # Both directions place valid NaNs after non-NaNs. NaN payload and
-        # sign do not participate in ordering; later keys can still break ties.
-        if an != bn:
-            return not an
         var descending = code[unsafe_offset=4 * node + 2] != 0
+        # NaN is the largest value: after the numbers ascending, before them
+        # descending. NaN payload and sign do not participate in ordering;
+        # later keys can still break ties.
+        if an != bn:
+            return an if descending else not an
         var less = _word_less(bw, aw, dtype) if descending else _word_less(
             aw, bw, dtype
         )

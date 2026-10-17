@@ -25,9 +25,10 @@ the plan before execution:
   the footer statistics first and decodes only the row groups that can
   hold a match (see `parquet._pruned_row_groups`).
 
-Filters never move past a slice, unique, right/full join, or a group_by
-whose aggregates they read, because that would change which rows those
-operators see.
+Filters never move past a slice, unique, right/full join, a group_by
+whose aggregates they read, or a group_by_dynamic or rolling (as in
+Polars, whose predicate pushdown stops at dynamic and rolling group_bys),
+because that would change which rows those operators see.
 """
 from std.os import getenv
 from std.time import perf_counter_ns
@@ -87,6 +88,7 @@ from .expr import (
 )
 from .frame import concat
 from .sorted_range import sorted_window
+from .time_windows import negate_period
 from .value import AnyValue
 from .io.csv import CsvSchema, read_csv
 from .io.csv_reader import read_csv_explicit, read_csv_inferred
@@ -178,6 +180,21 @@ comptime UNNEST = 13
 comptime ASOF = 14
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
+# Wide to long (DataFrame.unpivot): `names` the value columns (every
+# non-index column when empty), `names2` the index columns and
+# `right_keys` the variable and value column names. A breaker: its rows
+# come out by value column, then input row, so it needs its whole input,
+# as Polars' unpivot is a map function over a materialized frame.
+comptime UNPIVOT = 20
+# Time windows (`DataFrame.group_by_dynamic` and `DataFrame.rolling`, then
+# `agg`). `names` holds the index column then the `by` keys, `names2` the
+# window settings (every, period, offset, closed, label) with their
+# defaults filled in as the eager methods fill them, `exprs` the
+# aggregations and `length` their batch size. Both read their whole
+# input in index order, so they run as pipeline breakers, and filters and
+# slices never move below them.
+comptime GROUP_BY_DYNAMIC = 28
+comptime ROLLING = 29
 # Row-order operators, each run by its eager DataFrame method on its whole
 # input in order (a pipeline breaker under streaming); filters, slices and
 # other row-changing rewrites do not cross them.
@@ -1853,6 +1870,244 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Replace a struct column with its fields; see DataFrame.unnest."""
         return self._push(_plan_node(UNNEST, text=column))
 
+    def unpivot(
+        self,
+        on: List[String] = List[String](),
+        index: List[String] = List[String](),
+        *,
+        variable_name: String = "variable",
+        value_name: String = "value",
+    ) -> Self:
+        """Wide to long: one row per (input row, `on` column), with the
+        same output and errors as DataFrame.unpivot. `on` defaults to every
+        non-index column. Filters and slices above it stay above it."""
+        return self._push(
+            _plan_node(
+                UNPIVOT,
+                names=on,
+                names2=index,
+                right_keys=[variable_name, value_name],
+            )
+        )
+
+    def _input_schema(self) raises -> DataFrame:
+        """This plan's output names and types with no rows, computed as
+        `collect_schema` computes them (every scan yields no rows), for
+        the methods below that choose columns by type or take every
+        column, as Polars expands their selectors against the input
+        schema."""
+        return self._execute(len(self._nodes) - 1, True).clear()
+
+    def fill_null(
+        self, value: String, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls in string columns with a string; see the Expr
+        overload."""
+        return self.fill_null(lit(value), subset)
+
+    def fill_null(
+        self, value: Expr, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls with a scalar value, choosing the columns as
+        DataFrame.fill_null does from this plan's schema: a with_columns of
+        `col(c).fill_null(value)` for each, as Polars' LazyFrame.fill_null
+        is a with_columns over the columns its dtype selector matches.
+        Unknown subset names raise here, while the plan is built."""
+        var fills = self._input_schema()._fill_null_exprs(value, subset)
+        if len(fills) == 0:
+            return self.copy()
+        return self.with_columns(fills)
+
+    def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
+        """Keep rows with no null in subset (default: every column), as a
+        filter on each column's `is_not_null`, as Polars builds it."""
+        var names = subset.copy()
+        if len(names) == 0:
+            names = self._input_schema().columns()
+        if len(names) == 0:
+            return self.copy()
+        var keep = col(names[0]).is_not_null()
+        for k in range(1, len(names)):
+            keep = keep & col(names[k]).is_not_null()
+        return self.filter(keep)
+
+    def null_count(self) raises -> Self:
+        """One row holding each column's null count as Int64, as
+        DataFrame.null_count: a select of `col(c).null_count()` per
+        column, as Polars builds it."""
+        var counts = List[Expr]()
+        for name in self._input_schema().columns():
+            counts.append(col(name).null_count())
+        return self.select_exprs(counts)
+
+    def n_unique(self, subset: List[String] = List[String]()) raises -> Self:
+        """One row, one Int64 column "n_unique": the number of distinct
+        rows on subset (default: every column), the value
+        DataFrame.n_unique returns. Built as the subset's unique rows
+        counted."""
+        var keys = subset.copy()
+        if len(keys) == 0:
+            keys = self._input_schema().columns()
+        if len(keys) == 0:
+            raise Error("n_unique requires at least one column")
+        return (
+            self.select(keys)
+            .unique()
+            .select(col(keys[0]).len().alias("n_unique"))
+        )
+
+    def is_duplicated(
+        self, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """One Boolean column "is_duplicated", true for every row whose key
+        on subset (default: every column) occurs more than once: the
+        Series DataFrame.is_duplicated returns, as a frame."""
+        return self._key_occurs(subset, "is_duplicated")
+
+    def is_unique(self, subset: List[String] = List[String]()) raises -> Self:
+        """One Boolean column "is_unique", true for every row whose key on
+        subset (default: every column) occurs exactly once: the Series
+        DataFrame.is_unique returns, as a frame."""
+        return self._key_occurs(subset, "is_unique")
+
+    def _key_occurs(self, subset: List[String], name: String) raises -> Self:
+        # Each row's key count is a row count over the key's partition
+        # (nulls are one key, as in DataFrame.is_duplicated).
+        var keys = subset.copy()
+        if len(keys) == 0:
+            keys = self._input_schema().columns()
+        if len(keys) == 0:
+            raise Error(name + " requires at least one column")
+        var occurs = col(keys[0]).len().over(keys)
+        var flag = occurs == lit(Int64(1))
+        if name == "is_duplicated":
+            flag = occurs > lit(Int64(1))
+        return self.select_exprs([flag.alias(name)])
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        group_by: List[String] = List[String](),
+    ) -> LazyTimeGroupBy:
+        """Group rows into calendar-aligned, possibly overlapping windows of
+        the index column; see DataFrame.group_by_dynamic.
+
+        The index must be sorted (within each `group_by` group) when the
+        plan runs. Filters and slices above the aggregation stay above it,
+        and its input is read in full before any window is formed.
+        """
+        return LazyTimeGroupBy(
+            self.copy(),
+            _plan_node(
+                GROUP_BY_DYNAMIC,
+                names=List[String]([index_column]) + group_by.copy(),
+                names2=[
+                    every,
+                    period.value() if period else every,
+                    offset.value() if offset else "0d",
+                    closed,
+                    label,
+                ],
+            ),
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: String,
+    ) -> LazyTimeGroupBy:
+        return self.group_by_dynamic(
+            index_column,
+            every,
+            period,
+            offset,
+            closed,
+            label,
+            List[String]([group_by]),
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: NoneType,
+    ) -> LazyTimeGroupBy:
+        return self.group_by_dynamic(
+            index_column, every, period, offset, closed, label, List[String]()
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        group_by: List[String] = List[String](),
+    ) -> LazyTimeGroupBy:
+        """Aggregate a duration window ending at each row's index value;
+        see DataFrame.rolling.
+
+        The index must be sorted (within each `group_by` group) when the
+        plan runs. Filters and slices above the aggregation stay above it,
+        and its input is read in full before any window is formed.
+        """
+        return LazyTimeGroupBy(
+            self.copy(),
+            _plan_node(
+                ROLLING,
+                names=List[String]([index_column]) + group_by.copy(),
+                names2=[
+                    String(""),
+                    period,
+                    offset.value() if offset else negate_period(period),
+                    closed,
+                    String("datapoint"),
+                ],
+            ),
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: String,
+    ) -> LazyTimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]([group_by])
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: NoneType,
+    ) -> LazyTimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]()
+        )
+
     def join_asof(
         self,
         other: Self,
@@ -2924,6 +3179,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 node.kind == AGG
                 or node.kind == UNIQUE
                 or node.kind == SORT
+                or _is_time_window(node.kind)
                 or _row_order_step(node.kind)
             ):
                 return True
@@ -4590,6 +4846,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return input.explode(node.names)
         if node.kind == UNNEST:
             return input.unnest(node.text)
+        if node.kind == UNPIVOT:
+            return input.unpivot(
+                node.names,
+                node.names2,
+                variable_name=node.right_keys[0],
+                value_name=node.right_keys[1],
+            )
+        if _is_time_window(node.kind):
+            return _run_time_window(node, input)
         if node.kind == TAIL:
             return input.tail(node.offset)
         if node.kind == REVERSE:
@@ -5796,19 +6061,41 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # Each relation's table rows before its filters: its columns'
             # distinct counts, as DuckDB takes them with no statistics.
             var domains = List[Float64](capacity=n)
+            var estimates = List[Int](capacity=n)
+            var tables = List[Int](capacity=n)
+            var runs = List[Int]()
             for r in range(n):
-                var table = self._spine_rows(relations[r])
-                var estimated = self._relation_estimate(relations[r])
-                if estimated < 0:
-                    var frame = self._execute(
-                        relations[r], False, streaming, batch_size
+                tables.append(self._spine_rows(relations[r]))
+                estimates.append(self._relation_estimate(relations[r]))
+                if estimates[r] < 0:
+                    runs.append(r)
+            # Relations that must run to be counted are independent
+            # pipelines: run them at once, as Polars and DuckDB run
+            # independent pipelines (`_prefetch_breakers`), not one after
+            # another on a crew their serial phases leave partly idle.
+            if len(runs) > 0:
+                var jobs = List[_SubplanJob](capacity=len(runs))
+                for r in runs:
+                    jobs.append(
+                        _SubplanJob(
+                            self.copy(), relations[r], streaming, batch_size
+                        )
                     )
-                    estimated = frame.height()
-                    self._frames.append(frame^)
+                if len(jobs) == 1:
+                    jobs[0].run()
+                else:
+                    run_jobs(jobs)
+                for k in range(len(runs)):
+                    var r = runs[k]
+                    estimates[r] = jobs[k].result.height()
+                    self._frames.append(jobs[k].result.copy())
                     self._schemas.append(Optional[CsvSchema]())
                     self._nodes[relations[r]] = _plan_node(
                         SCAN_FRAME, offset=len(self._frames) - 1
                     )
+            for r in range(n):
+                var table = tables[r]
+                var estimated = estimates[r]
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
             # Each key column's distinct count, where its relation's table
@@ -7087,7 +7374,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 reads.append(node.text)
             if node.kind == UNIQUE and len(node.names) == 0:
                 reads_all = True
-            if not reads_all:
+            if node.kind == UNPIVOT:
+                # Its output is the index columns and the `on` columns'
+                # values, whatever is read above it; with no `on`, every
+                # column is a value column.
+                reads_all = len(node.names) == 0
+                reads = node.names + node.names2.copy()
+            elif _is_time_window(node.kind):
+                # Only what the windows read, whatever is wanted above:
+                # their outputs are new columns.
+                var window_reads = _time_window_reads(node)
+                reads_all = not window_reads
+                if window_reads:
+                    reads = window_reads.take()
+            elif not reads_all:
                 if needed[i]:
                     for n in needed[i].value():
                         reads.append(n)
@@ -7256,6 +7556,47 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "UNNEST " + node.text
         elif node.kind == CONCAT:
             label = "CONCAT"
+        elif node.kind == UNPIVOT:
+            label = (
+                "UNPIVOT on "
+                + (_joined(node.names) if len(node.names) else "*")
+                + " index "
+                + _joined(node.names2)
+                + " as "
+                + _joined(node.right_keys)
+            )
+        elif node.kind == GROUP_BY_DYNAMIC:
+            label = (
+                "GROUP_BY_DYNAMIC "
+                + node.names[0]
+                + " every "
+                + node.names2[0]
+                + " period "
+                + node.names2[1]
+                + " offset "
+                + node.names2[2]
+                + " closed "
+                + node.names2[3]
+                + " label "
+                + node.names2[4]
+            )
+            if len(node.names) > 1:
+                label += " by " + _joined(List[String](node.names[1:]))
+            label += " AGG " + _joined(_output_names(node.exprs))
+        elif node.kind == ROLLING:
+            label = (
+                "ROLLING "
+                + node.names[0]
+                + " period "
+                + node.names2[1]
+                + " offset "
+                + node.names2[2]
+                + " closed "
+                + node.names2[3]
+            )
+            if len(node.names) > 1:
+                label += " by " + _joined(List[String](node.names[1:]))
+            label += " AGG " + _joined(_output_names(node.exprs))
         elif node.kind == TAIL:
             label = "TAIL " + String(node.offset)
         elif node.kind == REVERSE:
@@ -7619,6 +7960,48 @@ def _is_scan(kind: Int) -> Bool:
     return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
 
 
+def _is_time_window(kind: Int) -> Bool:
+    return kind == GROUP_BY_DYNAMIC or kind == ROLLING
+
+
+def _time_window_reads(node: PlanNode) -> Optional[List[String]]:
+    """The input columns a time window node reads: its index column, its
+    `by` keys and the columns its aggregations reference, as Polars'
+    projection pushdown keeps for a dynamic or rolling group_by. None
+    when an aggregation reads columns through a selector."""
+    var reads = node.names.copy()
+    for e in node.exprs:
+        var r = _references(e)
+        if not r:
+            return None
+        for n in r.value():
+            reads.append(n)
+    return reads^
+
+
+def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
+    """The eager `group_by_dynamic` or `rolling` aggregation a time window
+    node records, over its executed input."""
+    var by = List[String](node.names[1:])
+    if node.kind == ROLLING:
+        return input.rolling(
+            node.names[0],
+            node.names2[1],
+            Optional(node.names2[2]),
+            node.names2[3],
+            by,
+        ).agg(node.exprs, batch_size=node.length)
+    return input.group_by_dynamic(
+        node.names[0],
+        node.names2[0],
+        Optional(node.names2[1]),
+        Optional(node.names2[2]),
+        node.names2[3],
+        node.names2[4],
+        by,
+    ).agg(node.exprs, batch_size=node.length)
+
+
 def _text_hash(text: String) -> UInt64:
     """FNV-1a over the text's bytes."""
     var h = UInt64(0xCBF29CE484222325)
@@ -7785,6 +8168,25 @@ struct LazyGroupBy(Copyable):
 
     def agg(self, expr: Expr) -> LazyFrame:
         return self.agg([expr.copy()])
+
+
+@fieldwise_init
+struct LazyTimeGroupBy(Copyable):
+    """A pending lazy `group_by_dynamic` or `rolling`; finish it with agg."""
+
+    var _frame: LazyFrame
+    var _node: PlanNode
+
+    def agg(self, exprs: List[Expr], *, batch_size: Int = 1024) -> LazyFrame:
+        """One row per window: the `group_by` keys, the index column (the
+        window's label) and the aggregations; see TimeGroupBy.agg."""
+        var node = self._node.copy()
+        node.exprs = exprs.copy()
+        node.length = batch_size
+        return self._frame._push(node^)
+
+    def agg(self, expr: Expr, *, batch_size: Int = 1024) -> LazyFrame:
+        return self.agg([expr.copy()], batch_size=batch_size)
 
 
 def scan_csv(path: String) raises -> LazyFrame:

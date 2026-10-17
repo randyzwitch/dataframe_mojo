@@ -136,6 +136,7 @@ from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
 from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
+from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
@@ -154,7 +155,12 @@ from .temporal_descriptors import (
     binary_literal,
     cast_literal,
 )
-from .movement import filter_scan, filter_offsets, filter_gather
+from .movement import (
+    filter_scan,
+    filter_offsets,
+    filter_gather,
+    observe_slot,
+)
 from . import statistics, quantiles, decimal_descriptors
 from .program import Program, kind as _kind
 from .grouping import (
@@ -229,6 +235,7 @@ def capabilities() -> RowCapabilities:
         contiguous_window_reductions=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,
+        adjudicated_faults=True,
         extended_integers=True,
         mixed_types=True,
         row_extras=True,
@@ -722,7 +729,6 @@ def _stage_categories(
     mut words: List[UInt64],
 ) raises:
     """Stage certified original codes in HIGH without changing text LOW."""
-    var cells = len(words) // 2
     for field in fields:
         if not field.category:
             continue
@@ -1059,6 +1065,41 @@ def estimate_resources(
         while run_width < rows:
             passes += 1
             run_width *= 2
+        # Fault observation (accelerator/faults.mojo), as the executor does
+        # it: one launch per plain-region step or grouped output that can
+        # fault and one for reduction states, then a 4-byte zero upload, one
+        # wait and a 4-byte read.
+        var observed = False
+        if plan.ordered_mode == 0:
+            var kinds = List[Int64](capacity=len(plan.node_dtypes))
+            for dtype in plan.node_dtypes:
+                try:
+                    kinds.append(_kind(dtype))
+                except:
+                    kinds.append(0)
+            for step in plan.steps:
+                if step.grouped:
+                    for node in range(step.start, step.start + step.nodes):
+                        if plan.code[
+                            4 * node
+                        ] == ROW_GROUP_OUTPUT and _can_fault(
+                            plan.slot_dtypes[Int(plan.code[4 * node + 2])]
+                        ):
+                            launches = _checked_add(launches, 1)
+                            observed = True
+                elif not step.order and _step_can_fault(
+                    plan.code, kinds, step.start, step.nodes
+                ):
+                    launches = _checked_add(launches, 1)
+                    observed = True
+            if plan.reductions:
+                for output in plan.outputs:
+                    observed |= _can_fault(plan.slot_dtypes[output.slot])
+                launches = _checked_add(launches, Int(observed))
+        if observed:
+            upload = _checked_add(upload, 4)
+            waits = _checked_add(waits, 1)
+            download = _checked_add(download, 4)
         for step in plan.steps:
             if step.order or step.grouped:
                 # Includes all sort, dense/group scans, scatter and checked
@@ -1629,6 +1670,14 @@ def execute_plan(
     var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     var ordered_partials = Optional[DeviceBuffer[DType.uint32]]()
     var fault_groups = min(1024, max(1, (rows + 255) // 256))
+    # One word flags a fault in any value this region writes, before a
+    # filter, head or HAVING step can drop it (accelerator/faults.mojo).
+    var fault_host = List[UInt32](length=1, fill=0)
+    var fault_observed = False
+    var fault_zeroed = False
+    # Certificate regions observe their own faults in CPU order; plain
+    # regions flag every written fault (accelerator/faults.mojo).
+    var plain = plan.ordered_mode == 0
     if rows and cells:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
@@ -1638,6 +1687,9 @@ def execute_plan(
             )
             var device_valid = ctx.enqueue_create_buffer[DType.uint8](cells)
             var device_errors = ctx.enqueue_create_buffer[DType.uint32](cells)
+            # Zeroed by the first observation only, so a region that
+            # observes nothing moves no extra bytes.
+            var fault_word = ctx.enqueue_create_buffer[DType.uint32](1)
             if _quantile_indices(plan):
                 quantile_indices = ctx.enqueue_create_buffer[DType.uint32](rows)
             if resident_input:
@@ -1887,7 +1939,7 @@ def execute_plan(
                         downloaded += len(shape) * 4
                         waits += 1
                         if shape[1]:
-                            raise Error(
+                            raise data_fault(
                                 "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
                             )
                         var gathered_words = ctx.enqueue_create_buffer[
@@ -2050,6 +2102,32 @@ def execute_plan(
                         device_words = gathered_words^
                         device_valid = gathered_valid^
                         device_errors = gathered_errors^
+                        # A later filter (HAVING) can drop a failed group.
+                        for node in range(step.start, step.start + step.nodes):
+                            if (
+                                plain
+                                and code[4 * node] == ROW_GROUP_OUTPUT
+                                and _can_fault(
+                                    plan.slot_dtypes[Int(code[4 * node + 2])]
+                                )
+                            ):
+                                if not fault_zeroed:
+                                    ctx.enqueue_copy(
+                                        fault_word, fault_host.unsafe_ptr()
+                                    )
+                                    uploaded += 4
+                                    fault_zeroed = True
+                                ctx.enqueue_function[observe_slot](
+                                    device_errors.unsafe_ptr(),
+                                    fault_word.unsafe_ptr(),
+                                    UInt32(code[4 * node + 2]),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    grid_dim=(current_rows + 255) // 256,
+                                    block_dim=256,
+                                )
+                                submissions += 1
+                                fault_observed = True
                         continue
                     var header = Int(code[4 * step.start])
                     if step.order and (
@@ -2146,7 +2224,7 @@ def execute_plan(
                         waits += 1
                         for failure in host_failures:
                             if failure:
-                                raise Error(
+                                raise data_fault(
                                     "Mojo GPU window key failed: checked arithmetic overflow or strict cast failed"
                                 )
                         if header == ROW_RANK_KEY:
@@ -2264,19 +2342,19 @@ def execute_plan(
                             if is_duration:
                                 for block in range(blocks):
                                     if host_failures[4 * block]:
-                                        raise Error(
+                                        raise data_fault(
                                             "Mojo GPU time window index contains nulls"
                                         )
                                     if host_failures[4 * block + 1]:
-                                        raise Error(
+                                        raise data_fault(
                                             "Mojo GPU time window index is not sorted within its group"
                                         )
                                     if host_failures[4 * block + 2]:
-                                        raise Error(
+                                        raise data_fault(
                                             "Mojo GPU time window bounds overflow"
                                         )
                                     if host_failures[4 * block + 3]:
-                                        raise Error(
+                                        raise data_fault(
                                             "Mojo GPU duration window decimal precision overflow" if plan.slot_dtypes[
                                                 step.slot
                                             ].is_decimal() else "Mojo GPU duration window arithmetic overflow"
@@ -2284,7 +2362,7 @@ def execute_plan(
                             else:
                                 for failure in host_failures:
                                     if failure:
-                                        raise Error(
+                                        raise data_fault(
                                             "Mojo GPU cumulative or rolling window overflow or input expression failure"
                                         )
                         continue
@@ -2398,7 +2476,7 @@ def execute_plan(
                         waits += 1
                         for failure in host_failures:
                             if failure:
-                                raise Error(
+                                raise data_fault(
                                     "Mojo GPU sort key failed: checked arithmetic overflow or strict cast failed"
                                 )
                         device_words = gathered_words^
@@ -2605,7 +2683,7 @@ def execute_plan(
                         if fault[0]:
                             var category = ordered_faults.category(fault[0])
                             if ordered_precision and category != 8:
-                                raise Error(
+                                raise data_fault(
                                     "Mojo GPU narrow Decimal precision proof was violated"
                                 )
                             if iana_certified and category > 64:
@@ -2705,6 +2783,26 @@ def execute_plan(
                             block_dim=256,
                         )
                     submissions += 1
+                    if plain and _step_can_fault(
+                        code, types, step.start, step.nodes
+                    ):
+                        if not fault_zeroed:
+                            ctx.enqueue_copy(
+                                fault_word, fault_host.unsafe_ptr()
+                            )
+                            uploaded += 4
+                            fault_zeroed = True
+                        ctx.enqueue_function[observe_slot](
+                            device_errors.unsafe_ptr(),
+                            fault_word.unsafe_ptr(),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=(current_rows + 255) // 256,
+                            block_dim=256,
+                        )
+                        submissions += 1
+                        fault_observed = True
                     if step.filter:
                         var blocks = (current_rows + 255) // 256
                         var positions = ctx.enqueue_create_buffer[DType.uint32](
@@ -2749,7 +2847,7 @@ def execute_plan(
                         downloaded += len(shape) * 4
                         waits += 1
                         if shape[1]:
-                            raise Error(
+                            raise data_fault(
                                 "Mojo GPU filter predicate failed: checked arithmetic overflow or strict cast failed"
                             )
                         if shape[0] and step.gather_count:
@@ -2930,8 +3028,31 @@ def execute_plan(
                         block_dim=128,
                     )
                     submissions += 3
+                # A head(0) or later consumer can skip exporting a failed state.
+                for output in plan.outputs:
+                    if plain and _can_fault(plan.slot_dtypes[output.slot]):
+                        fault_observed = True
+                if fault_observed:
+                    if not fault_zeroed:
+                        ctx.enqueue_copy(fault_word, fault_host.unsafe_ptr())
+                        uploaded += 4
+                        fault_zeroed = True
+                    ctx.enqueue_function[observe_slot](
+                        result_errors.unsafe_ptr(),
+                        fault_word.unsafe_ptr(),
+                        UInt32(0),
+                        UInt32(outputs),
+                        UInt32(outputs),
+                        grid_dim=(outputs + 255) // 256,
+                        block_dim=256,
+                    )
+                    submissions += 1
                 scope.synchronize()
                 waits += 1
+                if fault_observed:
+                    _observe_faults(scope, fault_word)
+                    downloaded += 4
+                    waits += 1
                 resident_result = Table(
                     Matrix(
                         scope,
@@ -2951,6 +3072,10 @@ def execute_plan(
                 )
                 scope.synchronize()
                 waits += 1
+                if fault_observed:
+                    _observe_faults(scope, fault_word)
+                    downloaded += 4
+                    waits += 1
                 resident_result = Table(
                     Matrix(
                         scope,
@@ -3169,6 +3294,67 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
         return "ENGINE accel: " + String(error) + "\n"
 
 
+def _can_fault(dtype: DataType) -> Bool:
+    """Float and Boolean values never carry a new value fault."""
+    return not (dtype.is_float() or dtype == DataType.BOOL)
+
+
+def _step_can_fault(
+    code: List[Int64], types: List[Int64], start: Int, nodes: Int
+) -> Bool:
+    """Whether a row-program step can write a new value fault.
+
+    Float32/Float64/Bool arithmetic, data movement and Boolean logic never
+    fault. Any other node touching an integer, Decimal or temporal value may;
+    integer comparisons are counted too, which only costs one observation.
+    """
+    from dataframe.expr import WHEN, IS_NULL, IS_NOT_NULL, FILL_NULL, AND, OR
+    from dataframe.expr import NOT, XOR
+
+    for node in range(start, start + nodes):
+        var op = Int(code[4 * node])
+        if (
+            op == COL
+            or op == LIT_INT
+            or op == LIT_FLOAT
+            or op == LIT_BOOL
+            or op == LIT_NULL
+            or op == WHEN
+            or op == IS_NULL
+            or op == IS_NOT_NULL
+            or op == FILL_NULL
+            or op == AND
+            or op == OR
+            or op == NOT
+            or op == XOR
+        ):
+            continue
+        var kinds = List[Int64]([types[node]])
+        for operand in [Int(code[4 * node + 1]), Int(code[4 * node + 2])]:
+            if operand >= 0 and operand < nodes:
+                kinds.append(types[start + operand])
+        for kind in kinds:
+            # 1 Float32, 4 Bool, 11 Float64 (program.kind).
+            if kind != 1 and kind != 4 and kind != 11:
+                return True
+    return False
+
+
+def _observe_faults(
+    scope: Scope, fault_word: DeviceBuffer[DType.uint32]
+) raises:
+    """Raise a data fault when any value the region wrote failed.
+
+    The CPU decides the query (accelerator/faults.mojo): it may never have
+    evaluated a row that a head, filter or HAVING step dropped here.
+    """
+    # raise_value_error names the fault's category; all are data faults.
+    raise_value_error(
+        scope.read_control(fault_word)[0],
+        "Mojo GPU arithmetic overflow or strict cast failed",
+    )
+
+
 def _raise_iana(
     plan: RowPlan, start: Int, nodes: Int, token: UInt32, detail: List[UInt64]
 ) raises:
@@ -3191,16 +3377,16 @@ def _raise_iana(
     if status == 7:
         for at in range(len(plan.iana_descriptors)):
             if plan.iana_descriptors[at] == base:
-                raise Error(plan.iana_diagnostics[at])
+                raise data_fault(plan.iana_diagnostics[at])
         raise Error("IANA interval diagnostic is missing")
     if status == 4:
-        raise Error("temporal value overflows Int64")
+        raise data_fault("temporal value overflows Int64")
     if status == 1:
-        raise Error(
+        raise data_fault(
             "could not localize a shifted datetime to time zone '" + name + "'"
         )
     if status == 2 or status == 3:
-        raise Error(
+        raise data_fault(
             "a shifted datetime is "
             + ("non-existent" if status == 2 else "ambiguous")
             + " in time zone '"
@@ -3209,7 +3395,7 @@ def _raise_iana(
         )
     var wall = _naive_text(detail[0].cast[DType.int64](), dtype)
     if status == 5:
-        raise Error(
+        raise data_fault(
             "datetime '"
             + wall
             + "' is non-existent in time zone '"
@@ -3217,7 +3403,7 @@ def _raise_iana(
             + "'; use non_existent='null' to return null instead"
         )
     if status == 6:
-        raise Error(
+        raise data_fault(
             "datetime '"
             + wall
             + "' is ambiguous in time zone '"

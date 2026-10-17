@@ -2,6 +2,7 @@
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, Series, Expr, col, lit, when
 from dataframe.metal import MetalRuntime
+from tests.support.metal_outcomes import same_outcome
 from tests.support.coverage_compare import assert_frame
 
 
@@ -155,6 +156,5 @@ def test_mojo_gpu_integer_operator_endpoints_conditional_errors_and_reuse() rais
             ]
         )
     )
-    with assert_raises(contains="strict cast failed"):
-        _ = grouped_fault.collect(accelerator=runtime)
+    same_outcome(grouped_fault)
     assert_frame(selected.collect(accelerator=runtime), actual)

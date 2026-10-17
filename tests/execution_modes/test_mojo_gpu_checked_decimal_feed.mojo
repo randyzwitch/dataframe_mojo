@@ -73,8 +73,12 @@ def test_checked_decimal_feed_metadata_retains_eager_boundary_and_signature() ra
         .head(0)
         ._with_accelerator_settings(False, False, 17)
     )
+    var strict = capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="checked decimal arithmetic"):
-        _ = lower_join_dag(unsupported, capabilities())
+        _ = lower_join_dag(unsupported, strict)
+    # Metal decides faults on the CPU and needs no ranked feed proof.
+    _ = lower_join_dag(unsupported, capabilities())
 
 
 # requires: metal

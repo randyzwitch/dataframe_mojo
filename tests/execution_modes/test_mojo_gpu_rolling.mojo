@@ -14,6 +14,7 @@ from dataframe import (
 )
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.metal import MetalRuntime
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.execution_modes.test_mojo_gpu_ordering import _layout
@@ -337,9 +338,9 @@ def test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association() 
 # requires: mojo_gpu
 def test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery() raises:
     var runtime = MetalRuntime()
+    # Each fault is decided on the CPU, which raises its own message.
     for pair in _failure_cases():
-        with assert_raises(contains=pair[1]):
-            _ = pair[0].collect(accelerator=runtime, engine="accel")
+        same_outcome(pair[0])
     var source = coordinate_source(35)
     var query = (
         source.lazy()
