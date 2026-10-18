@@ -12,6 +12,22 @@ Every column, in schema order.
 def all() -> Expr
 ```
 
+## `all_horizontal`
+
+Kleene AND across the inputs in each row: false if any is false, else null if any is null, else true. Numeric inputs read nonzero as true. A selector matching no columns gives a literal true.
+
+```mojo
+def all_horizontal(exprs: List[Expr]) -> Expr
+```
+
+## `any_horizontal`
+
+Kleene OR across the inputs in each row: true if any is true, else null if any is null, else false. Numeric inputs read nonzero as true. A selector matching no columns gives a literal false.
+
+```mojo
+def any_horizontal(exprs: List[Expr]) -> Expr
+```
+
 ## `AnyValue`
 
 One nullable cell of a supported dtype.
@@ -1281,6 +1297,30 @@ def lit(value: Bool) -> Expr
 def lit(value: String) -> Expr
 ```
 
+## `max_horizontal`
+
+Greatest input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
+
+```mojo
+def max_horizontal(exprs: List[Expr]) -> Expr
+```
+
+## `mean_horizontal`
+
+Mean of the inputs in each row: Float32 when their common type is Float32, otherwise Float64. With ignore_nulls the mean is over the row's non-null values, null when there are none; without it any null makes the row null.
+
+```mojo
+def mean_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
+```
+
+## `min_horizontal`
+
+Least input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
+
+```mojo
+def min_horizontal(exprs: List[Expr]) -> Expr
+```
+
 ## `nth`
 
 The column at a position; negative positions count from the end.
@@ -1675,6 +1715,14 @@ A window onto named child series of equal length and a validity.
 - `def equals(self, other: Self) -> Bool`
 - `def validity(self) -> List[Bool]`
 - `def unsafe_validity(self) -> Int`
+
+## `sum_horizontal`
+
+Sum of the inputs in each row, named after the first input.
+
+```mojo
+def sum_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
+```
 
 ## `Then`
 

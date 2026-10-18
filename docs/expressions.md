@@ -110,7 +110,10 @@ the exact sum so that only the final conversion rounds.
 (negative counts from the end), `first()`, and `last()` select columns. Any
 operation on a selector applies to each matched column: before binding, the
 expression expands into one expression per match, in schema order for `all`,
-`exclude`, and `by_dtype`, and in the listed order for `col([...])`. Expansion
+`exclude`, and `by_dtype`, and in the listed order for `col([...])`. The
+exception is a selector among the inputs of a horizontal reduction
+(`sum_horizontal([by_dtype(["int64"])])`): it expands into more inputs of
+that one expression, as in Polars. Expansion
 happens for `select`, `select_exprs`, `with_columns`, `agg`, and `group_by`
 key expressions; `filter` requires exactly one match. An empty expansion adds
 no columns.
@@ -362,6 +365,61 @@ storage alike; stripped affixes and split fields are views into the input's
 buffers rather than copies, and a categorical input runs each function once
 per dictionary value when it has few values. The accelerator backends run none of these and leave
 them to the CPU.
+
+### Horizontal reductions
+
+`sum_horizontal`, `min_horizontal`, `max_horizontal`, `mean_horizontal`,
+`any_horizontal` and `all_horizontal` take a list of expressions and reduce
+across them within each row, as Polars' functions of the same names do
+(DuckDB's `greatest` and `least` are `max_horizontal` and `min_horizontal`).
+The result is named after the first input. Selectors among the inputs expand
+into more inputs: `sum_horizontal([all()])` adds every column of a row.
+Inputs may be columns, literals or other expressions, including aggregates
+inside `group_by().agg`; one-row inputs broadcast.
+
+```mojo
+frame.with_columns(
+    [
+        sum_horizontal([col("q1"), col("q2"), col("q3")]).alias("total"),
+        max_horizontal([col("shipped"), col("returned")]).alias("latest"),
+        any_horizontal([by_dtype(["bool"])]).alias("flagged"),
+    ]
+)
+```
+
+Unlike the binary operators, these functions cast their inputs to a common
+type first: Polars' supertype for integers, floats and Bool (Int8 with
+UInt8 is Int16, Int32 with Float32 is Float64, Int64 with UInt64 is
+Float64), and DuckDB's for decimals (an integer meeting a decimal becomes a
+decimal holding its digits: Int64 with Decimal(10, 2) is Decimal(21, 2);
+a decimal meeting a float is Float64). An untyped number adopts the other
+inputs' type. Other combinations, such as a String with an integer, raise.
+
+| Function | Result | Nulls |
+|---|---|---|
+| `sum_horizontal(exprs, ignore_nulls=True)` | common type; UInt32 for all-Bool inputs | with `ignore_nulls` a null counts as zero, so a row of nulls sums to 0; without it any null makes the row null |
+| `mean_horizontal(exprs, ignore_nulls=True)` | Float32 when the common type is Float32, else Float64 | with `ignore_nulls` the mean of the row's non-null values, null when there are none; without it any null makes the row null |
+| `min_horizontal(exprs)`, `max_horizontal(exprs)` | common type (numeric, Bool, String, temporal) | nulls are skipped; a row of nulls is null |
+| `any_horizontal(exprs)`, `all_horizontal(exprs)` | Bool | Kleene OR and AND, as `\|` and `&` are; numeric inputs read nonzero as true |
+
+Integer sums keep `+`'s overflow check and raise where Polars wraps. A
+decimal sum has the type DuckDB gives the same chain of `+` (one more
+integer digit per addition, up to 38). NaN propagates through sums and
+means; `min_horizontal` and `max_horizontal` skip it, as Polars does, so
+the result is NaN only when a row has nothing else. DuckDB's `greatest`
+treats NaN as the largest value instead. A selector that matches no columns
+leaves `any_horizontal` false and `all_horizontal` true and is an error for
+the others. As filters, `any_horizontal` and `all_horizontal` keep the rows
+that are true.
+
+Each function is one expression node. Its inputs are evaluated once, cast
+to the common type, and reduced pairwise as Polars does: Float sums and
+means, and numeric `min`/`max`, accumulate into one output buffer a SIMD
+vector at a time; integer and decimal sums fill nulls with zero and add
+with the `+` kernel; `any`/`all` run the Kleene bitmap kernels. No
+intermediate column is kept per pair of inputs for float sums, means or
+`min`/`max`. Accelerators run none of them yet: a plan that uses one runs
+on the CPU.
 
 ### Conditionals
 

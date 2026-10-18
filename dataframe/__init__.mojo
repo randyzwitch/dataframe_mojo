@@ -23,6 +23,8 @@ from .expr import (
     DtNamespace,
     ListNamespace,
     all,
+    all_horizontal,
+    any_horizontal,
     as_struct,
     by_dtype,
     exclude,
@@ -38,7 +40,11 @@ from .expr import (
     concat_str,
     arctan2,
     lit,
+    max_horizontal,
+    mean_horizontal,
+    min_horizontal,
     null,
+    sum_horizontal,
     when,
 )
 from .io.arrow import (
