@@ -814,9 +814,9 @@ def test_text_function_argument_errors() raises:
             col("i").str().to_titlecase(),
             col("i").str().strip_prefix("a"),
             col("i").str().split_exact(" ", 1),
-            # Regex syntax needs literal=True until #219.
-            col("s").str().find("a.b"),
-            col("s").str().count_matches("[a]"),
+            # Invalid regular expressions.
+            col("s").str().find("a(b"),
+            col("s").str().count_matches("[a"),
             col("s").str().contains_any(List[String]()),
             col("s").str().replace_many(List[String](), List[String]()),
             col("s").str().replace_many(["a"], ["x", "y"]),
