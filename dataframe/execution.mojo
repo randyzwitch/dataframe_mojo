@@ -63,6 +63,8 @@ from .expr import (
     CUT,
     is_binary,
     is_unary,
+    is_math,
+    ARCTAN2,
     STR_CONCAT,
     CAST,
     OVER,
@@ -85,7 +87,11 @@ from .expr import (
     STRUCT_FIELD,
     struct_pack_children,
     struct_pack_names,
+    HORIZONTAL,
+    HORIZONTAL_ARGS,
+    horizontal_inputs,
 )
+from .horizontal import horizontal
 from .str_kernels import string_op, concat_strings
 from .text_functions import text_function
 from .expr_kernels import integer_is_in
@@ -107,11 +113,23 @@ from .window import window_op, interpolate_by_op, rolling_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
-from .column import Column, _copy_validity, _count_valid, _validity_at
+from .column import (
+    Column,
+    _append_bits,
+    _copy_validity,
+    _count_valid,
+)
 from .string_column import StringColumn, StringBuilder
 from .string_predicates import _flip
 from .series import Series
-from .expr_kernels import binary, unary, choose, fit_mask
+from .expr_kernels import (
+    binary,
+    unary,
+    choose,
+    fit_mask,
+    math_unary,
+    arctan2_series,
+)
 from .aggregate import Reducer, _sum_bools
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
@@ -327,6 +345,15 @@ def _binary_op[
     raise Error("Unsupported binary expression node")
 
 
+def _logical(values: Series, dtype: DataType) raises -> Series:
+    """A kernel's output under its bound decimal type: decimal kernels tag
+    their results with the physical storage type, and a cast to Float64
+    must read the scale."""
+    if dtype.is_decimal() and values.dtype() != dtype:
+        return values.with_dtype(dtype)
+    return values.copy()
+
+
 def _unary_op[
     width: Int
 ](op: Int, input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
@@ -407,6 +434,12 @@ def _eval[
         return _pack_struct[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
         )
+    if node.op == HORIZONTAL:
+        return _horizontal[width](
+            bound, columns, aggregates, index, offset, length, grouped, mask
+        )
+    if node.op == HORIZONTAL_ARGS:
+        raise Error("horizontal inputs are evaluated by their reduction")
     if bound.fusible[index] and node.left >= 0:
         return fused[width](bound, columns, index, offset, length)
     if (
@@ -473,12 +506,22 @@ def _eval[
     if is_nested_op(node.op):
         return nested_op(node, left, bound.dtypes[node.left])
     if node.right < 0:
+        if is_math(node.op):
+            return math_unary[width](
+                node.op, _logical(left, bound.dtypes[node.left]), node.floating
+            )
         return _unary_op[width](node.op, left, node.integer, mask)
     var right = _eval[width](
         bound, columns, aggregates, node.right, offset, length, grouped, mask
     )
     if node.op == STR_CONCAT:
         return concat_strings(left, right, node.text, node.integer == 1)
+    if node.op == ARCTAN2:
+        return arctan2_series(
+            _logical(left, bound.dtypes[node.left]),
+            _logical(right, bound.dtypes[node.right]),
+            bound.dtypes[index],
+        )
     var left_type = bound.dtypes[node.left]
     var right_type = bound.dtypes[node.right]
     if (left_type.is_temporal() or right_type.is_temporal()) and (
@@ -541,6 +584,45 @@ def _pack_struct[
             value = value.with_dtype(bound.dtypes[children[k]])
         fields.append(value.renamed(names[k]))
     return Series("", StructColumn(fields^))
+
+
+def _horizontal[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    mask: List[Bool],
+) raises -> Series:
+    """Evaluate a horizontal reduction's inputs and reduce them row-wise
+    (see horizontal.mojo); one-row inputs broadcast."""
+    ref node = bound.expr._nodes[index]
+    var inputs = List[Series]()
+    for child in horizontal_inputs(bound.expr._nodes, index):
+        var value = _eval[width](
+            bound, columns, aggregates, child, offset, length, grouped, mask
+        )
+        # Kernel outputs carry physical tags; restore the bound logical type.
+        if value.dtype() != bound.dtypes[child]:
+            value = value.with_dtype(bound.dtypes[child])
+        inputs.append(value^)
+    var result = horizontal(
+        Int(node.integer),
+        node.min_count != 0,
+        inputs^,
+        bound.dtypes[node.left],
+        bound.dtypes[index],
+        offset,
+        length,
+        mask,
+    )
+    if result.dtype() != bound.dtypes[index]:
+        result = result.with_dtype(bound.dtypes[index])
+    return result^
 
 
 def _implode[
@@ -811,43 +893,47 @@ def _and_validity(
 ) -> List[UInt8]:
     """A validity bitmap over rows [base, base + size) of a column: the
     column's own validity (`bits`, empty for none) and the predicate's
-    true-and-valid bits together. Whole bytes when every bitmap starts on
-    a byte boundary, which batch offsets do; bit by bit otherwise."""
-    var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
-    var packed = out.unsafe_ptr()
+    true-and-valid bits together, a byte of rows at a time whatever bit
+    each bitmap starts on (a morsel's column may start mid-byte), and
+    shifted into place once when the column's rows do."""
     var data = flags._data[].unsafe_ptr()
+    var data_bytes = len(flags._data[])
     var flag_bits = flags._bits[].unsafe_ptr()
-    var flag_nulls = len(flags._bits[]) > 0
+    var flag_bytes = len(flags._bits[])
     var own = bits.unsafe_ptr()
-    var own_nulls = len(bits) > 0
+    var own_bytes = len(bits)
     var flag_offset = flags._offset
-    if flag_offset % 8 == 0 and base % 8 == 0:
-        var first = base // 8
-        var flag_first = flag_offset // 8
-        var whole = size // 8
-        for b in range(whole):
-            var byte = data[unsafe_offset=flag_first + b]
-            if flag_nulls:
-                byte &= flag_bits[unsafe_offset=flag_first + b]
-            if own_nulls:
-                byte &= own[unsafe_offset=first + b]
-            packed[unsafe_offset=first + b] = byte
-        for row in range(whole * 8, size):
-            var keep = flags._get(row) and flags._valid(row)
-            if own_nulls:
-                keep = keep and _validity_at(own, base + row)
-            if keep:
-                var at = base + row
-                packed[unsafe_offset=at >> 3] |= UInt8(1) << UInt8(at & 7)
+    var bytes = (size + 7) // 8
+    var aligned = base % 8 == 0
+    var out = List[UInt8](
+        length=(base + size + 7) // 8 if aligned else bytes, fill=0
+    )
+    var packed = out.unsafe_ptr().unsafe_offset(base // 8 if aligned else 0)
+    for b in range(bytes):
+        var byte = _byte_from(data, data_bytes, flag_offset + 8 * b)
+        if flag_bytes > 0:
+            byte &= _byte_from(flag_bits, flag_bytes, flag_offset + 8 * b)
+        if own_bytes > 0:
+            byte &= _byte_from(own, own_bytes, base + 8 * b)
+        packed[unsafe_offset=b] = byte
+    if aligned:
         return out^
-    for row in range(size):
-        var keep = flags._get(row) and flags._valid(row)
-        if own_nulls:
-            keep = keep and _validity_at(own, base + row)
-        if keep:
-            var at = base + row
-            packed[unsafe_offset=at >> 3] |= UInt8(1) << UInt8(at & 7)
-    return out^
+    var placed = List[UInt8](length=(base + 7) // 8, fill=0)
+    _append_bits(placed, base, out, 0, size)
+    return placed^
+
+
+@always_inline
+def _byte_from(bits: Pointer[UInt8, _], bytes: Int, bit: Int) -> UInt8:
+    """Bits [bit, bit + 8) of a bitmap of `bytes` bytes as one byte, LSB
+    first; bits past its end read as 0."""
+    var at = bit >> 3
+    var shift = bit & 7
+    var low = bits[unsafe_offset=at]
+    if shift == 0:
+        return low
+    var high = bits[unsafe_offset=at + 1] if at + 1 < bytes else UInt8(0)
+    return (low >> UInt8(shift)) | (high << UInt8(8 - shift))
 
 
 def _conditional[
@@ -2006,6 +2092,8 @@ def _row_wise(op: Int) -> Bool:
         or op == CUT
         or is_dt_op(op)
         or is_nested_op(op)
+        or op == HORIZONTAL
+        or op == HORIZONTAL_ARGS
     )
 
 
@@ -2926,8 +3014,60 @@ def evaluate[
             var done = whole.take()
             done._name = bound.expr._name
             return done^
-    var result = _output_seed(bound, columns, states, root)
     var workers = worker_count(size) if bound.shape() == ROWS else 1
+    if (
+        bound.shape() == ROWS
+        and not grouped
+        and not bound.dtypes[root].is_categorical()
+        and _null_otherwise(bound, root)
+    ):
+        var masked = _whole_masked_branch[width](
+            bound,
+            columns,
+            prepared_columns,
+            states,
+            root,
+            size,
+            batch_size,
+            workers,
+        )
+        if masked:
+            var done = masked.take()
+            done._name = bound.expr._name
+            return done^
+    var result = _rows[width](
+        bound,
+        columns,
+        prepared_columns,
+        states,
+        root,
+        size,
+        batch_size,
+        grouped,
+        workers,
+    )
+    if bound.dtypes[root].is_categorical():
+        result = encode(result)
+    result._name = bound.expr._name
+    return result^
+
+
+def _rows[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    prepared_columns: List[Series],
+    states: List[Series],
+    index: Int,
+    size: Int,
+    batch_size: Int,
+    grouped: Bool,
+    workers: Int,
+) raises -> Series:
+    """Node `index` over `size` rows, batch by batch, on `workers` workers
+    when more than one."""
+    var result = _output_seed(bound, columns, states, index)
     if workers <= 1:
         result._reserve_rows(size, 0)
         for offset in range(0, size, batch_size):
@@ -2935,41 +3075,110 @@ def evaluate[
                 bound,
                 prepared_columns,
                 states,
-                root,
+                index,
                 offset,
                 min(batch_size, size - offset),
                 grouped,
             )
-            if bound.dtypes[root].is_struct() and len(result) == 0:
+            if bound.dtypes[index].is_struct() and len(result) == 0:
                 result = chunk^
             else:
                 result._append_series(chunk)
-    else:
-        # Row-parallel evaluation (#5): each worker evaluates the batches of
-        # one contiguous partition into a private series; pieces are joined
-        # in partition order. Precomputed states are shared read-only, and a
-        # worker error discards every piece (no partial result escapes).
-        var bounds = partitions(size, workers, batch_size)
-        var jobs = List[_RowsJob[width]](capacity=workers)
-        for w in range(workers):
-            jobs.append(
-                _RowsJob[width](
-                    bound,
-                    prepared_columns,
-                    states,
-                    root,
-                    bounds[w],
-                    bounds[w + 1],
-                    batch_size,
-                    grouped,
-                )
+        return result^
+    # Row-parallel evaluation (#5): each worker evaluates the batches of
+    # one contiguous partition into a private series; pieces are joined
+    # in partition order. Precomputed states are shared read-only, and a
+    # worker error discards every piece (no partial result escapes).
+    var bounds = partitions(size, workers, batch_size)
+    var jobs = List[_RowsJob[width]](capacity=workers)
+    for w in range(workers):
+        jobs.append(
+            _RowsJob[width](
+                bound,
+                prepared_columns,
+                states,
+                index,
+                bounds[w],
+                bounds[w + 1],
+                batch_size,
+                grouped,
             )
-        run_jobs(jobs)
-        var parts = List[Series](capacity=len(jobs))
-        while len(jobs) > 0:
-            parts.append(jobs.pop(0).into_result())
-        result = Series._from_chunks(parts^)
-    if bound.dtypes[root].is_categorical():
-        result = encode(result)
-    result._name = bound.expr._name
-    return result^
+        )
+    run_jobs(jobs)
+    var parts = List[Series](capacity=len(jobs))
+    while len(jobs) > 0:
+        parts.append(jobs.pop(0).into_result())
+    return Series._from_chunks(parts^)
+
+
+def _whole_masked_branch[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    prepared_columns: List[Series],
+    states: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+    workers: Int,
+) raises -> Optional[Series]:
+    """`when(c).then(x)` with null other rows over every row, when `x` is a
+    whole numeric column: `x`'s values as they are, under a validity that
+    adds the predicate's, as Polars' `zip_with` does when the other side
+    is a null scalar (`combine_validities_and`), rather than its values
+    copied batch by batch into a new column (TPC-DS q2's seven weekday
+    sums copied their input seven times a morsel, 14% of the query). Only
+    the predicate is evaluated in batches. None otherwise."""
+    ref node = bound.expr._nodes[index]
+    if (
+        node.left < 0
+        or node.right < 0
+        or bound.shapes[node.left] != ROWS
+        or bound.dtypes[node.right] != bound.dtypes[index]
+    ):
+        return None
+    var whole = _whole(
+        bound, prepared_columns, states, node.right, height, False
+    )
+    if not whole:
+        return None
+    var then = whole.take()
+    if then.is_chunked() or len(then) != height:
+        return None
+    var numeric = then._data.isa[Column[Int128]]()
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if then._data.isa[Column[Scalar[D]]]():
+            numeric = True
+    if not numeric:
+        return None
+    var predicate = _rows[width](
+        bound,
+        columns,
+        prepared_columns,
+        states,
+        node.left,
+        height,
+        batch_size,
+        False,
+        workers,
+    )
+    if predicate.is_chunked():
+        predicate = predicate.rechunk()
+    if len(predicate) != height or not predicate._data.isa[BoolColumn]():
+        return None
+    ref flags = predicate._data[BoolColumn]
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if then._data.isa[Column[Scalar[D]]]():
+            var masked = then._data[Column[Scalar[D]]].copy()
+            masked._bits = ArcPointer(
+                _and_validity(flags, masked._bits[], masked._offset, height)
+            )
+            return Series("", masked^).with_dtype(then.dtype())
+    var masked = then._data[Column[Int128]].copy()
+    masked._bits = ArcPointer(
+        _and_validity(flags, masked._bits[], masked._offset, height)
+    )
+    return Series("", masked^).with_dtype(then.dtype())
