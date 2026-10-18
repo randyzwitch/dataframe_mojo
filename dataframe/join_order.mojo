@@ -16,9 +16,14 @@ table divides by the whole table and keeps its share of the rows. Where a
 loaded table keeps distinct-count statistics (`distinct_statistics`,
 DuckDB's HyperLogLog per column), a set's domain is instead the largest
 count among its columns, and each edge with such a domain left over once
-the set is connected adds one to the denominator's multiplier. A plan's
-cost is the sum of the estimated rows of every join it makes
-(`CostModel::ComputeCost`).
+the set is connected adds one to the denominator's multiplier. A filter
+between joins comparing a column of one relation with a column of another
+is an edge too (`FilterEdge`, DuckDB's `CreateHyperGraphEdges`): its
+columns form an equivalence set like key columns, and where it is the
+edge that connects two components it divides by its domain (an equality)
+or by the domain to the power 2/3 (any other comparison); met once they
+are connected, it counts as any unused edge does. A plan's cost is the
+sum of the estimated rows of every join it makes (`CostModel::ComputeCost`).
 
 Below `EXACT_RELATIONS` relations every connected split of every connected
 set is tried (dynamic programming over subsets, as DPhyp enumerates them);
@@ -43,6 +48,22 @@ struct JoinEdge(Copyable, Movable):
 
 
 @fieldwise_init
+struct FilterEdge(Copyable, Movable):
+    """A filter between joins comparing column `a_column` of relation `a`
+    with `b_column` of relation `b`: DuckDB makes it an edge of the join
+    graph (`CreateHyperGraphEdges`) and estimates it as a join condition
+    (`CalculateUpdatedDenom`), an equality dividing by its total domain and
+    any other comparison by that domain to the power 2/3. It holds no join
+    keys: the filter runs once its relations are joined."""
+
+    var a: Int
+    var b: Int
+    var a_column: String
+    var b_column: String
+    var equal: Bool
+
+
+@fieldwise_init
 struct JoinTree(Copyable, Movable):
     """The chosen plan: entries 0 .. n-1 are the relations; each later
     entry joins entries `left[i]` and `right[i]` over relation set
@@ -57,11 +78,12 @@ struct JoinTree(Copyable, Movable):
 struct JoinGraph(Movable):
     var rows: List[Float64]
     var edges: List[JoinEdge]
-    # Each edge's total domain.
+    var filters: List[FilterEdge]
+    # Each edge's total domain, then each filter's.
     var tdom: List[Float64]
     var estimates: Dict[Int, Float64]
-    # Whether each edge's total domain is a distinct count (DuckDB's
-    # `has_distinct_count_hll`) rather than table rows.
+    # Whether each edge's (then filter's) total domain is a distinct count
+    # (DuckDB's `has_distinct_count_hll`) rather than table rows.
     var counted: List[Bool]
 
     def __init__(
@@ -70,14 +92,16 @@ struct JoinGraph(Movable):
         domains: List[Float64],
         edges: List[JoinEdge],
         distinct: Dict[String, Float64] = Dict[String, Float64](),
+        filters: List[FilterEdge] = List[FilterEdge](),
     ) raises:
         self.counted = List[Bool]()
         self.rows = rows.copy()
         self.edges = edges.copy()
+        self.filters = filters.copy()
         self.tdom = List[Float64]()
         self.estimates = Dict[Int, Float64]()
         # Equivalence sets of columns, by (relation, name), through each
-        # key pair (`InitEquivalentRelations`).
+        # key pair and filter (`InitEquivalentRelations`).
         var ids = Dict[String, Int]()
         var parent = List[Int]()
 
@@ -97,36 +121,39 @@ struct JoinGraph(Movable):
             parent.append(id)
             return id
 
-        var pairs = List[Tuple[Int, Int]]()
+        # Every compared pair: the edges' key pairs, then the filters'.
+        var compared = List[Tuple[Int, String, Int, String]]()
         for e in self.edges:
             for i in range(len(e.a_keys)):
-                var x = id_of(ids, parent, String(e.a) + "/" + e.a_keys[i])
-                var y = id_of(ids, parent, String(e.b) + "/" + e.b_keys[i])
-                pairs.append((x, y))
-                var rx = find(parent, x)
-                var ry = find(parent, y)
-                if rx != ry:
-                    parent[rx] = ry
+                compared.append((e.a, e.a_keys[i], e.b, e.b_keys[i]))
+        for f in self.filters:
+            compared.append((f.a, f.a_column, f.b, f.b_column))
+        for pair in compared:
+            var x = id_of(ids, parent, String(pair[0]) + "/" + pair[1])
+            var y = id_of(ids, parent, String(pair[2]) + "/" + pair[3])
+            var rx = find(parent, x)
+            var ry = find(parent, y)
+            if rx != ry:
+                parent[rx] = ry
         # A set's total domain (`UpdateTotalDomains`): the largest distinct
         # count among its columns where a table keeps statistics
         # (`distinct`, by "relation/column"), else the fewest table rows
         # (`domains`) of any relation holding one of its columns.
         var domain = Dict[Int, Float64]()
         var counted = Dict[Int, Float64]()
-        for e in self.edges:
-            for i in range(len(e.a_keys)):
-                for side in range(2):
-                    var rel = e.a if side == 0 else e.b
-                    var name = e.a_keys[i] if side == 0 else e.b_keys[i]
-                    var key = String(rel) + "/" + name
-                    var root = find(parent, ids[key])
-                    if key in distinct:
-                        var d = max(distinct[key], 1.0)
-                        if root not in counted or d > counted[root]:
-                            counted[root] = d
-                    var r = max(domains[rel], 1.0)
-                    if root not in domain or r < domain[root]:
-                        domain[root] = r
+        for pair in compared:
+            for side in range(2):
+                var rel = pair[0] if side == 0 else pair[2]
+                var name = pair[1] if side == 0 else pair[3]
+                var key = String(rel) + "/" + name
+                var root = find(parent, ids[key])
+                if key in distinct:
+                    var d = max(distinct[key], 1.0)
+                    if root not in counted or d > counted[root]:
+                        counted[root] = d
+                var r = max(domains[rel], 1.0)
+                if root not in domain or r < domain[root]:
+                    domain[root] = r
         for root in counted.keys():
             domain[root] = counted[root]
         # An edge of several key pairs merges its relations once, at the
@@ -143,6 +170,10 @@ struct JoinGraph(Movable):
                     from_count = root in counted
             self.tdom.append(best)
             self.counted.append(from_count)
+        for f in self.filters:
+            var root = find(parent, ids[String(f.a) + "/" + f.a_column])
+            self.tdom.append(domain[root])
+            self.counted.append(root in counted)
 
     def estimate(mut self, mask: Int) raises -> Float64:
         """Estimated rows of joining the relations in `mask`
@@ -154,12 +185,15 @@ struct JoinGraph(Movable):
         for r in range(n):
             if mask & (1 << r) != 0:
                 numerator *= max(self.rows[r], 1.0)
-        # Edges inside the set by descending total domain, each merging two
-        # components divides once by its domain.
+        # Edges and filters inside the set by descending total domain, each
+        # merging two components divides once: an edge or an equality by
+        # its domain, another comparison by the domain to the power 2/3.
         var order = List[Int]()
-        for k in range(len(self.edges)):
-            ref e = self.edges[k]
-            if mask & (1 << e.a) != 0 and mask & (1 << e.b) != 0:
+        var joins = len(self.edges)
+        for k in range(joins + len(self.filters)):
+            var a = self.edges[k].a if k < joins else self.filters[k - joins].a
+            var b = self.edges[k].b if k < joins else self.filters[k - joins].b
+            if mask & (1 << a) != 0 and mask & (1 << b) != 0:
                 order.append(k)
         for i in range(1, len(order)):
             var j = i
@@ -178,16 +212,20 @@ struct JoinGraph(Movable):
         var unused = List[Float64]()
         var parts = Int(pop_count(mask))
         for k in order:
-            ref e = self.edges[k]
             if parts == 1:
                 if self.counted[k] and self.tdom[k] not in unused:
                     unused.append(self.tdom[k])
                 continue
-            var ca = component[e.a]
-            var cb = component[e.b]
+            var a = self.edges[k].a if k < joins else self.filters[k - joins].a
+            var b = self.edges[k].b if k < joins else self.filters[k - joins].b
+            var ca = component[a]
+            var cb = component[b]
             if ca == cb:
                 continue
-            denominator *= self.tdom[k]
+            if k < joins or self.filters[k - joins].equal:
+                denominator *= self.tdom[k]
+            else:
+                denominator *= self.tdom[k] ** (2.0 / 3.0)
             parts -= 1
             for r in range(n):
                 if component[r] == cb:
@@ -260,12 +298,13 @@ def order_joins(
     domains: List[Float64],
     edges: List[JoinEdge],
     distinct: Dict[String, Float64] = Dict[String, Float64](),
+    filters: List[FilterEdge] = List[FilterEdge](),
 ) raises -> Optional[JoinTree]:
     """The cheapest join tree over these relations (`rows` after their own
     filters, `domains` their tables' rows before them), or None when the
     edges leave them disconnected (a cross product, which is not
     reordered)."""
-    var graph = JoinGraph(rows, domains, edges, distinct)
+    var graph = JoinGraph(rows, domains, edges, distinct, filters)
     var n = len(rows)
     var full = (1 << n) - 1
     if n < 2 or not _connected(graph, full):
