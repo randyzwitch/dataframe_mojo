@@ -345,6 +345,18 @@ struct MetalRuntime(AcceleratorBackend):
                 self._budget,
                 observation_only=self._observation_only,
             )
+        from .accelerator.gpu.paired_coded_sum import (
+            eligible as paired_sum_eligible,
+            execute as execute_paired_sum,
+        )
+
+        if original_entry and paired_sum_eligible(query):
+            return execute_paired_sum(
+                query,
+                self._device,
+                self._budget,
+                observation_only=self._observation_only,
+            )
         _reject_time_windows(query)
         from .accelerator.grouped_stream_routes import candidate
         from .accelerator.gpu.grouped_stream_dispatch import (
