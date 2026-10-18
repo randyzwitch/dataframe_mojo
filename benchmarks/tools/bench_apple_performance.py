@@ -489,6 +489,7 @@ def main():
             headline_full_tier_attempt=is_headline,
             quiet_host_policy="Observed compiler processes and load before/after each worker; no operator attestation required. Load above the configured thread budget flags busy-host ratios; process snapshots do not prove absence of all competing work.",
             timing_scope="Full query call returning materialized host DataFrame; table loading, answer summary and destruction excluded. Cold is first invocation in fresh worker after loading, not cold filesystem/cache/compilation.",
+            metal_execution_policy="End-to-end requested Metal backend. Engines with CPU data-fault adjudication may rerun a query on CPU; any rerun is included in elapsed time. Collect-boundary audits do not certify GPU-only execution.",
             strict_coverage_receipts=[
                 dict(path=str(p), sha256=sha(p)) for p in args.strict_coverage
             ],
