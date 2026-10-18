@@ -1,5 +1,6 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
-from std.collections import Optional
+from std.collections import Dict, Optional
+from std.memory import bitcast
 from .dtype import DataType
 
 # Node text of an untyped numeric literal; the binder replaces it with the
@@ -92,6 +93,8 @@ comptime KEEP_NULLS = 35
 # String concatenation with the separator in `text`; nulls propagate, or
 # with `integer` 1 a null side is skipped (null only if both are).
 comptime STR_CONCAT = 36
+# arctan2(y, x): left is y, right is x; x is cast to y's float type.
+comptime ARCTAN2 = 37
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
 comptime NEG = 50
@@ -109,6 +112,30 @@ comptime IS_NAN = 63
 comptime IS_NOT_NAN = 64
 comptime IS_FINITE = 65
 comptime IS_INFINITE = 66
+
+# Elementwise math functions occupy 190..209 (unary as well). They return
+# Float64, or Float32 for Float32 input, except SIGN and TRUNCATE, which
+# keep the input type. LOG_BASE keeps its base in `floating`.
+comptime LOG_BASE = 190
+comptime LOG1P = 191
+comptime SIGN = 192
+comptime CBRT = 193
+comptime TRUNCATE = 194
+comptime SIN = 195
+comptime COS = 196
+comptime TAN = 197
+comptime ARCSIN = 198
+comptime ARCCOS = 199
+comptime ARCTAN = 200
+comptime SINH = 201
+comptime COSH = 202
+comptime TANH = 203
+comptime ARCSINH = 204
+comptime ARCCOSH = 205
+comptime ARCTANH = 206
+comptime COT = 207
+comptime DEGREES = 208
+comptime RADIANS = 209
 
 # String operations (unary, parameters in text/text2/integer/min_count).
 comptime STR_LEN_CHARS = 67
@@ -136,6 +163,11 @@ comptime STR_IS_IN = 170
 comptime STR_LIKE = 171
 # `is_in` over typed integer literals: one pass, values in `text` (#486).
 comptime INT_IS_IN = 172
+# Recode values (#789). text: the old values, text2: the new values, each a
+# list of literals (`replace_item`); right: the default, -1 for none;
+# dtypes: replace_strict's return_dtype, when given.
+comptime REPLACE = 252
+comptime REPLACE_STRICT = 253
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -192,6 +224,8 @@ comptime INTERPOLATE_BY = 124
 # integer bit 0 is left_closed and bit 1 is include_breaks.
 comptime CUT = 125
 comptime QCUT = 126
+# Running product; integer products are checked for overflow.
+comptime CUM_PROD = 127
 
 # Temporal field and conversion operations occupy 130..149 (text holds an
 # interval, format, or unit; text2 a target dtype name).
@@ -235,6 +269,8 @@ comptime COV = 161
 # text: value field SEP count field; integer: bit 0 sort by count, bit 1
 # normalize (proportions).
 comptime VALUE_COUNTS = 162
+# Product of the non-null values; 1 when there are none.
+comptime PRODUCT = 163
 # Time zones of datetimes (#222). text: the zone ("" for naive). For
 # DT_REPLACE_TZ, text2 is "<ambiguous>,<non_existent>".
 comptime DT_REPLACE_TZ = 157
@@ -276,6 +312,51 @@ comptime STR_TO_INTEGER = 239
 # the last field keeps the remainder (splitn).
 comptime STR_SPLIT_FIELDS = 240
 
+# Row-wise reductions across expressions (#221): sum_horizontal and the
+# rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
+# whose leaves, read left to right, are the inputs; both keep the kind
+# (H_SUM ...) in `integer`, and HORIZONTAL keeps ignore_nulls in min_count.
+# Each input is one operand, so a selector among them expands into more
+# inputs rather than more expressions.
+comptime HORIZONTAL = 250
+comptime HORIZONTAL_ARGS = 251
+comptime H_SUM = 0
+comptime H_MIN = 1
+comptime H_MAX = 2
+comptime H_MEAN = 3
+comptime H_ANY = 4
+comptime H_ALL = 5
+
+
+def horizontal_name(kind: Int) -> String:
+    if kind == H_SUM:
+        return "sum_horizontal"
+    if kind == H_MIN:
+        return "min_horizontal"
+    if kind == H_MAX:
+        return "max_horizontal"
+    if kind == H_MEAN:
+        return "mean_horizontal"
+    if kind == H_ANY:
+        return "any_horizontal"
+    return "all_horizontal"
+
+
+def horizontal_inputs(nodes: List[Node], index: Int) -> List[Int]:
+    """The input roots of the HORIZONTAL node at `index`, in order."""
+    var inputs = List[Int]()
+    var pending = List[Int]()
+    pending.append(nodes[index].left)
+    while len(pending) > 0:
+        var at = pending.pop()
+        if nodes[at].op == HORIZONTAL_ARGS:
+            # Right is pushed first so the left side is read first.
+            pending.append(nodes[at].right)
+            pending.append(nodes[at].left)
+        else:
+            inputs.append(at)
+    return inputs^
+
 
 def is_rolling_by(op: Int) -> Bool:
     return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
@@ -286,7 +367,12 @@ def is_binary(op: Int) -> Bool:
 
 
 def is_unary(op: Int) -> Bool:
-    return op >= 50 and op < 80
+    return (op >= 50 and op < 80) or is_math(op)
+
+
+def is_math(op: Int) -> Bool:
+    """Whether op is one of the elementwise math functions (log10, sin...)."""
+    return op >= LOG_BASE and op <= RADIANS
 
 
 def is_reduction(op: Int) -> Bool:
@@ -296,6 +382,7 @@ def is_reduction(op: Int) -> Bool:
         or (op >= 80 and op < 100)
         or is_pair_reduction(op)
         or op == VALUE_COUNTS
+        or op == PRODUCT
     )
 
 
@@ -339,7 +426,7 @@ def is_dt_op(op: Int) -> Bool:
 
 
 def is_window(op: Int) -> Bool:
-    return (op >= CUM_SUM and op <= QCUT and op != OVER) or (
+    return (op >= CUM_SUM and op <= CUM_PROD and op != OVER) or (
         op >= ROLLING_STD and op <= ROLLING_VAR_BY
     )
 
@@ -355,6 +442,82 @@ def is_conditional(op: Int) -> Bool:
 
 def is_logical(op: Int) -> Bool:
     return op == AND or op == OR or op == XOR
+
+
+def is_replace(op: Int) -> Bool:
+    return op == REPLACE or op == REPLACE_STRICT
+
+
+def replace_item(value: Expr) -> String:
+    """A literal as one item of a REPLACE node's value list: its op, integer,
+    float bits, high word and dtype, then its text. "?" for anything but a
+    literal, which binding reports."""
+    if len(value._nodes) != 1:
+        return "?"
+    ref node = value._nodes[0]
+    if not (
+        node.op == LIT_INT
+        or node.op == LIT_FLOAT
+        or node.op == LIT_BOOL
+        or node.op == LIT_STRING
+        or node.op == LIT_NULL
+    ):
+        return "?"
+    var dtype = String()
+    if len(node.dtypes) > 0 and node.dtypes[0]:
+        dtype = node.dtypes[0].value().name()
+    return (
+        String(node.op)
+        + ":"
+        + String(node.integer)
+        + ":"
+        + String(bitcast[DType.int64](node.floating))
+        + ":"
+        + node.text2
+        + ":"
+        + dtype
+        + ":"
+        + node.text
+    )
+
+
+def replace_items(values: List[Expr]) -> String:
+    """`values` as a REPLACE node's list (see `replace_item`)."""
+    var items = List[String](capacity=len(values))
+    for value in values:
+        items.append(replace_item(value))
+    return join_names(items)
+
+
+def replace_literals(text: String) raises -> List[Node]:
+    """The literal nodes `replace_items` listed; empty text is no values."""
+    var out = List[Node]()
+    if text.byte_length() == 0:
+        return out^
+    for item in split_names(text):
+        if ":" not in item:
+            raise Error("replace values must be literals")
+        var fields = List[String]()
+        var rest = item
+        for _ in range(5):
+            var at = rest.find(":")
+            fields.append(String(rest[byte=0:at]))
+            var tail = String(rest[byte = at + 1 :])
+            rest = tail^
+        var dtypes = List[Optional[DataType]]()
+        if fields[4].byte_length() > 0:
+            dtypes.append(_parse_dtype(fields[4]))
+        out.append(
+            _node(
+                Int(atol(fields[0])),
+                text=rest,
+                integer=Int64(atol(fields[1])),
+                floating=bitcast[DType.float64](Int64(atol(fields[2]))),
+                text2=fields[3],
+                dtypes=dtypes,
+            )
+        )
+    return out^
 
 
 @fieldwise_init
@@ -617,6 +780,96 @@ struct Expr(Copyable):
         """Natural logarithm."""
         return self._unary(LOG)
 
+    def log(self, base: Float64) -> Self:
+        """Logarithm to `base`: ln(x) / ln(base), with log10 and log2
+        exact at powers of their base. Float64, or Float32 for Float32
+        input; log(0) is -inf and negative input NaN, as in IEEE."""
+        var nodes = self._nodes.copy()
+        nodes.append(_node(LOG_BASE, len(nodes) - 1, floating=base))
+        return Self(nodes^, self._name)
+
+    def log10(self) -> Self:
+        """Base-10 logarithm; see log(base)."""
+        return self.log(10.0)
+
+    def log1p(self) -> Self:
+        """ln(1 + x), accurate near zero; -inf at -1, NaN below."""
+        return self._unary(LOG1P)
+
+    def sign(self) -> Self:
+        """-1, 0 or 1 in the input's type. A float NaN stays NaN and a
+        signed zero keeps its sign, as in Polars."""
+        return self._unary(SIGN)
+
+    def cbrt(self) -> Self:
+        """Cube root (negative for negative input)."""
+        return self._unary(CBRT)
+
+    def truncate(self) -> Self:
+        """Round toward zero, keeping the input's type; integers are
+        unchanged."""
+        return self._unary(TRUNCATE)
+
+    def sin(self) -> Self:
+        """Sine of radians, as Float64 (Float32 for Float32 input)."""
+        return self._unary(SIN)
+
+    def cos(self) -> Self:
+        """Cosine of radians; see sin."""
+        return self._unary(COS)
+
+    def tan(self) -> Self:
+        """Tangent of radians; see sin."""
+        return self._unary(TAN)
+
+    def cot(self) -> Self:
+        """Cotangent, 1 / tan(x): inf at 0 and -inf at -0.0."""
+        return self._unary(COT)
+
+    def arcsin(self) -> Self:
+        """Inverse sine in radians; NaN outside [-1, 1]."""
+        return self._unary(ARCSIN)
+
+    def arccos(self) -> Self:
+        """Inverse cosine in radians; NaN outside [-1, 1]."""
+        return self._unary(ARCCOS)
+
+    def arctan(self) -> Self:
+        """Inverse tangent in radians."""
+        return self._unary(ARCTAN)
+
+    def sinh(self) -> Self:
+        """Hyperbolic sine."""
+        return self._unary(SINH)
+
+    def cosh(self) -> Self:
+        """Hyperbolic cosine."""
+        return self._unary(COSH)
+
+    def tanh(self) -> Self:
+        """Hyperbolic tangent."""
+        return self._unary(TANH)
+
+    def arcsinh(self) -> Self:
+        """Inverse hyperbolic sine."""
+        return self._unary(ARCSINH)
+
+    def arccosh(self) -> Self:
+        """Inverse hyperbolic cosine; NaN below 1."""
+        return self._unary(ARCCOSH)
+
+    def arctanh(self) -> Self:
+        """Inverse hyperbolic tangent; +-inf at +-1, NaN outside."""
+        return self._unary(ARCTANH)
+
+    def degrees(self) -> Self:
+        """Radians converted to degrees."""
+        return self._unary(DEGREES)
+
+    def radians(self) -> Self:
+        """Degrees converted to radians."""
+        return self._unary(RADIANS)
+
     def floor(self) -> Self:
         return self._unary(FLOOR)
 
@@ -786,6 +1039,257 @@ struct Expr(Copyable):
             raise Error("closed must be 'both', 'left', 'right', or 'none'")
         return low._binary(high, AND)
 
+    def _replace(
+        self,
+        op: Int,
+        old: List[Self],
+        new: List[Self],
+        default: Self,
+        return_dtype: Optional[DataType],
+    ) -> Self:
+        var nodes = self._nodes.copy()
+        var input = len(nodes) - 1
+        var right = -1
+        if len(default._nodes) > 0:
+            _append_shifted(nodes, default._nodes, len(nodes))
+            right = len(nodes) - 1
+        var dtypes = List[Optional[DataType]]()
+        if return_dtype:
+            dtypes.append(return_dtype)
+        nodes.append(
+            _node(
+                op,
+                input,
+                right,
+                text=replace_items(old),
+                text2=replace_items(new),
+                dtypes=dtypes,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def replace(self, old: List[Self], new: List[Self]) -> Self:
+        """Replace values equal to an entry of `old` with the entry of `new`
+        at the same position; every other value, and the dtype, is kept.
+
+        `old` and `new` hold literals (numbers, `lit(...)`, `null(...)`).
+        `new` has one value per entry of `old`, or one value for all of
+        them. Both are cast to the input dtype, so they must fit it; `old`
+        must not repeat a value. A null in `old` matches null input, NaN
+        matches NaN, and -0.0 matches 0.0. A categorical stays categorical.
+        """
+        return self._replace(REPLACE, old, new, _no_default(), None)
+
+    def replace(self, old: List[String], new: List[String]) -> Self:
+        """Replace strings; see the List[Expr] overload."""
+        return self.replace(_string_literals(old), _string_literals(new))
+
+    def replace(self, old: Self, new: Self) -> Self:
+        """Replace one value; see the List[Expr] overload."""
+        return self.replace([old.copy()], [new.copy()])
+
+    def replace(self, old: String, new: String) -> Self:
+        """Replace one string; see the List[Expr] overload."""
+        return self.replace([lit(old)], [lit(new)])
+
+    def replace(self, old: List[Self], new: Self) -> Self:
+        """Replace each value of `old` with the one value `new`."""
+        return self.replace(old, [new.copy()])
+
+    def replace(self, old: List[String], new: String) -> Self:
+        """Replace each string of `old` with the one string `new`."""
+        return self.replace(_string_literals(old), [lit(new)])
+
+    def replace(self, mapping: Dict[String, String]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace(old, new)
+
+    def replace(self, mapping: Dict[Int, Int]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace(old, new)
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map every value through `old` -> `new`; the result may change
+        dtype.
+
+        A non-null value with no entry in `old` raises unless `default` is
+        given; with one, it and null input (unless `old` holds a null) take
+        `default`, which may be any expression. The result dtype is
+        `return_dtype`, or that of `new` and `default` together (a string
+        with anything is a string, mixed numbers widen). `old` is cast to
+        the input dtype and matches as in `replace`.
+        """
+        return self._replace(REPLACE_STRICT, old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings, with a string default."""
+        return self.replace_strict(
+            _string_literals(old),
+            _string_literals(new),
+            lit(default),
+            return_dtype,
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to other values; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), new, default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            old, _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings, with a string default."""
+        return self.replace_strict(
+            old, _string_literals(new), lit(default), return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: Self,
+        new: Self,
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map one value; see the List[Expr] overload."""
+        return self.replace_strict(
+            [old.copy()], [new.copy()], default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
+
     def any(self, ignore_nulls: Bool = True) -> Self:
         """Any true value. With ignore_nulls=False, Kleene: null if no true
         and some null."""
@@ -860,6 +1364,14 @@ struct Expr(Copyable):
         checked for overflow. A Bool gives a UInt32 running count of true
         values."""
         return self._window(CUM_SUM, reverse=reverse)
+
+    def cum_prod(self, reverse: Bool = False) -> Self:
+        """Running product of non-null values; null rows stay null.
+
+        Int64 for Bool and integers up to 32 bits, UInt64, Int64 and Float
+        types keep theirs, decimals give Float64. Integer products raise on
+        overflow."""
+        return self._window(CUM_PROD, reverse=reverse)
 
     def cum_min(self, reverse: Bool = False) -> Self:
         return self._window(CUM_MIN, reverse=reverse)
@@ -1290,6 +1802,14 @@ struct Expr(Copyable):
         nodes.append(_node(SUM, len(nodes) - 1, min_count=min_count))
         return Self(nodes^, self._name)
 
+    def product(self) -> Self:
+        """Product of the non-null values; 1 when there are none.
+
+        Int64 for Bool and integers up to 32 bits, UInt64, Int64 and Float
+        types keep theirs, decimals give Float64. Integer products raise on
+        overflow."""
+        return self._unary(PRODUCT)
+
     def arg_min(self) -> Self:
         """Index of the first minimum, as UInt32; nulls are skipped and NaN
         counts only when every value is NaN. Null for no values. Inside
@@ -1509,6 +2029,18 @@ def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
 
 
+def _no_default() -> Expr:
+    """No expression: replace_strict without a default."""
+    return Expr(List[Node](), "")
+
+
+def _string_literals(values: List[String]) -> List[Expr]:
+    var literals = List[Expr](capacity=len(values))
+    for value in values:
+        literals.append(lit(value))
+    return literals^
+
+
 def null(dtype: DataType) -> Expr:
     """A typed null literal of a DataType; null(name) takes a dtype name."""
     return Expr(
@@ -1538,6 +2070,84 @@ def cov(a: Expr, b: Expr, ddof: Int = 1) -> Expr:
     var result = a._binary(b, COV)
     result._nodes[len(result._nodes) - 1].integer = Int64(ddof)
     return result^
+
+
+def _horizontal(
+    exprs: List[Expr], kind: Int, ignore_nulls: Bool = True
+) raises -> Expr:
+    if len(exprs) == 0:
+        raise Error(horizontal_name(kind) + " requires at least one expression")
+    var nodes = exprs[0]._nodes.copy()
+    for i in range(1, len(exprs)):
+        var offset = len(nodes)
+        _append_shifted(nodes, exprs[i]._nodes, offset)
+        nodes.append(
+            _node(
+                HORIZONTAL_ARGS,
+                offset - 1,
+                len(nodes) - 1,
+                integer=Int64(kind),
+            )
+        )
+    nodes.append(
+        _node(
+            HORIZONTAL,
+            len(nodes) - 1,
+            integer=Int64(kind),
+            min_count=Int(ignore_nulls),
+        )
+    )
+    return Expr(nodes^, exprs[0]._name)
+
+
+def sum_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) raises -> Expr:
+    """Sum of the inputs in each row, named after the first input.
+
+    Inputs are cast to their common type first (Polars' supertype; an
+    integer meeting a decimal becomes a decimal, as in DuckDB); Bool alone
+    sums as UInt32. With ignore_nulls a null counts as zero, so a row of
+    nulls sums to 0; without it any null makes the row null. Selectors
+    among `exprs` expand into more inputs.
+    """
+    return _horizontal(exprs, H_SUM, ignore_nulls)
+
+
+def min_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Least input in each row, at the inputs' common type. Nulls and NaN
+    are skipped; a row with no other value is null (NaN when only NaN).
+    """
+    return _horizontal(exprs, H_MIN)
+
+
+def max_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Greatest input in each row, at the inputs' common type. Nulls and
+    NaN are skipped; a row with no other value is null (NaN when only NaN).
+    """
+    return _horizontal(exprs, H_MAX)
+
+
+def mean_horizontal(
+    exprs: List[Expr], ignore_nulls: Bool = True
+) raises -> Expr:
+    """Mean of the inputs in each row: Float32 when their common type is
+    Float32, otherwise Float64. With ignore_nulls the mean is over the
+    row's non-null values, null when there are none; without it any null
+    makes the row null."""
+    return _horizontal(exprs, H_MEAN, ignore_nulls)
+
+
+def any_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Kleene OR across the inputs in each row: true if any is true, else
+    null if any is null, else false. Numeric inputs read nonzero as true.
+    A selector matching no columns gives a literal false."""
+    return _horizontal(exprs, H_ANY)
+
+
+def all_horizontal(exprs: List[Expr]) raises -> Expr:
+    """Kleene AND across the inputs in each row: false if any is false,
+    else null if any is null, else true. Numeric inputs read nonzero as
+    true. A selector matching no columns gives a literal true."""
+    return _horizontal(exprs, H_ALL)
 
 
 def coalesce(exprs: List[Expr]) raises -> Expr:
@@ -1957,6 +2567,16 @@ struct ListNamespace(Copyable):
 
     def mean(self) -> Expr:
         return self._op(LIST_MEAN)
+
+
+def arctan2(y: Expr, x: Expr) -> Expr:
+    """The angle of the point (x, y) in radians, in [-pi, pi], as Float64,
+    or Float32 when y is Float32 (x is cast to y's float type)."""
+    var nodes = y._nodes.copy()
+    var offset = len(nodes)
+    _append_shifted(nodes, x._nodes, offset)
+    nodes.append(_node(ARCTAN2, offset - 1, len(nodes) - 1))
+    return Expr(nodes^, y._name)
 
 
 def concat_str(
