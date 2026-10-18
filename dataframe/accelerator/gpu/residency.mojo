@@ -617,6 +617,61 @@ struct Table(Copyable):
         result.rows = min(result.rows, count)
         return result^
 
+    def project_view(
+        self, scope: Scope, schema: DataFrame, mapping: List[Int], rows: Int
+    ) raises -> Self:
+        """Rename/reorder immutable resident columns without copying a matrix.
+
+        Storage, deferred errors and provenance retain their original owners.
+        The caller must establish that no expression or text remap is needed.
+        """
+        if (
+            schema.height()
+            or schema.width() != len(mapping)
+            or rows < 0
+            or rows > self.rows
+        ):
+            raise Error("Mojo GPU resident projection shape mismatch")
+        if self.storage:
+            if not self.storage.value()[].scope.same_query(scope):
+                raise Error(
+                    "Mojo GPU resident input belongs to another query context"
+                )
+        elif self.identity_storage:
+            if not self.identity_storage.value()[].scope.same_query(scope):
+                raise Error(
+                    "Mojo GPU resident input belongs to another query context"
+                )
+        else:
+            raise Error("Mojo GPU resident projection requires a storage owner")
+        var result = self.copy()
+        result.schema = schema.copy()
+        result.rows = rows
+        result.columns = List[Int64](capacity=len(mapping))
+        result.text = List[Optional[TextColumn]](capacity=len(mapping))
+        result.categories = List[Optional[CategoryField]](capacity=len(mapping))
+        result.grouped_keys = List[Optional[GroupedKeyField]](
+            capacity=len(mapping)
+        )
+        for output in range(len(mapping)):
+            var input = mapping[output]
+            if input < 0 or input >= self.schema.width():
+                raise Error(
+                    "Mojo GPU resident projection column is outside its schema"
+                )
+            if (
+                schema._columns[output].dtype()
+                != self.schema._columns[input].dtype()
+            ):
+                raise Error(
+                    "Mojo GPU resident projection cannot change a column dtype"
+                )
+            result.columns.append(self.columns[input])
+            result.text.append(self.text[input].copy())
+            result.categories.append(self.categories[input].copy())
+            result.grouped_keys.append(self.grouped_keys[input].copy())
+        return result^
+
     def observe_errors(
         self,
         message: String = "Mojo GPU arithmetic overflow or strict cast failed",
