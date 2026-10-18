@@ -295,7 +295,7 @@ def _advertised_decimal_scalar(operation: String) raises:
 
 # expected-failure: Advertised decimal reduction aborts while accessing
 # expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: aggregate.mojo:1346:39: get: wrong variant type
+# expected-diagnostic: aggregate.mojo:1408:39: get: wrong variant type
 # expected-exit: variant-abort
 def test_decimal_variance_retains_numeric_scale() raises:
     _advertised_decimal_scalar("var")
@@ -303,7 +303,7 @@ def test_decimal_variance_retains_numeric_scale() raises:
 
 # expected-failure: Advertised decimal reduction aborts while accessing
 # expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: aggregate.mojo:1346:39: get: wrong variant type
+# expected-diagnostic: aggregate.mojo:1408:39: get: wrong variant type
 # expected-exit: variant-abort
 def test_decimal_standard_deviation_retains_numeric_scale() raises:
     _advertised_decimal_scalar("std")

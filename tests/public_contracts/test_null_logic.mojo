@@ -176,3 +176,56 @@ def test_conditionals_broadcast_fallthrough_and_binding_errors() raises:
             _ = source.select(
                 when(col("b")).then(lit(Int64(1))).otherwise(lit("wrong type"))
             )
+
+
+def test_null_other_rows_keep_their_branch_under_the_predicate() raises:
+    # `when(p).then(x)` without otherwise over a window that starts
+    # mid-byte, in batches that do not end on a byte: each row is x where
+    # p holds and both are valid, else null; eager, lazy and summed by key.
+    var xs = List[Float64]()
+    var x_valid = List[Bool]()
+    var ps = List[Int64]()
+    var p_valid = List[Bool]()
+    var ks = List[Int64]()
+    for row in range(5_000):
+        xs.append(Float64(row % 250))
+        x_valid.append(row % 11 != 3)
+        ps.append(Int64(row * 37 % 1_000))
+        p_valid.append(row % 7 != 2)
+        ks.append(Int64(row % 5))
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float64](xs.copy(), x_valid.copy())),
+            Series("p", Column[Int64](ps.copy(), p_valid.copy())),
+            Series("k", Column[Int64](ks.copy())),
+        ]
+    ).slice(3, 4_000)
+    var branch = when(col("p") > lit(Int64(500))).then(col("x")).end()
+    var masked = branch.alias("w")
+    var sums = List[Float64](length=5, fill=0)
+    var kept = List[Bool]()
+    for r in range(4_000):
+        var row = r + 3
+        var keep = x_valid[row] and p_valid[row] and ps[row] > 500
+        kept.append(keep)
+        if keep:
+            sums[row % 5] += xs[row]
+    var eager = frame.select_exprs([masked.copy()], batch_size=100)
+    var lazy = frame.lazy().select_exprs([masked.copy()]).collect()
+    for result in [eager.copy(), lazy.copy()]:
+        assert_equal(result.height(), 4_000)
+        for r in range(4_000):
+            assert_equal(result.item(r, "w").is_null(), not kept[r])
+            if kept[r]:
+                assert_equal(result.item(r, "w").float64(), xs[r + 3])
+    var grouped = (
+        frame.lazy()
+        .group_by(["k"])
+        .agg([branch.sum().alias("s")])
+        .sort(["k"])
+        .collect()
+    )
+    assert_equal(grouped.height(), 5)
+    for g in range(5):
+        var key = Int(grouped.item(g, "k").int64())
+        assert_equal(grouped.item(g, "s").float64(), sums[key])
