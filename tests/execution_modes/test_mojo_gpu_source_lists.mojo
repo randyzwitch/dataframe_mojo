@@ -225,7 +225,8 @@ def test_mojo_gpu_source_list_oob_empty_error_order_observer_and_exact_budget() 
     assert_equal(observed[0].height(), 0)
     assert_equal(observed[1].item(0, "host_result_bytes").int64(), Int64(0))
     assert_equal(
-        observed[1].item(0, "query_download_bytes").int64(), Int64(5 * 4)
+        observed[1].item(0, "query_download_bytes").int64(),
+        Int64(5 * 4 + 4),  # error words plus the region's fault word
     )
     assert_equal(
         observed[1].item(0, "source_list_preprocess_download_bytes").int64(),

@@ -39,6 +39,8 @@ Behavioral differences worth knowing:
 - NaN is a value, distinct from null; `fill_null` does not touch NaN (use
   `fill_nan`).
 - Group output order is unspecified unless `maintain_order=True`.
+- Rows with equal sort keys come out in an unspecified order unless
+  `sort(..., maintain_order=True)` keeps their input order, as in Polars.
 - Numeric dtypes are Int8–Int64, UInt8–UInt64, Float32, and Float64, with
   no implicit promotion: mixed widths need an explicit `cast`. Sums of 8- and
   16-bit integers produce Int64, as in Polars.

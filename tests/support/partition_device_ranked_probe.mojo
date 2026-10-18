@@ -88,15 +88,15 @@ def run_probe() raises:
             "PASS private ranked rows defer fault to caller phase", cast_first
         )
     # Ordinary failing source flags must never be reinterpreted as ranks.
+    # A plain region now raises its own faults (accelerator/faults.mojo),
+    # so no faulted source table can reach the ranked evaluator.
     var scope = Scope()
-    var bad = execute_plan(
-        _preflight(
-            frame.lazy().select(col("x").cast(DataType.INT8).alias("bad"))
-        ),
-        scope,
-        export_values=False,
-    )
-    var plan = ranked_operand(col("bad").cast(DataType.INT64), bad[0].schema)
-    with assert_raises(contains="already observed successful inputs"):
-        _ = evaluate(plan, bad[0], scope)
+    with assert_raises(contains="data fault"):
+        _ = execute_plan(
+            _preflight(
+                frame.lazy().select(col("x").cast(DataType.INT8).alias("bad"))
+            ),
+            scope,
+            export_values=False,
+        )
     print("PASS private ranked rows reject foreign deferred source faults")

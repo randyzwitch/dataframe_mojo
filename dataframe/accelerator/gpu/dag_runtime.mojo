@@ -123,8 +123,10 @@ def preflight(
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
                     if (
-                        op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST
-                    ) and plan.ordered_mode != 3:
+                        (op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST)
+                        and plan.ordered_mode != 3
+                        and not capabilities.adjudicated_faults
+                    ):
                         raise Error(
                             "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
                         )
@@ -278,7 +280,7 @@ def execute(
         var region_started = Int(perf_counter_ns())
         if task.kind == DAG_SOURCE_FIELDS or task.kind == DAG_GROUPED_FIELDS:
             var fields: ResidentFrame
-            var input_rows = 0
+            var input_rows: Int
             if task.kind == DAG_GROUPED_FIELDS:
                 ref prepared = task.grouped.value()[]
                 var staging = Optional[ArcPointer[HostReservation]]()

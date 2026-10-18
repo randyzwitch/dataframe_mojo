@@ -55,11 +55,14 @@ def test_calendar_offsets_capability_signed_metadata_and_checked_boundaries() ra
             time.lazy().select(col("t").dt().offset_by("1mo")), _capabilities()
         )
     var datetime = fixture(DataType.datetime("ns"))
+    # Metal decides faults on the CPU, so it needs no fault-order boundary;
+    # a backend without that still refuses.
+    var headed = datetime.lazy().select(col("t").dt().offset_by("1mo")).head(1)
+    var strict = _capabilities()
+    strict.adjudicated_faults = False
     with assert_raises(contains="terminal projections without head"):
-        _ = lower_rows(
-            datetime.lazy().select(col("t").dt().offset_by("1mo")).head(1),
-            _capabilities(),
-        )
+        _ = lower_rows(headed, strict)
+    _ = lower_rows(headed, _capabilities())
 
 
 # requires: metal

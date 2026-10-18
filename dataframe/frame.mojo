@@ -175,7 +175,7 @@ from .indexed_reduce import (
 )
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
-from .lazy import LazyFrame
+from .lazy import LazyFrame, _concat_plans
 from .display import render_frame, render_glimpse
 
 # A struct key groups, joins and deduplicates by its fields plus its own
@@ -613,9 +613,17 @@ struct DataFrame(Copyable, Sized, Writable):
     def hstack(self, columns: List[Series]) raises -> Self:
         return self.hstack(Self(columns.copy(), height=self._height))
 
-    def clear(self) raises -> Self:
-        """Zero rows with the same schema."""
-        return self.slice(0, 0)
+    def clear(self, n: Int = 0) raises -> Self:
+        """The same schema with n rows of nulls (zero rows by default), as
+        Polars' clear."""
+        if n < 0:
+            raise Error("clear: n must be nonnegative")
+        if n == 0:
+            return self.slice(0, 0)
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(Series.full_null(column.name(), column.dtype(), n))
+        return Self(columns^, height=n)
 
     def drop(self, name: String) raises -> Self:
         return self.drop([name])
@@ -634,10 +642,14 @@ struct DataFrame(Copyable, Sized, Writable):
                 columns.append(column.copy())
         return Self(columns^, height=self._height)
 
-    def rename(self, mapping: Dict[String, String]) raises -> Self:
-        """Rename columns by old name; all names are validated first."""
-        for item in mapping.items():
-            _ = self._index(item.key)
+    def rename(
+        self, mapping: Dict[String, String], *, strict: Bool = True
+    ) raises -> Self:
+        """Rename columns by old name; all names are validated first. With
+        strict=False, names this frame lacks are ignored, as in Polars."""
+        if strict:
+            for item in mapping.items():
+                _ = self._index(item.key)
         var columns = List[Series](capacity=self.width())
         var seen = Dict[String, Bool]()
         for column in self._columns:
@@ -713,16 +725,19 @@ struct DataFrame(Copyable, Sized, Writable):
         Nested columns give Float64 counts and nulls elsewhere. min and max
         skip NaN; mean and std propagate it.
         """
-        var qs = percentiles.copy()
-        for q in qs:
-            if not (q >= 0 and q <= 1):
-                raise Error("describe() percentiles must lie in [0, 1]")
-        sort(qs)
-        var labels: List[String] = ["count", "null_count", "mean", "std", "min"]
-        for q in qs:
-            labels.append(_percent_label(q))
-        labels.append("max")
-        var rows = len(labels)
+        var qs = _describe_percentiles(percentiles)
+        var exprs = self._describe_exprs(qs, interpolation)
+        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
+            List[Series](), height=1
+        )
+        return self._described(qs, stats)
+
+    def _describe_exprs(
+        self, qs: List[Float64], interpolation: String
+    ) -> List[Expr]:
+        """The reductions `describe` computes, chosen from the column names
+        and types alone, so LazyFrame.describe computes the same ones over
+        its plan."""
         var exprs = List[Expr]()
         for i in range(self.width()):
             ref column = self._columns[i]
@@ -761,9 +776,17 @@ struct DataFrame(Copyable, Sized, Writable):
                         .quantile(qs[k], interpolation)
                         .alias(p + "q" + String(k))
                     )
-        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
-            List[Series](), height=1
-        )
+        return exprs^
+
+    def _described(self, qs: List[Float64], stats: DataFrame) raises -> Self:
+        """`describe`'s frame from the reductions `_describe_exprs` named,
+        computed into one row of `stats`; only this frame's names and types
+        are read."""
+        var labels: List[String] = ["count", "null_count", "mean", "std", "min"]
+        for q in qs:
+            labels.append(_percent_label(q))
+        labels.append("max")
+        var rows = len(labels)
         var present = Dict[String, Bool]()
         for name in stats.columns():
             present[name] = True
@@ -899,6 +922,44 @@ struct DataFrame(Copyable, Sized, Writable):
                         valid.append(False)
             columns.append(Series(column.name(), StringColumn(texts, valid)))
         return Self(columns^, height=rows)
+
+    def gather(
+        self, indices: List[Int], *, null_on_oob: Bool = False
+    ) raises -> Self:
+        """The rows at `indices`, in that order, as Polars' gather: a
+        negative index counts from the end. An index out of range raises,
+        or with null_on_oob=True gives a row of nulls."""
+        return self._gather(indices, List[Bool](), null_on_oob)
+
+    def _gather(
+        self, indices: List[Int], valid: List[Bool], null_on_oob: Bool
+    ) raises -> Self:
+        """`gather`, where a false entry of `valid` (when given) is a null
+        index, which gives a row of nulls."""
+        var rows = List[Int](capacity=len(indices))
+        var nulls = False
+        for k in range(len(indices)):
+            var index = indices[k]
+            var row = index + self._height if index < 0 else index
+            if len(valid) > 0 and not valid[k]:
+                row = -1
+            elif row < 0 or row >= self._height:
+                if not null_on_oob:
+                    raise Error(
+                        "gather index "
+                        + String(index)
+                        + " is out of bounds for height "
+                        + String(self._height)
+                    )
+                row = -1
+            nulls = nulls or row < 0
+            rows.append(row)
+        if not nulls:
+            return self.take(rows)
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(column.take_or_null(rows))
+        return Self(columns^, height=len(rows))
 
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
@@ -1096,18 +1157,31 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=self._height)
 
     def sort(
-        self, by: String, descending: Bool = False, nulls_last: Bool = True
+        self,
+        by: String,
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Stable single-column sort. NaNs follow non-null numbers."""
-        return self.sort([by], descending, nulls_last)
+        """Single-column sort. NaNs follow non-null numbers. Rows with equal
+        keys come out in no particular order unless `maintain_order` keeps
+        their input order."""
+        return self.sort(
+            [by], descending, nulls_last, maintain_order=maintain_order
+        )
 
     def sort(
         self,
         by: List[String],
         descending: Bool = False,
         nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Stable lexicographic sort by several columns, one direction."""
+        """Lexicographic sort by several columns, one direction; equal keys
+        in no particular order unless `maintain_order`."""
+        _ = maintain_order
         return self.take(self.arg_sort(by, descending, nulls_last))
 
     def sort(
@@ -1116,8 +1190,11 @@ struct DataFrame(Copyable, Sized, Writable):
         *,
         descending: List[Bool],
         nulls_last: List[Bool],
+        maintain_order: Bool = False,
     ) raises -> Self:
-        """Per-column direction and null placement; list lengths match by."""
+        """Per-column direction and null placement; list lengths match by.
+        Equal keys in no particular order unless `maintain_order`."""
+        _ = maintain_order
         return self.take(
             self.arg_sort(by, descending=descending, nulls_last=nulls_last)
         )
@@ -1196,8 +1273,11 @@ struct DataFrame(Copyable, Sized, Writable):
         trace_path("sort.row_prefix")
         return row_arg_sort(keys, descending, nulls_last)
 
-    def top_k(self, k: Int, by: List[String]) raises -> Self:
-        """The k rows that sort(by, descending=True) would put first.
+    def top_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows that sort(by, descending=True) would put first
+        (sort(by) with reverse=True, as Polars' reverse flips the order).
 
         Nulls rank last. Selection is about one pass rather than a full sort.
         """
@@ -1205,22 +1285,27 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.take(
             self._arg_sort_head(
                 by,
-                List[Bool](length=n, fill=True),
+                List[Bool](length=n, fill=not reverse),
                 List[Bool](length=n, fill=True),
                 k,
             )
         )
 
-    def top_k(self, k: Int, by: String) raises -> Self:
-        return self.top_k(k, [by])
+    def top_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.top_k(k, [by], reverse=reverse)
 
-    def bottom_k(self, k: Int, by: List[String]) raises -> Self:
-        """The k rows that sort(by) would put first; nulls rank last."""
+    def bottom_k(
+        self, k: Int, by: List[String], *, reverse: Bool = False
+    ) raises -> Self:
+        """The k rows that sort(by) would put first (sort(by,
+        descending=True) with reverse=True); nulls rank last."""
         var n = len(by)
         return self.take(
             self._arg_sort_head(
                 by,
-                List[Bool](length=n, fill=False),
+                List[Bool](length=n, fill=reverse),
                 List[Bool](length=n, fill=True),
                 k,
             )
@@ -1301,8 +1386,10 @@ struct DataFrame(Copyable, Sized, Writable):
             self._sort_ranks(by, descending, nulls_last), take
         )
 
-    def bottom_k(self, k: Int, by: String) raises -> Self:
-        return self.bottom_k(k, [by])
+    def bottom_k(
+        self, k: Int, by: String, *, reverse: Bool = False
+    ) raises -> Self:
+        return self.bottom_k(k, [by], reverse=reverse)
 
     def _sort_ranks(
         self,
@@ -3019,35 +3106,7 @@ struct DataFrame(Copyable, Sized, Writable):
         count, len, or median. Missing cells are null. New column names are
         the `on` values' text, with null rendered as "null".
         """
-        var agg: Expr
-        var value = col(values)
-        var function = (
-            aggregate_function if aggregate_function.byte_length()
-            > 0 else "first"
-        )
-        if function == "first":
-            agg = value.first()
-        elif function == "last":
-            agg = value.last()
-        elif function == "sum":
-            agg = value.sum()
-        elif function == "mean":
-            agg = value.mean()
-        elif function == "min":
-            agg = value.min()
-        elif function == "max":
-            agg = value.max()
-        elif function == "count":
-            agg = value.count()
-        elif function == "len":
-            agg = value.len()
-        elif function == "median":
-            agg = value.median()
-        else:
-            raise Error(
-                "aggregate_function must be first, last, sum, mean, min, max,"
-                " count, len, or median"
-            )
+        var agg = _pivot_aggregate(values, aggregate_function)
         var seen = Dict[String, Bool]()
         for name in index:
             _ = self._index(name)
@@ -3311,6 +3370,14 @@ struct DataFrame(Copyable, Sized, Writable):
         adopt (an integer: every numeric column; a float: every float
         column), range-checked per column.
         """
+        return self.with_columns(self._fill_null_exprs(value, subset))
+
+    def _fill_null_exprs(
+        self, value: Expr, subset: List[String]
+    ) raises -> List[Expr]:
+        """`fill_null`'s per-column fills, chosen from the column names and
+        types alone, so LazyFrame.fill_null makes the same choice from its
+        input's schema."""
         var bound = bind(value, self._columns)
         if bound.shape() == ROWS:
             raise Error("fill_null on a dataframe requires a scalar value")
@@ -3351,7 +3418,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var fills = List[Expr]()
         for name in names:
             fills.append(col(name).fill_null(value))
-        return self.with_columns(fills)
+        return fills^
 
     def group_by_dynamic(
         self,
@@ -3534,6 +3601,37 @@ struct DataFrame(Copyable, Sized, Writable):
         return GroupBy(
             self.copy(), _expand_struct_keys(columns), maintain_order
         )
+
+
+def _pivot_aggregate(values: String, aggregate_function: String) raises -> Expr:
+    """The reduction `pivot` applies to each cell's `values` (first when
+    no aggregate_function is given, which then allows one row a cell)."""
+    var value = col(values)
+    var function = (
+        aggregate_function if aggregate_function.byte_length() > 0 else "first"
+    )
+    if function == "first":
+        return value.first()
+    if function == "last":
+        return value.last()
+    if function == "sum":
+        return value.sum()
+    if function == "mean":
+        return value.mean()
+    if function == "min":
+        return value.min()
+    if function == "max":
+        return value.max()
+    if function == "count":
+        return value.count()
+    if function == "len":
+        return value.len()
+    if function == "median":
+        return value.median()
+    raise Error(
+        "aggregate_function must be first, last, sum, mean, min, max,"
+        " count, len, or median"
+    )
 
 
 def _as_int64(values: List[Int]) -> List[Int64]:
@@ -5576,6 +5674,21 @@ def concat(
     raise Error("concat how must be 'vertical', 'diagonal', or 'horizontal'")
 
 
+def concat(
+    frames: List[LazyFrame], how: String = "vertical"
+) raises -> LazyFrame:
+    """Combine lazy plans into one plan, with the eager concat's results
+    and errors for 'vertical', 'diagonal' and 'horizontal'.
+
+    As Polars plans them, a diagonal concat is a vertical one over inputs
+    each selected to the union of the columns (nulls filling those an
+    input lacks), so filters and column selections above it reach every
+    input, and a horizontal one is its own operator. The inputs' names and
+    types are resolved here, as collect_schema resolves them.
+    """
+    return _concat_plans(frames, how)
+
+
 def _bind_all(
     expressions: List[Expr], columns: List[Series]
 ) raises -> List[BoundExpr]:
@@ -6450,6 +6563,93 @@ struct GroupBy(Copyable):
         )
         columns.append(Series(name, Column[Int64](counts^)))
         return _pack_struct_keys(DataFrame(columns^, height=groups.count()))
+
+    def _each(
+        self,
+        reduction: String,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> DataFrame:
+        """`reduction` of every column that is not a key, as Polars builds
+        these methods: an agg of `all()` reduced, keys excluded."""
+        var keys = self._key_names()
+        var exprs = List[Expr]()
+        for column in self._frame._columns:
+            if column.name() not in keys:
+                exprs.append(
+                    _reduce_column(
+                        column.name(), reduction, quantile, interpolation
+                    )
+                )
+        return self.agg(exprs)
+
+    def sum(self) raises -> DataFrame:
+        """Each other column's sum per group."""
+        return self._each("sum")
+
+    def mean(self) raises -> DataFrame:
+        """Each other column's mean per group, as Float64."""
+        return self._each("mean")
+
+    def min(self) raises -> DataFrame:
+        """Each other column's minimum per group."""
+        return self._each("min")
+
+    def max(self) raises -> DataFrame:
+        """Each other column's maximum per group."""
+        return self._each("max")
+
+    def median(self) raises -> DataFrame:
+        """Each other column's median per group, as Float64."""
+        return self._each("median")
+
+    def first(self) raises -> DataFrame:
+        """Each other column's first value per group (null when that row's
+        value is null)."""
+        return self._each("first")
+
+    def last(self) raises -> DataFrame:
+        """Each other column's last value per group (null when that row's
+        value is null)."""
+        return self._each("last")
+
+    def n_unique(self) raises -> DataFrame:
+        """Each other column's distinct values per group, null counted once,
+        as Int64."""
+        return self._each("n_unique")
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> DataFrame:
+        """Each other column's quantile per group, as Float64; the
+        interpolation defaults to "nearest", as in Polars."""
+        return self._each("quantile", quantile, interpolation)
+
+
+def _reduce_column(
+    name: String, reduction: String, quantile: Float64, interpolation: String
+) raises -> Expr:
+    """`col(name)` reduced by a GroupBy convenience method's reduction."""
+    var c = col(name)
+    if reduction == "sum":
+        return c.sum()
+    if reduction == "mean":
+        return c.mean()
+    if reduction == "min":
+        return c.min()
+    if reduction == "max":
+        return c.max()
+    if reduction == "median":
+        return c.median()
+    if reduction == "first":
+        return c.first()
+    if reduction == "last":
+        return c.last()
+    if reduction == "n_unique":
+        return c.n_unique()
+    if reduction == "quantile":
+        return c.quantile(quantile, interpolation)
+    raise Error("Unknown group reduction: " + reduction)
 
 
 def _keeps_every_row(mask: BoolColumn) -> Bool:
@@ -7442,6 +7642,16 @@ struct _StreamReduction(Movable):
 def _round_ticks(value: Float64) -> Int64:
     """Nearest integer tick, halves away from zero."""
     return Int64(value + 0.5) if value >= 0 else -Int64(-value + 0.5)
+
+
+def _describe_percentiles(percentiles: List[Float64]) raises -> List[Float64]:
+    """describe()'s percentiles checked and in ascending order."""
+    var qs = percentiles.copy()
+    for q in qs:
+        if not (q >= 0 and q <= 1):
+            raise Error("describe() percentiles must lie in [0, 1]")
+    sort(qs)
+    return qs^
 
 
 def _percent_label(q: Float64) -> String:

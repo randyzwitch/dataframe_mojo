@@ -43,6 +43,7 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
+from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.code_domains import TextQuery
 from .accelerator.qcuts import has_default_qcuts
 from std.memory import ArcPointer
@@ -100,7 +101,12 @@ from .accelerator.joins import (
 )
 from .accelerator import producer_phases
 from .accelerator.explodes import has_explode
-from .lazy import AcceleratorBackend, LazyFrame
+from .lazy import (
+    AcceleratorBackend,
+    LazyFrame,
+    GROUP_BY_DYNAMIC,
+    ROLLING,
+)
 from .column import Column
 from .frame import DataFrame
 from .series import Series
@@ -118,6 +124,16 @@ def metal_installed() -> Bool:
     from .accelerator.gpu.identity import available
 
     return available()
+
+
+def _reject_time_windows(query: LazyFrame) raises:
+    """`group_by_dynamic` and `rolling` run on the CPU only."""
+    for node in query._nodes:
+        if node.kind == GROUP_BY_DYNAMIC or node.kind == ROLLING:
+            raise Error(
+                "Metal unsupported [plan]: group_by_dynamic and rolling"
+                " require CPU execution"
+            )
 
 
 def _capabilities() -> RowCapabilities:
@@ -179,6 +195,7 @@ struct MetalRuntime(AcceleratorBackend):
         """Bound supported numeric work without reading values or device setup."""
         from .accelerator.gpu.calibration import estimate
 
+        _reject_time_windows(query)
         return estimate(query)
 
     def calibration_key(
@@ -193,13 +210,28 @@ struct MetalRuntime(AcceleratorBackend):
     ) -> Tuple[String, String]:
         from .accelerator.gpu.calibration import select_auto
 
+        try:
+            _reject_time_windows(query)
+        except error:
+            return (
+                "cpu",
+                "automatic analytical preflight rejected: " + String(error),
+            )
         return select_auto(
             query, self._device, self._budget, optimize, streaming, batch_size
         )
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         comptime if METAL_TARGET:
-            return self._configured(query)._run(query, False)
+            var configured = self._configured(query)
+            var fault: String
+            try:
+                return configured._run(query, False)
+            except error:
+                if not is_data_fault(error):
+                    raise error^
+                fault = String(error)
+            return configured._adjudicate(query, False, fault)
         else:
             raise Error(
                 "Mojo Metal execution requires an Apple Metal compilation target; "
@@ -210,12 +242,72 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame
     ) raises -> Tuple[DataFrame, DataFrame]:
         comptime if METAL_TARGET:
-            return self._configured(query)._run(query, True)
+            var configured = self._configured(query)
+            var fault: String
+            try:
+                return configured._run(query, True)
+            except error:
+                if not is_data_fault(error):
+                    raise error^
+                fault = String(error)
+            return configured._adjudicate(query, True, fault)
         else:
             raise Error(
                 "Mojo Metal execution requires an Apple Metal compilation target; "
                 + self.describe(query)
             )
+
+    def _adjudicate(
+        self, query: LazyFrame, profiling: Bool, fault: String
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """Decide a query whose kernels observed a data fault on the CPU.
+
+        Metal evaluates every checked value, including values the CPU
+        executor never computes (rows a head or filter prunes first), and
+        does not reproduce the CPU's evaluation order. The CPU therefore
+        decides the outcome: the error it raises, or its result when the
+        faulting values are never evaluated. The report says so, and a CPU
+        error keeps its message first, then names the Metal fault.
+        """
+        try:
+            return self._decide_on_cpu(query, profiling)
+        except cpu_error:
+            var message = String(cpu_error)
+            var observed = fault.replace(DATA_FAULT, "")
+            if observed in message:
+                raise cpu_error^
+            raise Error(message + " [Metal data fault: " + observed + "]")
+
+    def _decide_on_cpu(
+        self, query: LazyFrame, profiling: Bool
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        var settings = self._execution_settings.copy()
+        if not profiling:
+            var result = query.collect(
+                engine="cpu",
+                optimize=settings.optimize,
+                streaming=settings.streaming,
+                batch_size=settings.batch_size,
+            )
+            return (
+                result^,
+                DataFrame(
+                    [Series("fault_adjudication", Column[String](["cpu"]))]
+                ),
+            )
+        var measured = query.profile(
+            engine="cpu",
+            optimize=settings.optimize,
+            streaming=settings.streaming,
+            batch_size=settings.batch_size,
+        )
+        var marker = Series(
+            "fault_adjudication",
+            Column[String](
+                List[String](length=measured[1].height(), fill="cpu")
+            ),
+        )
+        return (measured[0].copy(), measured[1].with_column(marker^))
 
     def _configured(self, query: LazyFrame) -> Self:
         var configured = self.copy()
@@ -240,6 +332,7 @@ struct MetalRuntime(AcceleratorBackend):
 
         if self._execution_settings.batch_size <= 0:
             raise Error("batch_size must be positive")
+        _reject_time_windows(query)
         from .accelerator.grouped_stream_routes import candidate
         from .accelerator.gpu.grouped_stream_dispatch import (
             execute as execute_float_stream,
@@ -267,7 +360,9 @@ struct MetalRuntime(AcceleratorBackend):
                 observation_only=self._observation_only,
                 started=float_started,
             )
-        if original_entry and producer_phases.has_candidates(query):
+        if original_entry and producer_phases.has_candidates(
+            query, strict_casts=not _capabilities().adjudicated_faults
+        ):
             var prefix = prepare_temporal_prefix(
                 query, self._execution_settings.optimize
             )
@@ -1030,6 +1125,7 @@ struct MetalRuntime(AcceleratorBackend):
         from .parallel import configured_workers
 
         try:
+            _reject_time_windows(query)
             var float_route = candidate(
                 query,
                 configured_workers(),
@@ -1040,7 +1136,9 @@ struct MetalRuntime(AcceleratorBackend):
             )
             if float_route:
                 return "Metal ordered grouped floating states; captured CPU single-job morsels; device sample selects inserted epochs or generic collected GPU reductions"
-            if original_entry and producer_phases.has_candidates(query):
+            if original_entry and producer_phases.has_candidates(
+                query, strict_casts=not _capabilities().adjudicated_faults
+            ):
                 var prefix = prepare_temporal_prefix(
                     query, self._execution_settings.optimize
                 )

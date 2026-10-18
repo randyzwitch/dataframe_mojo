@@ -1595,7 +1595,8 @@ def lower_rows(
                 or capabilities.temporal_physical_casts
             ) and temporal_expressions.contains(bound):
                 if (
-                    not ordered_private
+                    not capabilities.adjudicated_faults
+                    and not ordered_private
                     and not ordered_producer
                     and (
                         len(chain) != 1
@@ -1614,6 +1615,7 @@ def lower_rows(
                     or ordered_private
                     or ordered_decimal
                     or ordered_producer
+                    or capabilities.adjudicated_faults
                 ):
                     temporal_expressions.validate_pairs(bound)
                 else:
@@ -1630,7 +1632,10 @@ def lower_rows(
                         and bound.dtypes[part.left].is_datetime()
                     ):
                         var interval = parse_every(part.text)
-                        if interval[0] != 0 and (
+                        if (
+                            interval[0] != 0
+                            and not capabilities.adjudicated_faults
+                        ) and (
                             not terminal_boundary
                             or k != 0
                             or node.kind == FILTER
@@ -1669,7 +1674,9 @@ def lower_rows(
                         and bound.dtypes[utc_part.left].is_datetime()
                         and bound.dtypes[utc_part.left].time_zone() == "UTC"
                     )
-                    if checked_utc and (
+                    if (
+                        checked_utc and not capabilities.adjudicated_faults
+                    ) and (
                         not terminal_boundary
                         or k != 0
                         or node.kind == FILTER
@@ -1690,18 +1697,22 @@ def lower_rows(
                         bound.expr._nodes[part_index].text
                     )
                     if (
-                        interval[1] != 0
-                        or (
-                            interval[0] != 0
-                            and bound.dtypes[
-                                bound.expr._nodes[part_index].left
-                            ].is_datetime()
+                        (
+                            interval[1] != 0
+                            or (
+                                interval[0] != 0
+                                and bound.dtypes[
+                                    bound.expr._nodes[part_index].left
+                                ].is_datetime()
+                            )
                         )
-                    ) and (
-                        not terminal_boundary
-                        or k != 0
-                        or node.kind == FILTER
-                        or limit >= 0
+                        and not capabilities.adjudicated_faults
+                        and (
+                            not terminal_boundary
+                            or k != 0
+                            or node.kind == FILTER
+                            or limit >= 0
+                        )
                     ):
                         capabilities.reject(
                             "plan",
@@ -1726,6 +1737,7 @@ def lower_rows(
                         if not (
                             capabilities.proven_integer_operations
                             and proven[part_index]
+                            or capabilities.adjudicated_faults
                         ) and (
                             not terminal_boundary
                             or (
@@ -1742,7 +1754,12 @@ def lower_rows(
                                     " terminal projections without head"
                                 ),
                             )
-                    if part.op == SUM and limit >= 0 and node.kind != AGG:
+                    if (
+                        part.op == SUM
+                        and limit >= 0
+                        and node.kind != AGG
+                        and not capabilities.adjudicated_faults
+                    ):
                         capabilities.reject(
                             "plan",
                             (
@@ -1770,6 +1787,7 @@ def lower_rows(
                     )
                     and not proven[part_index]
                     and not ordered_group
+                    and not capabilities.adjudicated_faults
                     and (
                         not terminal_boundary
                         or k != 0
@@ -1807,12 +1825,14 @@ def lower_rows(
                             "plan",
                             "checked decimal comparisons with a rescaled Decimal128 and Decimal64 require a static proof",
                         )
-                    if (
-                        not terminal_boundary
-                        or k != 0
-                        or node.kind == FILTER
-                        or limit >= 0
-                        or conditional
+                    if conditional or (
+                        not capabilities.adjudicated_faults
+                        and (
+                            not terminal_boundary
+                            or k != 0
+                            or node.kind == FILTER
+                            or limit >= 0
+                        )
                     ):
                         capabilities.reject(
                             "plan",
@@ -1830,6 +1850,7 @@ def lower_rows(
                         capabilities.float64_emulated
                         and bound.dtypes[part_index].is_float()
                     )
+                    and not capabilities.adjudicated_faults
                     and (
                         not terminal_boundary
                         or k != 0
@@ -1936,6 +1957,15 @@ def lower_rows(
                 if cumulative and not capabilities.cumulative_windows:
                     capabilities.reject(
                         "plan", "cumulative windows require backend support"
+                    )
+                if (
+                    window_op == CUM_SUM
+                    and bound.dtypes[ranked._nodes[r].left] == DataType.BOOL
+                ):
+                    # Counts of true values (#790) run on the CPU until a
+                    # device contract covers them.
+                    capabilities.reject(
+                        "dtype", "cum_sum of a Bool requires CPU execution"
                     )
                 if (
                     not cumulative
@@ -2073,7 +2103,9 @@ def lower_rows(
                         and not child.dtypes[c].is_float()
                     ):
                         checked_rank_input = True
-                if checked_rank_input:
+                # Adjudicated faults need no observed-input phase: the rank
+                # input step's values are observed like any other step's.
+                if checked_rank_input and not capabilities.adjudicated_faults:
                     if (
                         not capabilities.observed_rank_inputs
                         or (
@@ -2234,7 +2266,10 @@ def lower_rows(
                         axis_proven = proven_integer_nodes(axis)
                     for c in range(len(axis.expr._nodes)):
                         var operation = axis.expr._nodes[c].op
-                        if not axis_proven[c] and (
+                        if (
+                            not axis_proven[c]
+                            and not capabilities.adjudicated_faults
+                        ) and (
                             axis.dtypes[c].is_integer()
                             and (
                                 operation == ADD
@@ -2512,7 +2547,12 @@ def lower_rows(
                         )
                     )
                 )
-                if reduction == SUM and checked_sum and not terminal_boundary:
+                if (
+                    reduction == SUM
+                    and checked_sum
+                    and not terminal_boundary
+                    and not capabilities.adjudicated_faults
+                ):
                     capabilities.reject(
                         "plan", "checked sums require a terminal boundary"
                     )
@@ -2521,6 +2561,7 @@ def lower_rows(
                     and reduction == SUM
                     and checked_sum
                     and (k != 0 or limit >= 0)
+                    and not capabilities.adjudicated_faults
                 ):
                     capabilities.reject(
                         "plan",

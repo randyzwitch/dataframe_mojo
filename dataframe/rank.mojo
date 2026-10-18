@@ -4,9 +4,9 @@ Each valid row becomes one 128-bit integer: an order-preserving 64-bit key
 of its value above its row index. Sorting those integers orders a group by
 value with ties in row order, so one native sort replaces the dense-rank
 sort and the index sort the general path does, and a single pass over runs
-of equal keys assigns every method. NaN sorts above every number, and -0.0
-equals 0.0, as the general path and Polars have it. Nulls are left out and
-rank as null.
+of equal keys assigns every method. NaN sorts above every number (so first
+when descending), and -0.0 equals 0.0, as the general path and Polars have
+it. Nulls are left out and rank as null.
 
 Rows are bucketed by partition with a counting sort, and partitions are
 ranked on workers in contiguous ranges of about equal row counts. A

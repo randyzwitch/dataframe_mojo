@@ -4,7 +4,7 @@ two computed inputs, and a stream's aggregate builds and source, which run
 ahead of it. Results match the inputs computed one by one, and an error in
 any input reaches the caller."""
 # contract-group: planner.relational
-from std.testing import assert_equal, assert_raises
+from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
 from dataframe.frame import concat
 from tests.support.coverage_compare import assert_frame
@@ -124,3 +124,35 @@ def test_an_error_in_a_prefetched_input_reaches_the_caller() raises:
     var counts = frame.lazy().group_by("k").agg([col("v").count().alias("c")])
     with assert_raises():
         _ = counts.join(good, ["k"], how="left").join(bad, ["k"]).collect()
+
+
+def test_whole_input_selections_cross_joined_run_ahead_and_match() raises:
+    """One-row statistics of filtered bands, cross joined side by side
+    (TPC-DS q28's shape): each band's selection reads its whole input, so
+    each is a breaker computed ahead of the stream, and the row is what
+    the separately collected bands give."""
+    var frame = source()
+    var row = Optional[LazyFrame]()
+    var eager = Optional[DataFrame]()
+    for band in range(4):
+        var tag = "b" + String(band)
+        var part = (
+            frame.lazy()
+            .filter((col("k") % lit(Int64(4))) == lit(Int64(band)))
+            .select_exprs(
+                [
+                    col("v").mean().alias(tag + "_mean"),
+                    col("v").count().alias(tag + "_n"),
+                    col("v").n_unique().alias(tag + "_distinct"),
+                ]
+            )
+        )
+        var alone = part.collect()
+        eager = Optional(
+            eager.value().join(alone, how="cross") if eager else alone^
+        )
+        row = Optional(row.value().join(part, how="cross") if row else part^)
+    var plan = row.take()
+    var top = len(plan._nodes) - 1
+    assert_true(plan._ends_in_breaker(plan._nodes[top].right))
+    assert_frame(plan.collect(), eager.take())

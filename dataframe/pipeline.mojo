@@ -206,7 +206,8 @@ struct _TopBound(Copyable, Movable):
                 comptime if D.is_floating_point():
                     self.floating = Float64(value)
                     if self.floating != self.floating:
-                        # NaN sorts past every number: no row is worse.
+                        # A NaN bound compares false with every number:
+                        # take none, which is always safe.
                         return
                     self.kind = _BOUND_FLOAT
                 elif D == DType.uint64:

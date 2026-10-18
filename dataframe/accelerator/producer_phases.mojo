@@ -743,7 +743,13 @@ def validate_region(query: LazyFrame, node: PlanNode) raises:
         )
 
 
-def has_candidates(query: LazyFrame) -> Bool:
+def has_candidates(query: LazyFrame, *, strict_casts: Bool = True) -> Bool:
+    """Whether a producer phase can certify fault order for this plan.
+
+    A backend that decides faults on the CPU passes strict_casts=False:
+    its strict casts need no certificate, while IANA mutations still use
+    the phase's occurrence masks.
+    """
     for operation in query._nodes:
         if operation.kind != SELECT and operation.kind != WITH_COLUMNS:
             continue
@@ -751,7 +757,7 @@ def has_candidates(query: LazyFrame) -> Bool:
             for node in expression._nodes:
                 if len(query._nodes) > 2 or operation.kind == WITH_COLUMNS:
                     if (
-                        (node.op == CAST and node.integer)
+                        (node.op == CAST and node.integer and strict_casts)
                         or node.op == DT_REPLACE_TZ
                         or node.op == DT_TRUNCATE
                         or node.op == DT_OFFSET_BY

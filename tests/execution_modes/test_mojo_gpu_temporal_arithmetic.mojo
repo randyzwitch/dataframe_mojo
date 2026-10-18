@@ -16,6 +16,7 @@ from dataframe import (
 )
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
+from tests.support.metal_outcomes import same_outcome
 from dataframe.expr import ADD
 from dataframe.accelerator.gpu.runtime import _preflight, capabilities
 from dataframe.accelerator.gpu.dag_runtime import preflight as dag_preflight
@@ -243,7 +244,7 @@ def test_mojo_gpu_temporal_physical_casts_conditional_masks_and_overflow_contrac
 
 
 # requires: metal
-def test_mojo_gpu_temporal_arithmetic_preflight_rejects_checked_producers_and_resident_sources() raises:
+def test_mojo_gpu_temporal_arithmetic_preflight_checked_producers_and_resident_sources() raises:
     var d = DataType.duration("ns")
     var frame = DataFrame(
         [
@@ -252,37 +253,30 @@ def test_mojo_gpu_temporal_arithmetic_preflight_rejects_checked_producers_and_re
             Series("n", Column[Int64]([0, 1])),
         ]
     )
-    with assert_raises(contains="binary operands must be infallible"):
-        _ = _preflight(
-            frame.lazy().select((col("t") + col("delta")) + col("delta"))
-        )
-    with assert_raises(contains="mixed checked"):
-        _ = _preflight(
-            frame.lazy().select(
-                when((col("n") + lit(Int64(1))) > lit(Int64(0)))
-                .then(col("t") + col("delta"))
-                .otherwise(col("t"))
-            )
-        )
-    with assert_raises(contains="direct scan"):
-        _ = _preflight(
-            frame.lazy()
-            .with_columns((col("t") + col("delta")).alias("alias"))
-            .select(col("alias") + col("delta"))
-        )
-    with assert_raises(contains="direct scan"):
-        _ = _preflight(frame.lazy().select(col("t") + col("delta")).head(1))
-    with assert_raises(contains="direct scan"):
-        _ = _preflight(
-            frame.lazy().select(col("t") + col("delta")), source_rows=2
-        )
-    with assert_raises(contains="before DAG submission"):
-        _ = dag_preflight(
-            frame.lazy()
-            .join(frame.lazy(), on="n", how="inner")
-            .select(col("t") + col("delta")),
-            capabilities(),
-        )
+    # Metal decides faults on the CPU (accelerator/faults.mojo), so checked
+    # operands, chained producers, heads and sliced sources need no
+    # fault-order proof: each returns the CPU's outcome.
+    for query in [
+        frame.lazy().select((col("t") + col("delta")) + col("delta")),
+        frame.lazy().select(
+            when((col("n") + lit(Int64(1))) > lit(Int64(0)))
+            .then(col("t") + col("delta"))
+            .otherwise(col("t"))
+        ),
+        frame.lazy()
+        .with_columns((col("t") + col("delta")).alias("alias"))
+        .select(col("alias") + col("delta")),
+        frame.lazy().select(col("t") + col("delta")).head(1),
+    ]:
+        _ = _preflight(query)
+        same_outcome(query)
+    var joined = (
+        frame.lazy()
+        .join(frame.lazy(), on="n", how="inner")
+        .select(col("t") + col("delta"))
+    )
+    _ = dag_preflight(joined, capabilities())
+    same_outcome(joined)
     var decimal = DataFrame(
         [
             Series("d", Column[Int64]([123, 456])).with_dtype(
@@ -290,10 +284,7 @@ def test_mojo_gpu_temporal_arithmetic_preflight_rejects_checked_producers_and_re
             )
         ]
     )
-    with assert_raises(contains="only temporal, Int64 and Bool"):
-        _ = _preflight(
-            decimal.lazy().select(col("d").cast(DataType.INT64).cast(d))
-        )
+    same_outcome(decimal.lazy().select(col("d").cast(DataType.INT64).cast(d)))
     var dates = DataFrame([tagged("date", DataType.DATE, [0, 1])])
     with assert_raises(contains="cannot cast"):
         _ = _preflight(

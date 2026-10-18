@@ -11,6 +11,7 @@ from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from dataframe.accelerator.windows import lower_partition_aggregates
+from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.execution_modes.test_backend_metal_decimal_casts import (
@@ -335,14 +336,9 @@ def test_native_metal_rolling_moments_large_offsets_partition_workers_and_nested
     assert_true(";rolling-moments-v2" in estimate.family)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
-    with assert_raises(contains="checked"):
-        _ = (
-            small.lazy()
-            .select(
-                (col("x").cast(DataType.INT64) + lit(Int64(1))).rolling_var(
-                    3, 1, 0
-                )
-            )
-            .collect(accelerator=runtime)
+    same_outcome(
+        small.lazy().select(
+            (col("x").cast(DataType.INT64) + lit(Int64(1))).rolling_var(3, 1, 0)
         )
+    )
     check(query, runtime)

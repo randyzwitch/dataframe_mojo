@@ -352,11 +352,12 @@ def test_mojo_gpu_file_sources_prefix_observer_downloads_only_error_words() rais
         var report = measured[1].copy()
         assert_equal(report.height(), 1)
         assert_equal(report.item(0, "host_result_bytes").int64(), Int64(0))
-        # Three rows, one UInt32 error per public output: neither low/high
-        # value planes nor validity/decoded string buffers cross to the CPU.
+        # Three rows, one UInt32 error per public output, plus the region's
+        # fault word: neither low/high value planes nor validity/decoded
+        # string buffers cross to the CPU.
         assert_equal(
             report.item(0, "download_bytes").int64(),
-            Int64(3 * len(expressions) * 4),
+            Int64(3 * len(expressions) * 4 + 4),
         )
         assert_true(report.item(0, "kernel_launches").int64() > 0)
         var expected = query.collect(engine="cpu", streaming=False)

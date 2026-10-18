@@ -10,6 +10,7 @@ from std.memory import ArcPointer, Pointer
 from dataframe import Expr
 from dataframe.accelerator.rows import ROW_GROUP_KEY
 from .residency import Scope, Table, checked_add, checked_mul
+from dataframe.accelerator.faults import data_fault
 from .runtime import _preflight
 from .program import Program
 from .device_lists import GroupOwner
@@ -201,7 +202,7 @@ def build_groups(
         var shape = scope.read_control(metadata)
         scope.record_download(16)
         if shape[1]:
-            raise Error(
+            raise data_fault(
                 "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
             )
         var groups = Int(shape[0])

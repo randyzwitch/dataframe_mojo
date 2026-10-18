@@ -103,6 +103,9 @@ struct RowCapabilities(Copyable):
     var reuse_column_slots: Bool
     # Carry per-value checked errors through selections and observe consumers.
     var deferred_integer_errors: Bool
+    # Every checked value is computed and any fault is decided on the CPU
+    # (accelerator/faults.mojo), so no plan needs a fault-order proof.
+    var adjudicated_faults: Bool
     var proven_integer_operations: Bool
     var max_nodes: Int
     var max_slots: Int
@@ -184,6 +187,7 @@ struct RowCapabilities(Copyable):
         reuse_column_slots: Bool = False,
         proven_integer_operations: Bool = False,
         deferred_integer_errors: Bool = False,
+        adjudicated_faults: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -253,6 +257,7 @@ struct RowCapabilities(Copyable):
         self.reuse_column_slots = reuse_column_slots
         self.proven_integer_operations = proven_integer_operations
         self.deferred_integer_errors = deferred_integer_errors
+        self.adjudicated_faults = adjudicated_faults
         self.max_nodes = max_nodes
         self.max_slots = max_slots
         self.max_steps = max_steps
@@ -312,6 +317,10 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if (op == SUM or op == MEAN) and dtype == DataType.BOOL:
+            # Counts and shares of true values (#790) run on the CPU until
+            # a device contract covers them.
+            self.reject("dtype", "Bool sums and means require CPU execution")
         if op == MEDIAN or op == QUANTILE:
             if not self.quantiles:
                 self.reject("reduction", "quantiles require backend support")

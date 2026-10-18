@@ -120,12 +120,12 @@ row-valued. See the Narwhals order-dependence notes cited above.
 
 | Method | Result | Nulls |
 |---|---|---|
-| `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked | null rows stay null and are skipped |
+| `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked; Bool gives UInt32, a running count of true values | null rows stay null and are skipped |
 | `cum_min`, `cum_max` | same dtype; NaN sorts above numbers | as `cum_sum` |
 | `cum_count(reverse=False)` | Int64, never null | counts non-null values |
 | `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
 | `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
-| `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN ranks after numbers |
+| `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN is the largest value, so it ranks after numbers ascending and before them descending |
 | `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null |
 | `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
 | `interpolate(method="linear"|"nearest")` | Float64 for linear, input dtype for nearest | fills only interior nulls; nearest ties choose the following value |
@@ -316,10 +316,40 @@ same method convention. Inputs must be String and nulls propagate.
 | `slice(offset, length=-1)`, `head(n)`, `tail(n)` | String | by code point; a negative offset counts from the end; out-of-range parts clip |
 | `reverse()` | String | by code point |
 | `pad_start(w, c=" ")`, `pad_end(w, c)`, `zfill(w)` | String | pad to `w` code points with one fill character; `zfill` keeps a leading sign first |
+| `to_titlecase()` | String | lowercase, then uppercase each character after a non-alphabetic one (Unicode `Alphabetic`): `"a_b 1st"` gives `"A_B 1St"`, `"ßa"` gives `"SSa"` |
+| `strip_prefix(p)`, `strip_suffix(s)` | String | remove the literal once if present (not a character set) |
+| `find(p, literal=False)` | UInt32 | **byte** offset of the first occurrence, null if none; an empty pattern is at 0 |
+| `count_matches(p, literal=False)` | UInt32 | non-overlapping occurrences; an empty pattern counts code points + 1 |
+| `contains_any(patterns, ascii_case_insensitive=False)` | Bool | any literal pattern occurs |
+| `replace_many(patterns, replace_with, ascii_case_insensitive=False, leftmost=False)` | String | one pass over all literal patterns; `replace_with` is one string or one per pattern |
+| `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
+| `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 must be canonical and padded |
+| `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36, as Rust's `from_str_radix`; failures raise, or are null with `strict=False` |
+| `split_exact(by, n, inclusive=False)` | Struct | `n + 1` String fields `field_0`..`field_n`; extra parts are dropped, missing parts null |
+| `splitn(by, n)` | Struct | `n` String fields; the last keeps the rest of the string |
+| `join(delimiter="", ignore_nulls=True)` | String | an aggregation: every value (per group in `agg`) joined; nulls skipped, or with `ignore_nulls=False` a null makes the result null; no values give `""` |
 
-`concat_str([exprs], separator="")` joins String expressions row-wise and is
-null when any input is null. Character operations work on code points, not
-grapheme clusters: `"e\u0301"` has length 2 and reverses its combining mark.
+`concat_str([exprs], separator="", ignore_nulls=False)` joins String
+expressions row-wise and is null when any input is null. With
+`ignore_nulls=True` null inputs are left out with their separator and a row
+of only nulls is `""` (DuckDB's `concat_ws`). Character operations work on
+code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
+combining mark.
+
+These follow Polars 1.44. Regular expressions are not supported yet (#219):
+`find` and `count_matches` match their pattern as text and, unless
+`literal=True`, raise for a pattern holding regex syntax (`\ . + * ? ( ) | [ ]
+{ } ^ $`), where Polars would read it as a regex. Polars' `normalize`,
+`json_decode` and `json_path_match` are not available. Where DuckDB differs:
+`strpos`/`instr` count code points from 1 and give 0 when absent (`find`
+counts bytes from 0 and gives null), `split_part` gives `""` for a missing
+part (null here), and `to_hex` writes uppercase digits. `splitn(by, 0)`
+raises; Polars returns a struct with no fields. The `Alphabetic` table behind
+`to_titlecase` is Unicode 15.0. Row kernels read offsets and string-view
+storage alike; stripped affixes and split fields are views into the input's
+buffers rather than copies, and a categorical input runs each function once
+per dictionary value when it has few values. The accelerator backends run none of these and leave
+them to the CPU.
 
 ### Conditionals
 
@@ -370,10 +400,10 @@ columns outside grouping.
 
 | Reduction | Input | Result | Empty or all-null | Mergeable state |
 |---|---|---|---|---|
-| `sum(min_count=0)` | numeric | same; 8/16-bit integers give Int64 | 0, or null below `min_count` | yes (128-bit exact for integers) |
+| `sum(min_count=0)` | numeric or Bool | same; 8/16-bit integers give Int64; Bool gives UInt32, the number of true values | 0, or null below `min_count` | yes (128-bit exact for integers) |
 | `count()`, `null_count()`, `len()` | any | Int64 | 0 | yes |
 | `min()`, `max()` | any | same | null | yes |
-| `mean()` | numeric | Float64 | null | yes (sum + count) |
+| `mean()` | numeric or Bool | Float64; for Bool the share of true values | null | yes (sum + count) |
 | `first()`, `last()` | any | same | null | needs partition order |
 | `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
 | `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
@@ -389,6 +419,10 @@ columns outside grouping.
 NaN sorts above every number, as in `sort`: `max` is NaN if any valid value is
 NaN, and `min` is NaN only when every valid value is. Ties keep the first value.
 `mean` of Int64 input divides the exact 128-bit total, so it cannot overflow.
+A Bool sums as zeros and ones, as in Polars: `sum` and `cum_sum` count the true
+values as UInt32 (Polars' index type; `count`, `len` and `null_count` stay
+Int64 here), and `mean` is the share of true values among the valid ones.
+Ungrouped sums count set bits 64 rows at a time without unpacking them.
 `first` and `last` return the first or last row's value even when it is null.
 `n_unique` counts null as one value, treats every NaN as one value, and treats
 `-0.0` as equal to `0.0`. `var` and `std` convert Int64 to Float64; infinities
