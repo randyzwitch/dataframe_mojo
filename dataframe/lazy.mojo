@@ -99,6 +99,10 @@ from .expr import (
     AND,
     COL,
     EQ,
+    GE,
+    GT,
+    LE,
+    LT,
     NE,
     NOT,
     WHEN,
@@ -160,7 +164,7 @@ from .join_type import (
     join_code,
     join_type,
 )
-from .join_order import JoinEdge, order_joins
+from .join_order import FilterEdge, JoinEdge, order_joins
 from .join_hash import (
     _PERFECT_SPAN,
     PreparedHashIndex,
@@ -344,6 +348,43 @@ def _references(expr: Expr) -> Optional[List[String]]:
             for part in split_names(node.text2):
                 names.append(part)
     return names^
+
+
+def _comparison_edge(
+    expr: Expr, provider: Dict[String, Int]
+) raises -> Optional[FilterEdge]:
+    """A comparison whose two sides each read one column, of two different
+    relations (`provider` maps each column to its relation), as a join
+    graph edge on those columns (DuckDB's `GetColumnBinding` per side);
+    None for anything else."""
+    ref root = expr._nodes[len(expr._nodes) - 1]
+    var op = root.op
+    if not (
+        op == EQ or op == NE or op == LT or op == LE or op == GT or op == GE
+    ):
+        return None
+    if root.left < 0 or root.right < 0:
+        return None
+    var sides = List[String]()
+    var relations = List[Int]()
+    for child in [root.left, root.right]:
+        var reads = _references(subtree(expr, child))
+        if not reads:
+            return None
+        var names = reads.value().copy()
+        if len(names) == 0:
+            return None
+        for name in names:
+            if name != names[0]:
+                return None
+        var r = provider.get(names[0], -1)
+        if r < 0:
+            return None
+        sides.append(names[0])
+        relations.append(r)
+    if relations[0] == relations[1]:
+        return None
+    return FilterEdge(relations[0], relations[1], sides[0], sides[1], op == EQ)
 
 
 def _output_names(exprs: List[Expr]) -> List[String]:
@@ -5333,12 +5374,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 break
             trace_path("lazy.shared_subplan")
             var origin = self._spine_rows(best)
+            var aggregated = self._aggregated(best)
             var sub = self.copy()
             sub._reorder(best)
             var frame = sub._collect(
                 optimize=True, streaming=streaming, batch_size=batch_size
             )
-            self._frames.append(frame^)
+            # An aggregate's result keeps distinct counts of its own
+            # columns for the join order, as DuckDB keeps a materialized
+            # CTE's statistics (`AddMaterializedCTEStats`) and gives an
+            # aggregate's columns distinct counts (`ExtractAggregationStats`).
+            if aggregated:
+                self._frames.append(frame^._with_statistics())
+            else:
+                self._frames.append(frame^)
             self._schemas.append(Optional[CsvSchema]())
             var slot = len(self._frames) - 1
             if origin > 0:
@@ -6430,9 +6479,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var estimates = List[Int](capacity=n)
             var tables = List[Int](capacity=n)
             var runs = List[Int]()
+            var aggregated = List[Bool](capacity=n)
             for r in range(n):
                 tables.append(self._spine_rows(relations[r]))
                 estimates.append(self._relation_estimate(relations[r]))
+                aggregated.append(self._aggregated(relations[r]))
                 if estimates[r] < 0:
                     runs.append(r)
             # Relations that must run to be counted are independent
@@ -6454,7 +6505,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 for k in range(len(runs)):
                     var r = runs[k]
                     estimates[r] = jobs[k].result.height()
-                    self._frames.append(jobs[k].result.copy())
+                    # An aggregate's result is a new table: it keeps
+                    # distinct counts of its own columns, as DuckDB's
+                    # estimator gives an aggregate relation's columns
+                    # (`ExtractAggregationStats`).
+                    if aggregated[r]:
+                        self._frames.append(
+                            jobs[k].result.copy()._with_statistics()
+                        )
+                    else:
+                        self._frames.append(jobs[k].result.copy())
                     self._schemas.append(Optional[CsvSchema]())
                     self._nodes[relations[r]] = _plan_node(
                         SCAN_FRAME, offset=len(self._frames) - 1
@@ -6464,25 +6524,38 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 var estimated = estimates[r]
                 rows.append(Float64(estimated))
                 domains.append(Float64(table if table > 0 else estimated))
-            # Each key column's distinct count, where its relation's table
-            # keeps statistics: DuckDB's estimator then takes a set's
+            # Filters comparing a column of one relation with a column of
+            # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
+            # which the estimate counts as join conditions.
+            var compares = List[FilterEdge]()
+            for f in filters:
+                for part in conjuncts(self._nodes[f].exprs[0]):
+                    var compare = _comparison_edge(part, provider)
+                    if compare:
+                        compares.append(compare.take())
+            # Each compared column's distinct count, where its relation's
+            # table keeps statistics: DuckDB's estimator then takes a set's
             # domain as the largest count among its columns.
-            var distinct = Dict[String, Float64]()
+            var compared = List[Tuple[Int, String]]()
             for e in edges:
                 for i in range(len(e.a_keys)):
-                    for side in range(2):
-                        var rel = e.a if side == 0 else e.b
-                        var name = e.a_keys[i] if side == 0 else e.b_keys[i]
-                        var key = String(rel) + "/" + name
-                        if key in distinct:
-                            continue
-                        var table = self._spine_frame(relations[rel])
-                        if not table:
-                            continue
-                        var count = table.value()._distinct_count(name)
-                        if count > 0:
-                            distinct[key] = Float64(count)
-            var chosen = order_joins(rows, domains, edges, distinct)
+                    compared.append((e.a, e.a_keys[i]))
+                    compared.append((e.b, e.b_keys[i]))
+            for f in compares:
+                compared.append((f.a, f.a_column))
+                compared.append((f.b, f.b_column))
+            var distinct = Dict[String, Float64]()
+            for pair in compared:
+                var key = String(pair[0]) + "/" + pair[1]
+                if key in distinct:
+                    continue
+                var table = self._spine_frame(relations[pair[0]])
+                if not table:
+                    continue
+                var count = table.value()._distinct_count(pair[1])
+                if count > 0:
+                    distinct[key] = Float64(count)
+            var chosen = order_joins(rows, domains, edges, distinct, compares)
             if not chosen:
                 continue
             var tree = chosen.take()
@@ -6920,6 +6993,26 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 continue
             return None
         return None
+
+    def _aggregated(self, index: Int) -> Bool:
+        """Whether node `index` is an aggregation, under steps that keep,
+        drop or rename its rows' columns (a filter, a projection)."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == AGG:
+                return True
+            if not (
+                node.kind == FILTER
+                or node.kind == DROP
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                return False
+            cursor = node.left
+        return False
 
     def _spine_rows(self, index: Int) -> Int:
         """Rows of the table under `index` along steps that keep, drop or
@@ -7701,9 +7794,22 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # Unions whose inputs must each supply exactly the wanted columns.
         var unions = List[Int]()
         var union_columns = List[List[String]]()
+        # A subtree written in several places (a CTE read twice) keeps
+        # every output of its projections in each copy, so the copies stay
+        # identical and `_share_subplans` still computes it once; Polars
+        # likewise prunes a cached subplan to what all its readers need.
+        # Pruned per reader, TPC-DS q4's year totals ran six times.
+        var signatures = self._subtree_signatures()[0].copy()
+        var copies = Dict[String, Int]()
+        for s in signatures:
+            copies[s] = copies.get(s, 0) + 1
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
-            if not all_needed[i] and needed[i]:
+            if (
+                not all_needed[i]
+                and needed[i]
+                and copies.get(signatures[i], 0) < 2
+            ):
                 self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
