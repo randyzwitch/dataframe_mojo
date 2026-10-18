@@ -443,7 +443,7 @@ def main():
             "scale": args.scale,
             "repetitions": args.reps,
             "evaluation": bench_policy.record(ROOT, selected, suites.SUITES),
-            "comparison": "Exact full schema and row multiset against original CPU query, retaining duplicate rows. Original-order equality recorded separately. No numerical tolerance, dtype conversion, query rewriting for support, or CPU fallback. Collection durations are diagnostic, not performance evidence.",
+            "comparison": "Exact full schema and row multiset against original CPU query, retaining duplicate rows. Original-order equality recorded separately. No numerical tolerance, dtype conversion, or query rewriting for support. The requested Metal backend may use CPU data-fault adjudication according to its engine policy; collect-boundary audits do not certify GPU-only execution. Collection durations are diagnostic, not performance evidence.",
         },
         "cases": [],
     }
