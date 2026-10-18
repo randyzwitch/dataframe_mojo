@@ -312,8 +312,8 @@ comptime STR_SPLIT_FIELDS = 240
 # (H_SUM ...) in `integer`, and HORIZONTAL keeps ignore_nulls in min_count.
 # Each input is one operand, so a selector among them expands into more
 # inputs rather than more expressions.
-comptime HORIZONTAL = 190
-comptime HORIZONTAL_ARGS = 191
+comptime HORIZONTAL = 250
+comptime HORIZONTAL_ARGS = 251
 comptime H_SUM = 0
 comptime H_MIN = 1
 comptime H_MAX = 2
