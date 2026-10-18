@@ -39,6 +39,7 @@ from .expr import (
     KURTOSIS,
     CORR,
     COV,
+    PRODUCT,
     is_reduction,
     is_window,
     subtree,
@@ -6809,6 +6810,7 @@ def _stream_reductions(expressions: List[Expr]) -> Bool:
                     KURTOSIS,
                     CORR,
                     COV,
+                    PRODUCT,
                 ]:
                     return False
                 # Reduction inputs must be row-local; reduction-of-reduction
