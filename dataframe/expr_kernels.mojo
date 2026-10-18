@@ -58,6 +58,26 @@ from .expr import (
     IS_INFINITE,
     is_comparison,
     is_logical,
+    LOG_BASE,
+    LOG1P,
+    SIGN,
+    CBRT,
+    TRUNCATE,
+    SIN,
+    COS,
+    TAN,
+    ARCSIN,
+    ARCCOS,
+    ARCTAN,
+    SINH,
+    COSH,
+    TANH,
+    ARCSINH,
+    ARCCOSH,
+    ARCTANH,
+    COT,
+    DEGREES,
+    RADIANS,
 )
 
 comptime INT64_MIN = Int64(-9223372036854775807) - 1
@@ -1328,6 +1348,297 @@ def _math[
             else:
                 return _unary_int[op, D](input._data[Column[Scalar[D]]], mask)
     raise Error("Unsupported unary kernel")
+
+
+# --- math functions (#791) -------------------------------------------------
+#
+# Transcendental functions call the platform's IEEE implementations lane by
+# lane, as `log` does: the toolchain's vector approximations lose accuracy
+# at the edges, and Polars computes these with Rust's, which call the same
+# libm. sign, truncate, degrees and radians are vector operations. Float32
+# input computes in Float32, as in Polars; integers and decimals compute in
+# Float64.
+
+
+@always_inline
+def _libm[
+    double: StaticString, single: StaticString, D: DType
+](value: Scalar[D]) -> Scalar[D] where D.is_floating_point():
+    comptime if D == DType.float32:
+        return external_call[single, Float32](value.cast[DType.float32]()).cast[
+            D
+        ]()
+    else:
+        return external_call[double, Float64](value.cast[DType.float64]()).cast[
+            D
+        ]()
+
+
+@always_inline
+def _math_value[
+    op: Int, D: DType
+](x: Scalar[D], base: Scalar[D]) -> Scalar[D] where D.is_floating_point():
+    """One lane of a transcendental `op`; `base` is LOG_BASE's base."""
+    comptime if op == LOG_BASE:
+        # log10 and log2 are exact at powers of their base (Polars divides
+        # natural logarithms, so its log10(1000) is 2.9999999999999996).
+        if base == 10:
+            return _libm["log10", "log10f", D](x)
+        if base == 2:
+            return _libm["log2", "log2f", D](x)
+        return _log_value[D](x) / _log_value[D](base)
+    elif op == LOG1P:
+        return _libm["log1p", "log1pf", D](x)
+    elif op == CBRT:
+        return _libm["cbrt", "cbrtf", D](x)
+    elif op == SIN:
+        return _libm["sin", "sinf", D](x)
+    elif op == COS:
+        return _libm["cos", "cosf", D](x)
+    elif op == TAN:
+        return _libm["tan", "tanf", D](x)
+    elif op == COT:
+        return Scalar[D](1) / _libm["tan", "tanf", D](x)
+    elif op == ARCSIN:
+        return _libm["asin", "asinf", D](x)
+    elif op == ARCCOS:
+        return _libm["acos", "acosf", D](x)
+    elif op == ARCTAN:
+        return _libm["atan", "atanf", D](x)
+    elif op == SINH:
+        return _libm["sinh", "sinhf", D](x)
+    elif op == COSH:
+        return _libm["cosh", "coshf", D](x)
+    elif op == TANH:
+        return _libm["tanh", "tanhf", D](x)
+    elif op == ARCSINH:
+        return _libm["asinh", "asinhf", D](x)
+    elif op == ARCCOSH:
+        return _libm["acosh", "acoshf", D](x)
+    else:
+        return _libm["atanh", "atanhf", D](x)
+
+
+def _math_block[
+    op: Int, width: Int, D: DType
+](
+    input: Column[Scalar[D]],
+    start: Int,
+    base: Scalar[D],
+    valid: List[Bool],
+    mut values: List[Scalar[D]],
+) where D.is_floating_point():
+    var x = input._ptr().unsafe_load[width=width](start)
+    var zero = SIMD[D, width](0)
+    var result: SIMD[D, width]
+    comptime if op == SIGN:
+        # NaN and signed zeros are their own sign, as in Polars.
+        result = x.gt(zero).select(
+            SIMD[D, width](1), x.lt(zero).select(SIMD[D, width](-1), x)
+        )
+    elif op == TRUNCATE:
+        result = x.lt(zero).select(ceil(x), floor(x))
+    elif op == DEGREES:
+        # Rust's to_degrees and to_radians: one multiply by the constant.
+        result = x * SIMD[D, width](57.29577951308232)
+    elif op == RADIANS:
+        result = x * SIMD[D, width](0.017453292519943295)
+    else:
+        result = zero
+        comptime for lane in range(width):
+            if valid[start + lane]:
+                result[lane] = _math_value[op, D](x[lane], base)
+    values.unsafe_ptr().unsafe_offset(start).unsafe_store(
+        _mask[width](valid, start).select(result, zero)
+    )
+
+
+def _math_float[
+    op: Int, width: Int, D: DType
+](
+    input: Column[Scalar[D]], base: Float64
+) raises -> Series where D.is_floating_point():
+    var n = len(input)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        valid[i] = input._valid(i)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var main = n - n % width
+    var b = base.cast[D]()
+    for start in range(0, main, width):
+        _math_block[op, width, D](input, start, b, valid, values)
+    for start in range(main, n):
+        _math_block[op, 1, D](input, start, b, valid, values)
+    return Series("", Column[Scalar[D]](values^, valid))
+
+
+def _sign_ints[D: DType](input: Column[Scalar[D]]) raises -> Series:
+    """-1, 0 or 1 in the input's integer type; nulls stay null."""
+    var n = len(input)
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var x = input._ptr()
+    for i in range(n):
+        valid[i] = input._valid(i)
+        var value = x[unsafe_offset=i]
+        comptime if D.is_signed():
+            values[i] = Scalar[D](1) if value > 0 else (
+                Scalar[D](-1) if value < 0 else Scalar[D](0)
+            )
+        else:
+            values[i] = Scalar[D](1) if value > 0 else Scalar[D](0)
+    return Series("", Column[Scalar[D]](values^, valid))
+
+
+def _decimal_sign_or_truncate(op: Int, input: Series) raises -> Series:
+    """A decimal's sign (-1, 0 or 1 at its scale) or its value truncated
+    toward zero, in its own type, as in Polars."""
+    var dtype = input.dtype()
+    var wide = input._decimal128()
+    ref column = wide._data[Column[Int128]]
+    var unit = pow10(dtype.scale())
+    if op == SIGN and unit >= precision_limit(dtype.precision()):
+        raise Error("sign of " + dtype.name() + " cannot be represented")
+    var n = len(column)
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Int128](length=n, fill=0)
+    for i in range(n):
+        valid[i] = column._valid(i)
+        var value = column._get(i)
+        if op == SIGN:
+            values[i] = unit if value > 0 else (
+                -unit if value < 0 else Int128(0)
+            )
+        else:
+            var kept = abs(value) // unit * unit
+            values[i] = kept if value >= 0 else -kept
+    var result = Series("", Column[Int128](values^, valid)).with_dtype(
+        wide.dtype()
+    )
+    if wide.dtype() != dtype:
+        return result.cast(dtype)
+    return result^
+
+
+def _math_fn[
+    op: Int, width: Int
+](input: Series, base: Float64) raises -> Series:
+    var dtype = input.dtype()
+    comptime if op == SIGN or op == TRUNCATE:
+        if dtype.is_decimal():
+            return _decimal_sign_or_truncate(op, input)
+        if dtype.is_integer():
+            if op == TRUNCATE:
+                return input.copy()
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                comptime if not D.is_floating_point():
+                    if input._data.isa[Column[Scalar[D]]]():
+                        return _sign_ints[D](input._data[Column[Scalar[D]]])
+    if input._data.isa[Column[Float32]]():
+        return _math_float[op, width, DType.float32](
+            input._data[Column[Float32]], base
+        )
+    if input._data.isa[Column[Float64]]():
+        return _math_float[op, width, DType.float64](
+            input._data[Column[Float64]], base
+        )
+    # Integers and decimals compute in Float64, as in Polars.
+    var floats = input.cast(DataType.FLOAT64)
+    return _math_float[op, width, DType.float64](
+        floats._data[Column[Float64]], base
+    )
+
+
+def math_unary[
+    width: Int
+](op: Int, input: Series, base: Float64) raises -> Series:
+    """An elementwise math function (`is_math`) of a numeric series; `base`
+    is LOG_BASE's base. Float64 results, or Float32 for Float32 input;
+    sign and truncate keep the input's type."""
+    if input.is_chunked():
+        return math_unary[width](op, input.rechunk(), base)
+    if op == LOG_BASE:
+        return _math_fn[LOG_BASE, width](input, base)
+    if op == LOG1P:
+        return _math_fn[LOG1P, width](input, base)
+    if op == SIGN:
+        return _math_fn[SIGN, width](input, base)
+    if op == CBRT:
+        return _math_fn[CBRT, width](input, base)
+    if op == TRUNCATE:
+        return _math_fn[TRUNCATE, width](input, base)
+    if op == SIN:
+        return _math_fn[SIN, width](input, base)
+    if op == COS:
+        return _math_fn[COS, width](input, base)
+    if op == TAN:
+        return _math_fn[TAN, width](input, base)
+    if op == ARCSIN:
+        return _math_fn[ARCSIN, width](input, base)
+    if op == ARCCOS:
+        return _math_fn[ARCCOS, width](input, base)
+    if op == ARCTAN:
+        return _math_fn[ARCTAN, width](input, base)
+    if op == SINH:
+        return _math_fn[SINH, width](input, base)
+    if op == COSH:
+        return _math_fn[COSH, width](input, base)
+    if op == TANH:
+        return _math_fn[TANH, width](input, base)
+    if op == ARCSINH:
+        return _math_fn[ARCSINH, width](input, base)
+    if op == ARCCOSH:
+        return _math_fn[ARCCOSH, width](input, base)
+    if op == ARCTANH:
+        return _math_fn[ARCTANH, width](input, base)
+    if op == COT:
+        return _math_fn[COT, width](input, base)
+    if op == DEGREES:
+        return _math_fn[DEGREES, width](input, base)
+    if op == RADIANS:
+        return _math_fn[RADIANS, width](input, base)
+    raise Error("Unsupported math function")
+
+
+def arctan2_series(y: Series, x: Series, dtype: DataType) raises -> Series:
+    """atan2(y, x) per row in `dtype` (Float32 or Float64); either side may
+    be one row, broadcast. Null when either side is null."""
+    var ys = y.cast(dtype).rechunk()
+    var xs = x.cast(dtype).rechunk()
+    if dtype == DataType.FLOAT32:
+        return _arctan2[DType.float32](
+            ys._data[Column[Float32]], xs._data[Column[Float32]]
+        )
+    return _arctan2[DType.float64](
+        ys._data[Column[Float64]], xs._data[Column[Float64]]
+    )
+
+
+def _arctan2[
+    D: DType
+](
+    y: Column[Scalar[D]], x: Column[Scalar[D]]
+) raises -> Series where D.is_floating_point():
+    var n = _length(len(y), len(x))
+    var y_step = 0 if len(y) == 1 else 1
+    var x_step = 0 if len(x) == 1 else 1
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Scalar[D]](length=n, fill=0)
+    for i in range(n):
+        valid[i] = y._valid(i * y_step) and x._valid(i * x_step)
+        if valid[i]:
+            comptime if D == DType.float32:
+                values[i] = external_call["atan2f", Float32](
+                    y._get(i * y_step).cast[DType.float32](),
+                    x._get(i * x_step).cast[DType.float32](),
+                ).cast[D]()
+            else:
+                values[i] = external_call["atan2", Float64](
+                    y._get(i * y_step).cast[DType.float64](),
+                    x._get(i * x_step).cast[DType.float64](),
+                ).cast[D]()
+    return Series("", Column[Scalar[D]](values^, valid))
 
 
 # --- packed-bit comparisons and Kleene logic (#327) -------------------------
