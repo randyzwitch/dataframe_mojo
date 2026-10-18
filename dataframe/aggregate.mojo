@@ -40,6 +40,7 @@ from .expr import (
     CORR,
     COV,
     VALUE_COUNTS,
+    PRODUCT,
     split_names,
 )
 from .reductions import (
@@ -181,6 +182,20 @@ def _sum_ints[
             ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
             state.total += values.unsafe_offset(i)[].cast[DType.int128]()
             state.count += 1
+
+
+def _checked_product(a: Int128, b: Int128, unsigned: Bool) raises -> Int128:
+    """a * b, raising when it leaves Int64 (or UInt64 when `unsigned`);
+    both factors are within 64 bits, so the bound test cannot overflow."""
+    var widest = UInt64.MAX.cast[DType.int128]()
+    var high = widest if unsigned else Int64.MAX.cast[DType.int128]()
+    var low = Int128(0) if unsigned else Int64.MIN.cast[DType.int128]()
+    if a != 0 and b != 0 and abs(a) > widest // abs(b):
+        raise Error(("UInt64" if unsigned else "Int64") + " product overflow")
+    var product = a * b
+    if product > high or product < low:
+        raise Error(("UInt64" if unsigned else "Int64") + " product overflow")
+    return product
 
 
 def _sum_bools(
@@ -917,6 +932,10 @@ struct Reducer(Movable):
     var mode_nulls: List[Int64]
     # The logical input type, for results (mode) that carry input values.
     var logical: DataType
+    # product: running products per group, exact integers in 128 bits
+    # (each kept within the result type) or Float64.
+    var int_products: List[Int128]
+    var float_products: List[Float64]
 
     def __init__(
         out self,
@@ -1066,6 +1085,11 @@ struct Reducer(Movable):
             fill=Dict[String, Int64](),
         )
         self.mode_nulls = List[Int64](length=n if mode else 0, fill=0)
+        var exact = op == PRODUCT and self.logical.product_type().is_integer()
+        self.int_products = List[Int128](length=n if exact else 0, fill=1)
+        self.float_products = List[Float64](
+            length=n if op == PRODUCT and not exact else 0, fill=1
+        )
 
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
@@ -1078,6 +1102,9 @@ struct Reducer(Movable):
             for part in chunk.chunks():
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
+            return
+        if self.op == PRODUCT:
+            self._update_product(chunk, offset, grouped, groups)
             return
         if self.op == MEDIAN or self.op == QUANTILE:
             # Quantiles order numeric samples, not the biased UInt64 ordering
@@ -1181,6 +1208,41 @@ struct Reducer(Movable):
                         )
                     return
         self._update(_canonical(chunk), offset, grouped, groups)
+
+    def _update_product(
+        mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
+    ) raises:
+        """Multiply each group's product by its valid values, read at their
+        own type (UInt64 raw, not as the biased keys of other states)."""
+        var values = chunk.copy()
+        if self.logical.is_decimal():
+            # A decimal's product is Float64, as DuckDB's is.
+            if not values.dtype().is_decimal():
+                values = values.with_dtype(self.logical)
+            values = values.cast(DataType.FLOAT64)
+        elif values._data.isa[BoolColumn]():
+            values = values.cast(DataType.INT64)
+        var unsigned = self.logical.product_type() == DataType.UINT64
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if values._data.isa[Column[Scalar[D]]]():
+                ref column = values._data[Column[Scalar[D]]]
+                for i in range(len(column)):
+                    if not column._valid(i):
+                        continue
+                    var g = _group(grouped, groups, offset + i)
+                    comptime if D.is_floating_point():
+                        self.float_products[g] *= column._get(i).cast[
+                            DType.float64
+                        ]()
+                    else:
+                        self.int_products[g] = _checked_product(
+                            self.int_products[g],
+                            column._get(i).cast[DType.int128](),
+                            unsigned,
+                        )
+                return
+        raise Error("product requires a numeric expression")
 
     def update_pair(
         mut self,
@@ -1747,6 +1809,15 @@ struct Reducer(Movable):
             )
             if op == COUNT or op == NULL_COUNT or op == LEN:
                 self.counts[g] += other.counts[source]
+            elif op == PRODUCT:
+                if len(self.int_products) > 0:
+                    self.int_products[g] = _checked_product(
+                        self.int_products[g],
+                        other.int_products[source],
+                        self.logical.product_type() == DataType.UINT64,
+                    )
+                else:
+                    self.float_products[g] *= other.float_products[source]
             elif op == SUM or op == MEAN:
                 if self.dtype.is_decimal():
                     self.decimals[g] = check_limit(
@@ -1955,10 +2026,31 @@ struct Reducer(Movable):
         self.mode_float_values.extend(added.mode_float_values.copy())
         self.mode_strings.extend(added.mode_strings.copy())
         self.mode_nulls.extend(added.mode_nulls.copy())
+        self.int_products.extend(added.int_products.copy())
+        self.float_products.extend(added.float_products.copy())
         self.group_count = count
 
     def finish(self) raises -> Series:
         var op = self.op
+        if op == PRODUCT:
+            # Never null: an empty or all-null group's product is 1.
+            var dtype = self.logical.product_type()
+            if len(self.int_products) > 0:
+                if dtype == DataType.UINT64:
+                    var unsigned = List[UInt64](capacity=self.group_count)
+                    for value in self.int_products:
+                        unsigned.append(value.cast[DType.uint64]())
+                    return Series("", Column[UInt64](unsigned^))
+                var signed = List[Int64](capacity=self.group_count)
+                for value in self.int_products:
+                    signed.append(value.cast[DType.int64]())
+                return Series("", Column[Int64](signed^))
+            if dtype == DataType.FLOAT32:
+                var narrow = List[Float32](capacity=self.group_count)
+                for value in self.float_products:
+                    narrow.append(value.cast[DType.float32]())
+                return Series("", Column[Float32](narrow^))
+            return Series("", Column[Float64](self.float_products.copy()))
         if op == MODE:
             return self._finish_mode()
         if op == VALUE_COUNTS:
