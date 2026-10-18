@@ -332,6 +332,18 @@ struct MetalRuntime(AcceleratorBackend):
 
         if self._execution_settings.batch_size <= 0:
             raise Error("batch_size must be positive")
+        from .accelerator.gpu.coded_group_sum import (
+            eligible as coded_sum_eligible,
+            execute as execute_coded_sum,
+        )
+
+        if original_entry and coded_sum_eligible(query):
+            return execute_coded_sum(
+                query,
+                self._device,
+                self._budget,
+                observation_only=self._observation_only,
+            )
         _reject_time_windows(query)
         from .accelerator.grouped_stream_routes import candidate
         from .accelerator.gpu.grouped_stream_dispatch import (
