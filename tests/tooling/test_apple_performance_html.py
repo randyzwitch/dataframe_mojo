@@ -358,6 +358,33 @@ class ApplePerformanceHTML(unittest.TestCase):
             report.coverage_comparison(before, changed),
         )
 
+    def test_cli_admits_separate_timing_receipts_without_changing_support_counts(self):
+        data, strict = fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            strict_path = root / "default-strict.json"
+            strict_path.write_text(json.dumps(strict))
+            digest = report.sha(strict_path)
+            for case in data["cases"]:
+                case["strict_basis"]["receipt_sha256"] = digest
+            source = root / "timings.json"
+            source.write_text(json.dumps(data))
+            output = root / "report.html"
+            script = ROOT / "benchmarks/tools/apple_performance_html.py"
+            metadata = root / "synthetic-metadata.json"
+            metadata.write_text(json.dumps(dict(format="dataframe-metal-case-metadata-v1", cases={})))
+            argv = [sys.executable, str(script), str(source), "--strict-coverage", str(strict_path),
+                    "--case-metadata", str(metadata)]
+            result = subprocess.run(argv + ["--output", str(output)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("2 admitted pairs", result.stdout)
+            self.assertIn(digest, output.read_text())
+            self.assertIn("Unmeasured / receipt not supplied", output.read_text())
+            unchanged = strict_path.read_bytes()
+            refused = subprocess.run(argv + ["--output", str(strict_path)], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(strict_path.read_bytes(), unchanged)
+
     def test_cli_never_overwrites_input_and_missing_coverage_yields_no_ratios(self):
         data, strict = fixture()
         with tempfile.TemporaryDirectory() as tmp:

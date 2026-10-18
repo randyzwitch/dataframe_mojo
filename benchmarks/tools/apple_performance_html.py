@@ -444,7 +444,7 @@ def coverage_section(title, item):
     return f"<section><h2>{e(title)}</h2><table>{rows}</table><details><summary>Exact coverage cases, reasons and provenance</summary><pre>{e(details)}</pre></details></section>"
 
 
-def render(data, analysis, before=None, after=None, receipt_path="", receipt_sha=""):
+def render(data, analysis, before=None, after=None, receipt_path="", receipt_sha="", timing_coverage=()):
     p = data["provenance"]
     ratio = (
         "unavailable" if analysis["geometric_mean"]
@@ -536,6 +536,7 @@ def render(data, analysis, before=None, after=None, receipt_path="", receipt_sha
     provenance = json.dumps(
         dict(
             receipt=dict(path=str(receipt_path), sha256=receipt_sha),
+            supplied_timing_coverage_receipts=timing_coverage,
             provenance=p,
             final_engine_input_checks={
                 k: data.get(k, "unavailable")
@@ -581,6 +582,10 @@ def main():
     parser.add_argument("--baseline-coverage", type=Path, action="append", default=[])
     parser.add_argument("--final-coverage", type=Path, action="append", default=[])
     parser.add_argument(
+        "--strict-coverage", type=Path, action="append", default=[],
+        help="Exact receipts matching the timing inputs; separate from baseline/final support counts.",
+    )
+    parser.add_argument(
         "--case-metadata", type=Path, default=TOOLS / "metal_case_metadata.json"
     )
     parser.add_argument("--baseline-catalog", type=Path)
@@ -591,6 +596,7 @@ def main():
         [args.timings, args.case_metadata]
         + args.baseline_coverage
         + args.final_coverage
+        + args.strict_coverage
         + [p for p in (args.baseline_catalog, args.final_catalog) if p is not None]
     )
     if args.output.resolve() in {p.resolve() for p in inputs}:
@@ -602,12 +608,13 @@ def main():
     data = read(args.timings)
     supplied = [
         dict(read(p), receipt_sha256=sha(p))
-        for p in args.baseline_coverage + args.final_coverage
+        for p in args.baseline_coverage + args.final_coverage + args.strict_coverage
     ]
     analysis = analyze(data, supplied, metadata)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        render(data, analysis, before, after, args.timings, sha(args.timings))
+        render(data, analysis, before, after, args.timings, sha(args.timings),
+               timing_coverage=[dict(path=str(p), sha256=sha(p)) for p in args.strict_coverage])
     )
     print(
         f"Rendered {analysis['planned_cases']} planned cases; {analysis['admitted_cases']} admitted pairs. No queries executed."
