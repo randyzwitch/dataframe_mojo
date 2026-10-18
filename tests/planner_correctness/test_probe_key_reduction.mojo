@@ -195,3 +195,48 @@ def test_an_aggregate_on_both_keys_of_a_two_key_join_takes_the_key_pairs() raise
         .sort(["s"])
     )
     assert_frame(reduced, eager)
+
+
+def test_an_aggregate_reached_through_a_renamed_key_takes_the_probe_keys() raises:
+    # Orders with lines from two suppliers, the order key renamed above
+    # the aggregate, as a semi join's right side (TPC-DS q16's orders
+    # shipped from two warehouses).
+    var line = lines()
+    var supp = suppliers()
+    var split = (
+        line.lazy()
+        .group_by("o")
+        .agg([col("s").min().alias("first"), col("s").max().alias("last")])
+        .filter(col("first") != col("last"))
+        .select_exprs([col("o").alias("split_o")])
+    )
+    var chosen = (
+        line.lazy()
+        .join(
+            supp.lazy().filter(col("nation") == lit(Int64(4))),
+            left_on=["s"],
+            right_on=["sk"],
+        )
+        .select_exprs([col("o"), col("s")])
+    )
+    var query = (
+        chosen.join(split, left_on=["o"], right_on=["split_o"], how="semi")
+        .group_by("s")
+        .agg([col("o").count().alias("c")])
+        .sort("s")
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var reduced = query.collect()
+    var took = "dataframe-path: stream.probe_key_reduction\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the renamed aggregate key was not reduced")
+    var eager = (
+        chosen.collect()
+        .join(split.collect(), left_on=["o"], right_on=["split_o"], how="semi")
+        .group_by(["s"])
+        .agg([col("o").count().alias("c")])
+        .sort(["s"])
+    )
+    assert_frame(reduced, eager)

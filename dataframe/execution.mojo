@@ -6,7 +6,7 @@ by future parallel implementations. Int64 sums use exact wide states and check f
 """
 from .dtype import DataType, NUMERIC_DTYPES
 from .identity_metadata import identity_column_source
-from .expr import INT_IS_IN
+from .expr import INT_IS_IN, is_replace
 from .expr import (
     Node,
     Expr,
@@ -95,6 +95,7 @@ from .horizontal import horizontal
 from .str_kernels import string_op, concat_strings
 from .text_functions import text_function
 from .expr_kernels import integer_is_in
+from .replace import replace_values
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
@@ -434,6 +435,10 @@ def _eval[
         return _pack_struct[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
         )
+    if is_replace(node.op):
+        return _replace_batch[width](
+            bound, columns, aggregates, index, offset, length, grouped, mask
+        )
     if node.op == HORIZONTAL:
         return _horizontal[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
@@ -540,6 +545,81 @@ def _eval[
             mask,
         )
     return _binary_op[width](node.op, left, right, mask)
+
+
+def _replace_batch[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    mask: List[Bool],
+) raises -> Series:
+    """A REPLACE node's rows: a slice of the result `evaluate` made for
+    every row before the batches (`_replace_rows`), or, for a caller that
+    feeds batches itself, the node over this batch alone."""
+    if index < len(aggregates) and len(aggregates[index]) >= max(
+        1, offset + length
+    ):
+        return aggregates[index].slice(offset, length)
+    ref node = bound.expr._nodes[index]
+    var input = _eval[width](
+        bound, columns, aggregates, node.left, offset, length, grouped, mask
+    )
+    var default = Optional[Series]()
+    if node.right >= 0:
+        var given = _eval[width](
+            bound,
+            columns,
+            aggregates,
+            node.right,
+            offset,
+            length,
+            grouped,
+            mask,
+        )
+        if len(input) == 1 and len(given) > 1:
+            input = input._broadcast(len(given))
+        default = given^
+    return replace_values(
+        node, input, bound.dtypes[node.left], bound.dtypes[index], default, 1
+    )
+
+
+def _replace_rows[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+    grouped: Bool,
+) raises -> Series:
+    """A row-valued REPLACE node over every row at once, so that its old
+    values are cast and hashed once and probed by every worker (#789)."""
+    ref node = bound.expr._nodes[index]
+    var input = _full[width](
+        bound, columns, states, node.left, height, batch_size, grouped
+    )
+    var default = Optional[Series]()
+    if node.right >= 0:
+        if grouped or bound.shapes[node.right] == ROWS:
+            default = _full[width](
+                bound, columns, states, node.right, height, batch_size, grouped
+            )
+        else:
+            default = _batch[width](
+                bound, columns, states, node.right, 0, 1, False
+            )
+    return replace_values(
+        node, input, bound.dtypes[node.left], bound.dtypes[index], default, 0
+    )
 
 
 def _pack_struct[
@@ -2092,6 +2172,7 @@ def _row_wise(op: Int) -> Bool:
         or op == CUT
         or is_dt_op(op)
         or is_nested_op(op)
+        or is_replace(op)
         or op == HORIZONTAL
         or op == HORIZONTAL_ARGS
     )
@@ -2446,7 +2527,9 @@ def _whole(
         if len(column) == height and column.dtype() == bound.dtypes[index]:
             return column.copy()
         return None
-    if (is_window(node.op) or node.op == OVER) and len(states[index]) == height:
+    if (is_window(node.op) or node.op == OVER or is_replace(node.op)) and len(
+        states[index]
+    ) == height:
         if states[index].dtype() == bound.dtypes[index]:
             return states[index].copy()
     return None
@@ -2996,6 +3079,16 @@ def evaluate[
                     )
             else:
                 states[node_index] = window_op(node, input, window_groups)
+        elif is_replace(node.op) and bound.shapes[node_index] == ROWS:
+            states[node_index] = _replace_rows[width](
+                bound,
+                prepared_columns,
+                states,
+                node_index,
+                height,
+                batch_size,
+                row_mode,
+            )
         elif node.op == OVER:
             states[node_index] = _over[width](
                 bound,

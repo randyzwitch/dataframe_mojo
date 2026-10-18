@@ -1,4 +1,5 @@
 """Schema-only binding and expression shape analysis before execution."""
+from .regex_kernels import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,
     COL,
@@ -111,6 +112,9 @@ from .expr import (
     STR_STARTS_WITH,
     STR_ENDS_WITH,
     STR_CONTAINS,
+    STR_EXTRACT,
+    STR_EXTRACT_ALL,
+    STR_REPLACE,
     STR_IS_IN,
     INT_IS_IN,
     STR_LIKE,
@@ -153,6 +157,10 @@ from .expr import (
     is_unary,
     is_reduction,
     is_comparison,
+    REPLACE,
+    REPLACE_STRICT,
+    is_replace,
+    replace_literals,
     is_math,
     ARCTAN2,
     LOG_BASE,
@@ -178,6 +186,7 @@ from .expr import (
     PRODUCT,
     CUM_PROD,
 )
+from .replace import values_dtype, replace_supertype
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
@@ -234,6 +243,28 @@ def _text_function_name(op: Int) -> String:
     if op == STR_TO_INTEGER:
         return "str.to_integer"
     return "str.split_exact"
+
+
+def _check_pattern(node: Node) raises:
+    """Raise now for an invalid regular expression in a strict regex
+    string operation, as Polars does when the expression runs."""
+    var regex = False
+    if node.op == STR_CONTAINS:
+        regex = node.integer == 1
+    elif node.op == STR_FIND or node.op == STR_COUNT_MATCHES:
+        regex = node.integer == 0
+    elif node.op == STR_EXTRACT or node.op == STR_EXTRACT_ALL:
+        regex = True
+    elif node.op == STR_SPLIT:
+        regex = node.min_count == 1 and node.text.byte_length() > 0
+    elif node.op == STR_REPLACE:
+        regex = node.min_count == 0 and not is_literal_pattern(node.text)
+        if regex and node.integer > 1:
+            raise Error("regex replacement with 'n > 1' not yet supported")
+    if regex:
+        _ = compile_pattern(node.text, False)
+    if node.op == STR_EXTRACT and node.integer < 0:
+        raise Error("str.extract group_index must be nonnegative")
 
 
 def op_name(op: Int) -> String:
@@ -399,6 +430,10 @@ def op_name(op: Int) -> String:
         return "sum"
     if op == COUNT:
         return "count"
+    if op == REPLACE:
+        return "replace"
+    if op == REPLACE_STRICT:
+        return "replace_strict"
     if is_comparison(op):
         return "comparison"
     return "operation " + String(op)
@@ -934,41 +969,12 @@ def _packed_count(text: String) -> Int:
     return count
 
 
-def _has_regex_syntax(pattern: String) -> Bool:
-    """Whether a pattern holds a character with a meaning in a regular
-    expression, so that matching it literally could differ from Polars."""
-    for byte in pattern.as_bytes():
-        # \ . + * ? ( ) | [ ] { } ^ $
-        if (
-            byte == 92
-            or byte == 46
-            or byte == 43
-            or byte == 42
-            or byte == 63
-            or byte == 40
-            or byte == 41
-            or byte == 124
-            or byte == 91
-            or byte == 93
-            or byte == 123
-            or byte == 125
-            or byte == 94
-            or byte == 36
-        ):
-            return True
-    return False
-
-
 def _text_function_dtype(node: Node) raises -> DataType:
     """The result dtype of a text_functions.mojo operation, after checking
     its arguments."""
     var op = node.op
     if op == STR_FIND or op == STR_COUNT_MATCHES:
-        if node.integer == 0 and _has_regex_syntax(node.text):
-            raise Error(
-                op_name(op) + ": regular expressions are not supported; pass"
-                " literal=True to match the pattern as text"
-            )
+        _check_pattern(node)
         return DataType.UINT32
     if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:
         var patterns = _packed_count(node.text)
@@ -1017,6 +1023,81 @@ def _text_function_dtype(node: Node) raises -> DataType:
     return DataType.STRING
 
 
+def _replace_dtype(
+    mut nodes: List[Node],
+    mut types: List[DataType],
+    columns: List[Series],
+    sources: List[Int],
+    i: Int,
+) raises -> DataType:
+    """The result dtype of a REPLACE or REPLACE_STRICT node, checking its
+    values. `replace` keeps the input dtype, and a categorical stays one
+    when it is the result. `replace_strict` takes `return_dtype`, or the
+    type of the new values and the default together, as Polars does."""
+    var node = nodes[i].copy()
+    if node.left < 0 or node.left >= i or node.right >= i:
+        raise Error("Invalid " + op_name(node.op) + " input")
+    _default(nodes, types, node.left)
+    var input = types[node.left]
+    if input.is_nested():
+        raise Error(
+            op_name(node.op)
+            + " does not support list or struct expressions, found "
+            + input.name()
+        )
+    var old = replace_literals(node.text)
+    var new = replace_literals(node.text2)
+    var old_type = values_dtype(old)
+    var new_type = values_dtype(new)
+    if (len(old) > 0 and not old_type) or (len(new) > 0 and not new_type):
+        raise Error(op_name(node.op) + " values must be literals")
+    if len(new) != len(old) and len(new) != 1:
+        raise Error(
+            "new values for "
+            + op_name(node.op)
+            + " must have the same length as old or length 1"
+        )
+    if node.op == REPLACE:
+        var source = sources[node.left] if node.left < len(sources) else -1
+        var categorical = input.is_categorical() or (
+            nodes[node.left].op == COL
+            and source >= 0
+            and columns[source].dtype().is_categorical()
+        )
+        if categorical:
+            # Carried as strings inside an expression (#106); the result
+            # is encoded again when it is the expression's value.
+            return (
+                DataType.CATEGORICAL if i == len(nodes) - 1 else DataType.STRING
+            )
+        return input
+    var result = new_type.value() if new_type else input
+    if len(node.dtypes) > 0:
+        if not node.dtypes[0]:
+            raise Error("Unknown replace_strict return_dtype")
+        result = node.dtypes[0].value()
+    if node.right >= 0:
+        var default = types[node.right]
+        if default.is_untyped():
+            if (
+                len(node.dtypes) == 0
+                and result.is_integer()
+                and (default == DataType.UNTYPED_FLOAT)
+            ):
+                result = DataType.FLOAT64
+            if result.is_numeric():
+                _adopt(nodes, types, node.right, result)
+            else:
+                _default(nodes, types, node.right)
+        elif len(node.dtypes) == 0 and nodes[node.right].op != LIT_NULL:
+            result = replace_supertype(result, default)
+        if types[node.right].is_nested():
+            raise Error(
+                "replace_strict does not support a list or struct default"
+            )
+    return result
+
+
 def bind(
     expr: Expr, columns: List[Series], fuse: Bool = True
 ) raises -> BoundExpr:
@@ -1036,6 +1117,7 @@ def bind(
             is_binary(node.op)
             or is_conditional(node.op)
             or node.op == NEG
+            or is_replace(node.op)
             or node.op == HORIZONTAL_ARGS
             or node.op == HORIZONTAL
         ):
@@ -1367,6 +1449,16 @@ def bind(
             dtype = node.dtypes[0].value()
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
+        elif is_replace(node.op):
+            dtype = _replace_dtype(nodes, types, columns, sources, i)
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+            if node.right >= 0:
+                has_aggregate = has_aggregate or aggregated[node.right]
+                if shapes[node.right] == ROWS:
+                    shape = ROWS
+                elif shape != ROWS and has_aggregate:
+                    shape = AGGREGATE
         elif node.op == INT_IS_IN:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid is_in input")
@@ -1405,6 +1497,7 @@ def bind(
                     raise Error("pad width must be nonnegative")
                 if len(node.text.codepoints()) != 1:
                     raise Error("pad fill_char must be one character")
+            _check_pattern(node)
             if node.op == STR_LEN_CHARS or node.op == STR_LEN_BYTES:
                 dtype = DataType.INT64
             elif (
@@ -1504,12 +1597,17 @@ def bind(
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid list expression input")
             var input = types[node.left]
-            if node.op == STR_SPLIT:
+            if node.op == STR_SPLIT or node.op == STR_EXTRACT_ALL:
                 if input != DataType.STRING:
                     raise Error(
-                        "str.split requires a string expression, found "
+                        (
+                            "str.split" if node.op
+                            == STR_SPLIT else "str.extract_all"
+                        )
+                        + " requires a string expression, found "
                         + input.name()
                     )
+                _check_pattern(node)
                 dtype = DataType.list(DataType.STRING)
             elif node.op == STRUCT_FIELD:
                 if not input.is_struct():
