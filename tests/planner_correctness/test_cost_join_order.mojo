@@ -2,7 +2,8 @@
 `join_order.mojo`). The estimator divides the relations' rows by each
 spanning edge's total domain, the fewest table rows among the relations
 its keys reach; the cheapest tree is found exactly below twelve relations
-and greedily from twelve; a disconnected graph is left alone. A plan's
+and greedily from twelve; a disconnected graph is left alone; a filter
+comparing two relations' columns is an edge of the estimate. A plan's
 result is the same joins over separately collected inputs: a snowflake
 written large-table-last, a nested chain met from its far side (its keys
 swapped, the dropped ones read from their partners), a filter between
@@ -11,7 +12,7 @@ joins, and a plan whose rows' order shows, which keeps its written order."""
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from dataframe.distinct_statistics import distinct_estimate
-from dataframe.join_order import JoinEdge, JoinGraph, order_joins
+from dataframe.join_order import FilterEdge, JoinEdge, JoinGraph, order_joins
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -214,6 +215,47 @@ def test_counted_domains_take_the_largest_count_and_charge_unused_edges() raises
     # Spanning by descending domain: 0-2 (1000), then 0-1 (500); 1-2
     # (500, counted) is left over: 1e8 / (1000 * 500 * 2).
     assert_equal(counted.estimate(0b111), 100.0)
+
+
+def test_a_filter_comparing_two_relations_is_an_edge_of_the_estimate() raises:
+    # Totals (0) by state against state averages (1), kept where a total
+    # exceeds its state's average; customers (2); addresses (3) filtered
+    # to 5% of their table. Every compared column has a distinct count.
+    var rows: List[Float64] = [13000.0, 50.0, 100000.0, 2500.0]
+    var domains: List[Float64] = [13000.0, 50.0, 100000.0, 50000.0]
+    var edges: List[JoinEdge] = [
+        JoinEdge(0, 1, ["state"], ["avg_state"]),
+        JoinEdge(0, 2, ["customer"], ["c_id"]),
+        JoinEdge(2, 3, ["c_address"], ["a_id"]),
+    ]
+    var distinct = Dict[String, Float64]()
+    distinct["0/state"] = 50.0
+    distinct["1/avg_state"] = 50.0
+    distinct["0/total"] = 12500.0
+    distinct["1/average"] = 50.0
+    distinct["2/c_id"] = 100000.0
+    distinct["2/c_address"] = 45000.0
+    distinct["3/a_id"] = 50000.0
+    # Without the filter, totals join their states to 13000 rows, and
+    # customers join the few addresses first (5000 rows).
+    var plain = JoinGraph(rows, domains, edges, distinct)
+    assert_equal(plain.estimate(0b0011), 13000.0)
+    var unordered = order_joins(rows, domains, edges, distinct)
+    var unfiltered = unordered.take()
+    assert_equal(unfiltered.mask[4], 0b1100)
+    # The comparison is an edge (`CreateHyperGraphEdges`): its domain, the
+    # larger count 12500, is met first and divides by 12500^(2/3); the
+    # state edge is then left over and doubles the denominator.
+    var filters: List[FilterEdge] = [
+        FilterEdge(0, 1, "total", "average", False)
+    ]
+    var filtered = JoinGraph(rows, domains, edges, distinct, filters)
+    var expected = 13000.0 * 50.0 / (12500.0 ** (2.0 / 3.0) * 2.0)
+    assert_true(abs(filtered.estimate(0b0011) - expected) < 1e-6)
+    # So the totals meet their averages first, as written.
+    var found = order_joins(rows, domains, edges, distinct, filters)
+    var ordered = found.take()
+    assert_equal(ordered.mask[4], 0b0011)
 
 
 def test_distinct_estimates_sample_like_duckdb_and_skip_booleans() raises:
