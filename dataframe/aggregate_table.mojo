@@ -63,7 +63,7 @@ from std.sys import size_of
 from .aggregate import Reducer, float_key
 from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
-from .column import Column, _pack_bits
+from .column import Column, _count_set, _pack_bits, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     COUNT,
@@ -279,6 +279,19 @@ def _words_at(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
     return Pointer[UInt64, MutAnyOrigin](unsafe_from_address=address)
 
 
+@always_inline
+def _batch_nulls(
+    bits: List[UInt8], offset: Int, start: Int, count: Int
+) -> Bool:
+    """Whether rows [start, start + count) of a column (its validity
+    `bits`, row 0 at bit `offset`) hold a null, from the batch's own bits,
+    as DuckDB reads a vector's validity: `null_count()` counted every row
+    of the morsel, once a batch for each reduction and key."""
+    if len(bits) == 0:
+        return False
+    return _count_set(bits, offset + start, count) < count
+
+
 def _update_slot[
     D: DType
 ](
@@ -293,7 +306,9 @@ def _update_slot[
     groups' state words, `base` bytes into each group's row (`rows` holds
     their addresses; DuckDB's `UpdateStates` by address)."""
     var values = column._ptr()
-    var nulls = column.null_count() > 0
+    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
+    var valid = column._bits[].unsafe_ptr()
+    var bit = column._offset
     var kind = slot.kind
     if kind == _K_COUNT or kind == _K_NULLS:
         if not nulls:
@@ -302,12 +317,12 @@ def _update_slot[
                     _words_at(rows[unsafe_offset=k] + base)[] += 1
             return
         for k in range(count):
-            if column._valid(start + k) == (kind == _K_COUNT):
+            if _validity_at(valid, bit + start + k) == (kind == _K_COUNT):
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
         return
     for k in range(count):
         var i = start + k
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(valid, bit + i):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var w = 0
@@ -401,11 +416,12 @@ def _update_decimal[
     their groups' 128-bit totals and counts, each total held to the
     state's precision."""
     var values = column._ptr()
-    var nulls = column.null_count() > 0
+    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
+    var valid = column._bits[].unsafe_ptr()
     var limit = precision_limit(slot.dtype.precision())
     for k in range(count):
         var i = start + k
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(valid, column._offset + i):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var total = bitcast[DType.int128](
@@ -533,10 +549,11 @@ def _update_top_rows[
     """A batch's values into their groups' top-rows states; a null value
     has no rank and is not kept."""
     var values = column._ptr()
-    var nulls = column.null_count() > 0
+    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
+    var valid = column._bits[].unsafe_ptr()
     for k in range(count):
         var i = start + k
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(valid, column._offset + i):
             continue
         _keep_top(
             _words_at(rows[unsafe_offset=k] + base),
@@ -755,7 +772,7 @@ def _string_words(
     var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
     var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
-    var has_nulls = strings.null_count() > 0
+    var has_nulls = _batch_nulls(strings._bits[], strings._offset, start, count)
     var views = strings._is_view_storage()
     if views:
         # A view is already these words: its first word, then its inline
@@ -880,9 +897,10 @@ def _column_words(
         return
     if column._data.isa[Column[Int128]]():
         ref wide = column._data[Column[Int128]]
-        var has_nulls = wide.null_count() > 0
+        var has_nulls = _batch_nulls(wide._bits[], wide._offset, start, count)
+        var valid = wide._bits[].unsafe_ptr()
         for k in range(count):
-            if has_nulls and not wide._valid(start + k):
+            if has_nulls and not _validity_at(valid, wide._offset + start + k):
                 first[unsafe_offset=k] = 0
                 second[unsafe_offset=k] = 0
                 nulls[unsafe_offset=k] |= bit
@@ -896,10 +914,13 @@ def _column_words(
         if column._data.isa[Column[Scalar[D]]]():
             ref typed = column._data[Column[Scalar[D]]]
             var values = typed._ptr()
-            var has_nulls = typed.null_count() > 0
+            var has_nulls = _batch_nulls(
+                typed._bits[], typed._offset, start, count
+            )
+            var valid = typed._bits[].unsafe_ptr()
             for k in range(count):
                 var i = start + k
-                if has_nulls and not typed._valid(i):
+                if has_nulls and not _validity_at(valid, typed._offset + i):
                     first[unsafe_offset=k] = 0
                     nulls[unsafe_offset=k] |= bit
                     continue
@@ -1527,7 +1548,9 @@ struct _DictionaryKeys(Movable):
         var hashes = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=hashes_at
         )
-        var has_nulls = strings.null_count() > 0
+        var has_nulls = _batch_nulls(
+            strings._bits[], strings._offset, lo, count
+        )
         var codes = self.codes.unsafe_ptr()
         for k in range(count):
             var key: UInt64
