@@ -42,7 +42,6 @@ from .pipeline import (
     _BOUND_NONE,
     _TopBound,
     _ensure_zones,
-    _int_bounds,
     _range_key,
     _window_bounds,
     _int_bounds,
