@@ -64,6 +64,13 @@ and UInt64 compute in 128 bits and range-check the result.
 | `==`, `!=`, `.eq()`, `.ne()` | any | Bool | IEEE: NaN `!=` NaN is true |
 | unary `-`, `.abs()` | numeric | same | signed `MIN` raises; unsigned negation raises unless zero |
 | `.sqrt()`, `.exp()`, `.log()` | numeric | Float64 (Float32 for Float32) | natural log; IEEE results for negative inputs and zero |
+| `.log(base)`, `.log10()`, `.log1p()`, `.cbrt()` | numeric | Float64 (Float32 for Float32) | `log(base)` is `ln(x) / ln(base)`, with `log10` and base 2 exact at powers of the base; `log10(0)` is -inf, `log10(-1)` NaN; `log1p(-1)` is -inf |
+| `.sin()`, `.cos()`, `.tan()`, `.cot()`, `.arcsin()`, `.arccos()`, `.arctan()` | numeric | Float64 (Float32 for Float32) | radians; out-of-domain input (`arcsin(2)`) is NaN; `cot(0)` is inf |
+| `.sinh()`, `.cosh()`, `.tanh()`, `.arcsinh()`, `.arccosh()`, `.arctanh()` | numeric | Float64 (Float32 for Float32) | `arccosh` is NaN below 1; `arctanh(1)` is inf |
+| `.degrees()`, `.radians()` | numeric | Float64 (Float32 for Float32) | one multiply by `180 / pi` or `pi / 180`, as Rust does |
+| `arctan2(y, x)` | two numeric | Float64 (Float32 when `y` is Float32) | `x` is cast to `y`'s float type; null when either side is null |
+| `.sign()` | numeric | same | -1, 0 or 1 (unsigned: 0 or 1); a float NaN stays NaN and a signed zero keeps its sign; a decimal's sign is at its scale |
+| `.truncate()` | numeric | same | toward zero; identity for integers |
 | `.floor()`, `.ceil()`, `.round(decimals=0)` | numeric | same | identity for integers; `round` is half away from zero and accepts negative decimals |
 | `.clip(lower, upper)`, `.clip_min`, `.clip_max` | numeric | same | NaN inputs and NaN bounds leave the value unchanged |
 
@@ -77,7 +84,11 @@ other float operations run per lane. Comparisons on every numeric type, and
 `&`, `|`, `^` and `~` on Booleans, write packed value and validity bitmaps
 directly, eight rows per step. Fusion covers Float64 arithmetic, and
 comparisons over it; a comparison of two plain columns or literals uses the
-bitmap kernel instead. `sqrt`, `exp`, `log`, and `pow` use
+bitmap kernel instead. The logarithms beyond `log()`, `log1p`, `cbrt`, the
+trigonometric and hyperbolic functions and `arctan2` call the platform's IEEE
+`libm` lane by lane, as Polars does through Rust; `sign`, `truncate`,
+`degrees` and `radians` are SIMD. Integer and decimal inputs compute in
+Float64. `sqrt`, `exp`, `log`, and `pow` use
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
 about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
@@ -99,7 +110,10 @@ the exact sum so that only the final conversion rounds.
 (negative counts from the end), `first()`, and `last()` select columns. Any
 operation on a selector applies to each matched column: before binding, the
 expression expands into one expression per match, in schema order for `all`,
-`exclude`, and `by_dtype`, and in the listed order for `col([...])`. Expansion
+`exclude`, and `by_dtype`, and in the listed order for `col([...])`. The
+exception is a selector among the inputs of a horizontal reduction
+(`sum_horizontal([by_dtype(["int64"])])`): it expands into more inputs of
+that one expression, as in Polars. Expansion
 happens for `select`, `select_exprs`, `with_columns`, `agg`, and `group_by`
 key expressions; `filter` requires exactly one match. An empty expansion adds
 no columns.
@@ -122,6 +136,7 @@ row-valued. See the Narwhals order-dependence notes cited above.
 |---|---|---|
 | `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked; Bool gives UInt32, a running count of true values | null rows stay null and are skipped |
 | `cum_min`, `cum_max` | same dtype; NaN sorts above numbers | as `cum_sum` |
+| `cum_prod(reverse=False)` | as `product()`: Int64 for Bool and integers up to 32 bits, UInt64/Int64/floats keep theirs, decimals Float64; integers checked | as `cum_sum` |
 | `cum_count(reverse=False)` | Int64, never null | counts non-null values |
 | `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
 | `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
@@ -398,6 +413,61 @@ buffers rather than copies, and a categorical input runs each function once
 per dictionary value when it has few values. The accelerator backends run none of these and leave
 them to the CPU.
 
+### Horizontal reductions
+
+`sum_horizontal`, `min_horizontal`, `max_horizontal`, `mean_horizontal`,
+`any_horizontal` and `all_horizontal` take a list of expressions and reduce
+across them within each row, as Polars' functions of the same names do
+(DuckDB's `greatest` and `least` are `max_horizontal` and `min_horizontal`).
+The result is named after the first input. Selectors among the inputs expand
+into more inputs: `sum_horizontal([all()])` adds every column of a row.
+Inputs may be columns, literals or other expressions, including aggregates
+inside `group_by().agg`; one-row inputs broadcast.
+
+```mojo
+frame.with_columns(
+    [
+        sum_horizontal([col("q1"), col("q2"), col("q3")]).alias("total"),
+        max_horizontal([col("shipped"), col("returned")]).alias("latest"),
+        any_horizontal([by_dtype(["bool"])]).alias("flagged"),
+    ]
+)
+```
+
+Unlike the binary operators, these functions cast their inputs to a common
+type first: Polars' supertype for integers, floats and Bool (Int8 with
+UInt8 is Int16, Int32 with Float32 is Float64, Int64 with UInt64 is
+Float64), and DuckDB's for decimals (an integer meeting a decimal becomes a
+decimal holding its digits: Int64 with Decimal(10, 2) is Decimal(21, 2);
+a decimal meeting a float is Float64). An untyped number adopts the other
+inputs' type. Other combinations, such as a String with an integer, raise.
+
+| Function | Result | Nulls |
+|---|---|---|
+| `sum_horizontal(exprs, ignore_nulls=True)` | common type; UInt32 for all-Bool inputs | with `ignore_nulls` a null counts as zero, so a row of nulls sums to 0; without it any null makes the row null |
+| `mean_horizontal(exprs, ignore_nulls=True)` | Float32 when the common type is Float32, else Float64 | with `ignore_nulls` the mean of the row's non-null values, null when there are none; without it any null makes the row null |
+| `min_horizontal(exprs)`, `max_horizontal(exprs)` | common type (numeric, Bool, String, temporal) | nulls are skipped; a row of nulls is null |
+| `any_horizontal(exprs)`, `all_horizontal(exprs)` | Bool | Kleene OR and AND, as `\|` and `&` are; numeric inputs read nonzero as true |
+
+Integer sums keep `+`'s overflow check and raise where Polars wraps. A
+decimal sum has the type DuckDB gives the same chain of `+` (one more
+integer digit per addition, up to 38). NaN propagates through sums and
+means; `min_horizontal` and `max_horizontal` skip it, as Polars does, so
+the result is NaN only when a row has nothing else. DuckDB's `greatest`
+treats NaN as the largest value instead. A selector that matches no columns
+leaves `any_horizontal` false and `all_horizontal` true and is an error for
+the others. As filters, `any_horizontal` and `all_horizontal` keep the rows
+that are true.
+
+Each function is one expression node. Its inputs are evaluated once, cast
+to the common type, and reduced pairwise as Polars does: Float sums and
+means, and numeric `min`/`max`, accumulate into one output buffer a SIMD
+vector at a time; integer and decimal sums fill nulls with zero and add
+with the `+` kernel; `any`/`all` run the Kleene bitmap kernels. No
+intermediate column is kept per pair of inputs for float sums, means or
+`min`/`max`. Accelerators run none of them yet: a plan that uses one runs
+on the CPU.
+
 ### Conditionals
 
 `when(p).then(a).when(q).then(b).otherwise(c)` picks, per row, the value of the
@@ -451,6 +521,7 @@ columns outside grouping.
 | `count()`, `null_count()`, `len()` | any | Int64 | 0 | yes |
 | `min()`, `max()` | any | same | null | yes |
 | `mean()` | numeric or Bool | Float64; for Bool the share of true values | null | yes (sum + count) |
+| `product()` | numeric or Bool | Int64 for Bool and integers up to 32 bits; UInt64, Int64 and floats keep theirs; decimals Float64 | 1 | yes (128-bit exact for integers; raises on leaving the result type) |
 | `first()`, `last()` | any | same | null | needs partition order |
 | `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
 | `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
@@ -470,6 +541,9 @@ A Bool sums as zeros and ones, as in Polars: `sum` and `cum_sum` count the true
 values as UInt32 (Polars' index type; `count`, `len` and `null_count` stay
 Int64 here), and `mean` is the share of true values among the valid ones.
 Ungrouped sums count set bits 64 rows at a time without unpacking them.
+`product` follows Polars' result types, but where Polars wraps an integer
+product silently, this one raises, as `cum_sum` does. A decimal's product is
+Float64, as DuckDB's `product` is (Polars keeps the scale of a single factor).
 `first` and `last` return the first or last row's value even when it is null.
 `n_unique` counts null as one value, treats every NaN as one value, and treats
 `-0.0` as equal to `0.0`. `var` and `std` convert Int64 to Float64; infinities
