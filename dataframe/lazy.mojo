@@ -62,6 +62,7 @@ from ._accel_provider import (
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
+    HORIZONTAL_ARGS,
     split_names,
     ARG_MAX,
     ARG_MIN,
@@ -659,6 +660,9 @@ def _shared_text(expr: Expr, root: Int) -> Optional[String]:
         or op == LIT_STRING
         or op == LIT_NULL
         or op == SELECTOR
+        # A horizontal reduction's input list is evaluated by the reduction
+        # above it, never as a column of its own.
+        or op == HORIZONTAL_ARGS
     ):
         return None
     var part = subtree(expr, root)
