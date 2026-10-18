@@ -146,8 +146,11 @@ comptime STR_LOWER = 70
 comptime STR_STRIP = 71
 comptime STR_STARTS_WITH = 72
 comptime STR_ENDS_WITH = 73
+# text: pattern; integer: 0 literal, 1 regex, 2 regex giving null when the
+# pattern is invalid (strict=False).
 comptime STR_CONTAINS = 74
-# text: pattern, text2: replacement, integer: 1 replaces every occurrence.
+# text: pattern, text2: replacement, integer: how many matches to replace
+# (-1 every one), min_count: 1 when the pattern is literal.
 comptime STR_REPLACE = 75
 # integer: code point offset (negative from end), min_count: length (-1 all).
 comptime STR_SLICE = 76
@@ -163,6 +166,11 @@ comptime STR_IS_IN = 170
 comptime STR_LIKE = 171
 # `is_in` over typed integer literals: one pass, values in `text` (#486).
 comptime INT_IS_IN = 172
+# Regex string operations (#219); text holds the pattern.
+# integer: the capture group.
+comptime STR_EXTRACT = 182
+# A list of every match (a nested op, see list_kernels.mojo).
+comptime STR_EXTRACT_ALL = 183
 # Recode values (#789). text: the old values, text2: the new values, each a
 # list of literals (`replace_item`); right: the default, -1 for none;
 # dtypes: replace_strict's return_dtype, when given.
@@ -400,6 +408,7 @@ def is_string_op(op: Int) -> Bool:
         (op >= STR_LEN_CHARS and op <= STR_PAD)
         or op == STR_IS_IN
         or op == STR_LIKE
+        or op == STR_EXTRACT
     )
 
 
@@ -433,7 +442,7 @@ def is_window(op: Int) -> Bool:
 
 def is_nested_op(op: Int) -> Bool:
     """Whether op is str.split, a .list operation, or struct field access."""
-    return op >= STR_SPLIT and op <= STRUCT_FIELD
+    return (op >= STR_SPLIT and op <= STRUCT_FIELD) or op == STR_EXTRACT_ALL
 
 
 def is_conditional(op: Int) -> Bool:
@@ -2247,8 +2256,13 @@ def when(condition: Expr) -> When:
 struct StrNamespace(Copyable):
     """String expressions. Character operations work on Unicode code points;
     there is no grapheme clustering or locale-specific case mapping. Nulls
-    propagate. Patterns are literal text; regular expressions are not
-    supported."""
+    propagate.
+
+    `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
+    `replace_all` and `split(literal=False)` take regular expressions in
+    the syntax of Rust's `regex` crate, as Polars does; see
+    docs/expressions.md for what is supported. A pattern that is plain text
+    is searched as a substring."""
 
     var _expr: Expr
 
@@ -2303,9 +2317,24 @@ struct StrNamespace(Copyable):
     def ends_with(self, suffix: String) -> Expr:
         return self._op(STR_ENDS_WITH, suffix)
 
-    def contains(self, literal: String) -> Expr:
-        """Literal substring test; regular expressions are not supported."""
-        return self._op(STR_CONTAINS, literal)
+    def contains(
+        self, pattern: String, literal: Bool = False, strict: Bool = True
+    ) -> Expr:
+        """Whether the regular expression matches anywhere in the string
+        (with `literal`, whether the text occurs). An invalid pattern raises
+        when `strict`, or gives null otherwise."""
+        if literal:
+            return self._op(STR_CONTAINS, pattern, 0)
+        return self._op(STR_CONTAINS, pattern, Int64(1) if strict else Int64(2))
+
+    def extract(self, pattern: String, group_index: Int = 1) -> Expr:
+        """Capture group `group_index` of the first match (0 is the whole
+        match); null when nothing matches or the group took no part."""
+        return self._op(STR_EXTRACT, pattern, Int64(group_index))
+
+    def extract_all(self, pattern: String) -> Expr:
+        """Every non-overlapping match, as a list of strings."""
+        return self._op(STR_EXTRACT_ALL, pattern)
 
     def like(self, pattern: String) -> Expr:
         """SQL LIKE: '%' matches any run of characters (including none) and
@@ -2314,12 +2343,25 @@ struct StrNamespace(Copyable):
         `LIKE '%special%requests%'`."""
         return self._op(STR_LIKE, pattern)
 
-    def replace(self, pattern: String, value: String) -> Expr:
-        """Replace the first occurrence of a literal pattern."""
-        return self._op(STR_REPLACE, pattern, 0, text2=value)
+    def replace(
+        self, pattern: String, value: String, literal: Bool = False, n: Int = 1
+    ) -> Expr:
+        """Replace the first `n` matches of the pattern. `value` may refer to
+        capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a
+        dollar sign) unless the pattern is literal; as in Polars, a pattern
+        without ASCII punctuation counts as literal. A regex `n` above 1 is
+        not supported."""
+        return self._op(
+            STR_REPLACE, pattern, Int64(n), 1 if literal else 0, text2=value
+        )
 
-    def replace_all(self, pattern: String, value: String) -> Expr:
-        return self._op(STR_REPLACE, pattern, 1, text2=value)
+    def replace_all(
+        self, pattern: String, value: String, literal: Bool = False
+    ) -> Expr:
+        """Replace every non-overlapping match, as `replace`."""
+        return self._op(
+            STR_REPLACE, pattern, -1, 1 if literal else 0, text2=value
+        )
 
     def slice(self, offset: Int, length: Int = -1) -> Expr:
         """Code points [offset, offset + length); a negative offset counts
@@ -2380,10 +2422,22 @@ struct StrNamespace(Copyable):
         """Left-pad with zeros, after a leading + or - sign."""
         return self._op(STR_PAD, "0", 2, width)
 
-    def split(self, by: String, inclusive: Bool = False) -> Expr:
-        """Split on a literal separator into a list of strings. With
-        inclusive, each part but the last keeps the separator."""
-        return self._op(STR_SPLIT, by, Int64(1) if inclusive else Int64(0))
+    def split(
+        self,
+        by: String,
+        inclusive: Bool = False,
+        literal: Bool = True,
+        strict: Bool = True,
+    ) -> Expr:
+        """Split into a list of strings on a separator, or with
+        `literal=False` on a regular expression's matches (an empty pattern
+        splits into code points; an invalid one raises when `strict`, or
+        gives null otherwise). With inclusive, each part but the last keeps
+        its separator."""
+        var mode = 0 if literal else (1 if strict else 2)
+        return self._op(
+            STR_SPLIT, by, Int64(1) if inclusive else Int64(0), mode
+        )
 
     def split_exact(self, by: String, n: Int, inclusive: Bool = False) -> Expr:
         """Split on a literal separator into a struct of n + 1 String fields
@@ -2415,15 +2469,14 @@ struct StrNamespace(Copyable):
     def find(self, pattern: String, literal: Bool = False) -> Expr:
         """Byte offset (UInt32) of the first occurrence of the pattern, or
         null when it does not occur; an empty pattern is found at 0. Offsets
-        count bytes, as in Polars. Regular expressions are not supported
-        yet: without literal=True, a pattern holding regex syntax raises."""
+        count bytes, as in Polars. The pattern is a regular expression
+        unless `literal`."""
         return self._op(STR_FIND, pattern, Int64(literal))
 
     def count_matches(self, pattern: String, literal: Bool = False) -> Expr:
         """Number of non-overlapping occurrences (UInt32); an empty pattern
-        matches at every code point boundary. Regular expressions are not
-        supported yet: without literal=True, a pattern holding regex syntax
-        raises."""
+        matches at every code point boundary. The pattern is a regular
+        expression unless `literal`."""
         return self._op(STR_COUNT_MATCHES, pattern, Int64(literal))
 
     def contains_any(

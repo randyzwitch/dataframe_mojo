@@ -1,4 +1,5 @@
 """Schema-only binding and expression shape analysis before execution."""
+from .regex_kernels import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,
     COL,
@@ -111,6 +112,9 @@ from .expr import (
     STR_STARTS_WITH,
     STR_ENDS_WITH,
     STR_CONTAINS,
+    STR_EXTRACT,
+    STR_EXTRACT_ALL,
+    STR_REPLACE,
     STR_IS_IN,
     INT_IS_IN,
     STR_LIKE,
@@ -239,6 +243,28 @@ def _text_function_name(op: Int) -> String:
     if op == STR_TO_INTEGER:
         return "str.to_integer"
     return "str.split_exact"
+
+
+def _check_pattern(node: Node) raises:
+    """Raise now for an invalid regular expression in a strict regex
+    string operation, as Polars does when the expression runs."""
+    var regex = False
+    if node.op == STR_CONTAINS:
+        regex = node.integer == 1
+    elif node.op == STR_FIND or node.op == STR_COUNT_MATCHES:
+        regex = node.integer == 0
+    elif node.op == STR_EXTRACT or node.op == STR_EXTRACT_ALL:
+        regex = True
+    elif node.op == STR_SPLIT:
+        regex = node.min_count == 1 and node.text.byte_length() > 0
+    elif node.op == STR_REPLACE:
+        regex = node.min_count == 0 and not is_literal_pattern(node.text)
+        if regex and node.integer > 1:
+            raise Error("regex replacement with 'n > 1' not yet supported")
+    if regex:
+        _ = compile_pattern(node.text, False)
+    if node.op == STR_EXTRACT and node.integer < 0:
+        raise Error("str.extract group_index must be nonnegative")
 
 
 def op_name(op: Int) -> String:
@@ -943,41 +969,12 @@ def _packed_count(text: String) -> Int:
     return count
 
 
-def _has_regex_syntax(pattern: String) -> Bool:
-    """Whether a pattern holds a character with a meaning in a regular
-    expression, so that matching it literally could differ from Polars."""
-    for byte in pattern.as_bytes():
-        # \ . + * ? ( ) | [ ] { } ^ $
-        if (
-            byte == 92
-            or byte == 46
-            or byte == 43
-            or byte == 42
-            or byte == 63
-            or byte == 40
-            or byte == 41
-            or byte == 124
-            or byte == 91
-            or byte == 93
-            or byte == 123
-            or byte == 125
-            or byte == 94
-            or byte == 36
-        ):
-            return True
-    return False
-
-
 def _text_function_dtype(node: Node) raises -> DataType:
     """The result dtype of a text_functions.mojo operation, after checking
     its arguments."""
     var op = node.op
     if op == STR_FIND or op == STR_COUNT_MATCHES:
-        if node.integer == 0 and _has_regex_syntax(node.text):
-            raise Error(
-                op_name(op) + ": regular expressions are not supported; pass"
-                " literal=True to match the pattern as text"
-            )
+        _check_pattern(node)
         return DataType.UINT32
     if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:
         var patterns = _packed_count(node.text)
@@ -1500,6 +1497,7 @@ def bind(
                     raise Error("pad width must be nonnegative")
                 if len(node.text.codepoints()) != 1:
                     raise Error("pad fill_char must be one character")
+            _check_pattern(node)
             if node.op == STR_LEN_CHARS or node.op == STR_LEN_BYTES:
                 dtype = DataType.INT64
             elif (
@@ -1599,12 +1597,17 @@ def bind(
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid list expression input")
             var input = types[node.left]
-            if node.op == STR_SPLIT:
+            if node.op == STR_SPLIT or node.op == STR_EXTRACT_ALL:
                 if input != DataType.STRING:
                     raise Error(
-                        "str.split requires a string expression, found "
+                        (
+                            "str.split" if node.op
+                            == STR_SPLIT else "str.extract_all"
+                        )
+                        + " requires a string expression, found "
                         + input.name()
                     )
+                _check_pattern(node)
                 dtype = DataType.list(DataType.STRING)
             elif node.op == STRUCT_FIELD:
                 if not input.is_struct():

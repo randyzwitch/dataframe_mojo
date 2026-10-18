@@ -6,7 +6,7 @@ suite_common.mojo."""
 from std.collections import Dict
 
 from dataframe import DataFrame, Expr, LazyFrame, col, lit, when
-from suite_common import date_lit, run, unsupported
+from suite_common import date_lit, run
 
 
 def top(
@@ -164,7 +164,7 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
         return top(
             hits.filter(
                 col("Title").str().contains("Google")
-                & ~col("URL").str().contains(".google.")
+                & ~col("URL").str().contains(".google.", literal=True)
                 & phrase
             )
             .group_by("SearchPhrase")
@@ -223,7 +223,28 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             k=25,
         )
     if n == 28:
-        raise unsupported("regular expressions are not implemented (#219)")
+        return top(
+            hits.filter(col("Referer").ne(""))
+            .with_columns(
+                [
+                    col("Referer")
+                    .str()
+                    .replace("^https?://(?:www\\.)?([^/]+)/.*$", "${1}")
+                    .alias("k")
+                ]
+            )
+            .group_by("k")
+            .agg(
+                [
+                    col("Referer").str().len_chars().mean().alias("l"),
+                    count().alias("c"),
+                    col("Referer").min().alias("Referer"),
+                ]
+            )
+            .filter(col("c") > 100000),
+            "l",
+            k=25,
+        )
     if n == 29:
         var sums = List[Expr]()
         sums.append(col("ResolutionWidth").sum().alias("s0"))

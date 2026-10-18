@@ -31,6 +31,7 @@ from .expr import (
 )
 from .dtype import DataType
 from .nested_column import StructColumn
+from .regex_kernels import compile_pattern, regex_count, regex_find
 from .series import Series
 from .string_bytes import _Bytes, _find_bytes, _same_bytes
 from .string_column import StringColumn, StringBuilder
@@ -60,7 +61,18 @@ def text_function(node: Node, input: Series) raises -> Series:
             (node.integer & 2) != 0,
         )
     if op == STR_FIND or op == STR_COUNT_MATCHES:
-        return _find_or_count(column, node.text, op == STR_COUNT_MATCHES)
+        var pattern = node.text
+        if node.integer == 0:
+            # A regular expression (#219), unless it only matches one
+            # literal string.
+            var regex = compile_pattern(node.text, False)
+            var literal = regex.literal()
+            if not literal:
+                if op == STR_FIND:
+                    return regex_find(column, regex)
+                return regex_count(column, regex)
+            pattern = literal.value()
+        return _find_or_count(column, pattern, op == STR_COUNT_MATCHES)
     if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:
         var automaton = _Automaton(
             decode_values(node.text),
