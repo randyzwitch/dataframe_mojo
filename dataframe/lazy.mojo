@@ -7696,9 +7696,22 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # Unions whose inputs must each supply exactly the wanted columns.
         var unions = List[Int]()
         var union_columns = List[List[String]]()
+        # A subtree written in several places (a CTE read twice) keeps
+        # every output of its projections in each copy, so the copies stay
+        # identical and `_share_subplans` still computes it once; Polars
+        # likewise prunes a cached subplan to what all its readers need.
+        # Pruned per reader, TPC-DS q4's year totals ran six times.
+        var signatures = self._subtree_signatures()[0].copy()
+        var copies = Dict[String, Int]()
+        for s in signatures:
+            copies[s] = copies.get(s, 0) + 1
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
-            if not all_needed[i] and needed[i]:
+            if (
+                not all_needed[i]
+                and needed[i]
+                and copies.get(signatures[i], 0) < 2
+            ):
                 self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
