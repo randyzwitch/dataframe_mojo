@@ -315,6 +315,53 @@ and an empty list yields false. `is_between(lower, upper, closed="both")`
 accepts `both`, `left`, `right`, or `none` and combines the two comparisons with
 Kleene AND, so a null bound yields null unless the other side is false.
 
+### Recoding values
+
+`replace` and `replace_strict` map values to other values in one expression,
+following Polars:
+
+```mojo
+df.with_columns(col("fruit").replace(["aple", "banan"], ["apple", "banana"]))
+df.with_columns(
+    col("state").replace_strict(
+        ["CA", "NY", "TX"], ["California", "New York", "Texas"], default="Other"
+    )
+)
+df.with_columns(col("code").replace_strict([1, 2, 3], ["low", "mid", "high"]))
+```
+
+- `old` and `new` are lists of literals: numbers, strings, `lit(...)` and
+  `null(dtype)`. `new` has one value per entry of `old`, or a single value that
+  every entry maps to. A scalar `old` and `new`, and a `Dict`
+  (`Dict[String, String]`, `Dict[Int, Int]`, and for `replace_strict` also
+  `Dict[String, Int]` and `Dict[Int, String]`), are accepted too. `old` must
+  not repeat a value.
+- `replace(old, new)` keeps every unmatched value and the input dtype. `old` and
+  `new` are cast strictly to that dtype, so a value that does not fit raises;
+  strings cast too, so `col("d").replace(["2024-01-01"], ["2000-01-01"])`
+  works on a Date column.
+- `replace_strict(old, new, default=None, return_dtype=None)` maps every value.
+  A non-null value with no entry raises unless `default` is given. The default
+  is any expression (a literal, a column, an aggregate), and with one, both
+  unmatched values and null input take it. The result dtype is `return_dtype`,
+  or else the type of `new` and `default` together: a string with anything is
+  a string, integers widen, and a float with an integer is Float64.
+- A null in `old` matches null input, so `replace([null("int64")], [lit(0)])`
+  is a typed `fill_null`. Otherwise null input stays null. Values match as
+  join keys do: NaN matches NaN and -0.0 matches 0.0.
+- A categorical stays categorical under `replace` when the replacement is the
+  whole expression. With a small dictionary next to the rows, the expression
+  runs once per dictionary value and the rows take their value's result by
+  code, so no string is compared per row. Inside a larger expression a
+  categorical is read as its strings, as elsewhere.
+
+The old values are cast and put in a lookup table once per expression; every
+row probes it, in parallel, and the result is written in a second parallel
+pass (Polars does this as a left join against the old values). Batches that a
+streamed reduction feeds itself build the table per batch. Accelerators do not run these expressions and fall back to
+the CPU. Polars also accepts expressions for `old` and `new`; here they must
+be literals.
+
 ### Strings
 
 `col("s").str()` returns a namespace of String operations; Mojo has no

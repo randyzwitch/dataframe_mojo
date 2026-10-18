@@ -772,6 +772,48 @@ A flat, topologically ordered tree; composition never evaluates data.
   Replace valid NaNs in a Float64 expression with value.
 - `def is_between(self, lower: Self, upper: Self, closed: String = "both") -> Self`
   True when lower <= x <= upper; `closed` is both, left, right, or none.
+- `def replace(self, old: List[Self], new: List[Self]) -> Self`
+  Replace values equal to an entry of `old` with the entry of `new` at the same position; every other value, and the dtype, is kept.
+- `def replace(self, old: List[String], new: List[String]) -> Self`
+  Replace strings; see the List[Expr] overload.
+- `def replace(self, old: Self, new: Self) -> Self`
+  Replace one value; see the List[Expr] overload.
+- `def replace(self, old: String, new: String) -> Self`
+  Replace one string; see the List[Expr] overload.
+- `def replace(self, old: List[Self], new: Self) -> Self`
+  Replace each value of `old` with the one value `new`.
+- `def replace(self, old: List[String], new: String) -> Self`
+  Replace each string of `old` with the one string `new`.
+- `def replace(self, mapping: Dict[String, String]) -> Self`
+  Replace each key of `mapping` with its value.
+- `def replace(self, mapping: Dict[Int, Int]) -> Self`
+  Replace each key of `mapping` with its value.
+- `def replace_strict(self, old: List[Self], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map every value through `old` -> `new`; the result may change dtype.
+- `def replace_strict(self, old: List[String], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: List[String], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings, with a string default.
+- `def replace_strict(self, old: List[String], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to other values; see the List[Expr] overload.
+- `def replace_strict(self, old: List[Self], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: List[Self], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings, with a string default.
+- `def replace_strict(self, old: Self, new: Self, default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map one value; see the List[Expr] overload.
+- `def replace_strict(self, mapping: Dict[String, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[String, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value, with a string default.
+- `def replace_strict(self, mapping: Dict[String, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[Int, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[Int, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value, with a string default.
+- `def replace_strict(self, mapping: Dict[Int, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
 - `def any(self, ignore_nulls: Bool = True) -> Self`
   Any true value. With ignore_nulls=False, Kleene: null if no true and some null.
 - `def all(self, ignore_nulls: Bool = True) -> Self`

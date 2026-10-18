@@ -1,5 +1,6 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
-from std.collections import Optional
+from std.collections import Dict, Optional
+from std.memory import bitcast
 from .dtype import DataType
 
 # Node text of an untyped numeric literal; the binder replaces it with the
@@ -162,6 +163,11 @@ comptime STR_IS_IN = 170
 comptime STR_LIKE = 171
 # `is_in` over typed integer literals: one pass, values in `text` (#486).
 comptime INT_IS_IN = 172
+# Recode values (#789). text: the old values, text2: the new values, each a
+# list of literals (`replace_item`); right: the default, -1 for none;
+# dtypes: replace_strict's return_dtype, when given.
+comptime REPLACE = 252
+comptime REPLACE_STRICT = 253
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -436,6 +442,82 @@ def is_conditional(op: Int) -> Bool:
 
 def is_logical(op: Int) -> Bool:
     return op == AND or op == OR or op == XOR
+
+
+def is_replace(op: Int) -> Bool:
+    return op == REPLACE or op == REPLACE_STRICT
+
+
+def replace_item(value: Expr) -> String:
+    """A literal as one item of a REPLACE node's value list: its op, integer,
+    float bits, high word and dtype, then its text. "?" for anything but a
+    literal, which binding reports."""
+    if len(value._nodes) != 1:
+        return "?"
+    ref node = value._nodes[0]
+    if not (
+        node.op == LIT_INT
+        or node.op == LIT_FLOAT
+        or node.op == LIT_BOOL
+        or node.op == LIT_STRING
+        or node.op == LIT_NULL
+    ):
+        return "?"
+    var dtype = String()
+    if len(node.dtypes) > 0 and node.dtypes[0]:
+        dtype = node.dtypes[0].value().name()
+    return (
+        String(node.op)
+        + ":"
+        + String(node.integer)
+        + ":"
+        + String(bitcast[DType.int64](node.floating))
+        + ":"
+        + node.text2
+        + ":"
+        + dtype
+        + ":"
+        + node.text
+    )
+
+
+def replace_items(values: List[Expr]) -> String:
+    """`values` as a REPLACE node's list (see `replace_item`)."""
+    var items = List[String](capacity=len(values))
+    for value in values:
+        items.append(replace_item(value))
+    return join_names(items)
+
+
+def replace_literals(text: String) raises -> List[Node]:
+    """The literal nodes `replace_items` listed; empty text is no values."""
+    var out = List[Node]()
+    if text.byte_length() == 0:
+        return out^
+    for item in split_names(text):
+        if ":" not in item:
+            raise Error("replace values must be literals")
+        var fields = List[String]()
+        var rest = item
+        for _ in range(5):
+            var at = rest.find(":")
+            fields.append(String(rest[byte=0:at]))
+            var tail = String(rest[byte = at + 1 :])
+            rest = tail^
+        var dtypes = List[Optional[DataType]]()
+        if fields[4].byte_length() > 0:
+            dtypes.append(_parse_dtype(fields[4]))
+        out.append(
+            _node(
+                Int(atol(fields[0])),
+                text=rest,
+                integer=Int64(atol(fields[1])),
+                floating=bitcast[DType.float64](Int64(atol(fields[2]))),
+                text2=fields[3],
+                dtypes=dtypes,
+            )
+        )
+    return out^
 
 
 @fieldwise_init
@@ -956,6 +1038,257 @@ struct Expr(Copyable):
         else:
             raise Error("closed must be 'both', 'left', 'right', or 'none'")
         return low._binary(high, AND)
+
+    def _replace(
+        self,
+        op: Int,
+        old: List[Self],
+        new: List[Self],
+        default: Self,
+        return_dtype: Optional[DataType],
+    ) -> Self:
+        var nodes = self._nodes.copy()
+        var input = len(nodes) - 1
+        var right = -1
+        if len(default._nodes) > 0:
+            _append_shifted(nodes, default._nodes, len(nodes))
+            right = len(nodes) - 1
+        var dtypes = List[Optional[DataType]]()
+        if return_dtype:
+            dtypes.append(return_dtype)
+        nodes.append(
+            _node(
+                op,
+                input,
+                right,
+                text=replace_items(old),
+                text2=replace_items(new),
+                dtypes=dtypes,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def replace(self, old: List[Self], new: List[Self]) -> Self:
+        """Replace values equal to an entry of `old` with the entry of `new`
+        at the same position; every other value, and the dtype, is kept.
+
+        `old` and `new` hold literals (numbers, `lit(...)`, `null(...)`).
+        `new` has one value per entry of `old`, or one value for all of
+        them. Both are cast to the input dtype, so they must fit it; `old`
+        must not repeat a value. A null in `old` matches null input, NaN
+        matches NaN, and -0.0 matches 0.0. A categorical stays categorical.
+        """
+        return self._replace(REPLACE, old, new, _no_default(), None)
+
+    def replace(self, old: List[String], new: List[String]) -> Self:
+        """Replace strings; see the List[Expr] overload."""
+        return self.replace(_string_literals(old), _string_literals(new))
+
+    def replace(self, old: Self, new: Self) -> Self:
+        """Replace one value; see the List[Expr] overload."""
+        return self.replace([old.copy()], [new.copy()])
+
+    def replace(self, old: String, new: String) -> Self:
+        """Replace one string; see the List[Expr] overload."""
+        return self.replace([lit(old)], [lit(new)])
+
+    def replace(self, old: List[Self], new: Self) -> Self:
+        """Replace each value of `old` with the one value `new`."""
+        return self.replace(old, [new.copy()])
+
+    def replace(self, old: List[String], new: String) -> Self:
+        """Replace each string of `old` with the one string `new`."""
+        return self.replace(_string_literals(old), [lit(new)])
+
+    def replace(self, mapping: Dict[String, String]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace(old, new)
+
+    def replace(self, mapping: Dict[Int, Int]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace(old, new)
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map every value through `old` -> `new`; the result may change
+        dtype.
+
+        A non-null value with no entry in `old` raises unless `default` is
+        given; with one, it and null input (unless `old` holds a null) take
+        `default`, which may be any expression. The result dtype is
+        `return_dtype`, or that of `new` and `default` together (a string
+        with anything is a string, mixed numbers widen). `old` is cast to
+        the input dtype and matches as in `replace`.
+        """
+        return self._replace(REPLACE_STRICT, old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings, with a string default."""
+        return self.replace_strict(
+            _string_literals(old),
+            _string_literals(new),
+            lit(default),
+            return_dtype,
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to other values; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), new, default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            old, _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings, with a string default."""
+        return self.replace_strict(
+            old, _string_literals(new), lit(default), return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: Self,
+        new: Self,
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map one value; see the List[Expr] overload."""
+        return self.replace_strict(
+            [old.copy()], [new.copy()], default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
 
     def any(self, ignore_nulls: Bool = True) -> Self:
         """Any true value. With ignore_nulls=False, Kleene: null if no true
@@ -1694,6 +2027,18 @@ def lit(value: Bool) -> Expr:
 
 def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
+
+
+def _no_default() -> Expr:
+    """No expression: replace_strict without a default."""
+    return Expr(List[Node](), "")
+
+
+def _string_literals(values: List[String]) -> List[Expr]:
+    var literals = List[Expr](capacity=len(values))
+    for value in values:
+        literals.append(lit(value))
+    return literals^
 
 
 def null(dtype: DataType) -> Expr:

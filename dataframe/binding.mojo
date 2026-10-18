@@ -153,6 +153,10 @@ from .expr import (
     is_unary,
     is_reduction,
     is_comparison,
+    REPLACE,
+    REPLACE_STRICT,
+    is_replace,
+    replace_literals,
     is_math,
     ARCTAN2,
     LOG_BASE,
@@ -178,6 +182,7 @@ from .expr import (
     PRODUCT,
     CUM_PROD,
 )
+from .replace import values_dtype, replace_supertype
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
@@ -399,6 +404,10 @@ def op_name(op: Int) -> String:
         return "sum"
     if op == COUNT:
         return "count"
+    if op == REPLACE:
+        return "replace"
+    if op == REPLACE_STRICT:
+        return "replace_strict"
     if is_comparison(op):
         return "comparison"
     return "operation " + String(op)
@@ -1017,6 +1026,81 @@ def _text_function_dtype(node: Node) raises -> DataType:
     return DataType.STRING
 
 
+def _replace_dtype(
+    mut nodes: List[Node],
+    mut types: List[DataType],
+    columns: List[Series],
+    sources: List[Int],
+    i: Int,
+) raises -> DataType:
+    """The result dtype of a REPLACE or REPLACE_STRICT node, checking its
+    values. `replace` keeps the input dtype, and a categorical stays one
+    when it is the result. `replace_strict` takes `return_dtype`, or the
+    type of the new values and the default together, as Polars does."""
+    var node = nodes[i].copy()
+    if node.left < 0 or node.left >= i or node.right >= i:
+        raise Error("Invalid " + op_name(node.op) + " input")
+    _default(nodes, types, node.left)
+    var input = types[node.left]
+    if input.is_nested():
+        raise Error(
+            op_name(node.op)
+            + " does not support list or struct expressions, found "
+            + input.name()
+        )
+    var old = replace_literals(node.text)
+    var new = replace_literals(node.text2)
+    var old_type = values_dtype(old)
+    var new_type = values_dtype(new)
+    if (len(old) > 0 and not old_type) or (len(new) > 0 and not new_type):
+        raise Error(op_name(node.op) + " values must be literals")
+    if len(new) != len(old) and len(new) != 1:
+        raise Error(
+            "new values for "
+            + op_name(node.op)
+            + " must have the same length as old or length 1"
+        )
+    if node.op == REPLACE:
+        var source = sources[node.left] if node.left < len(sources) else -1
+        var categorical = input.is_categorical() or (
+            nodes[node.left].op == COL
+            and source >= 0
+            and columns[source].dtype().is_categorical()
+        )
+        if categorical:
+            # Carried as strings inside an expression (#106); the result
+            # is encoded again when it is the expression's value.
+            return (
+                DataType.CATEGORICAL if i == len(nodes) - 1 else DataType.STRING
+            )
+        return input
+    var result = new_type.value() if new_type else input
+    if len(node.dtypes) > 0:
+        if not node.dtypes[0]:
+            raise Error("Unknown replace_strict return_dtype")
+        result = node.dtypes[0].value()
+    if node.right >= 0:
+        var default = types[node.right]
+        if default.is_untyped():
+            if (
+                len(node.dtypes) == 0
+                and result.is_integer()
+                and (default == DataType.UNTYPED_FLOAT)
+            ):
+                result = DataType.FLOAT64
+            if result.is_numeric():
+                _adopt(nodes, types, node.right, result)
+            else:
+                _default(nodes, types, node.right)
+        elif len(node.dtypes) == 0 and nodes[node.right].op != LIT_NULL:
+            result = replace_supertype(result, default)
+        if types[node.right].is_nested():
+            raise Error(
+                "replace_strict does not support a list or struct default"
+            )
+    return result
+
+
 def bind(
     expr: Expr, columns: List[Series], fuse: Bool = True
 ) raises -> BoundExpr:
@@ -1036,6 +1120,7 @@ def bind(
             is_binary(node.op)
             or is_conditional(node.op)
             or node.op == NEG
+            or is_replace(node.op)
             or node.op == HORIZONTAL_ARGS
             or node.op == HORIZONTAL
         ):
@@ -1367,6 +1452,16 @@ def bind(
             dtype = node.dtypes[0].value()
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
+        elif is_replace(node.op):
+            dtype = _replace_dtype(nodes, types, columns, sources, i)
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+            if node.right >= 0:
+                has_aggregate = has_aggregate or aggregated[node.right]
+                if shapes[node.right] == ROWS:
+                    shape = ROWS
+                elif shape != ROWS and has_aggregate:
+                    shape = AGGREGATE
         elif node.op == INT_IS_IN:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid is_in input")
