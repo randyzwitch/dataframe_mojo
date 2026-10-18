@@ -13,6 +13,7 @@ from .expr import (
     CUM_MIN,
     CUM_MAX,
     CUM_COUNT,
+    CUM_PROD,
     SHIFT,
     RANK,
     ROLLING_SUM,
@@ -37,7 +38,7 @@ from .expr_kernels import checked_add, validity
 from .string_column import StringColumn
 from .nested_column import StructColumn
 from .parse import parse_float64
-from .aggregate import quantile_of
+from .aggregate import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from .reductions import WideInt
 from .series import Series, sort_indices
@@ -150,6 +151,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if input.is_chunked():
         return window_op(node, input.rechunk(), ids)
     var op_code = node.op
+    if op_code == CUM_PROD:
+        return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
         # A running count of true values: the UInt32 zeros and ones Polars
         # casts a Boolean to, summed as any UInt32 column is.
@@ -304,6 +307,67 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     if last >= 0 and (limit < 0 or distance <= limit):
                         source[row] = last
     return input.take_or_null(source)
+
+
+def _cum_prod(input: Series, ids: List[Int], reverse: Bool) raises -> Series:
+    """A running product within each partition, in one pass over the rows
+    (from the last when reversed), each partition's product kept by id.
+    Integers multiply exactly and raise on leaving the result type
+    (`product_type`: Int64, or UInt64 for UInt64); floats and decimals
+    multiply in Float64. Null rows stay null and leave the product as is."""
+    var target = input.dtype().product_type()
+    var values: Series
+    if target.is_float():
+        values = input.cast(DataType.FLOAT64)
+    else:
+        values = input.cast(target)
+    var n = len(values)
+    var valid = validity(values)
+    var partitioned = len(ids) > 0
+    var groups = 1
+    if partitioned:
+        for i in range(n):
+            groups = max(groups, ids[i] + 1)
+    var result: Series
+    if target.is_float():
+        ref column = values._data[Column[Float64]]
+        var state = List[Float64](length=groups, fill=1)
+        var out = List[Float64](length=n, fill=0)
+        for step in range(n):
+            var i = n - 1 - step if reverse else step
+            if not valid[i]:
+                continue
+            var g = ids[i] if partitioned else 0
+            state[g] *= column._get(i)
+            out[i] = state[g]
+        result = Series("", Column[Float64](out^, valid))
+        if target == DataType.FLOAT32:
+            result = result.cast(DataType.FLOAT32)
+        return result^
+    var unsigned = target == DataType.UINT64
+    var state = List[Int128](length=groups, fill=1)
+    var out = List[Int128](length=n, fill=0)
+    for step in range(n):
+        var i = n - 1 - step if reverse else step
+        if not valid[i]:
+            continue
+        var g = ids[i] if partitioned else 0
+        var value: Int128
+        if unsigned:
+            value = values._data[Column[UInt64]]._get(i).cast[DType.int128]()
+        else:
+            value = values._data[Column[Int64]]._get(i).cast[DType.int128]()
+        state[g] = _checked_product(state[g], value, unsigned)
+        out[i] = state[g]
+    if unsigned:
+        var products = List[UInt64](capacity=n)
+        for value in out:
+            products.append(value.cast[DType.uint64]())
+        return Series("", Column[UInt64](products^, valid))
+    var products = List[Int64](capacity=n)
+    for value in out:
+        products.append(value.cast[DType.int64]())
+    return Series("", Column[Int64](products^, valid))
 
 
 def _running(

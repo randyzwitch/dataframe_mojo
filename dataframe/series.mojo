@@ -11,9 +11,16 @@ from .string_column import StringCodes, StringColumn
 from .string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
-from .parallel import Job, Pool, configured_workers, run_jobs, worker_count
+from .parallel import (
+    Job,
+    Pool,
+    configured_workers,
+    partitions,
+    run_jobs,
+    worker_count,
+)
 from std.atomic import Atomic
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from .cast import cast_series
 from .expr import Expr, col
 from .frame import DataFrame
@@ -387,6 +394,16 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def _merge_storage(self, parts: List[Self]) raises -> Self:
         var result = parts[0].copy()
+        # Fixed-width numbers merge on every worker: each copies the rows
+        # of its share of the output, values and validity bits.
+        if worker_count(len(self)) > 1:
+            comptime for d in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[d]
+                if result._data.isa[Column[Scalar[D]]]():
+                    var merged = Self(self._name, _merge_scalars[D](parts))
+                    merged._dtype = self._dtype
+                    merged._field_metadata = self._field_metadata
+                    return merged^
         # Utf8View chunks concatenate descriptors and Arc byte blocks; any
         # view chunk makes the whole column views (an offsets chunk becomes
         # descriptors over its own bytes), the canonical layout.
@@ -2000,3 +2017,91 @@ def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
     for i in order:
         result.append(heap[i])
     return result^
+
+
+struct _MergeScalarsJob[D: DType](Job):
+    """Copy output rows [lo, hi) of a merge of chunks from the chunks that
+    hold them: values, and validity bits when `bits` is an address (rows
+    start at multiples of eight, so no two jobs write one bitmap byte)."""
+
+    var parts: List[Column[Scalar[Self.D]]]
+    var starts: List[Int]
+    var values: Int
+    var bits: Int
+    var lo: Int
+    var hi: Int
+
+    def __init__(
+        out self,
+        parts: List[Column[Scalar[Self.D]]],
+        starts: List[Int],
+        values: Int,
+        bits: Int,
+        lo: Int,
+        hi: Int,
+    ):
+        self.parts = parts.copy()
+        self.starts = starts.copy()
+        self.values = values
+        self.bits = bits
+        self.lo = lo
+        self.hi = hi
+
+    def run(mut self) raises:
+        var out = Pointer[Scalar[Self.D], MutAnyOrigin](
+            unsafe_from_address=self.values
+        )
+        var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.bits)
+        for p in range(len(self.parts)):
+            ref part = self.parts[p]
+            var first = self.starts[p]
+            var a = max(self.lo, first)
+            var b = min(self.hi, first + len(part))
+            if a >= b:
+                continue
+            unsafe_memcpy(
+                dest=out.unsafe_offset(a),
+                src=part._ptr().unsafe_offset(a - first),
+                count=b - a,
+            )
+            if self.bits == 0:
+                continue
+            var all_valid = len(part._bits[]) == 0
+            for r in range(a, b):
+                if all_valid or part._valid(r - first):
+                    bytes.unsafe_offset(r >> 3)[] |= UInt8(1) << UInt8(r & 7)
+
+
+def _merge_scalars[D: DType](parts: List[Series]) raises -> Column[Scalar[D]]:
+    """The chunks `parts` of a numeric column as one column, copied on
+    every worker."""
+    var columns = List[Column[Scalar[D]]](capacity=len(parts))
+    var starts = List[Int](capacity=len(parts))
+    var total = 0
+    var nulls = False
+    for part in parts:
+        ref column = part._data[Column[Scalar[D]]]
+        starts.append(total)
+        total += len(column)
+        nulls = nulls or column.null_count() > 0
+        columns.append(column.copy())
+    var values = List[Scalar[D]](unsafe_uninit_length=total)
+    var bits = List[UInt8]()
+    if nulls:
+        bits = List[UInt8](length=(total + 7) // 8, fill=0)
+    var lanes = worker_count(total)
+    var bounds = partitions(total, lanes, 64)
+    var jobs = List[_MergeScalarsJob[D]](capacity=lanes)
+    for w in range(lanes):
+        jobs.append(
+            _MergeScalarsJob[D](
+                columns,
+                starts,
+                Int(values.unsafe_ptr()),
+                Int(bits.unsafe_ptr()) if nulls else 0,
+                bounds[w],
+                bounds[w + 1],
+            )
+        )
+    run_jobs(jobs)
+    return Column[Scalar[D]](values=values^, bits=bits^)
