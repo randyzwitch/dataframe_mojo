@@ -7830,6 +7830,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var narrow_joins = List[Int]()
         var narrow_sides = List[Bool]()
         var narrow_columns = List[List[String]]()
+        # Unions whose inputs must each supply exactly the wanted columns.
+        var unions = List[Int]()
+        var union_columns = List[List[String]]()
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
             if not all_needed[i] and needed[i]:
@@ -7846,6 +7849,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         narrow_sides.append(side == 1)
                         narrow_columns.append(keep.copy())
                     continue
+            if node.kind == CONCAT and not all_needed[i] and needed[i]:
+                unions.append(i)
+                union_columns.append(needed[i].value().copy())
             if _is_scan(node.kind):
                 if not all_needed[i] and needed[i]:
                     var columns = self._columns_of(i)
@@ -7929,8 +7935,57 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     needed[child] = merged^
                 else:
                     needed[child] = reads.copy()
+        var aligned = self._align_union_inputs(unions, union_columns)
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
+        if aligned:
+            self._reorder()
         self._schema_memo = None
+
+    def _align_union_inputs(
+        mut self, unions: List[Int], columns: List[List[String]]
+    ) raises -> Bool:
+        """Give the inputs of each union whose inputs disagree the same
+        columns, in its first input's order, as a vertical union needs. Pruning an input's projection
+        can leave it wider than another: a select of only typed nulls
+        (diagonal concat's padding for a column the input lacks) is not
+        pruned, as it would lose its row count. A plain column selection
+        above such an input keeps its rows and drops the rest, as the
+        join inputs get one (`_narrow_join_inputs`). Inner unions are
+        aligned before the unions over them, so each union's first input
+        has a schema to read. True when a node was added; the caller
+        renumbers the plan."""
+        var added = False
+        for r in range(len(unions)):
+            var k = len(unions) - 1 - r
+            var union = unions[k]
+            # Inputs that already agree are left as they are.
+            if self._columns_of(self._nodes[union].left) == self._columns_of(
+                self._nodes[union].right
+            ):
+                continue
+            # In its first input's order: the union's own schema would
+            # stack the inputs as they are, which is what fails.
+            var keep = List[String]()
+            for c in self._columns_of(self._nodes[union].left):
+                if c in columns[k] and c not in keep:
+                    keep.append(c)
+            for side in range(2):
+                var child = self._nodes[union].right if side == 1 else (
+                    self._nodes[union].left
+                )
+                if self._columns_of(child) == keep:
+                    continue
+                var exprs = List[Expr]()
+                for name in keep:
+                    exprs.append(col(name))
+                self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+                if side == 1:
+                    self._nodes[union].right = len(self._nodes) - 1
+                else:
+                    self._nodes[union].left = len(self._nodes) - 1
+                self._forget_schemas_from(union)
+                added = True
+        return added
 
     def _prune_outputs(mut self, index: Int, wanted: List[String]):
         """Drop the expressions of a select or with_columns whose outputs
