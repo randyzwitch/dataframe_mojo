@@ -42,6 +42,7 @@ from .pipeline import (
     _BOUND_NONE,
     _TopBound,
     _ensure_zones,
+    _int_bounds,
     _range_key,
     _window_bounds,
     _int_bounds,
@@ -64,6 +65,7 @@ from ._accel_provider import (
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
+    HORIZONTAL_ARGS,
     split_names,
     ARG_MAX,
     ARG_MIN,
@@ -646,6 +648,81 @@ def _literal_node(value: Series) raises -> Optional[Node]:
                     )
                 )
     return None
+
+
+def _shared_text(expr: Expr, root: Int) -> Optional[String]:
+    """The text of the subexpression of `expr` at node `root` when common
+    subexpression elimination may compute it once: row-local, reading a
+    column, and more than a column or a literal; None otherwise."""
+    var op = expr._nodes[root].op
+    if (
+        op == COL
+        or op == LIT_INT
+        or op == LIT_FLOAT
+        or op == LIT_BOOL
+        or op == LIT_STRING
+        or op == LIT_NULL
+        or op == SELECTOR
+        # A horizontal reduction's input list is evaluated by the reduction
+        # above it, never as a column of its own.
+        or op == HORIZONTAL_ARGS
+    ):
+        return None
+    var part = subtree(expr, root)
+    var reads = False
+    for node in part._nodes:
+        # Row-local only (`_row_local`): no reduction or window.
+        if (
+            node.op == SELECTOR
+            or node.op == OVER
+            or is_reduction(node.op)
+            or is_window(node.op)
+        ):
+            return None
+        reads = reads or node.op == COL
+    if not reads:
+        return None
+    part._name = String()
+    return _expr_signature(part)
+
+
+def _emit_shared(
+    expr: Expr,
+    i: Int,
+    seen: Dict[String, Int],
+    mut names: Dict[String, String],
+    mut shared: List[Expr],
+    taken: List[String],
+    mut out: List[Node],
+) raises -> Int:
+    """Append node `i` of `expr` to `out` after its inputs, a subexpression
+    `seen` more than once as a read of the hidden column computing it
+    (added to `shared` the first time); its index in `out`."""
+    var text = _shared_text(expr, i)
+    if text and seen.get(text.value(), 0) > 1:
+        if text.value() not in names:
+            var name = "__cse_" + String(len(shared))
+            while name in taken:
+                name = "_" + name
+            names[text.value()] = name
+            shared.append(subtree(expr, i).alias(name))
+        out.append(col(names[text.value()])._nodes[0].copy())
+        return len(out) - 1
+    var copy = expr._nodes[i].copy()
+    if copy.left >= 0:
+        copy.left = _emit_shared(
+            expr, expr._nodes[i].left, seen, names, shared, taken, out
+        )
+    if copy.right >= 0:
+        copy.right = _emit_shared(
+            expr, expr._nodes[i].right, seen, names, shared, taken, out
+        )
+    if copy.op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_shared(
+            expr, expr._nodes[i].extra, seen, names, shared, taken, out
+        )
+    out.append(copy^)
+    return len(out) - 1
 
 
 def _emit_replaced(
@@ -5321,8 +5398,73 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         plan._merge_filters()
         plan._push_slices()
         plan._fuse_top_k()
+        plan._eliminate_common_subexpressions()
         plan._push_projections()
         return plan^
+
+    def _eliminate_common_subexpressions(mut self) raises:
+        """Common subexpression elimination (DuckDB's
+        `CommonSubExpressionOptimizer`, Polars' `comm_subexpr_elim`): a
+        row-local subexpression an aggregation or a projection reads more
+        than once is computed once, as a column of a with_columns below
+        it, and read from there. TPC-DS q99's five delay buckets compared
+        the same date difference nine times."""
+        var count = len(self._nodes)
+        var changed = False
+        for i in range(count):
+            var kind = self._nodes[i].kind
+            if not (kind == AGG or kind == SELECT):
+                continue
+            if self._nodes[i].left < 0:
+                continue
+            ref exprs = self._nodes[i].exprs
+            # How often each eligible subexpression appears, by its text.
+            var seen = Dict[String, Int]()
+            for e in exprs:
+                for r in range(len(e._nodes)):
+                    var text = _shared_text(e, r)
+                    if text:
+                        seen[text.value()] = seen.get(text.value(), 0) + 1
+            var any = False
+            for entry in seen.items():
+                any = any or entry.value > 1
+            if not any:
+                continue
+            # Hidden column names none of the node's inputs is read as: an
+            # input column of the same name that it does not read is
+            # dropped by the node anyway, so no schema is needed.
+            var taken = List[String]()
+            var readable = True
+            for e in exprs:
+                var reads = _references(e)
+                if not reads:
+                    readable = False
+                    break
+                for name in reads.value():
+                    taken.append(name)
+            if not readable:
+                continue
+            for name in self._nodes[i].names:
+                taken.append(name)
+            var shared = List[Expr]()
+            var names = Dict[String, String]()
+            var rewritten = List[Expr](capacity=len(exprs))
+            for e in exprs:
+                var out = List[Node]()
+                _ = _emit_shared(
+                    e, len(e._nodes) - 1, seen, names, shared, taken, out
+                )
+                rewritten.append(Expr(out^, e._name))
+            if len(shared) == 0:
+                continue
+            self._nodes[i].exprs = rewritten^
+            self._nodes.append(
+                _plan_node(WITH_COLUMNS, self._nodes[i].left, exprs=shared)
+            )
+            self._nodes[i].left = len(self._nodes) - 1
+            changed = True
+        if changed:
+            self._reorder()
 
     def _fold_casts(mut self) raises:
         """Constant folding (DuckDB's `ConstantFoldingRule`): a cast of an
