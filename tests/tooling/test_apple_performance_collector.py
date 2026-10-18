@@ -111,6 +111,15 @@ class ApplePerformanceCollector(unittest.TestCase):
                     (root / ("metal_" + name + ".mojo")).read_text(),
                     collector.metal.derive(original, name, "metal"),
                 )
+            # These callbacks must return completed DataFrames. The plan()
+            # exports of PDS-H/TPC-DS return LazyFrames and cannot be timed here.
+            for name in ("pdsh", "tpcds", "clickbench"):
+                wrapper = (root / f"performance_{name}.mojo").read_text()
+                for engine in ("cpu", "metal"):
+                    self.assertIn(
+                        f"from {engine}_{name} import query as {engine}_query",
+                        wrapper,
+                    )
             self.assertNotIn("def main", (root / "metal_suite_timing.mojo").read_text())
             self.assertNotIn(
                 "reference(", (root / "metal_suite_timing.mojo").read_text()

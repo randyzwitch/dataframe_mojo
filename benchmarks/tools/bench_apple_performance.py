@@ -64,8 +64,7 @@ from metal_h2o import groupby as metal_groupby, join as metal_join"""
     else:
         run[metal_join]()"""
         else:
-            function = "query" if name == "clickbench" else "plan"
-            imports = f"from cpu_{name} import {function} as cpu_query\nfrom metal_{name} import {function} as metal_query"
+            imports = f"from cpu_{name} import query as cpu_query\nfrom metal_{name} import query as metal_query"
             dispatch = """    if String(argv()[3]) == "cpu":
         run[cpu_query]()
     else:
