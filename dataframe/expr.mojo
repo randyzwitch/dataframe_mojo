@@ -1,5 +1,6 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
-from std.collections import Optional
+from std.collections import Dict, Optional
+from std.memory import bitcast
 from .dtype import DataType
 
 # Node text of an untyped numeric literal; the binder replaces it with the
@@ -145,8 +146,11 @@ comptime STR_LOWER = 70
 comptime STR_STRIP = 71
 comptime STR_STARTS_WITH = 72
 comptime STR_ENDS_WITH = 73
+# text: pattern; integer: 0 literal, 1 regex, 2 regex giving null when the
+# pattern is invalid (strict=False).
 comptime STR_CONTAINS = 74
-# text: pattern, text2: replacement, integer: 1 replaces every occurrence.
+# text: pattern, text2: replacement, integer: how many matches to replace
+# (-1 every one), min_count: 1 when the pattern is literal.
 comptime STR_REPLACE = 75
 # integer: code point offset (negative from end), min_count: length (-1 all).
 comptime STR_SLICE = 76
@@ -162,6 +166,16 @@ comptime STR_IS_IN = 170
 comptime STR_LIKE = 171
 # `is_in` over typed integer literals: one pass, values in `text` (#486).
 comptime INT_IS_IN = 172
+# Regex string operations (#219); text holds the pattern.
+# integer: the capture group.
+comptime STR_EXTRACT = 182
+# A list of every match (a nested op, see list_kernels.mojo).
+comptime STR_EXTRACT_ALL = 183
+# Recode values (#789). text: the old values, text2: the new values, each a
+# list of literals (`replace_item`); right: the default, -1 for none;
+# dtypes: replace_strict's return_dtype, when given.
+comptime REPLACE = 252
+comptime REPLACE_STRICT = 253
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -394,6 +408,7 @@ def is_string_op(op: Int) -> Bool:
         (op >= STR_LEN_CHARS and op <= STR_PAD)
         or op == STR_IS_IN
         or op == STR_LIKE
+        or op == STR_EXTRACT
     )
 
 
@@ -427,7 +442,7 @@ def is_window(op: Int) -> Bool:
 
 def is_nested_op(op: Int) -> Bool:
     """Whether op is str.split, a .list operation, or struct field access."""
-    return op >= STR_SPLIT and op <= STRUCT_FIELD
+    return (op >= STR_SPLIT and op <= STRUCT_FIELD) or op == STR_EXTRACT_ALL
 
 
 def is_conditional(op: Int) -> Bool:
@@ -436,6 +451,82 @@ def is_conditional(op: Int) -> Bool:
 
 def is_logical(op: Int) -> Bool:
     return op == AND or op == OR or op == XOR
+
+
+def is_replace(op: Int) -> Bool:
+    return op == REPLACE or op == REPLACE_STRICT
+
+
+def replace_item(value: Expr) -> String:
+    """A literal as one item of a REPLACE node's value list: its op, integer,
+    float bits, high word and dtype, then its text. "?" for anything but a
+    literal, which binding reports."""
+    if len(value._nodes) != 1:
+        return "?"
+    ref node = value._nodes[0]
+    if not (
+        node.op == LIT_INT
+        or node.op == LIT_FLOAT
+        or node.op == LIT_BOOL
+        or node.op == LIT_STRING
+        or node.op == LIT_NULL
+    ):
+        return "?"
+    var dtype = String()
+    if len(node.dtypes) > 0 and node.dtypes[0]:
+        dtype = node.dtypes[0].value().name()
+    return (
+        String(node.op)
+        + ":"
+        + String(node.integer)
+        + ":"
+        + String(bitcast[DType.int64](node.floating))
+        + ":"
+        + node.text2
+        + ":"
+        + dtype
+        + ":"
+        + node.text
+    )
+
+
+def replace_items(values: List[Expr]) -> String:
+    """`values` as a REPLACE node's list (see `replace_item`)."""
+    var items = List[String](capacity=len(values))
+    for value in values:
+        items.append(replace_item(value))
+    return join_names(items)
+
+
+def replace_literals(text: String) raises -> List[Node]:
+    """The literal nodes `replace_items` listed; empty text is no values."""
+    var out = List[Node]()
+    if text.byte_length() == 0:
+        return out^
+    for item in split_names(text):
+        if ":" not in item:
+            raise Error("replace values must be literals")
+        var fields = List[String]()
+        var rest = item
+        for _ in range(5):
+            var at = rest.find(":")
+            fields.append(String(rest[byte=0:at]))
+            var tail = String(rest[byte = at + 1 :])
+            rest = tail^
+        var dtypes = List[Optional[DataType]]()
+        if fields[4].byte_length() > 0:
+            dtypes.append(_parse_dtype(fields[4]))
+        out.append(
+            _node(
+                Int(atol(fields[0])),
+                text=rest,
+                integer=Int64(atol(fields[1])),
+                floating=bitcast[DType.float64](Int64(atol(fields[2]))),
+                text2=fields[3],
+                dtypes=dtypes,
+            )
+        )
+    return out^
 
 
 @fieldwise_init
@@ -956,6 +1047,257 @@ struct Expr(Copyable):
         else:
             raise Error("closed must be 'both', 'left', 'right', or 'none'")
         return low._binary(high, AND)
+
+    def _replace(
+        self,
+        op: Int,
+        old: List[Self],
+        new: List[Self],
+        default: Self,
+        return_dtype: Optional[DataType],
+    ) -> Self:
+        var nodes = self._nodes.copy()
+        var input = len(nodes) - 1
+        var right = -1
+        if len(default._nodes) > 0:
+            _append_shifted(nodes, default._nodes, len(nodes))
+            right = len(nodes) - 1
+        var dtypes = List[Optional[DataType]]()
+        if return_dtype:
+            dtypes.append(return_dtype)
+        nodes.append(
+            _node(
+                op,
+                input,
+                right,
+                text=replace_items(old),
+                text2=replace_items(new),
+                dtypes=dtypes,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def replace(self, old: List[Self], new: List[Self]) -> Self:
+        """Replace values equal to an entry of `old` with the entry of `new`
+        at the same position; every other value, and the dtype, is kept.
+
+        `old` and `new` hold literals (numbers, `lit(...)`, `null(...)`).
+        `new` has one value per entry of `old`, or one value for all of
+        them. Both are cast to the input dtype, so they must fit it; `old`
+        must not repeat a value. A null in `old` matches null input, NaN
+        matches NaN, and -0.0 matches 0.0. A categorical stays categorical.
+        """
+        return self._replace(REPLACE, old, new, _no_default(), None)
+
+    def replace(self, old: List[String], new: List[String]) -> Self:
+        """Replace strings; see the List[Expr] overload."""
+        return self.replace(_string_literals(old), _string_literals(new))
+
+    def replace(self, old: Self, new: Self) -> Self:
+        """Replace one value; see the List[Expr] overload."""
+        return self.replace([old.copy()], [new.copy()])
+
+    def replace(self, old: String, new: String) -> Self:
+        """Replace one string; see the List[Expr] overload."""
+        return self.replace([lit(old)], [lit(new)])
+
+    def replace(self, old: List[Self], new: Self) -> Self:
+        """Replace each value of `old` with the one value `new`."""
+        return self.replace(old, [new.copy()])
+
+    def replace(self, old: List[String], new: String) -> Self:
+        """Replace each string of `old` with the one string `new`."""
+        return self.replace(_string_literals(old), [lit(new)])
+
+    def replace(self, mapping: Dict[String, String]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace(old, new)
+
+    def replace(self, mapping: Dict[Int, Int]) -> Self:
+        """Replace each key of `mapping` with its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace(old, new)
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map every value through `old` -> `new`; the result may change
+        dtype.
+
+        A non-null value with no entry in `old` raises unless `default` is
+        given; with one, it and null input (unless `old` holds a null) take
+        `default`, which may be any expression. The result dtype is
+        `return_dtype`, or that of `new` and `default` together (a string
+        with anything is a string, mixed numbers widen). `old` is cast to
+        the input dtype and matches as in `replace`.
+        """
+        return self._replace(REPLACE_STRICT, old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to strings, with a string default."""
+        return self.replace_strict(
+            _string_literals(old),
+            _string_literals(new),
+            lit(default),
+            return_dtype,
+        )
+
+    def replace_strict(
+        self,
+        old: List[String],
+        new: List[Self],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map strings to other values; see the List[Expr] overload."""
+        return self.replace_strict(
+            _string_literals(old), new, default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings; see the List[Expr] overload."""
+        return self.replace_strict(
+            old, _string_literals(new), default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: List[Self],
+        new: List[String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map values to strings, with a string default."""
+        return self.replace_strict(
+            old, _string_literals(new), lit(default), return_dtype
+        )
+
+    def replace_strict(
+        self,
+        old: Self,
+        new: Self,
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map one value; see the List[Expr] overload."""
+        return self.replace_strict(
+            [old.copy()], [new.copy()], default, return_dtype
+        )
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[String, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[String]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(entry.key)
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[String]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(entry.value)
+        return self.replace_strict(old, new, default, return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, String],
+        *,
+        default: String,
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value, with a string default."""
+        return self.replace_strict(mapping, lit(default), return_dtype)
+
+    def replace_strict(
+        self,
+        mapping: Dict[Int, Int],
+        default: Self = _no_default(),
+        return_dtype: Optional[DataType] = None,
+    ) -> Self:
+        """Map each key of `mapping` to its value."""
+        var old = List[Self]()
+        var new = List[Self]()
+        for entry in mapping.items():
+            old.append(Self(entry.key))
+            new.append(Self(entry.value))
+        return self.replace_strict(old, new, default, return_dtype)
 
     def any(self, ignore_nulls: Bool = True) -> Self:
         """Any true value. With ignore_nulls=False, Kleene: null if no true
@@ -1696,6 +2038,18 @@ def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
 
 
+def _no_default() -> Expr:
+    """No expression: replace_strict without a default."""
+    return Expr(List[Node](), "")
+
+
+def _string_literals(values: List[String]) -> List[Expr]:
+    var literals = List[Expr](capacity=len(values))
+    for value in values:
+        literals.append(lit(value))
+    return literals^
+
+
 def null(dtype: DataType) -> Expr:
     """A typed null literal of a DataType; null(name) takes a dtype name."""
     return Expr(
@@ -1902,8 +2256,13 @@ def when(condition: Expr) -> When:
 struct StrNamespace(Copyable):
     """String expressions. Character operations work on Unicode code points;
     there is no grapheme clustering or locale-specific case mapping. Nulls
-    propagate. Patterns are literal text; regular expressions are not
-    supported."""
+    propagate.
+
+    `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
+    `replace_all` and `split(literal=False)` take regular expressions in
+    the syntax of Rust's `regex` crate, as Polars does; see
+    docs/expressions.md for what is supported. A pattern that is plain text
+    is searched as a substring."""
 
     var _expr: Expr
 
@@ -1958,9 +2317,24 @@ struct StrNamespace(Copyable):
     def ends_with(self, suffix: String) -> Expr:
         return self._op(STR_ENDS_WITH, suffix)
 
-    def contains(self, literal: String) -> Expr:
-        """Literal substring test; regular expressions are not supported."""
-        return self._op(STR_CONTAINS, literal)
+    def contains(
+        self, pattern: String, literal: Bool = False, strict: Bool = True
+    ) -> Expr:
+        """Whether the regular expression matches anywhere in the string
+        (with `literal`, whether the text occurs). An invalid pattern raises
+        when `strict`, or gives null otherwise."""
+        if literal:
+            return self._op(STR_CONTAINS, pattern, 0)
+        return self._op(STR_CONTAINS, pattern, Int64(1) if strict else Int64(2))
+
+    def extract(self, pattern: String, group_index: Int = 1) -> Expr:
+        """Capture group `group_index` of the first match (0 is the whole
+        match); null when nothing matches or the group took no part."""
+        return self._op(STR_EXTRACT, pattern, Int64(group_index))
+
+    def extract_all(self, pattern: String) -> Expr:
+        """Every non-overlapping match, as a list of strings."""
+        return self._op(STR_EXTRACT_ALL, pattern)
 
     def like(self, pattern: String) -> Expr:
         """SQL LIKE: '%' matches any run of characters (including none) and
@@ -1969,12 +2343,25 @@ struct StrNamespace(Copyable):
         `LIKE '%special%requests%'`."""
         return self._op(STR_LIKE, pattern)
 
-    def replace(self, pattern: String, value: String) -> Expr:
-        """Replace the first occurrence of a literal pattern."""
-        return self._op(STR_REPLACE, pattern, 0, text2=value)
+    def replace(
+        self, pattern: String, value: String, literal: Bool = False, n: Int = 1
+    ) -> Expr:
+        """Replace the first `n` matches of the pattern. `value` may refer to
+        capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a
+        dollar sign) unless the pattern is literal; as in Polars, a pattern
+        without ASCII punctuation counts as literal. A regex `n` above 1 is
+        not supported."""
+        return self._op(
+            STR_REPLACE, pattern, Int64(n), 1 if literal else 0, text2=value
+        )
 
-    def replace_all(self, pattern: String, value: String) -> Expr:
-        return self._op(STR_REPLACE, pattern, 1, text2=value)
+    def replace_all(
+        self, pattern: String, value: String, literal: Bool = False
+    ) -> Expr:
+        """Replace every non-overlapping match, as `replace`."""
+        return self._op(
+            STR_REPLACE, pattern, -1, 1 if literal else 0, text2=value
+        )
 
     def slice(self, offset: Int, length: Int = -1) -> Expr:
         """Code points [offset, offset + length); a negative offset counts
@@ -2035,10 +2422,22 @@ struct StrNamespace(Copyable):
         """Left-pad with zeros, after a leading + or - sign."""
         return self._op(STR_PAD, "0", 2, width)
 
-    def split(self, by: String, inclusive: Bool = False) -> Expr:
-        """Split on a literal separator into a list of strings. With
-        inclusive, each part but the last keeps the separator."""
-        return self._op(STR_SPLIT, by, Int64(1) if inclusive else Int64(0))
+    def split(
+        self,
+        by: String,
+        inclusive: Bool = False,
+        literal: Bool = True,
+        strict: Bool = True,
+    ) -> Expr:
+        """Split into a list of strings on a separator, or with
+        `literal=False` on a regular expression's matches (an empty pattern
+        splits into code points; an invalid one raises when `strict`, or
+        gives null otherwise). With inclusive, each part but the last keeps
+        its separator."""
+        var mode = 0 if literal else (1 if strict else 2)
+        return self._op(
+            STR_SPLIT, by, Int64(1) if inclusive else Int64(0), mode
+        )
 
     def split_exact(self, by: String, n: Int, inclusive: Bool = False) -> Expr:
         """Split on a literal separator into a struct of n + 1 String fields
@@ -2070,15 +2469,14 @@ struct StrNamespace(Copyable):
     def find(self, pattern: String, literal: Bool = False) -> Expr:
         """Byte offset (UInt32) of the first occurrence of the pattern, or
         null when it does not occur; an empty pattern is found at 0. Offsets
-        count bytes, as in Polars. Regular expressions are not supported
-        yet: without literal=True, a pattern holding regex syntax raises."""
+        count bytes, as in Polars. The pattern is a regular expression
+        unless `literal`."""
         return self._op(STR_FIND, pattern, Int64(literal))
 
     def count_matches(self, pattern: String, literal: Bool = False) -> Expr:
         """Number of non-overlapping occurrences (UInt32); an empty pattern
-        matches at every code point boundary. Regular expressions are not
-        supported yet: without literal=True, a pattern holding regex syntax
-        raises."""
+        matches at every code point boundary. The pattern is a regular
+        expression unless `literal`."""
         return self._op(STR_COUNT_MATCHES, pattern, Int64(literal))
 
     def contains_any(
