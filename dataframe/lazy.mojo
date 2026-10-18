@@ -3291,20 +3291,51 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return False
         return False
 
-    def _grouped_on(self, index: Int, key: String) -> Int:
+    def _input_name(self, index: Int, name: String) -> Optional[String]:
+        """The name column `name` has in the input of row-local node
+        `index` when the node passes it on unchanged, under that name or
+        renamed (`col(a).alias(name)`, a projection of a column reference,
+        which DuckDB's join filters pass through); None when the node
+        computes or drops it."""
+        ref node = self._nodes[index]
+        if node.kind == FILTER:
+            return name
+        if node.kind == DROP:
+            if name in node.names:
+                return None
+            return name
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return None
+        var at = _produced_at(node.exprs, name)
+        if at < 0:
+            if node.kind == WITH_COLUMNS:
+                return name
+            return None
+        ref made = node.exprs[at]
+        if len(made._nodes) == 1 and made._nodes[0].op == COL:
+            return made._nodes[0].text
+        return None
+
+    def _grouped_on(self, index: Int, key: String) -> Tuple[Int, String]:
         """The aggregate under node `index`, through row-local steps that
-        keep column `key`, when `key` is one of its group keys; else -1."""
+        pass column `key` on (renamed or not), when the column is one of
+        its group keys, and the key's name there; (-1, "") otherwise."""
         var at = index
+        var name = key
         while at >= 0:
             ref node = self._nodes[at]
             if node.kind == AGG:
-                return at if key in node.names else -1
+                if name in node.names:
+                    return (at, name)
+                return (-1, String())
             if not (_stream_rows(node) or node.kind == DROP):
-                return -1
-            if not self._keeps_column(at, key):
-                return -1
+                return (-1, String())
+            var below = self._input_name(at, name)
+            if not below:
+                return (-1, String())
+            name = below.value()
             at = node.left
-        return -1
+        return (-1, String())
 
     def _key_source(self, index: Int, key: String) raises -> Optional[Series]:
         """The table column that supplies column `key` at node `index`,
@@ -3349,6 +3380,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         stream has no such join or no filter narrows its probe side."""
         var joins = List[Int]()
         var aggregates = List[Int]()
+        # Each aggregate's names for the join's right keys.
+        var group_keys = List[List[String]]()
         var key = List[String]()
         var probe = top
         var lowest = -1
@@ -3370,11 +3403,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 and (len(key) == 0 or _same_names(step.names, key))
             ):
                 # One aggregate grouped on every right key (PDS-H q20's
-                # shipped quantities per part and supplier).
-                var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                # shipped quantities per part and supplier), each perhaps
+                # renamed on the way up (TPC-DS q16's orders shipped from
+                # two warehouses).
+                var aggregate = self._grouped_on(
+                    step.right, step.right_keys[0]
+                )[0]
+                var names = List[String]()
                 for name in step.right_keys:
-                    if self._grouped_on(step.right, name) != aggregate:
+                    var grouped = self._grouped_on(step.right, name)
+                    if grouped[0] != aggregate:
                         aggregate = -1
+                    names.append(grouped[1])
                 if aggregate >= 0:
                     # The row-local steps between this join and the one
                     # above keep the keys, so the keys reaching the higher
@@ -3387,6 +3427,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     if kept:
                         joins.append(probe)
                         aggregates.append(aggregate)
+                        group_keys.append(names^)
                         key = step.names.copy()
                         lowest = probe
                         steps = List[Int]()
@@ -3394,11 +3435,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if lowest < 0:
             return None
         var below = self._nodes[lowest].left
-        # Its keys can be few only if something filters the probe side:
-        # TPC-DS q35's customers joined to addresses and demographics kept
-        # 97% of them, and running that side first cost more than the
-        # filter saved.
-        if not self._has_kind(below, FILTER):
+        # Its keys can be few only if something filters the probe side: a
+        # filter, or an inner or semi join, which keeps only the rows its
+        # build side matches (the filters on TPC-DS q16's dates, addresses
+        # and call centers reach it as joins with their results, which the
+        # join order ran to count them).
+        if not self._filters_rows(below):
             return None
         trace_path("stream.probe_key_reduction")
         var probed = self._execute(below, False, True, batch_size)
@@ -3423,18 +3465,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for k in range(len(joins)):
             var aggregate = aggregates[k]
             var input = plan._nodes[aggregate].left
-            var group_keys = plan._nodes[joins[k]].right_keys.copy()
             # The filter pays when it drops most of the groups: some key's
             # probe values are at most half of the values the aggregate's
             # key column spans (the half rule the pipeline's key ranges
             # keep). TPC-DS q35's 97K probing customers kept 94% of a
             # year's store sales, for 16 ms of probes.
             var pays = False
-            for i in range(len(group_keys)):
-                var source = plan._key_source(input, group_keys[i])
+            ref grouped = group_keys[k]
+            for i in range(len(grouped)):
+                var source = plan._key_source(input, grouped[i])
                 if not source or not _range_key(source.value().dtype()):
                     continue
-                var named = group_keys[i] + "/" + String(len(source.value()))
+                var named = grouped[i] + "/" + String(len(source.value()))
                 if named not in spans:
                     var bounds = _int_bounds(source.value())
                     spans[named] = (
@@ -3448,7 +3490,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 JOIN,
                 input,
                 len(plan._nodes) - 1,
-                names=group_keys^,
+                names=grouped.copy(),
                 text="semi",
                 how=JOIN_SEMI,
                 right_keys=key.copy(),
@@ -6239,6 +6281,24 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var i = stack.pop()
             ref node = self._nodes[i]
             if node.kind == kind:
+                return True
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return False
+
+    def _filters_rows(self, index: Int) -> Bool:
+        """Whether a filter, or an inner or semi join, sits anywhere under
+        node `index`: a step that can drop rows."""
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if node.kind == FILTER or (
+                node.kind == JOIN
+                and (node.how == JOIN_INNER or node.how == JOIN_SEMI)
+            ):
                 return True
             if node.left >= 0:
                 stack.append(node.left)
