@@ -1645,6 +1645,45 @@ def execute_plan(
         )
     var schema = DataFrame(schema_columns^)
     var resident_result: Optional[Table] = None
+    var projection_view = False
+    if (
+        resident_input
+        and (
+            resident_input.value().storage
+            or resident_input.value().identity_storage
+        )
+        and not len(plan.steps)
+        and not plan.reductions
+        and plan.ordered_mode == 0
+        and (not remap_plan or not len(remap_plan.value().descriptors))
+    ):
+        var source_mapping = List[Int](capacity=plan.source.width())
+        for column in plan.source._columns:
+            var found = -1
+            for index in range(resident_input.value().schema.width()):
+                ref field = resident_input.value().schema._columns[index]
+                if (
+                    field.name() == column.name()
+                    and field.dtype() == column.dtype()
+                ):
+                    found = index
+                    break
+            if found < 0:
+                raise Error(
+                    "Mojo GPU resident source field does not match the row plan"
+                )
+            source_mapping.append(found)
+        var mapping = List[Int](capacity=len(plan.outputs))
+        for output in plan.outputs:
+            if output.slot < 0 or output.slot >= len(source_mapping):
+                raise Error(
+                    "Mojo GPU resident projection source slot is invalid"
+                )
+            mapping.append(source_mapping[output.slot])
+        resident_result = resident_input.value().project_view(
+            scope, schema, mapping, count
+        )
+        projection_view = True
     ref reduction_code = program.outputs
     var has_statistics = program.has_statistics
     var has_quantiles = program.has_quantiles
@@ -1697,7 +1736,7 @@ def execute_plan(
     # Certificate regions observe their own faults in CPU order; plain
     # regions flag every written fault (accelerator/faults.mojo).
     var plain = plan.ordered_mode == 0
-    if rows and cells:
+    if rows and cells and not projection_view:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
         try:
@@ -3272,7 +3311,7 @@ def execute_plan(
         "metal",
         rows,
         count,
-        algorithm="mojo_gpu_ordered_implode_rows" if ordered_private else "mojo_gpu_grouped_rows" if grouping else "mojo_gpu_reductions" if plan.reductions else "mojo_gpu_windows" if ranking
+        algorithm="mojo_gpu_resident_projection_view" if projection_view else "mojo_gpu_ordered_implode_rows" if ordered_private else "mojo_gpu_grouped_rows" if grouping else "mojo_gpu_reductions" if plan.reductions else "mojo_gpu_windows" if ranking
         or windows else "mojo_gpu_ordered_rows" if ordering else "mojo_gpu_row_program",
         wall_ns=Int(perf_counter_ns()) - started,
     )
