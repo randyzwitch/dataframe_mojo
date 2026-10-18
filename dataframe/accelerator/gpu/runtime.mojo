@@ -865,6 +865,18 @@ def _iana_scalar_slots(plan: RowPlan) raises -> Int:
     return slots
 
 
+def _source_high_words(plan: RowPlan) -> Bool:
+    """Only wide decimals and original category codes carry source high words."""
+    for column in plan.source._columns:
+        var dtype = column.dtype()
+        if dtype.is_decimal() and dtype.decimal_width() == 128:
+            return True
+    for field in plan.source_text:
+        if field.category:
+            return True
+    return False
+
+
 def estimate_resources(
     plan: RowPlan,
     rows_override: Int = -1,
@@ -1044,7 +1056,10 @@ def estimate_resources(
     ) if plan.reductions else 0
     if rows and cells:
         if not resident_input:
-            upload = matrix_bytes
+            upload = _checked_mul(
+                _checked_mul(rows, plan.source.width()),
+                17 if _source_high_words(plan) else 9,
+            )
         else:
             # GPU-resident copies upload only their three-word column mapping.
             upload = _checked_mul(plan.source.width(), 24)
@@ -1609,10 +1624,14 @@ def execute_plan(
         )
         peak = _checked_add(peak, remap_plan.value().bytes())
     _ = scope.check(peak)
-    var host_cells = 0 if resident_input else cells
+    # Host staging owns only immutable source columns. Derived slots and error
+    # words start at zero on the device, rather than crossing the host boundary.
+    var host_cells = 0 if resident_input else _checked_mul(
+        rows, plan.source.width()
+    )
     var words = List[UInt64](length=2 * host_cells, fill=0)
     var validity = List[UInt8](length=host_cells, fill=0)
-    var errors = List[UInt32](length=host_cells, fill=0)
+    var errors = List[UInt32]()
     var schema_columns = List[Series](capacity=len(plan.outputs))
     var output_slots = List[Int64](capacity=len(plan.outputs))
     for i in range(len(plan.outputs)):
@@ -1719,12 +1738,34 @@ def execute_plan(
                     mapping,
                 )
             else:
-                ctx.enqueue_copy(device_words, words.unsafe_ptr())
-                uploaded += len(words) * 8
-                ctx.enqueue_copy(device_valid, validity.unsafe_ptr())
-                uploaded += len(validity)
-                ctx.enqueue_copy(device_errors, errors.unsafe_ptr())
-                uploaded += len(errors) * 4
+                # Sub-buffer copies target their final column-major positions.
+                # No temporary device matrix, repacking kernel or extra wait.
+                ctx.enqueue_memset(device_words, UInt64(0))
+                ctx.enqueue_memset(device_valid, UInt8(0))
+                ctx.enqueue_memset(device_errors, UInt32(0))
+                if host_cells:
+                    ctx.enqueue_copy(
+                        device_words.create_sub_buffer[DType.uint64](
+                            0, host_cells
+                        ),
+                        words.unsafe_ptr(),
+                    )
+                    uploaded += host_cells * 8
+                    if _source_high_words(plan):
+                        ctx.enqueue_copy(
+                            device_words.create_sub_buffer[DType.uint64](
+                                cells, host_cells
+                            ),
+                            words.unsafe_ptr().unsafe_offset(host_cells),
+                        )
+                        uploaded += host_cells * 8
+                    ctx.enqueue_copy(
+                        device_valid.create_sub_buffer[DType.uint8](
+                            0, host_cells
+                        ),
+                        validity.unsafe_ptr(),
+                    )
+                    uploaded += host_cells
             if remap_plan:
                 remap_owner = submit_text(
                     scope,
