@@ -3,7 +3,19 @@ from std.collections import Optional
 from .dtype import DataType
 from .expr import (
     split_names,
+    struct_pack_children,
     COL,
+    H_ALL,
+    H_ANY,
+    HORIZONTAL,
+    HORIZONTAL_ARGS,
+    LIT_BOOL,
+    SEP,
+    STRUCT_PACK,
+    horizontal_name,
+    subtree,
+    Node,
+    _append_shifted,
     SELECT_ALL,
     SELECT_COLS,
     SELECT_DTYPE,
@@ -74,12 +86,171 @@ def _matches(
     return result^
 
 
+def _parents(nodes: List[Node]) -> List[Int]:
+    var parents = List[Int](length=len(nodes), fill=-1)
+    for i in range(len(nodes)):
+        ref node = nodes[i]
+        for child in [node.left, node.right, node.extra]:
+            if child >= 0:
+                parents[child] = i
+        if node.op == STRUCT_PACK:
+            for child in struct_pack_children(node):
+                parents[child] = i
+    return parents^
+
+
+def _emit(
+    source: List[Node],
+    at: Int,
+    target: Int,
+    replacement: List[Node],
+    mut out: List[Node],
+) -> Int:
+    """Copy the subtree at `at` into `out`, with the subtree at `target`
+    replaced by `replacement`, or dropped when that is empty: a dropped
+    horizontal input leaves its sibling in its place. Returns the copy's
+    root, or -1 when it was dropped."""
+    if at == target:
+        if len(replacement) == 0:
+            return -1
+        _append_shifted(out, replacement, len(out))
+        return len(out) - 1
+    var node = source[at].copy()
+    if node.op == HORIZONTAL_ARGS:
+        var left = _emit(source, node.left, target, replacement, out)
+        var right = _emit(source, node.right, target, replacement, out)
+        if left < 0:
+            return right
+        if right < 0:
+            return left
+        node.left = left
+        node.right = right
+    elif node.op == STRUCT_PACK:
+        var roots = String()
+        var children = struct_pack_children(node)
+        for k in range(len(children)):
+            var root = _emit(source, children[k], target, replacement, out)
+            if k == 0:
+                node.left = root
+            else:
+                roots += SEP
+            roots += String(root)
+        node.text2 = roots
+    else:
+        if node.left >= 0:
+            node.left = _emit(source, node.left, target, replacement, out)
+        if node.right >= 0:
+            node.right = _emit(source, node.right, target, replacement, out)
+        if node.extra >= 0:
+            node.extra = _emit(source, node.extra, target, replacement, out)
+    out.append(node^)
+    return len(out) - 1
+
+
+def _replaced(expression: Expr, target: Int, replacement: List[Node]) -> Expr:
+    var nodes = List[Node]()
+    _ = _emit(
+        expression._nodes,
+        len(expression._nodes) - 1,
+        target,
+        replacement,
+        nodes,
+    )
+    return Expr(nodes^, expression._name)
+
+
+def _expand_inputs(expression: Expr, columns: List[Series]) raises -> Expr:
+    """Expand each selector that is (part of) an input of a horizontal
+    reduction into one input per matched column, as Polars does: the
+    expression stays one expression. Other selectors are left alone."""
+    var current = expression.copy()
+    while True:
+        var parents = _parents(current._nodes)
+        var selector = -1
+        var operand = -1
+        var holder = -1
+        for i in range(len(current._nodes)):
+            if current._nodes[i].op != SELECTOR:
+                continue
+            var at = i
+            while parents[at] >= 0:
+                var op = current._nodes[parents[at]].op
+                if op == HORIZONTAL or op == HORIZONTAL_ARGS:
+                    selector = i
+                    operand = at
+                    holder = parents[at]
+                    break
+                at = parents[at]
+            if selector >= 0:
+                break
+        if selector < 0:
+            return current^
+        ref node = current._nodes[selector]
+        var parts = split_names(node.text)
+        var names = _matches(
+            node.min_count, node.text2, node.integer, node.dtypes, columns
+        )
+        var kind = Int(current._nodes[holder].integer)
+        if len(names) == 0 and current._nodes[holder].op == HORIZONTAL:
+            # The selector was the only input left.
+            if kind != H_ANY and kind != H_ALL:
+                raise Error(
+                    horizontal_name(kind)
+                    + " requires at least one input; the selector matched"
+                    " no columns"
+                )
+            var literal = Expr(
+                [_node(LIT_BOOL, integer=Int64(kind == H_ALL))],
+                horizontal_name(kind),
+            )
+            var name = current._name
+            current = _replaced(current, holder, literal._nodes)
+            current._name = name if name.byte_length() > 0 else literal._name
+            continue
+        var input = subtree(current, operand)
+        var at = -1
+        for k in range(len(input._nodes)):
+            if input._nodes[k].op == SELECTOR:
+                if at >= 0:
+                    raise Error(
+                        "An expression may contain at most one selector"
+                    )
+                at = k
+        var inputs = List[Node]()
+        for k in range(len(names)):
+            var copied = input._nodes.copy()
+            copied[at] = _node(COL, text=names[k])
+            var offset = len(inputs)
+            _append_shifted(inputs, copied, offset)
+            if k > 0:
+                inputs.append(
+                    _node(
+                        HORIZONTAL_ARGS,
+                        offset - 1,
+                        len(inputs) - 1,
+                        integer=Int64(kind),
+                    )
+                )
+        if current._name.byte_length() == 0 and len(names) > 0:
+            current._name = parts[0] + names[0] + parts[1]
+        current = _replaced(current, operand, inputs)
+
+
 def expand(expression: Expr, columns: List[Series]) raises -> List[Expr]:
     """Replace a selector leaf with each matched column.
 
     Output names: an explicit alias wins; otherwise prefix + column name +
-    suffix. At most one selector may appear in an expression.
+    suffix. At most one selector may appear in an expression, apart from
+    selectors among a horizontal reduction's inputs, which expand into
+    more inputs of that one expression.
     """
+    for node in expression._nodes:
+        if node.op == HORIZONTAL:
+            return _expanded(_expand_inputs(expression, columns), columns)
+    return _expanded(expression, columns)
+
+
+def _expanded(expression: Expr, columns: List[Series]) raises -> List[Expr]:
     var selector = -1
     for i in range(len(expression._nodes)):
         if expression._nodes[i].op == SELECTOR:

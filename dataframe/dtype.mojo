@@ -760,6 +760,20 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
                 return self
         return self
 
+    def product_type(self) -> DataType:
+        """The result type of product and cum_prod, as in Polars: INT64 for
+        Bool and integers up to 32 bits, which would soon overflow their
+        own width, and the type itself for Int64, UInt64 and floats. A
+        decimal's product has a scale no column of it shares, so FLOAT64,
+        as DuckDB's product is."""
+        if self.is_decimal():
+            return DataType.FLOAT64
+        if self == DataType.BOOL or (
+            self.is_integer() and self != DataType.UINT64
+        ):
+            return DataType.INT64
+        return self
+
     def write_to(self, mut writer: Some[Writer]):
         writer.write(self.name())
 

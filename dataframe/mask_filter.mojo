@@ -19,11 +19,11 @@ of the rest. This does the same:
 String and nested columns still go through a row list (`take`); #375 makes
 string gathers produce views.
 """
-from std.bit import count_trailing_zeros, pop_count
+from std.bit import count_leading_zeros, count_trailing_zeros, pop_count
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 
 from .bool_column import BoolColumn, _FULL, _bits64
-from .column import Column
+from .column import Column, _validity_at
 from .gather import GATHER_DTYPES
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
@@ -111,6 +111,25 @@ struct _Chunks(Copyable, Movable):
         for part in self.parts:
             end += len(part)
             self.ends.append(end)
+
+
+@always_inline
+def _or_bits(address: Int, at: Int, value: UInt64):
+    """OR `value`'s bits into the LSB-first bitmap at `address` from bit
+    `at` on, touching only the bytes up to its highest set bit."""
+    if value == 0:
+        return
+    var bits = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
+    var shift = at & 7
+    var start = at >> 3
+    var low = value << UInt64(shift)
+    var bytes = (shift + 64 - Int(count_leading_zeros(value)) + 7) // 8
+    for b in range(min(bytes, 8)):
+        bits.unsafe_offset(start + b)[] |= UInt8((low >> UInt64(8 * b)) & 0xFF)
+    if bytes > 8:
+        bits.unsafe_offset(start + 8)[] |= UInt8(
+            (value >> UInt64(64 - shift)) & 0xFF
+        )
 
 
 struct _CompressJob(Job):
@@ -228,6 +247,12 @@ struct _CompressJob(Job):
                 # (#395; a filter keeping most rows leaves long runs).
                 var local = base - start
                 var nulls = out_valid_address != 0 and len(part._bits[]) > 0
+                var in_bits = part._bits[].unsafe_ptr()
+                # The word's 64 validity bits, read once a run is long
+                # enough to want them: its bits are then ORed in as one
+                # piece rather than tested row by row.
+                var vword = _FULL
+                var loaded = not nulls
                 while word != 0 and k < self.last:
                     var b0 = Int(count_trailing_zeros(word))
                     var rest = word >> UInt64(b0)
@@ -252,12 +277,28 @@ struct _CompressJob(Job):
                         var bits = Pointer[List[UInt8], MutAnyOrigin](
                             unsafe_from_address=out_valid_address
                         )[].unsafe_ptr()
-                        for i in range(run):
-                            if not nulls or part._valid(local + b0 + i):
-                                var at = k + i
-                                bits.unsafe_offset(at >> 3)[] |= UInt8(
-                                    1
-                                ) << UInt8(at & 7)
+                        if run <= 8:
+                            for i in range(run):
+                                if not nulls or _validity_at(
+                                    in_bits, part._offset + local + b0 + i
+                                ):
+                                    var at = k + i
+                                    bits.unsafe_offset(at >> 3)[] |= UInt8(
+                                        1
+                                    ) << UInt8(at & 7)
+                        else:
+                            if not loaded:
+                                vword = _bits64(
+                                    part._bits[],
+                                    part._offset + local,
+                                    part._offset + len(part),
+                                )
+                                loaded = True
+                            var span = _FULL
+                            if run < 64:
+                                span = (UInt64(1) << UInt64(run)) - 1
+                            var held = (vword >> UInt64(b0)) & span
+                            _or_bits(Int(bits), k, held)
                     k += run
                     if b0 + run >= 64:
                         word = 0

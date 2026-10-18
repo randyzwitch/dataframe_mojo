@@ -12,6 +12,22 @@ Every column, in schema order.
 def all() -> Expr
 ```
 
+## `all_horizontal`
+
+Kleene AND across the inputs in each row: false if any is false, else null if any is null, else true. Numeric inputs read nonzero as true. A selector matching no columns gives a literal true.
+
+```mojo
+def all_horizontal(exprs: List[Expr]) -> Expr
+```
+
+## `any_horizontal`
+
+Kleene OR across the inputs in each row: true if any is true, else null if any is null, else false. Numeric inputs read nonzero as true. A selector matching no columns gives a literal false.
+
+```mojo
+def any_horizontal(exprs: List[Expr]) -> Expr
+```
+
 ## `AnyValue`
 
 One nullable cell of a supported dtype.
@@ -59,6 +75,14 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def bool(self) -> Bool`
 - `def string(self) -> String`
 - `def write_to(self, mut writer: T)`
+
+## `arctan2`
+
+The angle of the point (x, y) in radians, in [-pi, pi], as Float64, or Float32 when y is Float32 (x is cast to y's float type).
+
+```mojo
+def arctan2(y: Expr, x: Expr) -> Expr
+```
 
 ## `ArrowArray`
 
@@ -517,6 +541,8 @@ struct(names, dtypes) holds one value of each named field per row.
   Bits per value for fixed-width types; 0 for variable-width.
 - `def sum_type(self) -> Self`
   The result type of sum and cumulative sums: 8- and 16-bit integers widen to INT64 (as in Polars), decimals to decimal(38) at their scale (as in DuckDB); other types keep their type.
+- `def product_type(self) -> Self`
+  The result type of product and cum_prod, as in Polars: INT64 for Bool and integers up to 32 bits, which would soon overflow their own width, and the type itself for Int64, UInt64 and floats. A decimal's product has a scale no column of it shares, so FLOAT64, as DuckDB's product is.
 - `def write_to(self, mut writer: T)`
 
 ## `date_range`
@@ -682,6 +708,48 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def exp(self) -> Self`
 - `def log(self) -> Self`
   Natural logarithm.
+- `def log(self, base: Float64) -> Self`
+  Logarithm to `base`: ln(x) / ln(base), with log10 and log2 exact at powers of their base. Float64, or Float32 for Float32 input; log(0) is -inf and negative input NaN, as in IEEE.
+- `def log10(self) -> Self`
+  Base-10 logarithm; see log(base).
+- `def log1p(self) -> Self`
+  ln(1 + x), accurate near zero; -inf at -1, NaN below.
+- `def sign(self) -> Self`
+  -1, 0 or 1 in the input's type. A float NaN stays NaN and a signed zero keeps its sign, as in Polars.
+- `def cbrt(self) -> Self`
+  Cube root (negative for negative input).
+- `def truncate(self) -> Self`
+  Round toward zero, keeping the input's type; integers are unchanged.
+- `def sin(self) -> Self`
+  Sine of radians, as Float64 (Float32 for Float32 input).
+- `def cos(self) -> Self`
+  Cosine of radians; see sin.
+- `def tan(self) -> Self`
+  Tangent of radians; see sin.
+- `def cot(self) -> Self`
+  Cotangent, 1 / tan(x): inf at 0 and -inf at -0.0.
+- `def arcsin(self) -> Self`
+  Inverse sine in radians; NaN outside [-1, 1].
+- `def arccos(self) -> Self`
+  Inverse cosine in radians; NaN outside [-1, 1].
+- `def arctan(self) -> Self`
+  Inverse tangent in radians.
+- `def sinh(self) -> Self`
+  Hyperbolic sine.
+- `def cosh(self) -> Self`
+  Hyperbolic cosine.
+- `def tanh(self) -> Self`
+  Hyperbolic tangent.
+- `def arcsinh(self) -> Self`
+  Inverse hyperbolic sine.
+- `def arccosh(self) -> Self`
+  Inverse hyperbolic cosine; NaN below 1.
+- `def arctanh(self) -> Self`
+  Inverse hyperbolic tangent; +-inf at +-1, NaN outside.
+- `def degrees(self) -> Self`
+  Radians converted to degrees.
+- `def radians(self) -> Self`
+  Degrees converted to radians.
 - `def floor(self) -> Self`
 - `def ceil(self) -> Self`
 - `def round(self, decimals: Int = Int(0)) -> Self`
@@ -704,6 +772,48 @@ A flat, topologically ordered tree; composition never evaluates data.
   Replace valid NaNs in a Float64 expression with value.
 - `def is_between(self, lower: Self, upper: Self, closed: String = "both") -> Self`
   True when lower <= x <= upper; `closed` is both, left, right, or none.
+- `def replace(self, old: List[Self], new: List[Self]) -> Self`
+  Replace values equal to an entry of `old` with the entry of `new` at the same position; every other value, and the dtype, is kept.
+- `def replace(self, old: List[String], new: List[String]) -> Self`
+  Replace strings; see the List[Expr] overload.
+- `def replace(self, old: Self, new: Self) -> Self`
+  Replace one value; see the List[Expr] overload.
+- `def replace(self, old: String, new: String) -> Self`
+  Replace one string; see the List[Expr] overload.
+- `def replace(self, old: List[Self], new: Self) -> Self`
+  Replace each value of `old` with the one value `new`.
+- `def replace(self, old: List[String], new: String) -> Self`
+  Replace each string of `old` with the one string `new`.
+- `def replace(self, mapping: Dict[String, String]) -> Self`
+  Replace each key of `mapping` with its value.
+- `def replace(self, mapping: Dict[Int, Int]) -> Self`
+  Replace each key of `mapping` with its value.
+- `def replace_strict(self, old: List[Self], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map every value through `old` -> `new`; the result may change dtype.
+- `def replace_strict(self, old: List[String], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: List[String], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings, with a string default.
+- `def replace_strict(self, old: List[String], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to other values; see the List[Expr] overload.
+- `def replace_strict(self, old: List[Self], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: List[Self], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings, with a string default.
+- `def replace_strict(self, old: Self, new: Self, default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map one value; see the List[Expr] overload.
+- `def replace_strict(self, mapping: Dict[String, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[String, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value, with a string default.
+- `def replace_strict(self, mapping: Dict[String, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[Int, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[Int, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value, with a string default.
+- `def replace_strict(self, mapping: Dict[Int, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
 - `def any(self, ignore_nulls: Bool = True) -> Self`
   Any true value. With ignore_nulls=False, Kleene: null if no true and some null.
 - `def all(self, ignore_nulls: Bool = True) -> Self`
@@ -716,6 +826,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Convert to any dtype by name (numeric, bool, string, temporal).
 - `def cum_sum(self, reverse: Bool = False) -> Self`
   Running sum of non-null values; null rows stay null. Int64 is checked for overflow. A Bool gives a UInt32 running count of true values.
+- `def cum_prod(self, reverse: Bool = False) -> Self`
+  Running product of non-null values; null rows stay null.
 - `def cum_min(self, reverse: Bool = False) -> Self`
 - `def cum_max(self, reverse: Bool = False) -> Self`
 - `def cum_count(self, reverse: Bool = False) -> Self`
@@ -808,6 +920,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Number of rows including nulls, as Int64.
 - `def sum(self, min_count: Int = Int(0)) -> Self`
   Skip nulls; zero when empty unless fewer than min_count are valid. A Bool sums to its number of true values, as UInt32 (Polars).
+- `def product(self) -> Self`
+  Product of the non-null values; 1 when there are none.
 - `def arg_min(self) -> Self`
   Index of the first minimum, as UInt32; nulls are skipped and NaN counts only when every value is NaN. Null for no values. Inside group_by().agg() or over(), the index is within the group.
 - `def arg_max(self) -> Self`
@@ -1225,6 +1339,30 @@ def lit(value: Bool) -> Expr
 def lit(value: String) -> Expr
 ```
 
+## `max_horizontal`
+
+Greatest input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
+
+```mojo
+def max_horizontal(exprs: List[Expr]) -> Expr
+```
+
+## `mean_horizontal`
+
+Mean of the inputs in each row: Float32 when their common type is Float32, otherwise Float64. With ignore_nulls the mean is over the row's non-null values, null when there are none; without it any null makes the row null.
+
+```mojo
+def mean_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
+```
+
+## `min_horizontal`
+
+Least input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
+
+```mojo
+def min_horizontal(exprs: List[Expr]) -> Expr
+```
+
 ## `nth`
 
 The column at a position; negative positions count from the end.
@@ -1619,6 +1757,14 @@ A window onto named child series of equal length and a validity.
 - `def equals(self, other: Self) -> Bool`
 - `def validity(self) -> List[Bool]`
 - `def unsafe_validity(self) -> Int`
+
+## `sum_horizontal`
+
+Sum of the inputs in each row, named after the first input.
+
+```mojo
+def sum_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
+```
 
 ## `Then`
 

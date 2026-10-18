@@ -12,7 +12,12 @@ null, as in validity bitmaps.
 """
 from std.sys.intrinsics import prefetch
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
-from .column import _append_validity_bit, _count_valid, _validity_bit
+from .column import (
+    _append_validity_bit,
+    _count_valid,
+    _validity_at,
+    _validity_bit,
+)
 
 
 comptime STRING_VIEW_INLINE_BYTES = 12
@@ -257,12 +262,16 @@ struct StringViewStorage(Copyable, Sized):
             if length > STRING_VIEW_INLINE_BYTES:
                 total_buffer_bytes += length
         if len(bits) > 0:
+            # Through pointers: a bounds check on both bitmaps per row cost
+            # as much as reading the bits.
+            var out_bits = bits.unsafe_ptr()
+            var in_bits = self._bits[].unsafe_ptr()
             for k in range(count):
                 var index = rows[unsafe_offset=k]
                 if index < 0:
                     continue
-                if not nulls or _validity_bit(self._bits[], offset + index):
-                    bits[k >> 3] |= UInt8(1) << UInt8(k & 7)
+                if not nulls or _validity_at(in_bits, offset + index):
+                    out_bits[unsafe_offset=k >> 3] |= UInt8(1) << UInt8(k & 7)
         if not nulls and not missing:
             bits = List[UInt8]()
         return Self._sharing(
