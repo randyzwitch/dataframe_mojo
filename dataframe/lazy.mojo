@@ -41,8 +41,9 @@ from .io.parquet import _ParquetBatches
 from .pipeline import (
     _BOUND_NONE,
     _TopBound,
-    _int_bounds,
+    _ensure_zones,
     _range_key,
+    _window_bounds,
     STEP_DROP,
     STEP_FILTER,
     STEP_JOIN,
@@ -62,6 +63,7 @@ from ._accel_provider import (
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
+    HORIZONTAL_ARGS,
     split_names,
     ARG_MAX,
     ARG_MIN,
@@ -644,6 +646,81 @@ def _literal_node(value: Series) raises -> Optional[Node]:
                     )
                 )
     return None
+
+
+def _shared_text(expr: Expr, root: Int) -> Optional[String]:
+    """The text of the subexpression of `expr` at node `root` when common
+    subexpression elimination may compute it once: row-local, reading a
+    column, and more than a column or a literal; None otherwise."""
+    var op = expr._nodes[root].op
+    if (
+        op == COL
+        or op == LIT_INT
+        or op == LIT_FLOAT
+        or op == LIT_BOOL
+        or op == LIT_STRING
+        or op == LIT_NULL
+        or op == SELECTOR
+        # A horizontal reduction's input list is evaluated by the reduction
+        # above it, never as a column of its own.
+        or op == HORIZONTAL_ARGS
+    ):
+        return None
+    var part = subtree(expr, root)
+    var reads = False
+    for node in part._nodes:
+        # Row-local only (`_row_local`): no reduction or window.
+        if (
+            node.op == SELECTOR
+            or node.op == OVER
+            or is_reduction(node.op)
+            or is_window(node.op)
+        ):
+            return None
+        reads = reads or node.op == COL
+    if not reads:
+        return None
+    part._name = String()
+    return _expr_signature(part)
+
+
+def _emit_shared(
+    expr: Expr,
+    i: Int,
+    seen: Dict[String, Int],
+    mut names: Dict[String, String],
+    mut shared: List[Expr],
+    taken: List[String],
+    mut out: List[Node],
+) raises -> Int:
+    """Append node `i` of `expr` to `out` after its inputs, a subexpression
+    `seen` more than once as a read of the hidden column computing it
+    (added to `shared` the first time); its index in `out`."""
+    var text = _shared_text(expr, i)
+    if text and seen.get(text.value(), 0) > 1:
+        if text.value() not in names:
+            var name = "__cse_" + String(len(shared))
+            while name in taken:
+                name = "_" + name
+            names[text.value()] = name
+            shared.append(subtree(expr, i).alias(name))
+        out.append(col(names[text.value()])._nodes[0].copy())
+        return len(out) - 1
+    var copy = expr._nodes[i].copy()
+    if copy.left >= 0:
+        copy.left = _emit_shared(
+            expr, expr._nodes[i].left, seen, names, shared, taken, out
+        )
+    if copy.right >= 0:
+        copy.right = _emit_shared(
+            expr, expr._nodes[i].right, seen, names, shared, taken, out
+        )
+    if copy.op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_shared(
+            expr, expr._nodes[i].extra, seen, names, shared, taken, out
+        )
+    out.append(copy^)
+    return len(out) - 1
 
 
 def _emit_replaced(
@@ -3291,20 +3368,51 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return False
         return False
 
-    def _grouped_on(self, index: Int, key: String) -> Int:
+    def _input_name(self, index: Int, name: String) -> Optional[String]:
+        """The name column `name` has in the input of row-local node
+        `index` when the node passes it on unchanged, under that name or
+        renamed (`col(a).alias(name)`, a projection of a column reference,
+        which DuckDB's join filters pass through); None when the node
+        computes or drops it."""
+        ref node = self._nodes[index]
+        if node.kind == FILTER:
+            return name
+        if node.kind == DROP:
+            if name in node.names:
+                return None
+            return name
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return None
+        var at = _produced_at(node.exprs, name)
+        if at < 0:
+            if node.kind == WITH_COLUMNS:
+                return name
+            return None
+        ref made = node.exprs[at]
+        if len(made._nodes) == 1 and made._nodes[0].op == COL:
+            return made._nodes[0].text
+        return None
+
+    def _grouped_on(self, index: Int, key: String) -> Tuple[Int, String]:
         """The aggregate under node `index`, through row-local steps that
-        keep column `key`, when `key` is one of its group keys; else -1."""
+        pass column `key` on (renamed or not), when the column is one of
+        its group keys, and the key's name there; (-1, "") otherwise."""
         var at = index
+        var name = key
         while at >= 0:
             ref node = self._nodes[at]
             if node.kind == AGG:
-                return at if key in node.names else -1
+                if name in node.names:
+                    return (at, name)
+                return (-1, String())
             if not (_stream_rows(node) or node.kind == DROP):
-                return -1
-            if not self._keeps_column(at, key):
-                return -1
+                return (-1, String())
+            var below = self._input_name(at, name)
+            if not below:
+                return (-1, String())
+            name = below.value()
             at = node.left
-        return -1
+        return (-1, String())
 
     def _key_source(self, index: Int, key: String) raises -> Optional[Series]:
         """The table column that supplies column `key` at node `index`,
@@ -3349,6 +3457,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         stream has no such join or no filter narrows its probe side."""
         var joins = List[Int]()
         var aggregates = List[Int]()
+        # Each aggregate's names for the join's right keys.
+        var group_keys = List[List[String]]()
         var key = List[String]()
         var probe = top
         var lowest = -1
@@ -3370,11 +3480,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 and (len(key) == 0 or _same_names(step.names, key))
             ):
                 # One aggregate grouped on every right key (PDS-H q20's
-                # shipped quantities per part and supplier).
-                var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                # shipped quantities per part and supplier), each perhaps
+                # renamed on the way up (TPC-DS q16's orders shipped from
+                # two warehouses).
+                var aggregate = self._grouped_on(
+                    step.right, step.right_keys[0]
+                )[0]
+                var names = List[String]()
                 for name in step.right_keys:
-                    if self._grouped_on(step.right, name) != aggregate:
+                    var grouped = self._grouped_on(step.right, name)
+                    if grouped[0] != aggregate:
                         aggregate = -1
+                    names.append(grouped[1])
                 if aggregate >= 0:
                     # The row-local steps between this join and the one
                     # above keep the keys, so the keys reaching the higher
@@ -3387,6 +3504,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     if kept:
                         joins.append(probe)
                         aggregates.append(aggregate)
+                        group_keys.append(names^)
                         key = step.names.copy()
                         lowest = probe
                         steps = List[Int]()
@@ -3394,11 +3512,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if lowest < 0:
             return None
         var below = self._nodes[lowest].left
-        # Its keys can be few only if something filters the probe side:
-        # TPC-DS q35's customers joined to addresses and demographics kept
-        # 97% of them, and running that side first cost more than the
-        # filter saved.
-        if not self._has_kind(below, FILTER):
+        # Its keys can be few only if something filters the probe side: a
+        # filter, or an inner or semi join, which keeps only the rows its
+        # build side matches (the filters on TPC-DS q16's dates, addresses
+        # and call centers reach it as joins with their results, which the
+        # join order ran to count them).
+        if not self._filters_rows(below):
             return None
         trace_path("stream.probe_key_reduction")
         var probed = self._execute(below, False, True, batch_size)
@@ -3423,20 +3542,25 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for k in range(len(joins)):
             var aggregate = aggregates[k]
             var input = plan._nodes[aggregate].left
-            var group_keys = plan._nodes[joins[k]].right_keys.copy()
             # The filter pays when it drops most of the groups: some key's
             # probe values are at most half of the values the aggregate's
             # key column spans (the half rule the pipeline's key ranges
             # keep). TPC-DS q35's 97K probing customers kept 94% of a
             # year's store sales, for 16 ms of probes.
             var pays = False
-            for i in range(len(group_keys)):
-                var source = plan._key_source(input, group_keys[i])
+            ref grouped = group_keys[k]
+            for i in range(len(grouped)):
+                var source = plan._key_source(input, grouped[i])
                 if not source or not _range_key(source.value().dtype()):
                     continue
-                var named = group_keys[i] + "/" + String(len(source.value()))
+                var named = grouped[i] + "/" + String(len(source.value()))
                 if named not in spans:
-                    var bounds = _int_bounds(source.value())
+                    # From the column's zone maps, kept with its buffers as
+                    # DuckDB keeps a table's statistics: scanning the whole
+                    # column on one thread each run held PDS-H q20 at 19.6
+                    # ms (lineitem's 6M part and supplier keys), 12.3 now.
+                    _ensure_zones(source.value())
+                    var bounds = _window_bounds(source.value())
                     spans[named] = (
                         Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
                     ) if bounds else 0
@@ -3448,7 +3572,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 JOIN,
                 input,
                 len(plan._nodes) - 1,
-                names=group_keys^,
+                names=grouped.copy(),
                 text="semi",
                 how=JOIN_SEMI,
                 right_keys=key.copy(),
@@ -5272,8 +5396,73 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         plan._merge_filters()
         plan._push_slices()
         plan._fuse_top_k()
+        plan._eliminate_common_subexpressions()
         plan._push_projections()
         return plan^
+
+    def _eliminate_common_subexpressions(mut self) raises:
+        """Common subexpression elimination (DuckDB's
+        `CommonSubExpressionOptimizer`, Polars' `comm_subexpr_elim`): a
+        row-local subexpression an aggregation or a projection reads more
+        than once is computed once, as a column of a with_columns below
+        it, and read from there. TPC-DS q99's five delay buckets compared
+        the same date difference nine times."""
+        var count = len(self._nodes)
+        var changed = False
+        for i in range(count):
+            var kind = self._nodes[i].kind
+            if not (kind == AGG or kind == SELECT):
+                continue
+            if self._nodes[i].left < 0:
+                continue
+            ref exprs = self._nodes[i].exprs
+            # How often each eligible subexpression appears, by its text.
+            var seen = Dict[String, Int]()
+            for e in exprs:
+                for r in range(len(e._nodes)):
+                    var text = _shared_text(e, r)
+                    if text:
+                        seen[text.value()] = seen.get(text.value(), 0) + 1
+            var any = False
+            for entry in seen.items():
+                any = any or entry.value > 1
+            if not any:
+                continue
+            # Hidden column names none of the node's inputs is read as: an
+            # input column of the same name that it does not read is
+            # dropped by the node anyway, so no schema is needed.
+            var taken = List[String]()
+            var readable = True
+            for e in exprs:
+                var reads = _references(e)
+                if not reads:
+                    readable = False
+                    break
+                for name in reads.value():
+                    taken.append(name)
+            if not readable:
+                continue
+            for name in self._nodes[i].names:
+                taken.append(name)
+            var shared = List[Expr]()
+            var names = Dict[String, String]()
+            var rewritten = List[Expr](capacity=len(exprs))
+            for e in exprs:
+                var out = List[Node]()
+                _ = _emit_shared(
+                    e, len(e._nodes) - 1, seen, names, shared, taken, out
+                )
+                rewritten.append(Expr(out^, e._name))
+            if len(shared) == 0:
+                continue
+            self._nodes[i].exprs = rewritten^
+            self._nodes.append(
+                _plan_node(WITH_COLUMNS, self._nodes[i].left, exprs=shared)
+            )
+            self._nodes[i].left = len(self._nodes) - 1
+            changed = True
+        if changed:
+            self._reorder()
 
     def _fold_casts(mut self) raises:
         """Constant folding (DuckDB's `ConstantFoldingRule`): a cast of an
@@ -5948,6 +6137,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             providers.append(found)
         if not any:
             return False
+        # Read before the plan changes: the join's inequality conditions,
+        # as (large side column, comparison, small side column).
+        var comparisons = self._side_comparisons(j, small_left)
         var result = self._execute(small, False, streaming, batch_size)
         if not small_left and not self._any_selective(
             result, small_keys, providers
@@ -5991,6 +6183,50 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             else:
                 self._nodes[j].left = len(self._nodes) - 1
             added = True
+        # An inequality condition passes the small side's greatest value
+        # (for < and <=) or least (for > and >=) to the large side as a
+        # bound, as DuckDB's join filters do for these comparisons
+        # (`JoinFilterPushdownInfo::FinalizeFilters`). TPC-DS q72's stock
+        # on hand below the quantity ordered keeps the inventory rows
+        # under the largest quantity.
+        for comparison in comparisons:
+            var name = comparison[0]
+            var found = self._provider_scan(large, name)
+            if found[0] < 0:
+                continue
+            ref source = self._frames[self._nodes[found[0]].offset]
+            var dtype = source.column(found[1]).dtype()
+            var other = result.column(comparison[2])
+            if (
+                not (dtype == DataType.INT64 or dtype == DataType.INT32)
+                or other.dtype() != dtype
+            ):
+                continue
+            var bounds = _int_bounds(other)
+            if not bounds:
+                continue
+            var op = comparison[1]
+            var bound = (
+                bounds.value()[1] if op == LT or op == LE else bounds.value()[0]
+            )
+            var sampled = _bound_filter(found[1], op, bound, dtype)
+            if not self._selective_on(found[0], sampled):
+                continue
+            var target = (
+                self._nodes[j].right if small_left else self._nodes[j].left
+            )
+            self._nodes.append(
+                _plan_node(
+                    FILTER,
+                    target,
+                    exprs=[_bound_filter(name, op, bound, dtype)],
+                )
+            )
+            if small_left:
+                self._nodes[j].right = len(self._nodes) - 1
+            else:
+                self._nodes[j].left = len(self._nodes) - 1
+            added = True
         self._reorder()
         if not added:
             return True
@@ -6024,6 +6260,70 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     break
             self._reorder()
         return True
+
+    def _side_comparisons(
+        self, j: Int, small_left: Bool
+    ) raises -> List[Tuple[String, Int, String]]:
+        """The inequalities between a column of each input of the inner
+        join at `j` in the filters right above it, which DuckDB plans as
+        join conditions: each as (large side column, its comparison with
+        the small side column, small side column), the large side being
+        the right input when `small_left`. Only columns that one input
+        alone names."""
+        var found = List[Tuple[String, Int, String]]()
+        if self._nodes[j].how != JOIN_INNER:
+            return found^
+        var parents = self._live_parents(len(self._nodes) - 1)
+        var pairs = List[Tuple[String, Int, String]]()
+        var at = parents[j]
+        while at >= 0 and self._nodes[at].kind == FILTER:
+            for part in conjuncts(self._nodes[at].exprs[0]):
+                if len(part._nodes) != 3:
+                    continue
+                ref root = part._nodes[2]
+                if not (
+                    root.op == LT
+                    or root.op == LE
+                    or root.op == GT
+                    or root.op == GE
+                ):
+                    continue
+                if root.left < 0 or root.right < 0:
+                    continue
+                ref a = part._nodes[root.left]
+                ref b = part._nodes[root.right]
+                if a.op == COL and b.op == COL:
+                    pairs.append((a.text, root.op, b.text))
+            at = parents[at]
+        if len(pairs) == 0:
+            return found^
+        var large_cols = self._columns_of(
+            self._nodes[j].right if small_left else self._nodes[j].left
+        )
+        var small_cols = self._columns_of(
+            self._nodes[j].left if small_left else self._nodes[j].right
+        )
+        for pair in pairs:
+            var a = pair[0]
+            var op = pair[1]
+            var b = pair[2]
+            var a_large = a in large_cols and a not in small_cols
+            var b_large = b in large_cols and b not in small_cols
+            var a_small = a in small_cols and a not in large_cols
+            var b_small = b in small_cols and b not in large_cols
+            if a_large and b_small:
+                found.append((a, op, b))
+            elif b_large and a_small:
+                # `a op b` is `b flipped a`.
+                var flipped = GT
+                if op == LE:
+                    flipped = GE
+                elif op == GT:
+                    flipped = LT
+                elif op == GE:
+                    flipped = LE
+                found.append((b, flipped, a))
+        return found^
 
     def _filtered_table(self, index: Int) -> Bool:
         """Whether node `index` is an in-memory table under row-local
@@ -6128,6 +6428,24 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var i = stack.pop()
             ref node = self._nodes[i]
             if node.kind == kind:
+                return True
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return False
+
+    def _filters_rows(self, index: Int) -> Bool:
+        """Whether a filter, or an inner or semi join, sits anywhere under
+        node `index`: a step that can drop rows."""
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if node.kind == FILTER or (
+                node.kind == JOIN
+                and (node.how == JOIN_INNER or node.how == JOIN_SEMI)
+            ):
                 return True
             if node.left >= 0:
                 stack.append(node.left)
@@ -8770,6 +9088,19 @@ def _key_set_filter(
                         literals.append(lit(column._get(i)))
                 return Optional(col(name).is_in(literals))
     return None
+
+
+def _bound_filter(name: String, op: Int, bound: Int64, dtype: DataType) -> Expr:
+    """`col(name) op bound`, the bound a literal of the column's integer
+    type (Int64 or Int32)."""
+    var value = lit(bound) if dtype == DataType.INT64 else lit(Int32(bound))
+    if op == LT:
+        return col(name) < value
+    if op == LE:
+        return col(name) <= value
+    if op == GT:
+        return col(name) > value
+    return col(name) >= value
 
 
 def _covers(columns: List[String], reads: List[String]) -> Bool:

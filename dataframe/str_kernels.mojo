@@ -2,6 +2,7 @@
 are never read."""
 from .bool_column import BoolColumn
 from .column import Column
+from .regex import Regex
 from .string_column import StringColumn, StringBuilder
 from .expr import (
     Node,
@@ -13,12 +14,20 @@ from .expr import (
     STR_STARTS_WITH,
     STR_ENDS_WITH,
     STR_CONTAINS,
+    STR_EXTRACT,
     STR_IS_IN,
     STR_LIKE,
     STR_REPLACE,
     STR_SLICE,
     STR_REVERSE,
     STR_PAD,
+)
+from .regex_kernels import (
+    compile_pattern,
+    is_literal_pattern,
+    regex_contains,
+    regex_extract,
+    regex_replace,
 )
 from .series import Series
 from .string_predicates import (
@@ -80,23 +89,6 @@ def _strip(text: String, characters: String, mode: Int64) -> String:
     return _join(parts, start, end)
 
 
-def _replace(
-    text: String, pattern: String, value: String, every: Bool
-) -> String:
-    if every:
-        if pattern.byte_length() == 0:
-            return text
-        return text.replace(pattern, value)
-    var at = text.find(pattern)
-    if at < 0:
-        return text
-    return (
-        String(text[byte=0:at])
-        + value
-        + String(text[byte = at + pattern.byte_length() :])
-    )
-
-
 def _slice(text: String, offset: Int, length: Int) -> String:
     var parts = _codepoints(text)
     var n = len(parts)
@@ -131,7 +123,40 @@ def string_op(node: Node, input: Series) raises -> Series:
     if node.op == STR_ENDS_WITH:
         return string_ends_with(column, node.text)
     if node.op == STR_CONTAINS:
-        return string_contains(column, node.text)
+        if node.integer == 0:
+            return string_contains(column, node.text)
+        var regex: Regex
+        try:
+            regex = compile_pattern(node.text, False)
+        except e:
+            if node.integer == 1:
+                raise e^
+            # strict=False: an invalid pattern gives null.
+            var n = len(column)
+            return Series(
+                "",
+                BoolColumn(
+                    List[Bool](length=n, fill=False),
+                    List[Bool](length=n, fill=False),
+                ),
+            )
+        return regex_contains(column, regex)
+    if node.op == STR_EXTRACT:
+        return regex_extract(
+            column, compile_pattern(node.text, False), Int(node.integer)
+        )
+    if node.op == STR_REPLACE:
+        # Polars replaces a pattern without ASCII punctuation literally, and
+        # then does not expand `$` references in the value.
+        var literal = node.min_count == 1 or is_literal_pattern(node.text)
+        var limit = Int(node.integer)
+        if not literal and limit == 0:
+            # Polars' regex path ignores n=0 and replaces the first match.
+            limit = 1
+        var regex = compile_pattern(node.text, literal)
+        return regex_replace(
+            column, regex, regex.template(node.text2, not literal), limit
+        )
     if node.op == STR_LIKE:
         return string_like(column, node.text)
     if node.op == STR_SLICE and (
@@ -179,8 +204,6 @@ def string_op(node: Node, input: Series) raises -> Series:
             out.append(text.lower())
         elif op == STR_STRIP:
             out.append(_strip(text, node.text, node.integer))
-        elif op == STR_REPLACE:
-            out.append(_replace(text, node.text, node.text2, node.integer == 1))
         elif op == STR_SLICE:
             out.append(_slice(text, Int(node.integer), node.min_count))
         elif op == STR_REVERSE:

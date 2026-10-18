@@ -150,6 +150,14 @@ def test_literal_search_replace_and_empty_pattern_rules() raises:
         "!a\x00a",
         "!abcdefghijklmnopé",
     ]
+    # As in Polars, an empty pattern matches at every code point boundary.
+    var everywhere: List[String] = [
+        "!a!.!a!.!a!",
+        "!é!🙂!é!",
+        "!",
+        "!a!\x00!a!",
+        "!a!b!c!d!e!f!g!h!i!j!k!l!m!n!o!p!é!",
+    ]
     for mode in range(3):
         var valid = _validity(len(values), mode)
         var expected = DataFrame(
@@ -177,19 +185,19 @@ def test_literal_search_replace_and_empty_pattern_rules() raises:
                 _strings("first", first, valid),
                 _strings("all", all, valid),
                 _strings("insert", prefixed, valid),
-                _strings("noop", values, valid),
+                _strings("everywhere", everywhere, valid),
             ]
         )
         var expressions: List[Expr] = [
-            col("s").str().contains(".").alias("contains"),
+            col("s").str().contains(".", literal=True).alias("contains"),
             col("s").str().starts_with("é").alias("starts"),
             col("s").str().ends_with("é").alias("ends"),
             col("s").str().contains("").alias("empty"),
             col("s").str().contains("\x00").alias("nul"),
-            col("s").str().replace(".", "X").alias("first"),
-            col("s").str().replace_all(".", "X").alias("all"),
+            col("s").str().replace(".", "X", literal=True).alias("first"),
+            col("s").str().replace_all(".", "X", literal=True).alias("all"),
             col("s").str().replace("", "!").alias("insert"),
-            col("s").str().replace_all("", "!").alias("noop"),
+            col("s").str().replace_all("", "!").alias("everywhere"),
         ]
         for layout in range(4):
             var source = _source(values, valid, layout)
