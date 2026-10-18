@@ -13,7 +13,7 @@ reads it, once, and the gathered column replaces the shared one. DuckDB
 slices a chunk into dictionary vectors the same way.
 """
 from std.atomic import Atomic
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
 from std.os import getenv
 from std.ffi import _get_global, external_call
 from std.memory import ArcPointer, Pointer, bitcast
@@ -63,6 +63,7 @@ from .frame import (
     _word_hash,
     concat,
 )
+from .partition import _mix
 from .indexed_reduce import _reduce_floats, _reduce_ints
 from .join_hash import (
     PreparedHashIndex,
@@ -272,17 +273,225 @@ def _bare_columns(exprs: List[Expr]) -> Bool:
     return True
 
 
-@fieldwise_init
 struct _KeyRange(Copyable, Movable):
     """A finished join build's key range on a source column (DuckDB's
     min-max runtime join filter, `CreateDynamicMinMaxFilters`): a row
     whose key is null or outside it joins nothing. `any` is false when the
-    build holds no non-null key, so no row joins."""
+    build holds no non-null key, so no row joins.
+
+    A single-key join whose build has fewer rows than the probe side and
+    is not a perfect hash table also gets a Bloom filter of its build keys
+    (DuckDB's `JoinFilterPushdownInfo::PushBloomFilter`), empty otherwise:
+    a row whose key it rules out joins nothing either. As DuckDB's
+    `SelectivityOptionalFilter`, each worker pauses it once it has seen
+    `_BLOOM_CHECK_ROWS` rows and passed at least `_BLOOM_PAUSE_SHARE` of
+    them, where it costs more than it saves."""
 
     var column: String
     var low: Int64
     var high: Int64
     var any: Bool
+    var bloom: ArcPointer[List[UInt64]]
+    # Or the build's keys as exact bits from `exact_base`, when its prepared
+    # index keeps them (`PreparedHashIndex.filter`): tested with no hash.
+    var exact: ArcPointer[List[UInt64]]
+    var exact_base: Int64
+    var processed: Int
+    var accepted: Int
+    var paused: Bool
+
+    def __init__(
+        out self,
+        column: String,
+        low: Int64,
+        high: Int64,
+        any: Bool,
+        var bloom: List[UInt64] = List[UInt64](),
+        exact: ArcPointer[List[UInt64]] = ArcPointer(List[UInt64]()),
+        exact_base: Int64 = 0,
+    ):
+        self.column = column
+        self.low = low
+        self.high = high
+        self.any = any
+        self.bloom = ArcPointer(bloom^)
+        self.exact = exact
+        self.exact_base = exact_base
+        self.processed = 0
+        self.accepted = 0
+        self.paused = False
+
+
+# DuckDB's join Bloom filter (src/planner/filter/bloom_filter.cpp): a
+# register-blocked filter, each key setting 4 bits of one 64-bit sector,
+# with at least 12 bits a key, 512 bits and at most 2^26 sectors.
+comptime _BLOOM_BITS_PER_KEY = 12
+comptime _BLOOM_MIN_BITS = 512
+comptime _BLOOM_MAX_SECTORS = 1 << 26
+# Six bits for each of the 64 positions in a sector.
+comptime _BLOOM_SHIFT_MASK = UInt64(0x3F3F3F3F3F3F3F3F)
+# `SelectivityOptionalFilter::BF_THRESHOLD` and `BF_CHECK_N` (vectors of
+# 2,048 rows).
+comptime _BLOOM_PAUSE_SHARE = 0.25
+comptime _BLOOM_CHECK_ROWS = 75 * 2048
+
+
+@always_inline
+def _bloom_bits(hash: UInt64) -> UInt64:
+    """DuckDB's `GetMask`: the 4 bits a key sets in its sector, from the
+    hash's top four bytes (its low bits choose the sector)."""
+    var shifts = hash & _BLOOM_SHIFT_MASK
+    var mask = UInt64(0)
+    comptime for byte in range(4, 8):
+        mask |= UInt64(1) << ((shifts >> UInt64(8 * byte)) & 0xFF)
+    return mask
+
+
+def _bloom_filter(key: Series) raises -> List[UInt64]:
+    """The sectors of a Bloom filter over an integer key's valid values
+    (see `_range_key`), hashed as Int64."""
+    var bits = max(_BLOOM_MIN_BITS, len(key) * _BLOOM_BITS_PER_KEY)
+    var sectors = 1
+    while sectors * 64 < bits:
+        sectors *= 2
+    sectors = min(sectors, _BLOOM_MAX_SECTORS)
+    var words = List[UInt64](length=sectors, fill=0)
+    var bloom = words.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var last = UInt64(sectors - 1)
+    var physical = key.dtype().physical()
+    for part in key.chunks():
+        if physical == DataType.INT64:
+            _bloom_insert(part._data[Column[Int64]], bloom, last)
+        else:
+            _bloom_insert(part._data[Column[Int32]], bloom, last)
+    return words^
+
+
+def _bloom_insert[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    bloom: Pointer[UInt64, MutAnyOrigin],
+    last: UInt64,
+):
+    var values = column._ptr()
+    var all_valid = column.null_count() == 0
+    for i in range(len(column)):
+        if all_valid or column._valid(i):
+            var hash = _mix(UInt64(values[unsafe_offset=i].cast[DType.int64]()))
+            bloom[unsafe_offset=Int(hash & last)] |= _bloom_bits(hash)
+
+
+def _bloom_mask(
+    series: Series,
+    r: _KeyRange,
+    prior: Int,
+    selected: Bool,
+) raises -> Tuple[BoolColumn, Int]:
+    """The rows of an unchunked integer column whose value is valid and may
+    be a build key, as a packed mask, and how many (DuckDB's
+    `BFTableFilter::Filter`). With `selected`, only the rows set in the
+    byte-aligned mask at address `prior` are tested, as DuckDB hashes only a
+    vector's approved rows."""
+    var n = len(series)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var target = values.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var kept = 0
+    var exact = len(r.exact[]) > 0
+    if series.dtype().physical() == DataType.INT64:
+        ref column = series._data[Column[Int64]]
+        if exact:
+            kept = _bloom_bits_of[True](column, r, prior, selected, target)
+        else:
+            kept = _bloom_bits_of[False](column, r, prior, selected, target)
+    else:
+        ref column = series._data[Column[Int32]]
+        if exact:
+            kept = _bloom_bits_of[True](column, r, prior, selected, target)
+        else:
+            kept = _bloom_bits_of[False](column, r, prior, selected, target)
+    return (BoolColumn(values=values^, bits=List[UInt8](), length=n), kept)
+
+
+@always_inline
+def _may_join[
+    exact: Bool
+](
+    key: UInt64,
+    words: Pointer[UInt64, MutAnyOrigin],
+    last: UInt64,
+    base: Int64,
+) -> Bool:
+    """Whether a key may be a build key: its exact bit (`last` is the bit
+    count then), or its Bloom filter bits."""
+    comptime if exact:
+        var at = key - UInt64(base)
+        return (
+            at < last
+            and (words[unsafe_offset=Int(at >> 6)] >> (at & 63)) & 1 == 1
+        )
+    else:
+        var hash = _mix(key)
+        var bits = _bloom_bits(hash)
+        return words[unsafe_offset=Int(hash & last)] & bits == bits
+
+
+def _bloom_bits_of[
+    exact: Bool, D: DType
+](
+    column: Column[Scalar[D]],
+    r: _KeyRange,
+    prior: Int,
+    selected: Bool,
+    target: Pointer[UInt8, MutAnyOrigin],
+) -> Int:
+    var values = column._ptr()
+    var all_valid = column.null_count() == 0
+    var words = r.bloom[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var last = UInt64(len(r.bloom[]) - 1)
+    comptime if exact:
+        words = r.exact[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+        last = UInt64(len(r.exact[]) * 64)
+    var base = r.exact_base
+    var n = len(column)
+    var kept = 0
+    if not selected:
+        for i in range(n):
+            var found = _may_join[exact](
+                UInt64(values[unsafe_offset=i].cast[DType.int64]()),
+                words,
+                last,
+                base,
+            )
+            if not all_valid:
+                found = found and column._valid(i)
+            target[unsafe_offset=i >> 3] |= UInt8(Int(found)) << UInt8(i & 7)
+            kept += Int(found)
+        return kept
+    # Only the selected rows: a byte of the mask with none set skips its
+    # eight rows.
+    var mask = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=prior)
+    for byte in range((n + 7) // 8):
+        var candidates = mask[unsafe_offset=byte]
+        if candidates == 0:
+            continue
+        var found = UInt8(0)
+        for bit in range(min(8, n - 8 * byte)):
+            if (candidates >> UInt8(bit)) & 1 == 0:
+                continue
+            var i = 8 * byte + bit
+            var hit = _may_join[exact](
+                UInt64(values[unsafe_offset=i].cast[DType.int64]()),
+                words,
+                last,
+                base,
+            )
+            if not all_valid:
+                hit = hit and column._valid(i)
+            found |= UInt8(Int(hit)) << UInt8(bit)
+        target[unsafe_offset=byte] = found
+        kept += Int(pop_count(found))
+    return kept
 
 
 def _range_key(dtype: DataType) -> Bool:
@@ -530,13 +739,18 @@ def _range_bits[
 
 
 def _key_ranges(
-    frame: DataFrame, steps: List[Step], joins: List[DataFrame]
+    frame: DataFrame,
+    steps: List[Step],
+    joins: List[DataFrame],
+    indexes: List[Optional[PreparedHashIndex]],
 ) raises -> List[_KeyRange]:
     """The key ranges of the inner and semi joins among `steps` whose
     probe key is a source column no earlier step replaces: every build is
     finished before the first morsel, so its range can narrow the morsel
     before any step runs, as DuckDB pushes a build's min-max filter into
-    the probe side's scan."""
+    the probe side's scan. A single-key build smaller than the probe side
+    and not a perfect hash table adds a Bloom filter (DuckDB's
+    `CanUseBloomFilter`)."""
     var ranges = List[_KeyRange]()
     # Names the steps so far show for untouched source columns.
     var source = Dict[String, String]()
@@ -560,9 +774,32 @@ def _key_ranges(
                         continue
                     var bounds = _int_bounds(key)
                     if bounds:
+                        var bloom = List[UInt64]()
+                        var exact = ArcPointer(List[UInt64]())
+                        var exact_base = Int64(0)
+                        if (
+                            len(step.names) == 1
+                            and build.height() < frame.height()
+                            and bounds.value()[0] != bounds.value()[1]
+                            and not _perfect_index(indexes, step.join)
+                        ):
+                            var bits = _exact_bits(indexes, step.join)
+                            if bits:
+                                # The index already keeps the build keys as
+                                # exact bits: the scan tests those.
+                                exact = bits.value()[0]
+                                exact_base = bits.value()[1]
+                            else:
+                                bloom = _bloom_filter(key)
                         ranges.append(
                             _KeyRange(
-                                name, bounds.value()[0], bounds.value()[1], True
+                                name,
+                                bounds.value()[0],
+                                bounds.value()[1],
+                                True,
+                                bloom^,
+                                exact,
+                                exact_base,
                             )
                         )
                     else:
@@ -587,6 +824,30 @@ def _key_ranges(
                 if e._name in source:
                     _ = source.pop(e._name)
     return ranges^
+
+
+def _exact_bits(
+    indexes: List[Optional[PreparedHashIndex]], join: Int
+) -> Optional[Tuple[ArcPointer[List[UInt64]], Int64]]:
+    """A join's prepared build keys as exact bits and their base, when its
+    index keeps them (`PreparedHashIndex.filter`)."""
+    if join >= len(indexes) or not indexes[join]:
+        return None
+    ref index = indexes[join].value()
+    if len(index.filter[]) == 0:
+        return None
+    return (index.filter, index.filter_base)
+
+
+def _perfect_index(
+    indexes: List[Optional[PreparedHashIndex]], join: Int
+) -> Bool:
+    """Whether a join's prepared build looks rows up by position (a
+    progression or DuckDB's perfect hash join), where DuckDB expects its
+    min-max filter to prune well and pushes no Bloom filter."""
+    if join >= len(indexes) or not indexes[join]:
+        return False
+    return indexes[join].value().progression
 
 
 struct Morsel(Movable):
@@ -2382,44 +2643,90 @@ struct _PipelineJob(Job):
             self.shared_bound.publish(self.bound)
         self.parts = [merged^]
 
-    def _in_key_ranges(self, mut morsel: Morsel) raises -> Bool:
+    def _in_key_ranges(mut self, mut morsel: Morsel) raises -> Bool:
         """Narrow a fresh morsel to the rows inside every join build's key
         range; False when none is. A morsel whose keys all fall outside a
         range is skipped whole, and one whose keys all fall inside is left
         as it is, both told by its keys' least and greatest values (a
         zone map); only a morsel straddling the range is filtered row by
         row."""
-        for r in self.key_ranges:
-            if not r.any:
+        for i in range(len(self.key_ranges)):
+            if not self._in_key_range(morsel, i):
                 return False
-            var column = morsel.frame.column(r.column)
-            var bounds = _window_bounds(column)
-            if not bounds:
-                return False
-            var least = bounds.value()[0]
-            var most = bounds.value()[1]
-            if most < r.low or least > r.high:
-                return False
-            if least >= r.low and most <= r.high:
-                continue
-            # The share of the morsel's key span the range covers: when
-            # over half, the range likely keeps most rows, and the steps
-            # would read them through a selection for little gain.
-            var span = Float64(most) - Float64(least) + 1.0
-            var covered = (
-                Float64(min(most, r.high)) - Float64(max(least, r.low)) + 1.0
-            )
-            if 2.0 * covered > span:
-                continue
-            var narrowed = _range_mask(_unchunked(column), r.low, r.high)
-            if narrowed[1] == 0:
-                return False
-            if 2 * narrowed[1] > morsel.frame.height():
-                continue
-            morsel.keep(narrowed[0], narrowed[1])
-            if morsel.count == 0:
+            if not self._in_bloom(morsel, i):
                 return False
         return True
+
+    def _in_key_range(self, mut morsel: Morsel, i: Int) raises -> Bool:
+        """`_in_key_ranges` for one build's key range."""
+        ref r = self.key_ranges[i]
+        if not r.any:
+            return False
+        var column = morsel.frame.column(r.column)
+        var bounds = _window_bounds(column)
+        if not bounds:
+            return False
+        var least = bounds.value()[0]
+        var most = bounds.value()[1]
+        if most < r.low or least > r.high:
+            return False
+        if least >= r.low and most <= r.high:
+            return True
+        # The share of the morsel's key span the range covers: when over
+        # half, the range likely keeps most rows, and the steps would read
+        # them through a selection for little gain.
+        var span = Float64(most) - Float64(least) + 1.0
+        var covered = (
+            Float64(min(most, r.high)) - Float64(max(least, r.low)) + 1.0
+        )
+        if 2.0 * covered > span:
+            return True
+        var narrowed = _range_mask(_unchunked(column), r.low, r.high)
+        if narrowed[1] == 0:
+            return False
+        if 2 * narrowed[1] > morsel.frame.height():
+            return True
+        morsel.keep(narrowed[0], narrowed[1])
+        return morsel.count > 0
+
+    def _in_bloom(mut self, mut morsel: Morsel, i: Int) raises -> Bool:
+        """Narrow a morsel to the rows whose key the build's Bloom filter
+        may hold; False when none is. Each worker keeps its own count of
+        the rows the filter saw and passed, and pauses it as DuckDB's
+        `SelectivityOptionalFilter` does."""
+        ref r = self.key_ranges[i]
+        if (len(r.bloom[]) == 0 and len(r.exact[]) == 0) or r.paused:
+            return True
+        var column = _unchunked(morsel.frame.column(r.column))
+        # Only the rows still selected are tested.
+        var entering = len(column)
+        var selected = (
+            morsel.selected
+            and morsel.mask._offset % 8 == 0
+            and len(morsel.mask._bits[]) == 0
+        )
+        var prior = 0
+        if selected:
+            prior = Int(
+                morsel.mask._data[]
+                .unsafe_ptr()
+                .unsafe_offset(morsel.mask._offset // 8)
+            )
+            entering = morsel.count
+        var found = _bloom_mask(column, r, prior, selected)
+        if r.processed < _BLOOM_CHECK_ROWS:
+            r.processed += entering
+            r.accepted += found[1]
+            if r.processed >= _BLOOM_CHECK_ROWS and Float64(
+                r.accepted
+            ) >= _BLOOM_PAUSE_SHARE * Float64(r.processed):
+                r.paused = True
+        if found[1] == 0:
+            return False
+        if found[1] == entering:
+            return True
+        morsel.keep(found[0], found[1])
+        return morsel.count > 0
 
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
@@ -3072,7 +3379,7 @@ def run_pipeline(
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
-    var key_ranges = _key_ranges(frame, steps, joins[])
+    var key_ranges = _key_ranges(frame, steps, joins[], indexes[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
     for r in key_ranges:
