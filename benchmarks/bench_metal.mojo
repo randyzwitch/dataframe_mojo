@@ -144,6 +144,39 @@ def make_decimal_frame(n: Int, variant: String) raises -> DataFrame:
     )
 
 
+def make_native64_frame(
+    n: Int, variant: String, unsigned: Bool
+) raises -> DataFrame:
+    var valid = List[Bool](length=n, fill=True)
+    if unsigned:
+        var uvalues = List[UInt64](length=n, fill=0)
+        for i in range(n):
+            var value = i % 17
+            if variant == "sorted":
+                value = i * 17 // n
+            elif variant == "nulls":
+                value = Int(
+                    (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                    % UInt32(17)
+                )
+                valid[i] = i % 20 != 0
+            uvalues[i] = UInt64(value)
+        return DataFrame([Series("x", Column[UInt64](uvalues^, valid^))])
+    var values = List[Int64](length=n, fill=0)
+    for i in range(n):
+        var value = i % 17 - 8
+        if variant == "sorted":
+            value = i * 17 // n - 8
+        elif variant == "nulls":
+            value = Int(
+                (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                % UInt32(17)
+            ) - 8
+            valid[i] = i % 20 != 0
+        values[i] = Int64(value)
+    return DataFrame([Series("x", Column[Int64](values^, valid^))])
+
+
 def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
     var query = frame.lazy()
     if workload == "chain32":
@@ -209,6 +242,17 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         )
     elif workload == "int_sum":
         query = query.select(col("x").sum().alias("s"))
+    elif workload == "int64_sum" or workload == "uint64_sum":
+        query = query.select(col("x").sum().alias("s"))
+    elif workload == "int64_affine_sum":
+        query = query.select(
+            ((col("x") + lit(Int64(3))) * lit(Int64(2))).sum().alias("s")
+        )
+    elif workload == "int64_wide_sum16":
+        var outputs = List[Expr]()
+        for i in range(16):
+            outputs.append(col("x").sum().alias("s" + String(i)))
+        query = query.select_exprs(outputs)
     elif (
         workload == "int32_affine_sum"
         or workload == "filtered_int32_affine_sum"
@@ -348,11 +392,12 @@ def report_profile(profile: DataFrame) raises:
 def main() raises:
     var n = Int(getenv("BENCH_ROWS", "1048576"))
     var reps = Int(getenv("BENCH_REPS", "7"))
+    var warmups = Int(getenv("BENCH_WARMUPS", "2"))
     var workload = getenv("BENCH_WORKLOAD", "projection")
     var variant = getenv("BENCH_VARIANT", "base")
     var gpu_first = getenv("BENCH_GPU_FIRST", "0") == "1"
-    if n < 1 or reps < 1:
-        raise Error("Rows and repetitions must be positive")
+    if n < 1 or reps < 1 or warmups < 0:
+        raise Error("Rows and repetitions must be positive; warmups nonnegative")
     var algorithm = (
         workload == "sort_radix"
         or workload == "group_hash"
@@ -364,7 +409,11 @@ def main() raises:
     var frame = (
         make_float64_frame(n, variant) if workload
         == "float64_arithmetic" else make_decimal_frame(n, variant) if workload
-        == "decimal_sum" else make_algorithm_frame(
+        == "decimal_sum" else make_native64_frame(
+            n, variant, workload == "uint64_sum"
+        ) if workload == "int64_sum" or workload == "uint64_sum"
+        or workload == "int64_affine_sum"
+        or workload == "int64_wide_sum16" else make_algorithm_frame(
             n, variant, workload
         ) if algorithm else make_frame(
             n,
@@ -390,7 +439,7 @@ def main() raises:
     )
     print("WORKERS", configured_workers())
     print("OUTPUT_ROWS", expected.height())
-    for _ in range(2):
+    for _ in range(warmups):
         _ = query.collect(engine="cpu")
         _ = query.collect(engine="accel", accelerator=runtime)
     for sample in range(reps):

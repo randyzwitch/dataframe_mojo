@@ -178,6 +178,24 @@ runtime. Host phase values may overlap and are reported separately; the report
 does not derive GPU-only or pipeline compilation time when the runtime does not
 provide it.
 
+Four optional SUM cases cover native Int64 and UInt64 inputs: `int64_sum`,
+`uint64_sum`, `int64_affine_sum`, and `int64_wide_sum16`. The signed inputs are
+`i % 17 - 8`, unsigned inputs are `i % 17`; sorted variants distribute those
+same ranges monotonically, and null variants use
+`UInt32` wrapping of `1664525*i + 1013904223` before taking `% 17` (then
+subtract 8 for signed values), with every twentieth row null. The affine case
+sums `(x + 3) * 2`, bounded to magnitude 22 per row. The wide case returns
+16 separately named sums over one Int64 source column. Each output is checked
+against the CPU executor's result; that check validates execution but is not an
+independent oracle. These names are selectable through `--workloads` and are
+excluded from the default workload list. The new `--warmups` setting defaults
+to the existing two extra collections per engine. For paired runs, the driver
+requires verified receipts with matching benchmark source, driver, lockfile,
+compile flags, compiler identity and executable hash, build platform, SDK, and
+Xcode version. Engine commit and engine-source hashes may differ. This guard
+checks those recorded identity fields; host hardware and runtime conditions
+remain separate recorded context.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join

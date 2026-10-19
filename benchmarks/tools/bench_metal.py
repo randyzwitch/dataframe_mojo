@@ -41,10 +41,52 @@ DEFAULT_WORKLOADS = [
     "filter_unused",
 ]
 OPTIONAL_WORKLOADS = ["int32_affine_sum", "filtered_int32_affine_sum"]
-WORKLOADS = DEFAULT_WORKLOADS + OPTIONAL_WORKLOADS
+OPTIONAL_NATIVE64_SUM_WORKLOADS = [
+    "int64_sum",
+    "uint64_sum",
+    "int64_affine_sum",
+    "int64_wide_sum16",
+]
+WORKLOADS = (
+    DEFAULT_WORKLOADS + OPTIONAL_WORKLOADS + OPTIONAL_NATIVE64_SUM_WORKLOADS
+)
 VARIANTS = ["base", "sorted", "nulls"]
-
-
+NATIVE64_SUM_CASES = {
+    "int64_sum": {
+        "input_dtype": "Int64",
+        "input_values": "i % 17 - 8",
+        "expression": "sum(x)",
+        "maximum_absolute_result_per_input_row": 8,
+    },
+    "uint64_sum": {
+        "input_dtype": "UInt64",
+        "input_values": "i % 17",
+        "expression": "sum(x)",
+        "maximum_result_per_input_row": 16,
+    },
+    "int64_affine_sum": {
+        "input_dtype": "Int64",
+        "input_values": "i % 17 - 8",
+        "expression": "sum((x + 3) * 2)",
+        "maximum_absolute_result_per_input_row": 22,
+    },
+    "int64_wide_sum16": {
+        "input_dtype": "Int64",
+        "input_values": "i % 17 - 8",
+        "expression": "16 separately aliased sum(x) outputs",
+        "maximum_absolute_result_per_input_row": 8,
+    },
+}
+NATIVE64_SUM_INPUT_VARIANTS = {
+    "base": "Signed values i % 17 - 8; unsigned values i % 17",
+    "sorted": (
+        "Monotone bins over the same respective signed and unsigned ranges"
+    ),
+    "nulls": (
+        "LCG values use UInt32-wrapped (1664525*i + 1013904223) before % 17; "
+        "subtract 8 for signed inputs; every twentieth row null"
+    ),
+}
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -173,6 +215,50 @@ def load_build_receipt(binary):
     return {"status": "verified", **receipt}
 
 
+def validate_paired_build_receipts(baseline, current):
+    """Check equal harness, lock, compiler, SDK/Xcode and build-flag identity.
+
+    Engine commit and source hashes intentionally differ between the pair. This
+    guard does not prove full environment equivalence beyond the listed receipt
+    fields; host hardware and runtime conditions are recorded separately.
+    """
+    identity_fields = (
+        "benchmark_source_sha256",
+        "driver_source_sha256",
+        "pixi_lock_sha256",
+        "compile_flags",
+        "compiler_identity",
+        "compiler_executable_sha256",
+        "build_platform",
+        "build_sdk",
+        "build_xcode",
+    )
+    for name, receipt in (("baseline", baseline), ("current", current)):
+        if receipt.get("status") != "verified":
+            raise ValueError(
+                f"The {name} binary needs a verified fresh build receipt"
+            )
+        missing = [
+            field for field in identity_fields
+            if receipt.get(field) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"The {name} build receipt lacks paired identity fields: "
+                + ", ".join(missing)
+            )
+    mismatched = [
+        field for field in identity_fields
+        if baseline[field] != current[field]
+    ]
+    if mismatched:
+        raise ValueError(
+            "Baseline and current binary must match on benchmark source, "
+            "driver, lockfile, compiler, SDK/Xcode and compile flags; differing "
+            "receipt fields: " + ", ".join(mismatched)
+        )
+
+
 def invocation_metadata(args, argv=None):
     return {
         "argv": list(sys.argv if argv is None else argv),
@@ -180,6 +266,7 @@ def invocation_metadata(args, argv=None):
         "build_cwd": str(ROOT),
         "python_executable": sys.executable,
         "timeout_seconds": args.timeout_seconds,
+        "warmups": args.warmups,
         "binary": str(args.binary.resolve()),
         "baseline_binary": (
             str(args.baseline_binary.resolve())
@@ -197,7 +284,7 @@ def command(args):
     ).strip()
 
 
-def metadata(binaries, threads, binary_receipts):
+def metadata(binaries, threads, warmups, binary_receipts):
     compiler = command(["mojo", "--version"])
     compiler_path = shutil.which("mojo")
     source_diff = command(
@@ -257,6 +344,7 @@ def metadata(binaries, threads, binary_receipts):
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
         "dataframe_threads": threads,
+        "warmups_per_engine": warmups,
         "powerconditions": powerconditions(),
         "implementation": "mojo",
         "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
@@ -268,9 +356,10 @@ def metadata(binaries, threads, binary_receipts):
             for k, v in os.environ.items()
             if k.startswith(("DATAFRAME_", "PLANNER_"))
         },
-        "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
+        "method": "Fresh process per case/build/round; first-use collections retained separately; configured extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows. Optional int32_affine_sum and filtered_int32_affine_sum workloads use the same Int32 base/sorted/nulls input patterns as int_sum, compute sum(cast_Int64((x+3)*2)), and optionally filter x>0 before the expression. They are explicitly selectable with --workloads and excluded from the default set.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows. Optional int32_affine_sum and filtered_int32_affine_sum workloads use the same Int32 base/sorted/nulls input patterns as int_sum, compute sum(cast_Int64((x+3)*2)), and optionally filter x>0 before the expression. Optional native64 workloads use typed Int64 values i%17-8 and typed UInt64 values i%17; sorted variants use monotone bins over the same ranges, and null variants use an LCG-distributed value with every twentieth row null. int64_affine_sum sums (x+3)*2, whose per-row magnitude is at most 22; int64_wide_sum16 emits 16 differently aliased sums of the same Int64 input. The harness validates every output against its exact CPU result, which is not an independent oracle. All these workloads are explicitly selectable with --workloads and excluded from the default set.",
+        "native64_sum_cases": NATIVE64_SUM_CASES,
         "limitations": [
             "No external-suite coverage claimed. Floating reductions remain outside these cases. Algorithm comparisons preserve complete output order and values against CPU; this CPU check is not an independent oracle.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
@@ -483,6 +572,12 @@ def main():
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
+        "--warmups",
+        type=int,
+        default=2,
+        help="Extra CPU and Metal collections per worker before timed samples",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=300,
@@ -502,6 +597,8 @@ def main():
         parser.error("This benchmark requires an Apple Silicon Mac")
     if min(args.reps, args.rounds, args.threads, args.timeout_seconds) < 1:
         parser.error("Repetitions, rounds, threads and timeout must be positive")
+    if args.warmups < 0:
+        parser.error("Warmups must be nonnegative")
     rows = [int(x) for x in args.rows.split(",")]
     workloads, variants = args.workloads.split(","), args.variants.split(",")
     if (
@@ -535,9 +632,15 @@ def main():
         name: load_build_receipt(executable)
         for name, executable in binaries.items()
     }
+    if args.baseline_binary:
+        validate_paired_build_receipts(
+            binary_receipts["baseline"], binary_receipts["mojo"]
+        )
     data = {
         "schema_version": 2,
-        "metadata": metadata(binaries, args.threads, binary_receipts),
+        "metadata": metadata(
+            binaries, args.threads, args.warmups, binary_receipts
+        ),
         "invocation": invocation_metadata(args),
         "selection": {
             "rows": rows,
@@ -545,6 +648,7 @@ def main():
             "variants": variants,
             "rounds": args.rounds,
             "reps": args.reps,
+            "warmups": args.warmups,
             "threads": args.threads,
             "timeout_seconds": args.timeout_seconds,
         },
@@ -569,6 +673,7 @@ def main():
                     BENCH_WORKLOAD=workload,
                     BENCH_VARIANT=variant,
                     BENCH_REPS=str(args.reps),
+                    BENCH_WARMUPS=str(args.warmups),
                     BENCH_GPU_FIRST=str((case_id + round_id) % 2),
                 )
                 run = {
@@ -577,6 +682,7 @@ def main():
                     "rows": n,
                     "workload": workload,
                     "variant": variant,
+                    "warmups": args.warmups,
                     "gpu_first": env["BENCH_GPU_FIRST"] == "1",
                     "load_before": list(os.getloadavg()),
                     "power_before": powerconditions(),
