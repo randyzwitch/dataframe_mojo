@@ -2,6 +2,7 @@
 from dataframe import DataType
 from dataframe.accelerator.rows import RowPlan
 from dataframe.expr import COL, LIT_INT, ADD, MUL, SUM
+from std.memory import bitcast
 
 
 @fieldwise_init
@@ -14,7 +15,11 @@ struct Program(Copyable):
 
 
 def _node(plan: RowPlan, at: Int, op: Int, dtype: DataType) -> Bool:
-    return plan.code[4 * at] == Int64(op) and plan.node_dtypes[at] == dtype
+    return (
+        plan.code[4 * at] == Int64(op) and plan.node_dtypes[at] == dtype
+        and plan.code[4 * at + 1] == -1 and plan.code[4 * at + 2] == -1
+        and (op == COL or plan.code[4 * at + 3] == -1)
+    )
 
 
 def _binary(plan: RowPlan, at: Int, op: Int, left: Int, right: Int) -> Bool:
@@ -22,6 +27,7 @@ def _binary(plan: RowPlan, at: Int, op: Int, left: Int, right: Int) -> Bool:
         plan.code[4 * at] == Int64(op)
         and plan.code[4 * at + 1] == Int64(left)
         and plan.code[4 * at + 2] == Int64(right)
+        and plan.code[4 * at + 3] == -1
     )
 
 
@@ -87,10 +93,10 @@ def bind(plan: RowPlan) -> Optional[List[Program]]:
                 return None
             if _binary(plan, start + 2, ADD, 0, 1):
                 add = True
-                addend = plan.literals[start + 1]
+                addend = bitcast[DType.uint64](plan.literals[start + 1])
             elif step.nodes == 3 and _binary(plan, start + 2, MUL, 0, 1):
                 multiply = True
-                factor = plan.literals[start + 1]
+                factor = bitcast[DType.uint64](plan.literals[start + 1])
             else:
                 return None
         if step.nodes == 5:
@@ -101,7 +107,7 @@ def bind(plan: RowPlan) -> Optional[List[Program]]:
             ):
                 return None
             multiply = True
-            factor = plan.literals[start + 3]
+            factor = bitcast[DType.uint64](plan.literals[start + 3])
         programs.append(Program(add, multiply, addend, factor, Int64(field.min_count)))
         start += step.nodes
     if start != len(plan.literals):

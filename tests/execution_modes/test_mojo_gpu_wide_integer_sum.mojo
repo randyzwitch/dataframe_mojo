@@ -124,6 +124,17 @@ def test_wide_integer_sum_final_overflow_and_late_checked_row_faults() raises:
     var measured = _check(query)
     for pair in List[Tuple[String, Int64]]([("a", 3), ("b", 9), ("c", -9), ("d", 12)]):
         assert_equal(measured[0].item(0, pair[0]).int64(), pair[1])
+    var one = DataFrame([Series("value", Column[Int64]([1]))])
+    var literal = Int64(9007199254740993)
+    var exact_literal = _check(one.lazy().select_exprs([
+        (col("value") + lit(literal)).sum().alias("add"),
+        (col("value") * lit(literal)).sum().alias("multiply"),
+    ]))
+    assert_equal(exact_literal[0].item(0, "add").int64(), literal + 1)
+    assert_equal(exact_literal[0].item(0, "multiply").int64(), literal)
+    var unsigned_one = DataFrame([Series("value", Column[UInt64]([1]))])
+    var exact_unsigned = _check(_sums(unsigned_one, col("value") * lit(UInt64.MAX), 1))
+    assert_equal(exact_unsigned[0].item(0, "s0").uint64(), UInt64.MAX)
 
 
 # requires: mojo_gpu
