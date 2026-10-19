@@ -161,6 +161,47 @@ class MetalBenchmarkDriver(unittest.TestCase):
         )
         self.assertEqual(record["output"], str(args.output.resolve()))
 
+    def test_new_mechanism_cases_are_selectable(self):
+        for workload in (
+            "float64_arithmetic",
+            "decimal_sum",
+            "wide_float32",
+            "join_fanout",
+        ):
+            self.assertIn(workload, driver.WORKLOADS)
+
+    def test_powerconditions_preserves_unavailable_commands(self):
+        with patch.object(
+            driver.subprocess,
+            "run",
+            side_effect=FileNotFoundError("pmset missing"),
+        ):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertIn("pmset missing", snapshot["battery"]["error"])
+        self.assertEqual(snapshot["thermal"]["status"], "unavailable")
+
+    def test_powerconditions_timeout_is_unavailable_with_partial_output(self):
+        error = subprocess.TimeoutExpired(["pmset"], 5, output=b"partial")
+        with patch.object(driver.subprocess, "run", side_effect=error):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertEqual(snapshot["battery"]["output"], "partial")
+        self.assertIn("timed out", snapshot["battery"]["error"])
+
+    def test_powerconditions_retains_stdout_and_returncode(self):
+        with patch.object(
+            driver.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["pmset"], 1, stdout="unsupported"
+            ),
+        ):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertEqual(snapshot["battery"]["returncode"], 1)
+        self.assertEqual(snapshot["battery"]["output"], "unsupported")
+
     def test_source_fingerprint_includes_untracked_mojo_content(self):
         with tempfile.TemporaryDirectory() as folder:
             source_root = Path(folder) / "dataframe"

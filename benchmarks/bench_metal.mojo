@@ -3,7 +3,7 @@
 Run with benchmarks/tools/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
 """
-from dataframe import Column, DataFrame, Series, LazyFrame, col, lit
+from dataframe import Column, DataFrame, DataType, Series, LazyFrame, col, lit
 from dataframe.metal import MetalRuntime
 from dataframe.parallel import configured_workers
 from std.os import getenv
@@ -21,12 +21,15 @@ def make_algorithm_frame(
     var cardinality = min(
         n, 1024
     ) if workload == "group_hash" or workload == "group_skew" else max(
+        1, (n + 3) // 4
+    ) if workload == "join_fanout" else max(
         1, n // 2
     )
     for i in range(n):
         var key = (
             i * cardinality // n if variant
-            == "sorted" else (i * 37) % cardinality
+            == "sorted" else i % cardinality if workload
+            == "join_fanout" else (i * 37) % cardinality
         )
         if workload == "group_skew":
             if variant == "sorted":
@@ -105,6 +108,42 @@ def make_frame(
     return DataFrame([Series("x", Column[Float32](values^, validity^))])
 
 
+def make_float64_frame(n: Int, variant: String) raises -> DataFrame:
+    var values = List[Float64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    for i in range(n):
+        var key = i % 1024
+        if variant == "sorted":
+            key = i * 1024 // n
+        elif variant == "nulls":
+            key = Int(
+                (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                % UInt32(1024)
+            )
+            valid[i] = i % 20 != 0
+        values[i] = Float64(key) / 1024
+    return DataFrame([Series("x", Column[Float64](values^, valid^))])
+
+
+def make_decimal_frame(n: Int, variant: String) raises -> DataFrame:
+    var values = List[Int64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    for i in range(n):
+        var cents = i % 17 - 8
+        if variant == "sorted":
+            cents = i * 17 // n - 8
+        elif variant == "nulls":
+            valid[i] = i % 20 != 0
+        values[i] = Int64(cents)
+    return DataFrame(
+        [
+            Series("x", Column[Int64](values^, valid^)).with_dtype(
+                DataType.decimal(15, 2, 64)
+            )
+        ]
+    )
+
+
 def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
     var query = frame.lazy()
     if workload == "chain32":
@@ -125,6 +164,26 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         query = query.select(col("x").cum_sum().alias("sum"))
     elif workload == "rolling_sum":
         query = query.select(col("x").rolling_sum(32, 1).alias("sum"))
+    elif workload == "float64_arithmetic":
+        query = query.select(
+            (col("x") * lit(Float64(2)) + lit(Float64(0.25))).alias("y")
+        )
+    elif workload == "decimal_sum":
+        var multiplier = lit("1.25").cast(DataType.decimal(15, 2))
+        query = query.select((col("x") * multiplier).sum().alias("sum"))
+    elif workload == "wide_float32":
+        query = query.select_exprs(
+            [
+                col("x").alias("f0"),
+                (col("x") + lit(Float32(0.125))).alias("f1"),
+                (col("x") + lit(Float32(0.25))).alias("f2"),
+                (col("x") + lit(Float32(0.375))).alias("f3"),
+                (col("x") + lit(Float32(0.5))).alias("f4"),
+                (col("x") + lit(Float32(0.625))).alias("f5"),
+                (col("x") + lit(Float32(0.75))).alias("f6"),
+                (col("x") + lit(Float32(0.875))).alias("f7"),
+            ]
+        )
     elif workload == "projection":
         query = query.select(
             (col("x") * lit(Float32(1.0001)) + lit(Float32(0.0001))).alias("x")
@@ -160,7 +219,7 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         query = query.group_by("x", maintain_order=True).agg(
             [col("y").sum().alias("s"), col("y").count().alias("n")]
         )
-    elif workload == "join_hash":
+    elif workload == "join_hash" or workload == "join_fanout":
         query = query.join(frame.lazy(), "x", how="left", suffix="_right")
     else:
         raise Error("Unknown Metal development workload")
@@ -288,14 +347,19 @@ def main() raises:
         or workload == "group_high"
         or workload == "group_skew"
         or workload == "join_hash"
+        or workload == "join_fanout"
     )
-    var frame = make_algorithm_frame(
-        n, variant, workload
-    ) if algorithm else make_frame(
-        n,
-        variant,
-        workload == "int_sum" or workload == "filtered_int_sum",
-        extra_column=workload == "filter_unused",
+    var frame = (
+        make_float64_frame(n, variant) if workload
+        == "float64_arithmetic" else make_decimal_frame(n, variant) if workload
+        == "decimal_sum" else make_algorithm_frame(
+            n, variant, workload
+        ) if algorithm else make_frame(
+            n,
+            variant,
+            workload == "int_sum" or workload == "filtered_int_sum",
+            extra_column=workload == "filter_unused",
+        )
     )
     var query = make_query(frame, workload)
     var runtime = MetalRuntime()

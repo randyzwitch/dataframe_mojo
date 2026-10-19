@@ -40,14 +40,19 @@ Cases cover a simple projection, a 15-repetition single expression, a 32-stage p
 chain, filters retaining about half or one percent of rows, count/length after a
 filter, exact Int32 sum, filtered Int32 sum, and a filter whose predicate column
 is omitted from the output. Additional cases exercise stable sorting, low/high
-cardinality grouping and self-left-joins. Their historical workload names
-(`sort_radix`, `group_hash`, `group_high`, `join_hash`) identify input recipes;
-the Mojo provider uses stable sorted paths. Base, sorted, and nullable/permuted distributions
-all run by default. Float32 inputs are exact multiples of 1/1024. Int32 sum
-inputs stay small enough that the final Int32 result fits. The raw record states
-the deterministic input recipe. The report includes every variant and each
-case's lowest CPU/Metal ratio. Ratios below one favor CPU; failures are never
-removed from the selected case set.
+cardinality grouping, a self-left-join and a bounded fanout self-left-join.
+join_fanout uses ceil(N/4) balanced key classes, so every key appears at most
+four times and the result contains at most 4N rows for every positive row count.
+The wide_float32 projection returns eight columns, at most 8N Float32 values
+(256 MiB at the default largest input). float64_arithmetic evaluates
+x * 2 + 0.25 over exact binary fractions. decimal_sum uses Decimal(15,2)
+inputs from -0.08 to 0.08, multiplies by 1.25, and sums the result.
+Base, sorted, and nullable/permuted distributions all run by default. Float32
+inputs are exact multiples of 1/1024. Int32 sum inputs stay small enough that
+the final Int32 result fits. The raw record states the deterministic input
+recipe. The report includes every variant and each case's lowest CPU/Metal
+ratio. Ratios below one favor CPU; failures are never removed from the selected
+case set.
 
 Results default to `build/metal/results.json`, with the Markdown report beside
 it and complete process stdout in a sibling directory. Re-render without
@@ -65,8 +70,14 @@ noise affect short queries on the M1. These cases do not enable automatic GPU
 selection; placement requires separate validated calibration.
 
 External-suite reporting continues to follow [the benchmark rules](benchmarks.md).
-Float64 and floating reductions are outside this development matrix. No
-external-suite coverage or holdout claim is made here.
+Floating reductions remain outside this development matrix. The cases have
+no independent oracle or holdout claim, and do not represent external-suite
+coverage.
+
+The driver records best-effort read-only pmset -g batt and pmset -g therm
+snapshots in run metadata. Missing commands, nonzero statuses, and timeouts remain
+explicitly unavailable; these snapshots provide operating context rather than a
+controlled power measurement.
 
 The retained initial smoke record includes three unsupported 16-repetition
 single-expression cases: their 65 nodes exceeded the then-current shared 64-node

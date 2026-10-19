@@ -24,10 +24,14 @@ WORKLOADS = [
     "group_high",
     "group_skew",
     "join_hash",
+    "join_fanout",
     "projection",
     "expression15",
     "cumulative_sum",
     "rolling_sum",
+    "float64_arithmetic",
+    "decimal_sum",
+    "wide_float32",
     "chain32",
     "filter_half",
     "filter_sparse",
@@ -61,6 +65,33 @@ def build_receipt_path(binary):
     return Path(str(Path(binary).resolve()) + ".receipt.json")
 
 
+def powerconditions():
+    """Best-effort read-only macOS power and thermal snapshot."""
+    snapshot = {}
+    for name, args in (("battery", ["pmset", "-g", "batt"]),
+                       ("thermal", ["pmset", "-g", "therm"])):
+        try:
+            result = subprocess.run(
+                args, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, timeout=5, check=False,
+            )
+            snapshot[name] = {
+                "status": "available" if result.returncode == 0 else "unavailable",
+                "returncode": result.returncode,
+                "output": result.stdout.strip(),
+            }
+        except (OSError, subprocess.TimeoutExpired) as error:
+            output = captured_text(error.stdout or error.output) if isinstance(
+                error, subprocess.TimeoutExpired
+            ) else str(error)
+            snapshot[name] = {
+                "status": "unavailable",
+                "error": str(error),
+                "output": output,
+            }
+    return snapshot
+
+
 def capture_build_identity(compile_flags):
     compiler = command(["mojo", "--version"])
     compiler_path = shutil.which("mojo")
@@ -88,6 +119,7 @@ def capture_build_identity(compile_flags):
         "benchmark_source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
         "driver_source_sha256": sha(__file__),
         "compile_flags": list(compile_flags),
+        "powerconditions": powerconditions(),
     }
 
 
@@ -220,6 +252,7 @@ def metadata(binaries, threads, binary_receipts):
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
         "dataframe_threads": threads,
+        "powerconditions": powerconditions(),
         "implementation": "mojo",
         "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
         "binary_receipts": binary_receipts,
@@ -232,13 +265,14 @@ def metadata(binaries, threads, binary_receipts):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high and join_hash have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows.",
         "limitations": [
-            "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
+            "No external-suite coverage claimed. Floating reductions remain outside these cases. Algorithm comparisons preserve complete output order and values against CPU; this CPU check is not an independent oracle.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
             "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
             "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure. Reported host phase timings are retained as measured and may overlap; they are not added. GPU-only time and pipeline compilation attribution are unavailable unless the runtime supplies those fields.",
             "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim.",
+            "Power and thermal snapshots use read-only pmset queries when available. Missing commands, unsupported output, and timeouts are retained as unavailable; the snapshot is context, not a controlled power measurement.",
         ],
     }
 
@@ -540,6 +574,7 @@ def main():
                     "variant": variant,
                     "gpu_first": env["BENCH_GPU_FIRST"] == "1",
                     "load_before": list(os.getloadavg()),
+                    "power_before": powerconditions(),
                     "log": label + ".txt",
                 }
                 captured = ""
