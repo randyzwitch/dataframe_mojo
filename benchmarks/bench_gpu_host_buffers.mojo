@@ -193,6 +193,3 @@ def main() raises:
     )
     for i in range(len(rows)):
         run_float32(ctx, rows[i], reps)
-
-
-main()
