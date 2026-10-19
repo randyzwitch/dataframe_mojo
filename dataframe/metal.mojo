@@ -42,6 +42,7 @@ from .accelerator.dictionaries import (
     restore_frame,
     lower_dictionary_operations,
 )
+from .accelerator.source_projection import project_sources
 from .accelerator.memory import checked_add
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.code_domains import TextQuery
@@ -968,6 +969,11 @@ struct MetalRuntime(AcceleratorBackend):
             var schema = schema_frame(query, len(query._nodes) - 1)
             var lowered = lower_dictionary_operations(query, self._budget)
             var staged_query = lowered[0].copy()
+            if (
+                self._execution_settings.optimize
+                and not producer_phases.has_certified(staged_query)
+            ):
+                staged_query = project_sources(staged_query)
             var dictionary = DictionaryCodes(staged_query)
             var staging_bytes = checked_add(
                 dictionary.staging_bytes(staged_query), lowered[1]
