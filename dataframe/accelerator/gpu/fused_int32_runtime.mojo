@@ -143,7 +143,7 @@ def execute(
     var result_started = Int(perf_counter_ns()) if profiling else 0
     var output = Series(
         plan.outputs[0].name,
-        Column[Int64]([total], [count >= plan.outputs[0].min_count]),
+        Column[Int64]([total], [count >= Int64(plan.outputs[0].min_count)]),
     )
     output._field_metadata = plan.outputs[0].field_metadata
     var result = DataFrame([output^])

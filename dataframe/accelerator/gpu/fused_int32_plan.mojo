@@ -16,7 +16,7 @@ struct Program(Copyable):
 
 
 def _node(plan: RowPlan, at: Int, op: Int, dtype: DataType) -> Bool:
-    return plan.code[4 * at] == op and plan.node_dtypes[at] == dtype
+    return plan.code[4 * at] == Int64(op) and plan.node_dtypes[at] == dtype
 
 
 def _column(plan: RowPlan, at: Int) -> Bool:
@@ -37,8 +37,8 @@ def _binary(
 ) -> Bool:
     return (
         _node(plan, at, op, dtype)
-        and plan.code[4 * at + 1] == left
-        and plan.code[4 * at + 2] == right
+        and plan.code[4 * at + 1] == Int64(left)
+        and plan.code[4 * at + 2] == Int64(right)
     )
 
 
@@ -135,7 +135,7 @@ def bind(plan: RowPlan) -> Optional[Program]:
     var cast_at = start + projection.nodes - 1
     if (
         not _node(plan, cast_at, CAST, DataType.INT64)
-        or plan.code[4 * cast_at + 1] != (4 if arithmetic else 0)
+        or plan.code[4 * cast_at + 1] != Int64(4 if arithmetic else 0)
         or (plan.code[4 * cast_at + 3] != 0 and plan.code[4 * cast_at + 3] != 1)
     ):
         return None
