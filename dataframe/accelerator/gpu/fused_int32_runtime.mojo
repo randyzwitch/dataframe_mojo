@@ -25,10 +25,10 @@ def _run[
     var bits = values.create_sub_buffer[DType.uint8](0, 1)
     comptime if nullable:
         bits = source.validity().value().copy()
-    var sums = ctx.enqueue_create_buffer[DType.int64](partial_count)
-    var counts = ctx.enqueue_create_buffer[DType.uint32](partial_count)
-    var faults = ctx.enqueue_create_buffer[DType.uint32](partial_count)
-    var output = ctx.enqueue_create_buffer[DType.int64](3)
+    var sums = scope.scratch[DType.int64](partial_count)
+    var counts = scope.scratch[DType.uint32](partial_count)
+    var faults = scope.scratch[DType.uint32](partial_count)
+    var output = scope.scratch[DType.int64](3)
     var result = List[Int64](length=3, fill=0)
     try:
         ctx.enqueue_function[
@@ -61,17 +61,20 @@ def _run[
         scope.read_control_into(output, result)
         scope.record_download(24)
     except error:
-        scope.synchronize()
+        try:
+            scope.synchronize()
+        except:
+            pass
         _ = result^
         _ = sums^
         _ = counts^
         _ = faults^
         _ = output^
         raise error^
-    _ = sums^
-    _ = counts^
-    _ = faults^
-    _ = output^
+    scope.recycle_scratch(sums^)
+    scope.recycle_scratch(counts^)
+    scope.recycle_scratch(faults^)
+    scope.recycle_scratch(output^)
     return result^
 
 

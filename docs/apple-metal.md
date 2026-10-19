@@ -23,7 +23,10 @@ var measured = query.profile(engine="accel", accelerator=runtime)
 ```
 
 The default Apple accelerator uses the same implementation. Runtime copies
-retain configuration; query execution owns its context and allocations. Public
+retain configuration and share a lazy device service. Direct row and scalar
+collections exclusively lease its one cached context; overlapping collections
+use private contexts. Other resident DAG/operator routes still own fresh
+contexts. Query allocations, budgets and fault state remain independent. Public
 collection, profiling and explanation preserve the requested optimization,
 streaming and batch settings through provider dispatch and recursive planning.
 With `optimize=False`, file staging preserves the original source prefix rather
@@ -247,12 +250,54 @@ the final result exports ordinary CPU-owned columns. Original immutable CPU
 scans stage when first consumed. Structural empty/scalar results can be retained
 without initializing a device, including positive row counts with zero columns.
 
-Each logical matrix cell uses 21 requested bytes: two UInt64 words, one validity
-byte and one UInt32 deferred-error word. A query budget includes all retained
+Each legacy logical matrix cell uses 21 requested bytes: two UInt64 words,
+one validity byte and one UInt32 deferred-error word. A query budget includes all retained
 intermediates, active region matrices/descriptors/scratch, control observations,
 and final host export/materialization. Bounds use checked host arithmetic and
 are checked before allocation/submission. They measure requested payload, not
 allocator or driver overhead, and cannot guarantee physical allocation succeeds.
+
+### Initial native storage and fused scalar paths
+
+Certified single-input, single-output Float32 row projections use native-width
+values, a packed bitmap only when nulls are present, and no deferred-error plane
+for the supported infallible expressions. Values transfer in bulk; sliced
+bitmaps retain their bit offset, and chunked inputs repack only validity.
+Supported stable filters compact native output. Final CPU columns adopt the
+readback lists. Multi-output, grouped and other unconverted regions still use
+the legacy representation. This Float32 kernel still interprets a bounded
+expression program; it is not the interpreter-free fused reduction path.
+
+The first precompiled reduction family accepts one Int32 input, an optional
+`x > Int32(threshold)` filter, optional checked `(x + addend) * factor`, an
+explicit Int64 cast, and terminal SUM. It preserves the filter boundary and
+checks each Int32 arithmetic operation before accumulating. At most 4096
+device partial records and a 24-byte final control record replace per-row
+predicate, expression and filtered-table intermediates. With at most
+`Int32.MAX` input rows, summing surviving Int32 values in Int64 cannot overflow.
+The final valid count implements `min_count`; observed arithmetic faults retain
+the existing CPU adjudication contract. Other expression shapes and wide sums
+keep their existing execution paths.
+
+The runtime service retains one idle context and up to 8 MiB / 32 entries of
+exact-capacity Int64 and UInt32 reduction scratch. These idle limits are per
+shared runtime service, separate from each query's requested-payload limit.
+Every checked-out allocation is charged in full to the current query, including
+pool hits. A smaller budget cannot become admissible just because buffers are
+warm. Scratch returns only after its final GPU use completes; the exclusive
+context lease stays held until the last query owner is released. An overlapping
+query uses a private context and cannot consume the cached context's scratch.
+Failure discards the cached context and its idle scratch before another query
+can lease them. Runtime copies share the service; dropping its final owner
+releases cached resources. Native column handles and arbitrary buffer views are
+not pooled because their aliases can outlive an individual operator.
+
+Direct execution currently performs one conservative final drain before marking
+its context reusable. Profiles include this wait and expose cumulative service
+context generations, scratch hits/misses, and current idle scratch bytes/entries.
+Context creation remains lazy: metadata-only work, empty native input and budget
+rejection before submission do not initialize the device. Pipeline-handle reuse
+and wider operator migration remain separate work.
 
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and
@@ -360,7 +405,7 @@ Profiled generic row regions additionally report host wall-clock phases:
 | `preflight_ms` | Standalone row-plan binding and resource preparation before execution |
 | `host_prepare_ms` | Region checks, descriptors and host buffer preparation before source staging |
 | `staging_copy_ms` | CPU source conversion into the upload representation |
-| `initialization_ms` | First construction of the query's Metal context |
+| `initialization_ms` | Acquisition of the query's context, including construction when no cached context is available |
 | `submit_wait_ms` | Device allocation, enqueueing and completion waits, excluding context construction |
 | `synchronization_ms` | Time inside region synchronization calls; overlaps execution phases |
 | `readback_ms` | Final host matrix export, including its allocation and waits |

@@ -5,6 +5,7 @@ from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer
 from std.time import perf_counter_ns
 from .target import METAL_TARGET
+from .scratch_pool import ScratchPool
 
 
 def checked_add(a: Int, b: Int) raises -> Int:
@@ -30,12 +31,22 @@ struct _DeviceServiceState(Movable):
     var device: Int
     var cached_lease: Atomic[Int64]
     var generation: Atomic[Int64]
+    var pool: ScratchPool
+    var pool_lock: Atomic[Int64]
 
-    def __init__(out self, device: Int):
+    def __init__(out self, device: Int, idle_bytes: Int, idle_entries: Int):
         self.context = None
         self.device = device
         self.cached_lease = Atomic[Int64](0)
         self.generation = Atomic[Int64](0)
+        self.pool = ScratchPool(idle_bytes, idle_entries)
+        self.pool_lock = Atomic[Int64](0)
+
+    def __deinit__(deinit self):
+        # Buffers keep their context alive; release idle owners before the
+        # service's final context handle, without issuing new GPU work.
+        _ = self.pool^
+        _ = self.context^
 
 
 struct DeviceService(Copyable):
@@ -43,15 +54,24 @@ struct DeviceService(Copyable):
 
     Only one Scope may lease the cached context at once. Overlapping scopes
     receive a private context, so copies of MetalRuntime remain concurrent.
-    The service never owns DeviceBuffers or query budget reservations.
+    A separately bounded idle pool owns only private reduction scratch.
+    All active allocations remain charged to their per-query reservations.
     """
 
     var _state: ArcPointer[_DeviceServiceState]
 
-    def __init__(out self, device_id: Int = 0) raises:
-        if device_id < 0:
-            raise Error("Mojo GPU device service requires a nonnegative device")
-        self._state = ArcPointer(_DeviceServiceState(device_id))
+    def __init__(
+        out self,
+        device_id: Int = 0,
+        *,
+        idle_scratch_bytes: Int = 8 * 1024 * 1024,
+        idle_scratch_entries: Int = 32,
+    ) raises:
+        if device_id < 0 or idle_scratch_bytes < 0 or idle_scratch_entries < 0:
+            raise Error("Mojo GPU device service device or idle limit is invalid")
+        self._state = ArcPointer(
+            _DeviceServiceState(device_id, idle_scratch_bytes, idle_scratch_entries)
+        )
 
     def same_service(self, other: Self) -> Bool:
         return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
@@ -61,6 +81,51 @@ struct DeviceService(Copyable):
 
     def device_id(self) -> Int:
         return self._state[].device
+
+    def _lock_pool(self):
+        var unlocked = Int64(0)
+        while not self._state[].pool_lock.compare_exchange(unlocked, 1):
+            unlocked = 0
+
+    def scratch_info(self) -> Tuple[Int, Int, Int, Int]:
+        """Idle bytes, idle entries, hits and misses; separate from query peak."""
+        self._lock_pool()
+        var result = (
+            self._state[].pool.idle_bytes,
+            self._state[].pool.idle_entries,
+            self._state[].pool.hits,
+            self._state[].pool.misses,
+        )
+        self._state[].pool_lock.store(0)
+        return result
+
+    def _scratch[dtype: DType](
+        self, context: DeviceContext, length: Int
+    ) raises -> DeviceBuffer[dtype]:
+        self._lock_pool()
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
+        var found = Optional[DeviceBuffer[dtype]]()
+        try:
+            found = state[].pool.take[dtype](context, length)
+            state[].pool_lock.store(0)
+        except error:
+            state[].pool_lock.store(0)
+            raise error^
+        if found:
+            return found.take()
+        return context.enqueue_create_buffer[dtype](length)
+
+    def _recycle_scratch[dtype: DType](
+        self, context: DeviceContext, var buffer: DeviceBuffer[dtype]
+    ) raises:
+        self._lock_pool()
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
+        try:
+            state[].pool.put[dtype](context, buffer^)
+            state[].pool_lock.store(0)
+        except error:
+            state[].pool_lock.store(0)
+            raise error^
 
     def _acquire(self) raises -> Tuple[DeviceContext, Bool]:
         var unlocked = Int64(0)
@@ -86,6 +151,9 @@ struct DeviceService(Copyable):
                 ).copy()
                 return (result^, True)
             except error:
+                self._lock_pool()
+                state[].pool.clear()
+                state[].pool_lock.store(0)
                 state[].context = None
                 state[].cached_lease.store(0)
                 raise error^
@@ -101,6 +169,9 @@ struct DeviceService(Copyable):
         if not reusable:
             # The Scope still owns its context copy until after this method.
             # Never make a context involved in a failed query available again.
+            self._lock_pool()
+            state[].pool.clear()
+            state[].pool_lock.store(0)
             state[].context = None
         state[].cached_lease.store(0)
 
@@ -246,6 +317,33 @@ struct Scope(Copyable):
     def uses_cached_context(self) -> Bool:
         return self._state[].cached_context_lease
 
+    def scratch[dtype: DType](self, length: Int) raises -> DeviceBuffer[dtype]:
+        """Obtain private scratch after its caller reserves the exact capacity."""
+        if length <= 0:
+            raise Error("Mojo GPU reusable scratch length must be positive")
+        var context = self.context()
+        if self._state[].cached_context_lease and self._state[].service:
+            return self._state[].service.value()._scratch[dtype](context, length)
+        return context.enqueue_create_buffer[dtype](length)
+
+    def recycle_scratch[dtype: DType](
+        self, var buffer: DeviceBuffer[dtype]
+    ) raises:
+        """Return an unaliased root after successful synchronization of its last use.
+
+        Only lexical operator-private scratch may enter this API. Native-column
+        values and views keep their existing ownership and are never pooled.
+        The caller retains its reservation until all these returns complete.
+        """
+        if (
+            self._state[].cached_context_lease
+            and self._state[].service
+            and self._state[].reusable.load() != 2
+        ):
+            self._state[].service.value()._recycle_scratch[dtype](
+                self.context(), buffer^
+            )
+
     def same_query(self, other: Self) -> Bool:
         return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
 
@@ -335,7 +433,10 @@ struct Scope(Copyable):
             ctx.enqueue_copy(values.unsafe_ptr(), buffer)
             self.synchronize()
         except error:
-            self.synchronize()
+            try:
+                self.synchronize()
+            except:
+                pass
             raise error^
 
     def read_control[

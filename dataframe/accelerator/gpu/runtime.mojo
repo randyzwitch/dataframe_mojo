@@ -1523,6 +1523,17 @@ def execute(
             )
         )
         if profiling:
+            var scratch_cache = device_service.value().scratch_info()
+            for field in List[Tuple[String, Int]]([
+                ("service_context_generations", device_service.value().cached_generations()),
+                ("service_idle_scratch_bytes", scratch_cache[0]),
+                ("service_idle_scratch_entries", scratch_cache[1]),
+                ("service_scratch_hits", scratch_cache[2]),
+                ("service_scratch_misses", scratch_cache[3]),
+            ]):
+                report = report.with_column(
+                    Series(field[0], Column[Int64]([Int64(field[1])]))
+                )
             report = report.with_column(
                 Series(
                     "synchronization_ms",
