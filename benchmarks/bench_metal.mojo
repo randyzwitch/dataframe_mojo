@@ -3,7 +3,7 @@
 Run with benchmarks/tools/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
 """
-from dataframe import Column, DataFrame, DataType, Series, LazyFrame, col, lit
+from dataframe import Column, DataFrame, DataType, Expr, Series, LazyFrame, col, lit
 from dataframe.metal import MetalRuntime
 from dataframe.parallel import configured_workers
 from std.os import getenv
