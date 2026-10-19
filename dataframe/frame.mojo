@@ -7768,7 +7768,10 @@ struct _StreamReduction(Movable):
                 source.text,
                 source.logical,
             )
-            state.merge(source, sources=order)
+            if source.finished:
+                state.finished = source.finished.value().take(order)
+            else:
+                state.merge(source, sources=order)
             states.append(state^)
         self.keys = self.keys.take(order)
         self.firsts = firsts^
