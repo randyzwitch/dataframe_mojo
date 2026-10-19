@@ -8,6 +8,7 @@ from dataframe.accelerator.gpu.typed_storage import (
     check_native_column_capacity,
     upload_float32,
     readback_float32,
+    _NativeReservation,
 )
 from tests.execution_modes.test_backend_metal import require_metal
 
@@ -30,6 +31,24 @@ def test_native_column_capacity_checks_budget_before_allocation() raises:
     assert_equal(
         check_native_column_capacity[DType.float32](Scope(), 5, 2, 5), 42
     )
+
+
+def test_native_reservation_precedes_allocation_and_releases_shared_scope() raises:
+    var scope = Scope(budget=8)
+    var copied = scope.copy()
+    var reservation = _NativeReservation(scope, 8)
+    assert_equal(copied.info()[0], 8)
+    with assert_raises(contains="memory budget"):
+        _ = _NativeReservation(copied, 1)
+    assert_equal(scope.info()[0], 8)
+    assert_equal(scope.initialized(), False)
+    _ = reservation^
+    assert_equal(scope.info()[0], 0)
+    assert_equal(scope.info()[1], 8)
+    var healthy = _NativeReservation(copied, 8)
+    assert_equal(scope.info()[0], 8)
+    _ = healthy^
+    assert_equal(scope.info()[0], 0)
 
 
 # requires: metal

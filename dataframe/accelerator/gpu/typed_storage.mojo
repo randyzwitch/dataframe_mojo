@@ -46,12 +46,28 @@ def check_native_column_capacity[
     )
 
 
+struct _NativeReservation(Movable):
+    """Reserve query bytes before allocation and release on every exit."""
+
+    var scope: Scope
+    var bytes: Int
+
+    def __init__(out self, scope: Scope, bytes: Int) raises:
+        scope._retain(bytes)
+        self.scope = scope.copy()
+        self.bytes = bytes
+
+    def __deinit__(deinit self):
+        self.scope._release(self.bytes)
+
+
 struct _NativeColumnOwner[dtype: DType](Movable):
     var scope: Scope
     var retained: Int
     var values: Optional[DeviceBuffer[dtype]]
     var validity: Optional[DeviceBuffer[DType.uint8]]
     var errors: Optional[DeviceBuffer[DType.uint32]]
+    var reservation: _NativeReservation
 
     def __init__(
         out self,
@@ -59,6 +75,7 @@ struct _NativeColumnOwner[dtype: DType](Movable):
         var values: Optional[DeviceBuffer[dtype]] = None,
         var validity: Optional[DeviceBuffer[DType.uint8]] = None,
         var errors: Optional[DeviceBuffer[DType.uint32]] = None,
+        var reservation: Optional[_NativeReservation] = None,
     ) raises:
         var validity_bytes = len(validity.value()) if validity else 0
         var error_capacity = len(errors.value()) if errors else 0
@@ -66,9 +83,14 @@ struct _NativeColumnOwner[dtype: DType](Movable):
         var retained = native_column_bytes[dtype](
             value_capacity, validity_bytes, error_capacity
         )
-        # Callers check this same complete size before creating any buffers;
-        # retain is the lifetime lease and protects concurrent scopes too.
-        scope._retain(retained)
+        if reservation:
+            if reservation.value().bytes != retained or not scope.same_query(
+                reservation.value().scope
+            ):
+                raise Error("Mojo GPU typed column reservation mismatch")
+            self.reservation = reservation.take()
+        else:
+            self.reservation = _NativeReservation(scope, retained)
         self.scope = scope.copy()
         self.retained = retained
         self.values = values^
@@ -76,7 +98,10 @@ struct _NativeColumnOwner[dtype: DType](Movable):
         self.errors = errors^
 
     def __deinit__(deinit self):
-        self.scope._release(self.retained)
+        _ = self.values^
+        _ = self.validity^
+        _ = self.errors^
+        _ = self.reservation^
 
 
 struct NativeColumn[dtype: DType](Copyable):
@@ -98,6 +123,7 @@ struct NativeColumn[dtype: DType](Copyable):
         var errors: Optional[DeviceBuffer[DType.uint32]] = None,
         value_offset: Int = 0,
         validity_bit_offset: Int = 0,
+        var reservation: Optional[_NativeReservation] = None,
     ) raises:
         if logical.physical() != DataType.of(dtype):
             raise Error(
@@ -131,6 +157,7 @@ struct NativeColumn[dtype: DType](Copyable):
                 Optional[DeviceBuffer[dtype]](values^),
                 validity^,
                 errors^,
+                reservation^,
             )
         )
         self.logical = logical
@@ -290,6 +317,10 @@ def allocate_native_column[
     _ = check_native_column_capacity[dtype](
         scope, length, validity_bytes, error_capacity
     )
+    var reservation = _NativeReservation(
+        scope,
+        native_column_bytes[dtype](length, validity_bytes, error_capacity),
+    )
     var ctx = scope.context()
     var values = ctx.enqueue_create_buffer[dtype](length)
     var validity = Optional[DeviceBuffer[DType.uint8]]()
@@ -303,7 +334,13 @@ def allocate_native_column[
             ctx.enqueue_create_buffer[DType.uint32](error_capacity)
         )
     return NativeColumn[dtype](
-        scope, logical, length, values^, validity^, errors^
+        scope,
+        logical,
+        length,
+        values^,
+        validity^,
+        errors^,
+        reservation=Optional[_NativeReservation](reservation^),
     )
 
 
@@ -356,6 +393,12 @@ def upload_float32(
     if len(chunks) > 1 and has_validity:
         preflight_bytes = checked_add(preflight_bytes, validity_bytes)
     _ = scope.check(preflight_bytes)
+    var reservation = _NativeReservation(
+        scope, native_column_bytes[DType.float32](rows, validity_bytes, 0)
+    )
+    var bitmap_reservation = Optional[_NativeReservation]()
+    if len(chunks) > 1 and has_validity:
+        bitmap_reservation = _NativeReservation(scope, validity_bytes)
 
     if has_validity and len(chunks) > 1:
         packed_bits = List[UInt8](capacity=validity_bytes)
@@ -418,9 +461,11 @@ def upload_float32(
         scope.synchronize()
         _ = chunks^
         _ = packed_bits^
+        _ = bitmap_reservation^
         raise error^
     _ = chunks^
     _ = packed_bits^
+    _ = bitmap_reservation^
 
     return NativeColumn[DType.float32](
         scope,
@@ -431,6 +476,7 @@ def upload_float32(
         None,
         0,
         source_bit_offset,
+        Optional[_NativeReservation](reservation^),
     )
 
 

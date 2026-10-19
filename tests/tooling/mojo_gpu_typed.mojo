@@ -2,6 +2,7 @@
 from tests.execution_modes.test_gpu_typed_storage_metadata import (
     test_native_float32_column_capacity_includes_only_present_sidecars,
     test_native_column_capacity_checks_budget_before_allocation,
+    test_native_reservation_precedes_allocation_and_releases_shared_scope,
     test_native_float32_upload_roundtrips_slice_and_packed_nulls,
     test_native_float32_upload_rechunks_only_validity_for_chunked_series,
     test_native_float32_empty_and_budget_failure_allocate_nothing,
@@ -22,6 +23,7 @@ from tests.execution_modes.test_metal_profile_phases import (
 def main() raises:
     test_native_float32_column_capacity_includes_only_present_sidecars()
     test_native_column_capacity_checks_budget_before_allocation()
+    test_native_reservation_precedes_allocation_and_releases_shared_scope()
     test_native_float32_upload_roundtrips_slice_and_packed_nulls()
     test_native_float32_upload_rechunks_only_validity_for_chunked_series()
     test_native_float32_empty_and_budget_failure_allocate_nothing()
