@@ -206,3 +206,113 @@ def test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow() rai
             .collect(accelerator=MetalRuntime(), engine="accel")
         )
     _ = _check(overflow.lazy().group_by("k").agg(col("x").sum(min_count=3)))
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
+    var rows = 10000
+    var keys = List[Int32](length=rows, fill=0)
+    var values = List[Int64](length=rows, fill=0)
+    var valid = List[Bool](length=rows, fill=True)
+    for row in range(rows):
+        values[row] = Int64.MAX if row % 2 == 0 else -Int64.MAX
+        if (row // 2) % 100 == 0:
+            valid[row] = False
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32](keys^)),
+            Series("x", Column[Int64](values^, valid^)),
+        ]
+    )
+    var query = frame.lazy().group_by("k").agg(
+        [
+            col("x").sum().alias("sum"),
+            col("x").count().alias("count"),
+            col("x").min().alias("min"),
+            col("x").max().alias("max"),
+            col("x").sum(min_count=10000).alias("minimum_count"),
+        ]
+    )
+    var runtime = MetalRuntime()
+    var measured = query.profile(engine="accel", accelerator=runtime)
+    assert_true(
+        measured[0].equals(query.collect(engine="cpu", streaming=False))
+    )
+    assert_equal(measured[0].height(), 1)
+    assert_equal(measured[0].item(0, "sum").int64(), Int64(0))
+    assert_equal(measured[0].item(0, "count").int64(), Int64(9900))
+    assert_equal(measured[0].item(0, "min").int64(), -Int64.MAX)
+    assert_equal(measured[0].item(0, "max").int64(), Int64.MAX)
+    assert_true(measured[0].item(0, "minimum_count").is_null())
+    assert_equal(
+        measured[1].item(0, "grouped_int_algorithm").string(),
+        "mojo_gpu_grouped_int_partials",
+    )
+    assert_equal(
+        measured[1].item(0, "grouped_int_parallel_outputs").int64(),
+        Int64(5),
+    )
+    assert_true(
+        measured[1].item(0, "grouped_int_max_partials_per_group").int64()
+        >= 2
+    )
+    assert_true(
+        measured[1].item(0, "grouped_int_max_partial_states").int64() <= 4096
+    )
+    assert_equal(
+        measured[1].item(0, "grouped_int_scratch_bytes").int64(),
+        Int64(4096 * 8 * 8),
+    )
+    var peak = Int(measured[1].item(0, "peak_requested_bytes").int64())
+    var bounded = runtime.copy()
+    bounded._budget = peak - 1
+    with assert_raises(contains="memory budget"):
+        _ = query.collect(engine="accel", accelerator=bounded)
+    bounded._budget = peak
+    var exact = query.profile(engine="accel", accelerator=bounded)
+    assert_true(exact[0].equals(measured[0]))
+
+    var distinct = List[Int32](length=4097, fill=0)
+    var ones = List[Int64](length=4097, fill=1)
+    for row in range(4097):
+        distinct[row] = Int32(row)
+    var high_cardinality = DataFrame(
+        [Series("k", Column[Int32](distinct^)), Series("x", Column[Int64](ones^))]
+    )
+    var fallback = high_cardinality.lazy().group_by("k").agg(
+        col("x").sum()
+    )
+    var fallback_profile = fallback.profile(
+        engine="accel", accelerator=MetalRuntime()
+    )
+    assert_true(
+        fallback_profile[0].equals(
+            fallback.collect(engine="cpu", streaming=False)
+        )
+    )
+    assert_equal(
+        fallback_profile[1].item(0, "grouped_int_algorithm").string(),
+        "legacy",
+    )
+    assert_equal(
+        fallback_profile[1].item(0, "grouped_int_partial_tiles").int64(),
+        Int64(0),
+    )
+    assert_equal(
+        fallback_profile[1].item(0, "grouped_int_scratch_bytes").int64(),
+        Int64(0),
+    )
+
+    var overflowing = DataFrame(
+        [
+            Series("k", Column[Int32](List[Int32](length=rows, fill=0)^)),
+            Series(
+                "x",
+                Column[Int64](List[Int64](length=rows, fill=Int64.MAX)^),
+            ),
+        ]
+    )
+    with assert_raises(contains="overflow"):
+        _ = overflowing.lazy().group_by("k").agg(col("x").sum()).collect(
+            engine="accel", accelerator=MetalRuntime()
+        )

@@ -178,6 +178,9 @@ from .grouping import (
     group_window_merge,
     group_window_schedule,
     group_reduce,
+    group_integer_partials,
+    group_integer_finish,
+    integer_partial_supported,
 )
 from .ordering import order_init, order_merge, order_key_errors, order_gather
 from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
@@ -1942,6 +1945,13 @@ def execute_plan(
     )
     var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     var ordered_partials = Optional[DeviceBuffer[DType.uint32]]()
+    var grouped_integer_scratch = Optional[DeviceBuffer[DType.uint64]]()
+    var grouped_int_parallel_outputs = 0
+    var grouped_int_max_partial_states = 0
+    var grouped_int_max_partials_per_group = 0
+    var grouped_int_max_group_batch = 0
+    var grouped_int_partial_tiles = 0
+    var grouped_int_scratch_bytes = 0
     var fault_groups = min(1024, max(1, (rows + 255) // 256))
     # One word flags a fault in any value this region writes, before a
     # filter, head or HAVING step can drop it (accelerator/faults.mojo).
@@ -2347,6 +2357,92 @@ def execute_plan(
                                 submissions += 2
                                 positions = group_order^
                                 next_index = next_group_order^
+                            var integer_partial_nodes = List[UInt32]()
+                            var integer_partial_certificate = True
+                            if code[4 * step.start] == ROW_GROUP_HEADER_LAST:
+                                var group_keys = Int(
+                                    code[4 * step.start + 1]
+                                )
+                                for column in range(group_keys + 1, step.nodes):
+                                    var node = step.start + column
+                                    var source_slot = Int(code[4 * node + 1])
+                                    var target_slot = Int(code[4 * node + 2])
+                                    var op = code[4 * node + 3]
+                                    if integer_partial_supported(
+                                        code[4 * step.start],
+                                        op,
+                                        slot_types[source_slot],
+                                        slot_types[target_slot],
+                                    ):
+                                        if (
+                                            plan.slot_dtypes[
+                                                source_slot
+                                            ].is_integer()
+                                            and plan.slot_dtypes[
+                                                target_slot
+                                            ].is_integer()
+                                        ):
+                                            integer_partial_nodes.append(
+                                                UInt32(node)
+                                            )
+                                        else:
+                                            integer_partial_certificate = False
+                            if not integer_partial_certificate:
+                                integer_partial_nodes = List[UInt32]()
+                            var partials_per_group = 1
+                            var group_batch = 0
+                            if len(integer_partial_nodes) and shape[0] > 0:
+                                var average_group_rows = (
+                                    Int(current_rows) + Int(shape[0]) - 1
+                                ) // Int(shape[0])
+                                var desired_partials = (
+                                    average_group_rows + 255
+                                ) // 256
+                                partials_per_group = min(
+                                    4096,
+                                    min(
+                                        4096 // Int(shape[0]),
+                                        desired_partials,
+                                    ),
+                                )
+                                if partials_per_group >= 2:
+                                    group_batch = min(
+                                        Int(shape[0]),
+                                        4096 // partials_per_group,
+                                    )
+                                    if not grouped_integer_scratch:
+                                        grouped_int_scratch_bytes = 4096 * 8 * 8
+                                        peak = _checked_add(
+                                            peak, grouped_int_scratch_bytes
+                                        )
+                                        _ = scope.check(peak)
+                                        grouped_integer_scratch = (
+                                            ctx.enqueue_create_buffer[
+                                                DType.uint64
+                                            ](4096 * 8)
+                                        )
+                                    grouped_int_parallel_outputs += len(
+                                        integer_partial_nodes
+                                    )
+                                    grouped_int_max_partial_states = max(
+                                        grouped_int_max_partial_states,
+                                        group_batch * partials_per_group,
+                                    )
+                                    grouped_int_max_partials_per_group = max(
+                                        grouped_int_max_partials_per_group,
+                                        partials_per_group,
+                                    )
+                                    grouped_int_max_group_batch = max(
+                                        grouped_int_max_group_batch,
+                                        group_batch,
+                                    )
+                                    grouped_int_partial_tiles += (
+                                        (Int(shape[0]) + group_batch - 1)
+                                        // group_batch
+                                        * len(integer_partial_nodes)
+                                    )
+                                else:
+                                    partials_per_group = 1
                             ctx.enqueue_function[group_reduce](
                                 device_words.unsafe_ptr(),
                                 device_valid.unsafe_ptr(),
@@ -2366,11 +2462,74 @@ def execute_plan(
                                 UInt32(current_rows),
                                 UInt32(rows),
                                 UInt32(plan.slots),
+                                UInt32(partials_per_group),
                                 grid_dim=(Int(shape[0]) * step.nodes + 255)
                                 // 256,
                                 block_dim=256,
                             )
                             submissions += 2
+                            if partials_per_group > 1:
+                                for node in integer_partial_nodes:
+                                    for group_base in range(
+                                        0, Int(shape[0]), group_batch
+                                    ):
+                                        var current_batch = min(
+                                            group_batch,
+                                            Int(shape[0]) - group_base,
+                                        )
+                                        ctx.enqueue_function[
+                                            group_integer_partials
+                                        ](
+                                            device_words.unsafe_ptr(),
+                                            device_valid.unsafe_ptr(),
+                                            device_errors.unsafe_ptr(),
+                                            index.unsafe_ptr(),
+                                            starts.unsafe_ptr(),
+                                            device_code.unsafe_ptr(),
+                                            device_literals.unsafe_ptr(),
+                                            device_slot_types.unsafe_ptr(),
+                                            UInt32(step.start),
+                                            node,
+                                            UInt32(group_base),
+                                            UInt32(current_batch),
+                                            shape[0],
+                                            UInt32(partials_per_group),
+                                            UInt32(current_rows),
+                                            UInt32(rows),
+                                            grouped_integer_scratch.value()
+                                            .unsafe_ptr(),
+                                            grid_dim=(current_batch
+                                            * partials_per_group),
+                                            block_dim=256,
+                                        )
+                                        ctx.enqueue_function[
+                                            group_integer_finish
+                                        ](
+                                            gathered_words.unsafe_ptr(),
+                                            gathered_valid.unsafe_ptr(),
+                                            gathered_errors.unsafe_ptr(),
+                                            starts.unsafe_ptr(),
+                                            device_code.unsafe_ptr(),
+                                            device_literals.unsafe_ptr(),
+                                            device_slot_types.unsafe_ptr(),
+                                            UInt32(step.start),
+                                            node,
+                                            UInt32(group_base),
+                                            UInt32(current_batch),
+                                            shape[0],
+                                            UInt32(partials_per_group),
+                                            UInt32(current_rows),
+                                            UInt32(rows),
+                                            UInt32(plan.slots),
+                                            grouped_integer_scratch.value()
+                                            .unsafe_ptr()
+                                            .unsafe_origin_cast[
+                                                ImmutAnyOrigin
+                                            ](),
+                                            grid_dim=current_batch,
+                                            block_dim=256,
+                                        )
+                                        submissions += 2
                             if _group_quantiles(plan, step.start, step.nodes):
                                 ctx.enqueue_function[
                                     quantiles.correct_zero_groups
@@ -3583,6 +3742,54 @@ def execute_plan(
         )
     )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
+    fields.append(
+        Series(
+            "grouped_int_algorithm",
+            Column[String](
+                [
+                    "mojo_gpu_grouped_int_partials"
+                    if grouped_int_parallel_outputs
+                    else "legacy"
+                ]
+            ),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_parallel_outputs",
+            Column[Int64]([Int64(grouped_int_parallel_outputs)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_partial_states",
+            Column[Int64]([Int64(grouped_int_max_partial_states)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_partials_per_group",
+            Column[Int64]([Int64(grouped_int_max_partials_per_group)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_group_batch",
+            Column[Int64]([Int64(grouped_int_max_group_batch)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_partial_tiles",
+            Column[Int64]([Int64(grouped_int_partial_tiles)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_scratch_bytes",
+            Column[Int64]([Int64(grouped_int_scratch_bytes)]),
+        )
+    )
     fields.append(Series("host_result_bytes", Column[Int64]([Int64(0)])))
     fields.append(
         Series(
