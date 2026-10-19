@@ -163,6 +163,33 @@ def _int_column(
     )
 
 
+def _grouped_integer_profile_fields(report: DataFrame) raises -> DataFrame:
+    """Keep heterogeneous DAG regions vstack-compatible with row reports."""
+    var result = report.copy()
+    if "grouped_int_algorithm" not in result.columns():
+        result = result.with_column(
+            Series(
+                "grouped_int_algorithm",
+                Column[String](
+                    List[String](length=result.height(), fill="legacy")
+                ),
+            )
+        )
+    for name in List[String](
+        [
+            "grouped_int_parallel_outputs",
+            "grouped_int_max_partial_states",
+            "grouped_int_max_partials_per_group",
+            "grouped_int_max_group_batch",
+            "grouped_int_partial_tiles",
+            "grouped_int_scratch_bytes",
+        ]
+    ):
+        if name not in result.columns():
+            result = _int_column(result, name, 0)
+    return result^
+
+
 def _profile_phases(report: DataFrame) raises -> DataFrame:
     """Keep measured row timings when other region types have no attribution."""
     var result = report.copy()
@@ -381,6 +408,7 @@ def execute(
             )
             if profiling:
                 region = _profile_phases(region)
+            region = _grouped_integer_profile_fields(region)
             report = region^ if report.width() == 0 else report.vstack(
                 region.select(report.columns())
             )
@@ -751,6 +779,7 @@ def execute(
         )
         if profiling:
             region = _profile_phases(region)
+        region = _grouped_integer_profile_fields(region)
         report = region^ if report.width() == 0 else report.vstack(
             region.select(report.columns())
         )

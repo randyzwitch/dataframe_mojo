@@ -844,6 +844,41 @@ def _group_quantiles(plan: RowPlan, start: Int, nodes: Int) -> Bool:
     return False
 
 
+def _grouped_integer_partial_nodes(
+    plan: RowPlan, start: Int, nodes: Int
+) raises -> List[UInt32]:
+    """Metadata-only output certificate shared by sizing and dispatch."""
+    var result = List[UInt32]()
+    var header = plan.code[4 * start]
+    if header != ROW_GROUP_HEADER_LAST:
+        return result^
+    var keys = Int(plan.code[4 * start + 1])
+    var unsupported_physical_candidate = False
+    for column in range(keys + 1, nodes):
+        var node = start + column
+        var source_slot = Int(plan.code[4 * node + 1])
+        var target_slot = Int(plan.code[4 * node + 2])
+        var op = plan.code[4 * node + 3]
+        var source_dtype = plan.slot_dtypes[source_slot]
+        var target_dtype = plan.slot_dtypes[target_slot]
+        if (
+            source_dtype.physical().is_integer()
+            and target_dtype.physical().is_integer()
+        ):
+            if integer_partial_supported(
+                header, op, _kind(source_dtype), _kind(target_dtype)
+            ):
+                if source_dtype.is_integer() and target_dtype.is_integer():
+                    result.append(UInt32(node))
+                else:
+                    # Device slot kinds are physical. Avoid skipping a temporal
+                    # logical aggregate if another output admits this step.
+                    unsupported_physical_candidate = True
+    if unsupported_physical_candidate:
+        return List[UInt32]()
+    return result^
+
+
 def _quantile_indices(plan: RowPlan) -> Bool:
     if plan.reductions:
         for output in plan.outputs:
@@ -1061,6 +1096,20 @@ def estimate_resources(
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
             )
+    # The grouped integer path reuses one bounded 4096-state device scratch
+    # buffer across outputs and grouped steps. The group count is only known
+    # after sorting, so charge the full cap whenever metadata and row count
+    # could admit P >= 2; resident calls keep this same conservative envelope.
+    var grouped_integer_possible = False
+    if rows > 256:
+        for step in plan.steps:
+            if step.grouped and len(
+                _grouped_integer_partial_nodes(plan, step.start, step.nodes)
+            ):
+                grouped_integer_possible = True
+                break
+    if grouped_integer_possible:
+        peak = _checked_add(peak, 4096 * STATE_WORDS * 8)
     var upload = 0
     var download = 0
     var launches = 0
@@ -2357,38 +2406,11 @@ def execute_plan(
                                 submissions += 2
                                 positions = group_order^
                                 next_index = next_group_order^
-                            var integer_partial_nodes = List[UInt32]()
-                            var integer_partial_certificate = True
-                            if code[4 * step.start] == ROW_GROUP_HEADER_LAST:
-                                var group_keys = Int(
-                                    code[4 * step.start + 1]
+                            var integer_partial_nodes = (
+                                _grouped_integer_partial_nodes(
+                                    plan, step.start, step.nodes
                                 )
-                                for column in range(group_keys + 1, step.nodes):
-                                    var node = step.start + column
-                                    var source_slot = Int(code[4 * node + 1])
-                                    var target_slot = Int(code[4 * node + 2])
-                                    var op = code[4 * node + 3]
-                                    if integer_partial_supported(
-                                        code[4 * step.start],
-                                        op,
-                                        slot_types[source_slot],
-                                        slot_types[target_slot],
-                                    ):
-                                        if (
-                                            plan.slot_dtypes[
-                                                source_slot
-                                            ].is_integer()
-                                            and plan.slot_dtypes[
-                                                target_slot
-                                            ].is_integer()
-                                        ):
-                                            integer_partial_nodes.append(
-                                                UInt32(node)
-                                            )
-                                        else:
-                                            integer_partial_certificate = False
-                            if not integer_partial_certificate:
-                                integer_partial_nodes = List[UInt32]()
+                            )
                             var partials_per_group = 1
                             var group_batch = 0
                             if len(integer_partial_nodes) and shape[0] > 0:
@@ -2411,15 +2433,13 @@ def execute_plan(
                                         4096 // partials_per_group,
                                     )
                                     if not grouped_integer_scratch:
-                                        grouped_int_scratch_bytes = 4096 * 8 * 8
-                                        peak = _checked_add(
-                                            peak, grouped_int_scratch_bytes
-                                        )
-                                        _ = scope.check(peak)
                                         grouped_integer_scratch = (
                                             ctx.enqueue_create_buffer[
                                                 DType.uint64
                                             ](4096 * 8)
+                                        )
+                                        grouped_int_scratch_bytes = (
+                                            4096 * STATE_WORDS * 8
                                         )
                                     grouped_int_parallel_outputs += len(
                                         integer_partial_nodes
@@ -3574,6 +3594,7 @@ def execute_plan(
             _ = iana_replay^
             _ = ordered_control^
             _ = ordered_partials^
+            _ = grouped_integer_scratch^
             _ = remap_owner^
             raise error^
     elif plan.reductions:
@@ -3620,6 +3641,7 @@ def execute_plan(
     _ = iana_replay^
     _ = ordered_control^
     _ = ordered_partials^
+    _ = grouped_integer_scratch^
     _ = remap_owner^
     if not resident_result:
         if plan.reductions and count:
