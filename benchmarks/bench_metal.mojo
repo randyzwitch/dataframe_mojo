@@ -251,6 +251,12 @@ def report_profile(profile: DataFrame) raises:
             "query_wall_ms",
             profile.item(0, "query_wall_ms").float64(),
         )
+    if "query_preflight_ms" in profile.columns():
+        print(
+            "PROFILE_F",
+            "query_preflight_ms",
+            profile.item(0, "query_preflight_ms").float64(),
+        )
     if "preflight_ms" in profile.columns():
         print(
             "PROFILE_F",

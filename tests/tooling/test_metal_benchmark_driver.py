@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -75,6 +76,12 @@ class MetalBenchmarkDriver(unittest.TestCase):
         self.assertEqual(parsed["profile"]["region_0_staging_copy_ms"], 1.25)
         self.assertEqual(parsed["profile"]["query_wall_ms"], 4.75)
 
+    def test_query_preflight_timing_is_retained(self):
+        parsed = driver.parse_run(
+            output() + "PROFILE_F query_preflight_ms 0.8\n", 1
+        )
+        self.assertEqual(parsed["profile"]["query_preflight_ms"], 0.8)
+
     def test_optional_pipeline_and_gpu_timing_fields_are_retained(self):
         parsed = driver.parse_run(
             output()
@@ -84,6 +91,75 @@ class MetalBenchmarkDriver(unittest.TestCase):
         )
         self.assertEqual(parsed["profile"]["region_0_pipeline_compile_ms"], 0.75)
         self.assertEqual(parsed["profile"]["region_0_gpu_ms"], 1.5)
+
+    def test_build_receipt_is_verified_and_stale_binary_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "bench"
+            binary.write_bytes(b"first executable")
+            identity = {
+                "git_commit": "abc123",
+                "engine_content_sha256": "a" * 64,
+                "compiler_identity": "Mojo 0.0",
+                "pixi_lock_sha256": "b" * 64,
+                "benchmark_source_sha256": "c" * 64,
+                "driver_source_sha256": "d" * 64,
+                "compile_flags": ["-O3", "-I", "."],
+            }
+            with patch.object(
+                driver, "capture_build_identity", return_value=identity
+            ):
+                driver.write_build_receipt(binary, identity["compile_flags"])
+            receipt = driver.load_build_receipt(binary)
+            self.assertEqual(receipt["status"], "verified")
+            self.assertEqual(receipt["git_commit"], "abc123")
+            self.assertEqual(receipt["binary_sha256"], driver.sha(binary))
+            self.assertEqual(
+                receipt["build_command"],
+                [
+                    "mojo",
+                    "build",
+                    "-O3",
+                    "-I",
+                    ".",
+                    "benchmarks/bench_metal.mojo",
+                    "-o",
+                    str(binary.resolve()),
+                ],
+            )
+            binary.write_bytes(b"replacement executable")
+            with self.assertRaisesRegex(ValueError, "Stale build receipt"):
+                driver.load_build_receipt(binary)
+
+    def test_legacy_binary_has_unknown_source_attribution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "legacy-bench"
+            binary.write_bytes(b"legacy")
+            receipt = driver.load_build_receipt(binary)
+        self.assertEqual(receipt["status"], "unknown")
+        self.assertNotIn("git_commit", receipt)
+        self.assertNotIn("engine_content_sha256", receipt)
+
+    def test_invocation_records_effective_timeout_and_paths(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "timeout_seconds": 90,
+                "binary": Path("build/current"),
+                "baseline_binary": Path("build/baseline"),
+                "output": Path("build/run.json"),
+                "skip_build": True,
+            },
+        )()
+        record = driver.invocation_metadata(args, ["bench_metal.py", "--skip-build"])
+        self.assertEqual(record["argv"], ["bench_metal.py", "--skip-build"])
+        self.assertEqual(record["timeout_seconds"], 90)
+        self.assertTrue(record["skip_build"])
+        self.assertEqual(record["binary"], str(args.binary.resolve()))
+        self.assertEqual(
+            record["baseline_binary"], str(args.baseline_binary.resolve())
+        )
+        self.assertEqual(record["output"], str(args.output.resolve()))
 
     def test_source_fingerprint_includes_untracked_mojo_content(self):
         with tempfile.TemporaryDirectory() as folder:

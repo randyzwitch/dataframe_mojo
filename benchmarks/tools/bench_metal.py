@@ -57,13 +57,109 @@ def source_fingerprint(root):
     return digest.hexdigest()
 
 
+def build_receipt_path(binary):
+    return Path(str(Path(binary).resolve()) + ".receipt.json")
+
+
+def capture_build_identity(compile_flags):
+    compiler = command(["mojo", "--version"])
+    compiler_path = shutil.which("mojo")
+    source_diff = command(
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+    )
+    return {
+        "git_commit": command(["git", "rev-parse", "HEAD"]),
+        "git_status": command(["git", "status", "--porcelain"]),
+        "engine_status": command(
+            ["git", "status", "--porcelain", "--", "dataframe"]
+        ),
+        "engine_content_sha256": source_fingerprint(ROOT / "dataframe"),
+        "engine_diff_sha256": hashlib.sha256(source_diff.encode()).hexdigest(),
+        "compiler_identity": compiler,
+        "compiler_executable": compiler_path,
+        "compiler_executable_sha256": (
+            sha(compiler_path)
+            if compiler_path and Path(compiler_path).is_file()
+            else None
+        ),
+        "pixi_lock_sha256": (
+            sha(ROOT / "pixi.lock") if (ROOT / "pixi.lock").is_file() else None
+        ),
+        "benchmark_source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
+        "driver_source_sha256": sha(__file__),
+        "compile_flags": list(compile_flags),
+    }
+
+
+def write_build_receipt(binary, compile_flags, build_identity=None):
+    binary = Path(binary).resolve()
+    if build_identity is None:
+        build_identity = capture_build_identity(compile_flags)
+    receipt = {
+        "schema_version": 1,
+        "built_at_utc": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+        "binary_path": str(binary),
+        "binary_sha256": sha(binary),
+        "build_command": [
+            "mojo",
+            "build",
+            *compile_flags,
+            "benchmarks/bench_metal.mojo",
+            "-o",
+            str(binary),
+        ],
+        **build_identity,
+    }
+    path = build_receipt_path(binary)
+    path.write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def load_build_receipt(binary):
+    binary = Path(binary).resolve()
+    binary_sha256 = sha(binary)
+    path = build_receipt_path(binary)
+    if not path.is_file():
+        return {
+            "status": "unknown",
+            "reason": "No build receipt; binary source attribution is unknown",
+            "binary_path": str(binary),
+            "binary_sha256": binary_sha256,
+        }
+    receipt = json.loads(path.read_text())
+    if receipt.get("binary_sha256") != binary_sha256:
+        raise ValueError(f"Stale build receipt for {binary}")
+    if receipt.get("schema_version") != 1:
+        raise ValueError(f"Unsupported build receipt schema for {binary}")
+    return {"status": "verified", **receipt}
+
+
+def invocation_metadata(args, argv=None):
+    return {
+        "argv": list(sys.argv if argv is None else argv),
+        "cwd": str(ROOT),
+        "python_executable": sys.executable,
+        "timeout_seconds": args.timeout_seconds,
+        "binary": str(args.binary.resolve()),
+        "baseline_binary": (
+            str(args.baseline_binary.resolve())
+            if args.baseline_binary
+            else None
+        ),
+        "output": str(args.output.resolve()),
+        "skip_build": args.skip_build,
+    }
+
+
 def command(args):
     return subprocess.check_output(
         args, cwd=ROOT, text=True, stderr=subprocess.STDOUT
     ).strip()
 
 
-def metadata(binaries, threads):
+def metadata(binaries, threads, binary_receipts):
     compiler = command(["mojo", "--version"])
     compiler_path = shutil.which("mojo")
     source_diff = command(
@@ -125,6 +221,7 @@ def metadata(binaries, threads):
         "dataframe_threads": threads,
         "implementation": "mojo",
         "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
+        "binary_receipts": binary_receipts,
         "source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
         "driver_sha256": sha(__file__),
         "environment": {
@@ -374,15 +471,15 @@ def main():
     ):
         parser.error("Invalid rows, workload or variant")
     binary = args.binary.resolve()
+    compile_flags = ["-O3", "-I", "."]
     if not args.skip_build:
         binary.parent.mkdir(parents=True, exist_ok=True)
+        build_identity = capture_build_identity(compile_flags)
         subprocess.run(
             [
                 "mojo",
                 "build",
-                "-O3",
-                "-I",
-                ".",
+                *compile_flags,
                 "benchmarks/bench_metal.mojo",
                 "-o",
                 str(binary),
@@ -390,18 +487,26 @@ def main():
             cwd=ROOT,
             check=True,
         )
+        write_build_receipt(binary, compile_flags, build_identity)
     binaries = {"mojo": binary}
     if args.baseline_binary:
         binaries["baseline"] = args.baseline_binary.resolve()
+    binary_receipts = {
+        name: load_build_receipt(executable)
+        for name, executable in binaries.items()
+    }
     data = {
         "schema_version": 2,
-        "metadata": metadata(binaries, args.threads),
+        "metadata": metadata(binaries, args.threads, binary_receipts),
+        "invocation": invocation_metadata(args),
         "selection": {
             "rows": rows,
             "workloads": workloads,
             "variants": variants,
             "rounds": args.rounds,
             "reps": args.reps,
+            "threads": args.threads,
+            "timeout_seconds": args.timeout_seconds,
         },
         "runs": [],
     }
