@@ -1528,6 +1528,7 @@ def execute(
         )
         if profiling:
             var scratch_cache = device_service.value().scratch_info()
+            var pipeline_cache = device_service.value().pipeline_info()
             for field in List[Tuple[String, Int]](
                 [
                     (
@@ -1538,6 +1539,11 @@ def execute(
                     ("service_idle_scratch_entries", scratch_cache[1]),
                     ("service_scratch_hits", scratch_cache[2]),
                     ("service_scratch_misses", scratch_cache[3]),
+                    ("service_pipeline_entries", pipeline_cache[0]),
+                    ("service_pipeline_hits", pipeline_cache[1]),
+                    ("service_pipeline_misses", pipeline_cache[2]),
+                    ("service_pipeline_clears", pipeline_cache[3]),
+                    ("service_pipeline_capacity", 9),
                 ]
             ):
                 report = report.with_column(
