@@ -3,7 +3,16 @@
 Run with benchmarks/tools/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
 """
-from dataframe import Column, DataFrame, DataType, Expr, Series, LazyFrame, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    Series,
+    LazyFrame,
+    col,
+    lit,
+)
 from dataframe.metal import MetalRuntime
 from dataframe.parallel import configured_workers
 from std.os import getenv
@@ -168,10 +177,13 @@ def make_native64_frame(
         if variant == "sorted":
             value = i * 17 // n - 8
         elif variant == "nulls":
-            value = Int(
-                (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
-                % UInt32(17)
-            ) - 8
+            value = (
+                Int(
+                    (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                    % UInt32(17)
+                )
+                - 8
+            )
             valid[i] = i % 20 != 0
         values[i] = Int64(value)
     return DataFrame([Series("x", Column[Int64](values^, valid^))])
@@ -397,7 +409,9 @@ def main() raises:
     var variant = getenv("BENCH_VARIANT", "base")
     var gpu_first = getenv("BENCH_GPU_FIRST", "0") == "1"
     if n < 1 or reps < 1 or warmups < 0:
-        raise Error("Rows and repetitions must be positive; warmups nonnegative")
+        raise Error(
+            "Rows and repetitions must be positive; warmups nonnegative"
+        )
     var algorithm = (
         workload == "sort_radix"
         or workload == "group_hash"
@@ -411,9 +425,12 @@ def main() raises:
         == "float64_arithmetic" else make_decimal_frame(n, variant) if workload
         == "decimal_sum" else make_native64_frame(
             n, variant, workload == "uint64_sum"
-        ) if workload == "int64_sum" or workload == "uint64_sum"
+        ) if workload
+        == "int64_sum"
+        or workload == "uint64_sum"
         or workload == "int64_affine_sum"
-        or workload == "int64_wide_sum16" else make_algorithm_frame(
+        or workload
+        == "int64_wide_sum16" else make_algorithm_frame(
             n, variant, workload
         ) if algorithm else make_frame(
             n,
