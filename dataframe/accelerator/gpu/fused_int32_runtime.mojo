@@ -42,6 +42,7 @@ def _run[
             sums,
             counts,
             faults,
+            partial_count,
         )
         scope.enqueue_fused_finish(
             sums,

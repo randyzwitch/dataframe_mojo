@@ -34,9 +34,7 @@ def _plain_sum_query(value: Int32, rows: Int = 513) raises -> LazyFrame:
 
 
 def _nullable_sum_query() raises -> LazyFrame:
-    var source = DataFrame(
-        [Series("x", Column[Int32]([2, 2], [True, False]))]
-    )
+    var source = DataFrame([Series("x", Column[Int32]([2, 2], [True, False]))])
     return (
         source.lazy()
         .filter(col("x") > lit(Int32(0)))
@@ -148,12 +146,8 @@ def test_mojo_gpu_fused_pipeline_cache_hits_variants_budget_and_poison() raises:
     var first = _sum_query(2).profile(engine="accel", accelerator=runtime)
     assert_equal(first[0].item(0, "total").int64(), Int64(5130))
     assert_equal(runtime._device_service.pipeline_info(), (2, 0, 2, 0))
-    assert_equal(
-        first[1].item(0, "service_pipeline_entries").int64(), Int64(2)
-    )
-    assert_equal(
-        first[1].item(0, "service_pipeline_misses").int64(), Int64(2)
-    )
+    assert_equal(first[1].item(0, "service_pipeline_entries").int64(), Int64(2))
+    assert_equal(first[1].item(0, "service_pipeline_misses").int64(), Int64(2))
     assert_equal(
         first[1].item(0, "service_pipeline_capacity").int64(), Int64(9)
     )
@@ -161,15 +155,11 @@ def test_mojo_gpu_fused_pipeline_cache_hits_variants_budget_and_poison() raises:
     var repeated = _sum_query(4).profile(engine="accel", accelerator=runtime)
     assert_equal(repeated[0].item(0, "total").int64(), Int64(7182))
     assert_equal(runtime._device_service.pipeline_info(), (2, 2, 2, 0))
-    assert_equal(
-        repeated[1].item(0, "service_pipeline_hits").int64(), Int64(2)
-    )
+    assert_equal(repeated[1].item(0, "service_pipeline_hits").int64(), Int64(2))
 
     # Removing filter and row arithmetic selects another precompiled partial
     # specialization while reusing the common finish function.
-    var plain = _plain_sum_query(7).profile(
-        engine="accel", accelerator=runtime
-    )
+    var plain = _plain_sum_query(7).profile(engine="accel", accelerator=runtime)
     assert_equal(plain[0].item(0, "total").int64(), Int64(3591))
     assert_equal(runtime._device_service.pipeline_info(), (3, 3, 3, 0))
 

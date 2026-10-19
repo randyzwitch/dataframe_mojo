@@ -1400,7 +1400,12 @@ def _execute_preflighted(
         var wide_programs = wide_integer_plan.bind(plan)
         if wide_programs:
             return wide_integer_runtime.execute(
-                plan, wide_programs.value(), scope, profiling, started, preflight_ns
+                plan,
+                wide_programs.value(),
+                scope,
+                profiling,
+                started,
+                preflight_ns,
             )
     var executed = execute_plan(
         plan,
@@ -3620,8 +3625,9 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
             )
         if bind_wide_integer(plan):
             return (
-                "ENGINE accel: Mojo GPU native wide integer SUM; exact two-word "
-                "state, at most 4096 shared partial records, scalar-only export\n"
+                "ENGINE accel: Mojo GPU native wide integer SUM; exact two-word"
+                " state, at most 4096 shared partial records, scalar-only"
+                " export\n"
             )
         return (
             "ENGINE accel: Mojo GPU row expressions; "

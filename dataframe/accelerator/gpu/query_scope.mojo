@@ -115,9 +115,7 @@ struct DeviceService(Copyable):
     def pipeline_info(self) -> Tuple[Int, Int, Int, Int]:
         """Cached fused handles, cumulative hits, misses, and poison clears."""
         self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[
-            MutAnyOrigin
-        ]()
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
         var result = (
             state[].pipelines.entries(),
             state[].pipelines.hits,
@@ -152,18 +150,17 @@ struct DeviceService(Copyable):
         as soon as enqueue returns and is never held across a synchronization.
         """
         self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[
-            MutAnyOrigin
-        ]()
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
         try:
             if state[].cached_lease.load() != 1:
                 raise Error(
                     "fused pipeline cache requires the cached context lease"
                 )
             comptime if METAL_TARGET:
-                if not state[].context or rebind[DeviceContext](
-                    state[].context.value()
-                ) != context:
+                if (
+                    not state[].context
+                    or rebind[DeviceContext](state[].context.value()) != context
+                ):
                     raise Error(
                         "fused pipeline cache context does not match its lease"
                     )
@@ -203,18 +200,17 @@ struct DeviceService(Copyable):
         output: DeviceBuffer[DType.int64],
     ) raises:
         self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[
-            MutAnyOrigin
-        ]()
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
         try:
             if state[].cached_lease.load() != 1:
                 raise Error(
                     "fused pipeline cache requires the cached context lease"
                 )
             comptime if METAL_TARGET:
-                if not state[].context or rebind[DeviceContext](
-                    state[].context.value()
-                ) != context:
+                if (
+                    not state[].context
+                    or rebind[DeviceContext](state[].context.value()) != context
+                ):
                     raise Error(
                         "fused pipeline cache context does not match its lease"
                     )

@@ -101,9 +101,7 @@ def main() raises:
     test_mojo_gpu_overlapping_private_scope_cannot_consume_idle_scratch()
     test_mojo_gpu_fused_pipeline_cache_hits_variants_budget_and_poison()
     test_mojo_gpu_fused_pipeline_cache_bypasses_overlapping_scope()
-    print(
-        "PASS scratch and fused pipeline cache, budgets, poison and overlap"
-    )
+    print("PASS scratch and fused pipeline cache, budgets, poison and overlap")
 
     test_wide_integer_sum_exact_cancellation_across_partials_and_outputs()
     print("PASS wide integer cancellation, layouts and scalar outputs")

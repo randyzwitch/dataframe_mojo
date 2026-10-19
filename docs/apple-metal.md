@@ -276,8 +276,19 @@ device partial records and a 24-byte final control record replace per-row
 predicate, expression and filtered-table intermediates. With at most
 `Int32.MAX` input rows, summing surviving Int32 values in Int64 cannot overflow.
 The final valid count implements `min_count`; observed arithmetic faults retain
-the existing CPU adjudication contract. Other expression shapes and wide sums
-keep their existing execution paths.
+the existing CPU adjudication contract.
+
+A second precompiled family accepts one Int64 or UInt64 input and one or more
+terminal SUM outputs. Each output may use the source directly, checked addition
+or multiplication by a same-type literal, or checked addition followed by
+multiplication. This family does not accept filters. It retains native input
+storage and accumulates exact two-word integer totals in at most 4096 device
+partial records, shared sequentially across outputs. Final narrowing happens on
+the device after all partials merge; only one 24-byte record per output returns
+to the host. `min_count` may suppress final narrowing for a null result, but
+never suppresses a checked row arithmetic fault. The Int32 row-count bound
+ensures the exact total fits the two-word state. Other expression shapes keep
+their existing execution paths.
 
 The runtime service retains one idle context and up to 8 MiB / 32 entries of
 exact-capacity Int64 and UInt32 reduction scratch. These idle limits are per

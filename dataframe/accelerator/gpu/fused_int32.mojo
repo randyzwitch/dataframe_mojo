@@ -7,6 +7,9 @@ row values remain Int32, so an Int64 accumulator is exact for <= Int32.MAX rows.
 The launch caps the number of partials; grid-stride loops handle larger inputs.
 """
 
+# Kernel arguments have explicit device lifetimes: callers retain their native
+# input and private scratch owners until final synchronization. Untracked
+# origins let the compiled function type be retained in a concrete cache slot.
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer
@@ -15,17 +18,17 @@ from std.memory import Pointer
 def partials[
     nullable: Bool, filtered: Bool, arithmetic: Bool
 ](
-    values: Pointer[Int32, ImmutAnyOrigin],
-    validity: Pointer[UInt8, ImmutAnyOrigin],
+    values: Pointer[Int32, UntrackedOrigin[mut=False]],
+    validity: Pointer[UInt8, UntrackedOrigin[mut=False]],
     validity_offset: UInt32,
     rows: UInt32,
     stride: UInt32,
     threshold: Int32,
     addend: Int32,
     factor: Int32,
-    sums: Pointer[Int64, MutAnyOrigin],
-    counts: Pointer[UInt32, MutAnyOrigin],
-    faults: Pointer[UInt32, MutAnyOrigin],
+    sums: Pointer[Int64, MutUntrackedOrigin],
+    counts: Pointer[UInt32, MutUntrackedOrigin],
+    faults: Pointer[UInt32, MutUntrackedOrigin],
 ):
     var total = Int64(0)
     var count = UInt32(0)
@@ -71,11 +74,11 @@ def partials[
 
 
 def finish(
-    sums: Pointer[Int64, ImmutAnyOrigin],
-    counts: Pointer[UInt32, ImmutAnyOrigin],
-    faults: Pointer[UInt32, ImmutAnyOrigin],
+    sums: Pointer[Int64, UntrackedOrigin[mut=False]],
+    counts: Pointer[UInt32, UntrackedOrigin[mut=False]],
+    faults: Pointer[UInt32, UntrackedOrigin[mut=False]],
     partial_count: UInt32,
-    result: Pointer[Int64, MutAnyOrigin],
+    result: Pointer[Int64, MutUntrackedOrigin],
 ):
     """Publish sum, valid count and fault count in one small control record."""
     var total = Int64(0)

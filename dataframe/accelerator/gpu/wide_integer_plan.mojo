@@ -16,8 +16,10 @@ struct Program(Copyable):
 
 def _node(plan: RowPlan, at: Int, op: Int, dtype: DataType) -> Bool:
     return (
-        plan.code[4 * at] == Int64(op) and plan.node_dtypes[at] == dtype
-        and plan.code[4 * at + 1] == -1 and plan.code[4 * at + 2] == -1
+        plan.code[4 * at] == Int64(op)
+        and plan.node_dtypes[at] == dtype
+        and plan.code[4 * at + 1] == -1
+        and plan.code[4 * at + 2] == -1
         and (op == COL or plan.code[4 * at + 3] == -1)
     )
 
@@ -66,7 +68,9 @@ def bind(plan: RowPlan) -> Optional[List[Program]]:
         ref step = plan.steps[output]
         ref field = plan.outputs[output]
         if (
-            step.filter or step.order or step.grouped
+            step.filter
+            or step.order
+            or step.grouped
             or step.start != start
             or (step.nodes != 1 and step.nodes != 3 and step.nodes != 5)
             or step.slot != output + 1
@@ -108,7 +112,9 @@ def bind(plan: RowPlan) -> Optional[List[Program]]:
                 return None
             multiply = True
             factor = bitcast[DType.uint64](plan.literals[start + 3])
-        programs.append(Program(add, multiply, addend, factor, Int64(field.min_count)))
+        programs.append(
+            Program(add, multiply, addend, factor, Int64(field.min_count))
+        )
         start += step.nodes
     if start != len(plan.literals):
         return None

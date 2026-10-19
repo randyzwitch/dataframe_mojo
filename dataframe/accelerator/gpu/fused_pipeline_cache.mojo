@@ -18,79 +18,61 @@ comptime Partial000Handle = (
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[False, False, False]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial001Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[False, False, True]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial010Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[False, True, False]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial011Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[False, True, True]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial100Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[True, False, False]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial101Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[True, False, True]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial110Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[True, True, False]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime Partial111Handle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[
             fused_int32.partials[True, True, True]
         ]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 comptime FinishHandle = (
     type_of(
         DeviceContext(0, api="metal").compile_function[fused_int32.finish]()
-    )
-    if METAL_TARGET
-    else Int
+    ) if METAL_TARGET else Int
 )
 
 
@@ -160,20 +142,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial111 = Optional[
-                                Partial111Handle
-                            ](
+                            self.partial111 = Optional[Partial111Handle](
                                 rebind[Partial111Handle](
                                     context.compile_function[
                                         fused_int32.partials[True, True, True]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[True, True, True](
                             context,
-                            rebind[Partial111Handle](
-                                self.partial111.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[True, True, True]
+                                    ]()
+                                )
+                            ](self.partial111.value()),
                             values,
                             validity,
                             validity_offset,
@@ -192,20 +176,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial110 = Optional[
-                                Partial110Handle
-                            ](
+                            self.partial110 = Optional[Partial110Handle](
                                 rebind[Partial110Handle](
                                     context.compile_function[
                                         fused_int32.partials[True, True, False]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[True, True, False](
                             context,
-                            rebind[Partial110Handle](
-                                self.partial110.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[True, True, False]
+                                    ]()
+                                )
+                            ](self.partial110.value()),
                             values,
                             validity,
                             validity_offset,
@@ -225,20 +211,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial101 = Optional[
-                                Partial101Handle
-                            ](
+                            self.partial101 = Optional[Partial101Handle](
                                 rebind[Partial101Handle](
                                     context.compile_function[
                                         fused_int32.partials[True, False, True]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[True, False, True](
                             context,
-                            rebind[Partial101Handle](
-                                self.partial101.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[True, False, True]
+                                    ]()
+                                )
+                            ](self.partial101.value()),
                             values,
                             validity,
                             validity_offset,
@@ -257,20 +245,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial100 = Optional[
-                                Partial100Handle
-                            ](
+                            self.partial100 = Optional[Partial100Handle](
                                 rebind[Partial100Handle](
                                     context.compile_function[
                                         fused_int32.partials[True, False, False]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[True, False, False](
                             context,
-                            rebind[Partial100Handle](
-                                self.partial100.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[True, False, False]
+                                    ]()
+                                )
+                            ](self.partial100.value()),
                             values,
                             validity,
                             validity_offset,
@@ -291,20 +281,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial011 = Optional[
-                                Partial011Handle
-                            ](
+                            self.partial011 = Optional[Partial011Handle](
                                 rebind[Partial011Handle](
                                     context.compile_function[
                                         fused_int32.partials[False, True, True]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[False, True, True](
                             context,
-                            rebind[Partial011Handle](
-                                self.partial011.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[False, True, True]
+                                    ]()
+                                )
+                            ](self.partial011.value()),
                             values,
                             validity,
                             validity_offset,
@@ -323,20 +315,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial010 = Optional[
-                                Partial010Handle
-                            ](
+                            self.partial010 = Optional[Partial010Handle](
                                 rebind[Partial010Handle](
                                     context.compile_function[
                                         fused_int32.partials[False, True, False]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[False, True, False](
                             context,
-                            rebind[Partial010Handle](
-                                self.partial010.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[False, True, False]
+                                    ]()
+                                )
+                            ](self.partial010.value()),
                             values,
                             validity,
                             validity_offset,
@@ -356,20 +350,22 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial001 = Optional[
-                                Partial001Handle
-                            ](
+                            self.partial001 = Optional[Partial001Handle](
                                 rebind[Partial001Handle](
                                     context.compile_function[
                                         fused_int32.partials[False, False, True]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[False, False, True](
                             context,
-                            rebind[Partial001Handle](
-                                self.partial001.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[False, False, True]
+                                    ]()
+                                )
+                            ](self.partial001.value()),
                             values,
                             validity,
                             validity_offset,
@@ -388,20 +384,26 @@ struct FusedPipelineCache(Movable):
                             self.hits += 1
                         else:
                             self.misses += 1
-                            self.partial000 = Optional[
-                                Partial000Handle
-                            ](
+                            self.partial000 = Optional[Partial000Handle](
                                 rebind[Partial000Handle](
                                     context.compile_function[
-                                        fused_int32.partials[False, False, False]
+                                        fused_int32.partials[
+                                            False, False, False
+                                        ]
                                     ]()
                                 )
                             )
-                        enqueue_partial_handle(
+                        enqueue_partial_handle[False, False, False](
                             context,
-                            rebind[Partial000Handle](
-                                self.partial000.value()
-                            ),
+                            rebind[
+                                type_of(
+                                    context.compile_function[
+                                        fused_int32.partials[
+                                            False, False, False
+                                        ]
+                                    ]()
+                                )
+                            ](self.partial000.value()),
                             values,
                             validity,
                             validity_offset,
@@ -416,9 +418,7 @@ struct FusedPipelineCache(Movable):
                             partial_count,
                         )
         else:
-            raise Error(
-                "fused pipeline cache requires a compiled Metal target"
-            )
+            raise Error("fused pipeline cache requires a compiled Metal target")
 
     def enqueue_finish(
         mut self,
@@ -442,7 +442,7 @@ struct FusedPipelineCache(Movable):
                 )
             enqueue_finish_handle(
                 context,
-                rebind[FinishHandle](
+                rebind[type_of(context.compile_function[fused_int32.finish]())](
                     self.finish.value()
                 ),
                 sums,
@@ -452,9 +452,7 @@ struct FusedPipelineCache(Movable):
                 output,
             )
         else:
-            raise Error(
-                "fused pipeline cache requires a compiled Metal target"
-            )
+            raise Error("fused pipeline cache requires a compiled Metal target")
 
     def clear(mut self):
         # Compiled DeviceFunctions own context references. Release every handle
@@ -470,9 +468,15 @@ struct FusedPipelineCache(Movable):
         self.finish = Optional[FinishHandle]()
 
 
-def enqueue_partial_handle[Handle: AnyType](
+def enqueue_partial_handle[
+    nullable: Bool, filtered: Bool, arithmetic: Bool
+](
     context: DeviceContext,
-    handle: Handle,
+    handle: type_of(
+        DeviceContext(0, api="metal").compile_function[
+            fused_int32.partials[nullable, filtered, arithmetic]
+        ]()
+    ),
     values: DeviceBuffer[DType.int32],
     validity: DeviceBuffer[DType.uint8],
     validity_offset: UInt32,
@@ -504,9 +508,11 @@ def enqueue_partial_handle[Handle: AnyType](
     )
 
 
-def enqueue_finish_handle[Handle: AnyType](
+def enqueue_finish_handle(
     context: DeviceContext,
-    handle: Handle,
+    handle: type_of(
+        DeviceContext(0, api="metal").compile_function[fused_int32.finish]()
+    ),
     sums: DeviceBuffer[DType.int64],
     counts: DeviceBuffer[DType.uint32],
     faults: DeviceBuffer[DType.uint32],

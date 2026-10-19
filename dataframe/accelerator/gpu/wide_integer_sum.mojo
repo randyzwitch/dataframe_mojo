@@ -60,9 +60,17 @@ def partials[
         var present = True
         comptime if nullable:
             var bit = Int(validity_offset) + row
-            present = (validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1 != 0
+            present = (
+                validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)
+            ) & 1 != 0
         if present:
-            var value = bitcast[DType.uint64](values[unsafe_offset=row])
+            var value = UInt64(0)
+            comptime if unsigned:
+                value = rebind[UInt64](values[unsafe_offset=row])
+            else:
+                value = bitcast[DType.uint64](
+                    rebind[Int64](values[unsafe_offset=row])
+                )
             var failed = False
             comptime if add:
                 var added = value + addend
@@ -97,7 +105,9 @@ def partials[
         faults[unsafe_offset=block_idx.x] = block_failures
 
 
-def finish[unsigned: Bool](
+def finish[
+    unsigned: Bool
+](
     lows: Pointer[Int64, ImmutAnyOrigin],
     highs: Pointer[Int64, ImmutAnyOrigin],
     counts: Pointer[UInt32, ImmutAnyOrigin],
@@ -114,7 +124,8 @@ def finish[unsigned: Bool](
     var at = thread_idx.x
     while at < Int(partial_count):
         var next = _add_pair(
-            low, high,
+            low,
+            high,
             bitcast[DType.uint64](lows[unsafe_offset=at]),
             bitcast[DType.uint64](highs[unsafe_offset=at]),
         )
@@ -130,7 +141,9 @@ def finish[unsigned: Bool](
         var expected_high = UInt64(0)
         comptime if not unsigned:
             expected_high = UInt64.MAX if total[0] >> 63 else UInt64(0)
-        block_failures += UInt32(Int64(block_count) >= min_count and total[1] != expected_high)
+        block_failures += UInt32(
+            Int64(block_count) >= min_count and total[1] != expected_high
+        )
         var base = Int(output_index) * 3
         result[unsafe_offset=base] = bitcast[DType.int64](total[0])
         result[unsafe_offset=base + 1] = Int64(block_count)

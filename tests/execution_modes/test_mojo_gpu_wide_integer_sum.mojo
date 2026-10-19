@@ -7,10 +7,14 @@ from dataframe.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
-def _sums(frame: DataFrame, expression: Expr, outputs: Int = 16, min_count: Int = 0) -> LazyFrame:
+def _sums(
+    frame: DataFrame, expression: Expr, outputs: Int = 16, min_count: Int = 0
+) -> LazyFrame:
     var expressions = List[Expr]()
     for index in range(outputs):
-        expressions.append(expression.sum(min_count=min_count).alias("s" + String(index)))
+        expressions.append(
+            expression.sum(min_count=min_count).alias("s" + String(index))
+        )
     return frame.lazy().select_exprs(expressions)
 
 
@@ -23,8 +27,13 @@ def _check(query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     var expected = query.collect(engine="cpu", optimize=False, streaming=False)
     var measured = query.profile(engine="accel", accelerator=runtime)
     assert_true(measured[0].equals(expected))
-    assert_equal(measured[1].item(0, "algorithm").string(), "mojo_gpu_native_wide_integer_sum")
-    assert_true(query.collect(engine="accel", accelerator=runtime).equals(expected))
+    assert_equal(
+        measured[1].item(0, "algorithm").string(),
+        "mojo_gpu_native_wide_integer_sum",
+    )
+    assert_true(
+        query.collect(engine="accel", accelerator=runtime).equals(expected)
+    )
     return measured^
 
 
@@ -43,9 +52,15 @@ def test_wide_integer_sum_exact_cancellation_across_partials_and_outputs() raise
                 var name = "s" + String(index)
                 assert_equal(measured[0].column(name).dtype(), DataType.INT64)
                 assert_equal(measured[0].item(0, name).int64(), Int64(7))
-    var endpoints = DataFrame([Series("value", Column[Int64]([Int64.MAX, Int64.MIN]))])
+    var endpoints = DataFrame(
+        [Series("value", Column[Int64]([Int64.MAX, Int64.MIN]))]
+    )
     var result = _check(_sums(endpoints, col("value"), 1))
     assert_equal(result[0].item(0, "s0").int64(), Int64(-1))
+    for endpoint in [Int64.MIN, Int64.MAX]:
+        var singleton = DataFrame([Series("value", Column[Int64]([endpoint]))])
+        var exact = _check(_sums(singleton, col("value"), 1))
+        assert_equal(exact[0].item(0, "s0").int64(), endpoint)
 
 
 # requires: mojo_gpu
@@ -90,9 +105,17 @@ def _overflow(query: LazyFrame) raises:
     assert_true("overflow" in cpu_error)
     var gpu_error = String()
     try:
-        _ = query.collect(engine="accel", accelerator=MetalRuntime(), optimize=False, streaming=False)
+        _ = query.collect(
+            engine="accel",
+            accelerator=MetalRuntime(),
+            optimize=False,
+            streaming=False,
+        )
     except error:
         gpu_error = String(error)
+    if cpu_error not in gpu_error:
+        print("Expected CPU overflow:", cpu_error)
+        print("Actual Metal outcome:", gpu_error)
     assert_true(cpu_error in gpu_error)
 
 
@@ -107,6 +130,16 @@ def test_wide_integer_sum_final_overflow_and_late_checked_row_faults() raises:
     _overflow(_sums(unsigned, col("value") * lit(UInt64(2))))
     var minimum = DataFrame([Series("value", Column[Int64]([Int64.MIN]))])
     _overflow(_sums(minimum, col("value") * lit(Int64(-1))))
+    # Unmet min_count suppresses final narrowing, never a checked row fault.
+    _overflow(_sums(minimum, col("value") * lit(Int64(-1)), 1, 2))
+    _overflow(
+        _sums(unsigned, (col("value") + lit(UInt64(1))) * lit(UInt64(0)), 1, 3)
+    )
+    var masked = DataFrame(
+        [Series("value", Column[Int64]([Int64.MIN, 3], [False, True]))]
+    )
+    var skipped = _check(_sums(masked, col("value") * lit(Int64(-1)), 1))
+    assert_equal(skipped[0].item(0, "s0").int64(), Int64(-3))
     var values = List[Int64](length=65537, fill=0)
     values[65536] = Int64.MAX
     var late = DataFrame([Series("value", Column[Int64](values^))])
@@ -115,25 +148,35 @@ def test_wide_integer_sum_final_overflow_and_late_checked_row_faults() raises:
     # Distinct output constants exercise the same bounded partial set without
     # retaining one whole-row intermediate per scalar output.
     var frame = DataFrame([Series("value", Column[Int64]([-2, 0, 5]))])
-    var query = frame.lazy().select_exprs([
-        col("value").sum().alias("a"),
-        (col("value") + lit(Int64(2))).sum().alias("b"),
-        (col("value") * lit(Int64(-3))).sum().alias("c"),
-        ((col("value") + lit(Int64(1))) * lit(Int64(2))).sum().alias("d"),
-    ])
+    var query = frame.lazy().select_exprs(
+        [
+            col("value").sum().alias("a"),
+            (col("value") + lit(Int64(2))).sum().alias("b"),
+            (col("value") * lit(Int64(-3))).sum().alias("c"),
+            ((col("value") + lit(Int64(1))) * lit(Int64(2))).sum().alias("d"),
+        ]
+    )
     var measured = _check(query)
-    for pair in List[Tuple[String, Int64]]([("a", 3), ("b", 9), ("c", -9), ("d", 12)]):
+    for pair in List[Tuple[String, Int64]](
+        [("a", Int64(3)), ("b", Int64(9)), ("c", Int64(-9)), ("d", Int64(12))]
+    ):
         assert_equal(measured[0].item(0, pair[0]).int64(), pair[1])
     var one = DataFrame([Series("value", Column[Int64]([1]))])
     var literal = Int64(9007199254740993)
-    var exact_literal = _check(one.lazy().select_exprs([
-        (col("value") + lit(literal)).sum().alias("add"),
-        (col("value") * lit(literal)).sum().alias("multiply"),
-    ]))
+    var exact_literal = _check(
+        one.lazy().select_exprs(
+            [
+                (col("value") + lit(literal)).sum().alias("add"),
+                (col("value") * lit(literal)).sum().alias("multiply"),
+            ]
+        )
+    )
     assert_equal(exact_literal[0].item(0, "add").int64(), literal + 1)
     assert_equal(exact_literal[0].item(0, "multiply").int64(), literal)
     var unsigned_one = DataFrame([Series("value", Column[UInt64]([1]))])
-    var exact_unsigned = _check(_sums(unsigned_one, col("value") * lit(UInt64.MAX), 1))
+    var exact_unsigned = _check(
+        _sums(unsigned_one, col("value") * lit(UInt64.MAX), 1)
+    )
     assert_equal(exact_unsigned[0].item(0, "s0").uint64(), UInt64.MAX)
 
 
