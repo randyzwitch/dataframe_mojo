@@ -51,6 +51,8 @@ HAYSTACKS = [
     "_under_score_",
     "0",
     "ababab",
+    "https://www.example.com/a/b?q=1",
+    "http://foo.org/",
 ]
 
 PATTERNS = [
@@ -72,6 +74,9 @@ PATTERNS = [
     "^", "$", "^a", "a$", "^abc$", "^$", r"\A", r"\z", r"\Aab", r"b\z",
     "(?m)^", "(?m)$", "(?m)^line", "(?m)\\d$", "(?m)^$", r"\b", r"\B", r"\bfoo\b",
     r"\b\w+\b", r"\B\w", r"\bé", r"ab\b", "^*", "$+",
+    # anchored with groups
+    "^(a+)(b)?", r"^(\w+)\s", r"\A(?:x|(a))+", "^(|a)", "^([^/]+)/?.*$",
+    r"^https?://(?:www\.)?([^/]+)/.*$", "^(a)|b", r"(?m)^(\w+)",
     # alternation and groups
     "a|b", "foo|bar", "a|ab|abc", "abc|ab|a", "(a|b)+", "(?:ab)+", "(ab)+",
     "(a)(b)?(c)?", "(a|ab)(c|bcd)", "()", "a|", "|", "(|a)", "(a)|b",

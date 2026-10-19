@@ -1685,7 +1685,11 @@ def _column_stats[
     Int128, Int, Int64, Int64
 ]:
     """One pass for the sum, count, min and max of the valid rows
-    [start, end); min and max are Int64.MAX and Int64.MIN when none."""
+    [start, end); min and max are Int64.MAX and Int64.MIN when none.
+    The sum is exact: Int64 values add in Int128 lanes, since eight Int64
+    lanes wrap (eight values of 2**60 sum to 2**63, one past Int64.MAX);
+    narrower integers add in Int64 lanes, which no realistic row count
+    can overflow (#605)."""
     var values = column._ptr()
     var bits = column.unsafe_validity()
     var all_valid = len(column._bits[]) == 0
@@ -1693,6 +1697,7 @@ def _column_stats[
         column._bits[], column._offset + start, end - start
     )
     var sum = SIMD[DType.int64, 8](0)
+    var wide = SIMD[DType.int128, 8](0)
     var least = SIMD[DType.int64, 8](Int64.MAX)
     var most = SIMD[DType.int64, 8](Int64.MIN)
     var i = start
@@ -1700,15 +1705,23 @@ def _column_stats[
         var v = values.unsafe_load[width=8](i).cast[DType.int64]()
         if not all_valid:
             var valid = _valid_lanes(bits, column._offset + i)
-            sum += valid.select(v, SIMD[DType.int64, 8](0))
+            comptime if D == DType.int64:
+                wide += valid.select(v, SIMD[DType.int64, 8](0)).cast[
+                    DType.int128
+                ]()
+            else:
+                sum += valid.select(v, SIMD[DType.int64, 8](0))
             least = min(least, valid.select(v, SIMD[DType.int64, 8](Int64.MAX)))
             most = max(most, valid.select(v, SIMD[DType.int64, 8](Int64.MIN)))
         else:
-            sum += v
+            comptime if D == DType.int64:
+                wide += v.cast[DType.int128]()
+            else:
+                sum += v
             least = min(least, v)
             most = max(most, v)
         i += 8
-    var total = sum.reduce_add().cast[DType.int128]()
+    var total = sum.reduce_add().cast[DType.int128]() + wide.reduce_add()
     var smallest = least.reduce_min()
     var largest = most.reduce_max()
     while i < end:

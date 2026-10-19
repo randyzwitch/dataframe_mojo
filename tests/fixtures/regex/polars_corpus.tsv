@@ -28,6 +28,8 @@ a	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a	0	false	\N	0	0	0	0	\N	10
 a	ababab	true	0	3	3aaa	<$0>b<$0>b<$0>b	[${1}]babab	\N	4bbb
+a	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<$0>mple.com/<$0>/b?q=1	https://www.ex[${1}]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 abc		false	\N	0	0			\N	1
 abc	a	false	\N	0	0	a	a	\N	1a
 abc	abc	true	0	1	1abc	<$0>	[${1}]	\N	2
@@ -58,6 +60,8 @@ abc	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 abc	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 abc	0	false	\N	0	0	0	0	\N	10
 abc	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+abc	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+abc	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 b		false	\N	0	0			\N	1
 b	a	false	\N	0	0	a	a	\N	1a
 b	abc	true	1	1	1b	a<$0>c	a[${1}]c	\N	2ac
@@ -88,6 +92,8 @@ b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 b	0	false	\N	0	0	0	0	\N	10
 b	ababab	true	1	3	3bbb	a<$0>a<$0>a<$0>	a[${1}]abab	\N	4aaa
+b	https://www.example.com/a/b?q=1	true	26	1	1b	https://www.example.com/a/<$0>?q=1	https://www.example.com/a/[${1}]?q=1	\N	2https://www.example.com/a/?q=1
+b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 foo		false	\N	0	0			\N	1
 foo	a	false	\N	0	0	a	a	\N	1a
 foo	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -118,6 +124,8 @@ foo	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 foo	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 foo	0	false	\N	0	0	0	0	\N	10
 foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+foo	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+foo	http://foo.org/	true	7	1	1foo	http://<$0>.org/	http://[${1}].org/	\N	2http://.org/
 é		false	\N	0	0			\N	1
 é	a	false	\N	0	0	a	a	\N	1a
 é	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -148,6 +156,8 @@ foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 é	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 é	0	false	\N	0	0	0	0	\N	10
 é	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+é	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+é	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 日本		false	\N	0	0			\N	1
 日本	a	false	\N	0	0	a	a	\N	1a
 日本	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -178,6 +188,8 @@ foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 日本	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 日本	0	false	\N	0	0	0	0	\N	10
 日本	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+日本	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+日本	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 😀		false	\N	0	0			\N	1
 😀	a	false	\N	0	0	a	a	\N	1a
 😀	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -208,6 +220,8 @@ foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 😀	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 😀	0	false	\N	0	0	0	0	\N	10
 😀	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+😀	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+😀	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\.		false	\N	0	0			\N	1
 \\.	a	false	\N	0	0	a	a	\N	1a
 \\.	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -238,6 +252,8 @@ foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\.	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\.	0	false	\N	0	0	0	0	\N	10
 \\.	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\.	https://www.example.com/a/b?q=1	true	11	2	2..	https://www<.>example<.>com/a/b?q=1	https://www[]example.com/a/b?q=1	\N	3https://wwwexamplecom/a/b?q=1
+\\.	http://foo.org/	true	10	1	1.	http://foo<.>org/	http://foo[]org/	\N	2http://fooorg/
 a\\.b		false	\N	0	0			\N	1
 a\\.b	a	false	\N	0	0	a	a	\N	1a
 a\\.b	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -268,6 +284,8 @@ a\\.b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a\\.b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a\\.b	0	false	\N	0	0	0	0	\N	10
 a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a\\.b	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a\\.b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\*		false	\N	0	0			\N	1
 \\*	a	false	\N	0	0	a	a	\N	1a
 \\*	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -298,6 +316,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\*	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\*	0	false	\N	0	0	0	0	\N	10
 \\*	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\*	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\*	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\+		false	\N	0	0			\N	1
 \\+	a	false	\N	0	0	a	a	\N	1a
 \\+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -328,6 +348,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\+	0	false	\N	0	0	0	0	\N	10
 \\+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\?		false	\N	0	0			\N	1
 \\?	a	false	\N	0	0	a	a	\N	1a
 \\?	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -358,6 +380,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\?	0	false	\N	0	0	0	0	\N	10
 \\?	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\?	https://www.example.com/a/b?q=1	true	27	1	1?	https://www.example.com/a/b<?>q=1	https://www.example.com/a/b[]q=1	\N	2https://www.example.com/a/bq=1
+\\?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\t		false	\N	0	0			\N	1
 \\t	a	false	\N	0	0	a	a	\N	1a
 \\t	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -388,6 +412,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\t	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\t	0	false	\N	0	0	0	0	\N	10
 \\t	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\t	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\t	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\n		false	\N	0	0			\N	1
 \\n	a	false	\N	0	0	a	a	\N	1a
 \\n	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -418,6 +444,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\n	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\n	0	false	\N	0	0	0	0	\N	10
 \\n	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\n	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\n	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\x41		false	\N	0	0			\N	1
 \\x41	a	false	\N	0	0	a	a	\N	1a
 \\x41	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -448,6 +476,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\x41	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\x41	0	false	\N	0	0	0	0	\N	10
 \\x41	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\x41	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\x41	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\x{1F600}		false	\N	0	0			\N	1
 \\x{1F600}	a	false	\N	0	0	a	a	\N	1a
 \\x{1F600}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -478,6 +508,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\x{1F600}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\x{1F600}	0	false	\N	0	0	0	0	\N	10
 \\x{1F600}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\x{1F600}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\x{1F600}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 é		false	\N	0	0			\N	1
 é	a	false	\N	0	0	a	a	\N	1a
 é	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -508,6 +540,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 é	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 é	0	false	\N	0	0	0	0	\N	10
 é	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+é	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+é	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\U0001F600		false	\N	0	0			\N	1
 \\U0001F600	a	false	\N	0	0	a	a	\N	1a
 \\U0001F600	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -538,6 +572,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\U0001F600	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\U0001F600	0	false	\N	0	0	0	0	\N	10
 \\U0001F600	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\U0001F600	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\U0001F600	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\-		false	\N	0	0			\N	1
 \\-	a	false	\N	0	0	a	a	\N	1a
 \\-	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -568,6 +604,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\-	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\-	0	false	\N	0	0	0	0	\N	10
 \\-	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\-	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\-	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\ 		false	\N	0	0			\N	1
 \\ 	a	false	\N	0	0	a	a	\N	1a
 \\ 	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -598,6 +636,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\ 	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\ 	0	false	\N	0	0	0	0	\N	10
 \\ 	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\ 	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\ 	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\%		false	\N	0	0			\N	1
 \\%	a	false	\N	0	0	a	a	\N	1a
 \\%	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -628,6 +668,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\%	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\%	0	false	\N	0	0	0	0	\N	10
 \\%	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\%	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\%	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\_		false	\N	0	0			\N	1
 \\_	a	false	\N	0	0	a	a	\N	1a
 \\_	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -658,6 +700,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\_	_under_score_	true	0	3	3___	<_>under<_>score<_>	[]under_score_	\N	4underscore
 \\_	0	false	\N	0	0	0	0	\N	10
 \\_	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\_	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\_	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\\\		false	\N	0	0			\N	1
 \\\\	a	false	\N	0	0	a	a	\N	1a
 \\\\	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -688,6 +732,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\\\	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\\\	0	false	\N	0	0	0	0	\N	10
 \\\\	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\\\	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\\\	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 		true	0	1	1	<$0>	[${1}]	\N	0
 	a	true	0	2	2	<$0>a<$0>	[${1}]a	\N	1a
 	abc	true	0	4	4	<$0>a<$0>b<$0>c<$0>	[${1}]abc	\N	3abc
@@ -718,6 +764,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 	_under_score_	true	0	14	14	<$0>_<$0>u<$0>n<$0>d<$0>e<$0>r<$0>_<$0>s<$0>c<$0>o<$0>r<$0>e<$0>_<$0>	[${1}]_under_score_	\N	13_under_score_
 	0	true	0	2	2	<$0>0<$0>	[${1}]0	\N	10
 	ababab	true	0	7	7	<$0>a<$0>b<$0>a<$0>b<$0>a<$0>b<$0>	[${1}]ababab	\N	6ababab
+	https://www.example.com/a/b?q=1	true	0	32	32	<$0>h<$0>t<$0>t<$0>p<$0>s<$0>:<$0>/<$0>/<$0>w<$0>w<$0>w<$0>.<$0>e<$0>x<$0>a<$0>m<$0>p<$0>l<$0>e<$0>.<$0>c<$0>o<$0>m<$0>/<$0>a<$0>/<$0>b<$0>?<$0>q<$0>=<$0>1<$0>	[${1}]https://www.example.com/a/b?q=1	\N	31https://www.example.com/a/b?q=1
+	http://foo.org/	true	0	16	16	<$0>h<$0>t<$0>t<$0>p<$0>:<$0>/<$0>/<$0>f<$0>o<$0>o<$0>.<$0>o<$0>r<$0>g<$0>/<$0>	[${1}]http://foo.org/	\N	15http://foo.org/
 .		false	\N	0	0			\N	1
 .	a	true	0	1	1a	<a>	[]	\N	2
 .	abc	true	0	3	3abc	<a><b><c>	[]bc	\N	4
@@ -748,6 +796,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 .	_under_score_	true	0	13	13_under_score_	<_><u><n><d><e><r><_><s><c><o><r><e><_>	[]under_score_	\N	14
 .	0	true	0	1	10	<0>	[]	\N	2
 .	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[]babab	\N	7
+.	https://www.example.com/a/b?q=1	true	0	31	31https://www.example.com/a/b?q=1	<h><t><t><p><s><:></></><w><w><w><.><e><x><a><m><p><l><e><.><c><o><m></><a></><b><?><q><=><1>	[]ttps://www.example.com/a/b?q=1	\N	32
+.	http://foo.org/	true	0	15	15http://foo.org/	<h><t><t><p><:></></><f><o><o><.><o><r><g></>	[]ttp://foo.org/	\N	16
 ..		false	\N	0	0			\N	1
 ..	a	false	\N	0	0	a	a	\N	1a
 ..	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -778,6 +828,8 @@ a\\.b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ..	_under_score_	true	0	6	6_under_score	<_u><nd><er><_s><co><re>_	[]nder_score_	\N	7_
 ..	0	false	\N	0	0	0	0	\N	10
 ..	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+..	https://www.example.com/a/b?q=1	true	0	15	15https://www.example.com/a/b?q=	<ht><tp><s:><//><ww><w.><ex><am><pl><e.><co><m/><a/><b?><q=>1	[]tps://www.example.com/a/b?q=1	\N	161
+..	http://foo.org/	true	0	7	7http://foo.org	<ht><tp><:/></f><oo><.o><rg>/	[]tp://foo.org/	\N	8/
 a.c		false	\N	0	0			\N	1
 a.c	a	false	\N	0	0	a	a	\N	1a
 a.c	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -808,6 +860,8 @@ a.c	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a.c	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a.c	0	false	\N	0	0	0	0	\N	10
 a.c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a.c	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a.c	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?s).		false	\N	0	0			\N	1
 (?s).	a	true	0	1	1a	<a>	[]	\N	2
 (?s).	abc	true	0	3	3abc	<a><b><c>	[]bc	\N	4
@@ -838,6 +892,8 @@ a.c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (?s).	_under_score_	true	0	13	13_under_score_	<_><u><n><d><e><r><_><s><c><o><r><e><_>	[]under_score_	\N	14
 (?s).	0	true	0	1	10	<0>	[]	\N	2
 (?s).	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[]babab	\N	7
+(?s).	https://www.example.com/a/b?q=1	true	0	31	31https://www.example.com/a/b?q=1	<h><t><t><p><s><:></></><w><w><w><.><e><x><a><m><p><l><e><.><c><o><m></><a></><b><?><q><=><1>	[]ttps://www.example.com/a/b?q=1	\N	32
+(?s).	http://foo.org/	true	0	15	15http://foo.org/	<h><t><t><p><:></></><f><o><o><.><o><r><g></>	[]ttp://foo.org/	\N	16
 (?s)a.+		false	\N	0	0			\N	1
 (?s)a.+	a	false	\N	0	0	a	a	\N	1a
 (?s)a.+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -868,6 +924,8 @@ a.c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (?s)a.+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?s)a.+	0	false	\N	0	0	0	0	\N	10
 (?s)a.+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+(?s)a.+	https://www.example.com/a/b?q=1	true	14	1	1ample.com/a/b?q=1	https://www.ex<ample.com/a/b?q=1>	https://www.ex[]	\N	2https://www.ex
+(?s)a.+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 .+		false	\N	0	0			\N	1
 .+	a	true	0	1	1a	<a>	[]	\N	2
 .+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -898,6 +956,8 @@ a.c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 .+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 .+	0	true	0	1	10	<0>	[]	\N	2
 .+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+.+	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[]	\N	2
+.+	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 .*		true	0	1	1	<>	[]	\N	2
 .*	a	true	0	1	1a	<a>	[]	\N	2
 .*	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -928,6 +988,8 @@ a.c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 .*	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 .*	0	true	0	1	10	<0>	[]	\N	2
 .*	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+.*	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[]	\N	2
+.*	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 x.y		false	\N	0	0			\N	1
 x.y	a	false	\N	0	0	a	a	\N	1a
 x.y	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -958,6 +1020,8 @@ x.y	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 x.y	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 x.y	0	false	\N	0	0	0	0	\N	10
 x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+x.y	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+x.y	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [abc]		false	\N	0	0			\N	1
 [abc]	a	true	0	1	1a	<a>	[]	\N	2
 [abc]	abc	true	0	3	3abc	<a><b><c>	[]bc	\N	4
@@ -988,6 +1052,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [abc]	_under_score_	true	8	1	1c	_under_s<c>ore_	_under_s[]ore_	\N	2_under_sore_
 [abc]	0	false	\N	0	0	0	0	\N	10
 [abc]	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[]babab	\N	7
+[abc]	https://www.example.com/a/b?q=1	true	14	4	4acab	https://www.ex<a>mple.<c>om/<a>/<b>?q=1	https://www.ex[]mple.com/a/b?q=1	\N	5https://www.exmple.om//?q=1
+[abc]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [a-c]+		false	\N	0	0			\N	1
 [a-c]+	a	true	0	1	1a	<a>	[]	\N	2
 [a-c]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1018,6 +1084,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-c]+	_under_score_	true	8	1	1c	_under_s<c>ore_	_under_s[]ore_	\N	2_under_sore_
 [a-c]+	0	false	\N	0	0	0	0	\N	10
 [a-c]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+[a-c]+	https://www.example.com/a/b?q=1	true	14	4	4acab	https://www.ex<a>mple.<c>om/<a>/<b>?q=1	https://www.ex[]mple.com/a/b?q=1	\N	5https://www.exmple.om//?q=1
+[a-c]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [^a-c]+		false	\N	0	0			\N	1
 [^a-c]+	a	false	\N	0	0	a	a	\N	1a
 [^a-c]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1048,6 +1116,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [^a-c]+	_under_score_	true	0	2	2_under_sore_	<_under_s>c<ore_>	[]core_	\N	3c
 [^a-c]+	0	true	0	1	10	<0>	[]	\N	2
 [^a-c]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[^a-c]+	https://www.example.com/a/b?q=1	true	0	5	5https://www.exmple.om//?q=1	<https://www.ex>a<mple.>c<om/>a</>b<?q=1>	[]ample.com/a/b?q=1	\N	6acab
+[^a-c]+	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 [^abc]		false	\N	0	0			\N	1
 [^abc]	a	false	\N	0	0	a	a	\N	1a
 [^abc]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1078,6 +1148,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [^abc]	_under_score_	true	0	12	12_under_sore_	<_><u><n><d><e><r><_><s>c<o><r><e><_>	[]under_score_	\N	13c
 [^abc]	0	true	0	1	10	<0>	[]	\N	2
 [^abc]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[^abc]	https://www.example.com/a/b?q=1	true	0	27	27https://www.exmple.om//?q=1	<h><t><t><p><s><:></></><w><w><w><.><e><x>a<m><p><l><e><.>c<o><m></>a</>b<?><q><=><1>	[]ttps://www.example.com/a/b?q=1	\N	28acab
+[^abc]	http://foo.org/	true	0	15	15http://foo.org/	<h><t><t><p><:></></><f><o><o><.><o><r><g></>	[]ttp://foo.org/	\N	16
 []a]		false	\N	0	0			\N	1
 []a]	a	true	0	1	1a	<a>	[]	\N	2
 []a]	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1108,6 +1180,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 []a]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 []a]	0	false	\N	0	0	0	0	\N	10
 []a]	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[]a]	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[]a]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [a-]		false	\N	0	0			\N	1
 [a-]	a	true	0	1	1a	<a>	[]	\N	2
 [a-]	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1138,6 +1212,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [a-]	0	false	\N	0	0	0	0	\N	10
 [a-]	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[a-]	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[a-]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [-a]		false	\N	0	0			\N	1
 [-a]	a	true	0	1	1a	<a>	[]	\N	2
 [-a]	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1168,6 +1244,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [-a]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [-a]	0	false	\N	0	0	0	0	\N	10
 [-a]	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[-a]	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[-a]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [a-z0-9]+		false	\N	0	0			\N	1
 [a-z0-9]+	a	true	0	1	1a	<a>	[]	\N	2
 [a-z0-9]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1198,6 +1276,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-z0-9]+	_under_score_	true	1	2	2underscore	_<under>_<score>_	_[]_score_	\N	3___
 [a-z0-9]+	0	true	0	1	10	<0>	[]	\N	2
 [a-z0-9]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+[a-z0-9]+	https://www.example.com/a/b?q=1	true	0	8	8httpswwwexamplecomabq1	<https>://<www>.<example>.<com>/<a>/<b>?<q>=<1>	[]://www.example.com/a/b?q=1	\N	9://..//?=
+[a-z0-9]+	http://foo.org/	true	0	3	3httpfooorg	<http>://<foo>.<org>/	[]://foo.org/	\N	4://./
 [éèê]		false	\N	0	0			\N	1
 [éèê]	a	false	\N	0	0	a	a	\N	1a
 [éèê]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1228,6 +1308,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [éèê]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [éèê]	0	false	\N	0	0	0	0	\N	10
 [éèê]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[éèê]	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[éèê]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [α-ω]+		false	\N	0	0			\N	1
 [α-ω]+	a	false	\N	0	0	a	a	\N	1a
 [α-ω]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1258,6 +1340,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [α-ω]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [α-ω]+	0	false	\N	0	0	0	0	\N	10
 [α-ω]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[α-ω]+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[α-ω]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [[:alpha:]]+		false	\N	0	0			\N	1
 [[:alpha:]]+	a	true	0	1	1a	<a>	[]	\N	2
 [[:alpha:]]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1288,6 +1372,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:alpha:]]+	_under_score_	true	1	2	2underscore	_<under>_<score>_	_[]_score_	\N	3___
 [[:alpha:]]+	0	false	\N	0	0	0	0	\N	10
 [[:alpha:]]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+[[:alpha:]]+	https://www.example.com/a/b?q=1	true	0	7	7httpswwwexamplecomabq	<https>://<www>.<example>.<com>/<a>/<b>?<q>=1	[]://www.example.com/a/b?q=1	\N	8://..//?=1
+[[:alpha:]]+	http://foo.org/	true	0	3	3httpfooorg	<http>://<foo>.<org>/	[]://foo.org/	\N	4://./
 [[:digit:]]+		false	\N	0	0			\N	1
 [[:digit:]]+	a	false	\N	0	0	a	a	\N	1a
 [[:digit:]]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1318,6 +1404,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:digit:]]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [[:digit:]]+	0	true	0	1	10	<0>	[]	\N	2
 [[:digit:]]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:digit:]]+	https://www.example.com/a/b?q=1	true	30	1	11	https://www.example.com/a/b?q=<1>	https://www.example.com/a/b?q=[]	\N	2https://www.example.com/a/b?q=
+[[:digit:]]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [[:^alpha:]]+		false	\N	0	0			\N	1
 [[:^alpha:]]+	a	false	\N	0	0	a	a	\N	1a
 [[:^alpha:]]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1348,6 +1436,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:^alpha:]]+	_under_score_	true	0	3	3___	<_>under<_>score<_>	[]under_score_	\N	4underscore
 [[:^alpha:]]+	0	true	0	1	10	<0>	[]	\N	2
 [[:^alpha:]]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:^alpha:]]+	https://www.example.com/a/b?q=1	true	5	7	7://..//?=1	https<://>www<.>example<.>com</>a</>b<?>q<=1>	https[]www.example.com/a/b?q=1	\N	8httpswwwexamplecomabq
+[[:^alpha:]]+	http://foo.org/	true	4	3	3://./	http<://>foo<.>org</>	http[]foo.org/	\N	4httpfooorg
 [[:space:]]		false	\N	0	0			\N	1
 [[:space:]]	a	false	\N	0	0	a	a	\N	1a
 [[:space:]]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1378,6 +1468,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:space:]]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [[:space:]]	0	false	\N	0	0	0	0	\N	10
 [[:space:]]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:space:]]	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[[:space:]]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [[:punct:]]+		false	\N	0	0			\N	1
 [[:punct:]]+	a	false	\N	0	0	a	a	\N	1a
 [[:punct:]]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1408,6 +1500,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:punct:]]+	_under_score_	true	0	3	3___	<_>under<_>score<_>	[]under_score_	\N	4underscore
 [[:punct:]]+	0	false	\N	0	0	0	0	\N	10
 [[:punct:]]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:punct:]]+	https://www.example.com/a/b?q=1	true	5	7	7://..//?=	https<://>www<.>example<.>com</>a</>b<?>q<=>1	https[]www.example.com/a/b?q=1	\N	8httpswwwexamplecomabq1
+[[:punct:]]+	http://foo.org/	true	4	3	3://./	http<://>foo<.>org</>	http[]foo.org/	\N	4httpfooorg
 [[:upper:]]		false	\N	0	0			\N	1
 [[:upper:]]	a	false	\N	0	0	a	a	\N	1a
 [[:upper:]]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1438,6 +1532,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:upper:]]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [[:upper:]]	0	false	\N	0	0	0	0	\N	10
 [[:upper:]]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:upper:]]	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[[:upper:]]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [[:foo:]]		false	\N	0	0			\N	1
 [[:foo:]]	a	false	\N	0	0	a	a	\N	1a
 [[:foo:]]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1468,6 +1564,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [[:foo:]]	_under_score_	true	9	1	1o	_under_sc<o>re_	_under_sc[]re_	\N	2_under_scre_
 [[:foo:]]	0	false	\N	0	0	0	0	\N	10
 [[:foo:]]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[[:foo:]]	https://www.example.com/a/b?q=1	true	5	2	2:o	https<:>//www.example.c<o>m/a/b?q=1	https[]//www.example.com/a/b?q=1	\N	3https//www.example.cm/a/b?q=1
+[[:foo:]]	http://foo.org/	true	4	5	5:fooo	http<:>//<f><o><o>.<o>rg/	http[]//foo.org/	\N	6http//.rg/
 [:alpha:]		false	\N	0	0			\N	1
 [:alpha:]	a	true	0	1	1a	<a>	[]	\N	2
 [:alpha:]	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1498,6 +1596,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [:alpha:]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [:alpha:]	0	false	\N	0	0	0	0	\N	10
 [:alpha:]	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[:alpha:]	https://www.example.com/a/b?q=1	true	0	7	7hp:apla	<h>tt<p>s<:>//www.ex<a>m<p><l>e.com/<a>/b?q=1	[]ttps://www.example.com/a/b?q=1	\N	8tts//www.exme.com//b?q=1
+[:alpha:]	http://foo.org/	true	0	3	3hp:	<h>tt<p><:>//foo.org/	[]ttp://foo.org/	\N	4tt//foo.org/
 [a-z&&[^aeiou]]+		false	\N	0	0			\N	1
 [a-z&&[^aeiou]]+	a	false	\N	0	0	a	a	\N	1a
 [a-z&&[^aeiou]]+	abc	true	1	1	1bc	a<bc>	a[]	\N	2a
@@ -1528,6 +1628,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-z&&[^aeiou]]+	_under_score_	true	2	4	4ndrscr	_u<nd>e<r>_<sc>o<r>e_	_u[]er_score_	\N	5_ue_oe_
 [a-z&&[^aeiou]]+	0	false	\N	0	0	0	0	\N	10
 [a-z&&[^aeiou]]+	ababab	true	1	3	3bbb	a<b>a<b>a<b>	a[]abab	\N	4aaa
+[a-z&&[^aeiou]]+	https://www.example.com/a/b?q=1	true	0	8	8httpswwwxmplcmbq	<https>://<www>.e<x>a<mpl>e.<c>o<m>/a/<b>?<q>=1	[]://www.example.com/a/b?q=1	\N	9://.eae.o/a/?=1
+[a-z&&[^aeiou]]+	http://foo.org/	true	0	3	3httpfrg	<http>://<f>oo.o<rg>/	[]://foo.org/	\N	4://oo.o/
 [a-z--[b-y]]+		false	\N	0	0			\N	1
 [a-z--[b-y]]+	a	true	0	1	1a	<a>	[]	\N	2
 [a-z--[b-y]]+	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1558,6 +1660,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-z--[b-y]]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [a-z--[b-y]]+	0	false	\N	0	0	0	0	\N	10
 [a-z--[b-y]]+	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[a-z--[b-y]]+	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[a-z--[b-y]]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [a-c~~b-d]+		false	\N	0	0			\N	1
 [a-c~~b-d]+	a	true	0	1	1a	<a>	[]	\N	2
 [a-c~~b-d]+	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1588,6 +1692,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a-c~~b-d]+	_under_score_	true	3	1	1d	_un<d>er_score_	_un[]er_score_	\N	2_uner_score_
 [a-c~~b-d]+	0	false	\N	0	0	0	0	\N	10
 [a-c~~b-d]+	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[a-c~~b-d]+	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[a-c~~b-d]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [a[0-9]]+		false	\N	0	0			\N	1
 [a[0-9]]+	a	true	0	1	1a	<a>	[]	\N	2
 [a[0-9]]+	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1618,6 +1724,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [a[0-9]]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [a[0-9]]+	0	true	0	1	10	<0>	[]	\N	2
 [a[0-9]]+	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[a[0-9]]+	https://www.example.com/a/b?q=1	true	14	3	3aa1	https://www.ex<a>mple.com/<a>/b?q=<1>	https://www.ex[]mple.com/a/b?q=1	\N	4https://www.exmple.com//b?q=
+[a[0-9]]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [\\d]		false	\N	0	0			\N	1
 [\\d]	a	false	\N	0	0	a	a	\N	1a
 [\\d]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1648,6 +1756,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [\\d]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [\\d]	0	true	0	1	10	<0>	[]	\N	2
 [\\d]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[\\d]	https://www.example.com/a/b?q=1	true	30	1	11	https://www.example.com/a/b?q=<1>	https://www.example.com/a/b?q=[]	\N	2https://www.example.com/a/b?q=
+[\\d]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [\\w.]+		false	\N	0	0			\N	1
 [\\w.]+	a	true	0	1	1a	<a>	[]	\N	2
 [\\w.]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1678,6 +1788,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [\\w.]+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 [\\w.]+	0	true	0	1	10	<0>	[]	\N	2
 [\\w.]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+[\\w.]+	https://www.example.com/a/b?q=1	true	0	6	6httpswww.example.comabq1	<https>://<www.example.com>/<a>/<b>?<q>=<1>	[]://www.example.com/a/b?q=1	\N	7:////?=
+[\\w.]+	http://foo.org/	true	0	2	2httpfoo.org	<http>://<foo.org>/	[]://foo.org/	\N	3:///
 [^\\s]+		false	\N	0	0			\N	1
 [^\\s]+	a	true	0	1	1a	<a>	[]	\N	2
 [^\\s]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1708,6 +1820,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [^\\s]+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 [^\\s]+	0	true	0	1	10	<0>	[]	\N	2
 [^\\s]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+[^\\s]+	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[]	\N	2
+[^\\s]+	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 [\\n]		false	\N	0	0			\N	1
 [\\n]	a	false	\N	0	0	a	a	\N	1a
 [\\n]	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1738,6 +1852,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [\\n]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [\\n]	0	false	\N	0	0	0	0	\N	10
 [\\n]	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[\\n]	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[\\n]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [\\x41-\\x43]+		false	\N	0	0			\N	1
 [\\x41-\\x43]+	a	false	\N	0	0	a	a	\N	1a
 [\\x41-\\x43]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1768,6 +1884,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [\\x41-\\x43]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [\\x41-\\x43]+	0	false	\N	0	0	0	0	\N	10
 [\\x41-\\x43]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[\\x41-\\x43]+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[\\x41-\\x43]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [😀a]		false	\N	0	0			\N	1
 [😀a]	a	true	0	1	1a	<a>	[]	\N	2
 [😀a]	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -1798,6 +1916,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [😀a]	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [😀a]	0	false	\N	0	0	0	0	\N	10
 [😀a]	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+[😀a]	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+[😀a]	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\d		false	\N	0	0			\N	1
 \\d	a	false	\N	0	0	a	a	\N	1a
 \\d	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1828,6 +1948,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\d	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\d	0	true	0	1	10	<0>	[]	\N	2
 \\d	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\d	https://www.example.com/a/b?q=1	true	30	1	11	https://www.example.com/a/b?q=<1>	https://www.example.com/a/b?q=[]	\N	2https://www.example.com/a/b?q=
+\\d	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\d+		false	\N	0	0			\N	1
 \\d+	a	false	\N	0	0	a	a	\N	1a
 \\d+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1858,6 +1980,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\d+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\d+	0	true	0	1	10	<0>	[]	\N	2
 \\d+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\d+	https://www.example.com/a/b?q=1	true	30	1	11	https://www.example.com/a/b?q=<1>	https://www.example.com/a/b?q=[]	\N	2https://www.example.com/a/b?q=
+\\d+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\D+		false	\N	0	0			\N	1
 \\D+	a	true	0	1	1a	<a>	[]	\N	2
 \\D+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1888,6 +2012,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\D+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 \\D+	0	false	\N	0	0	0	0	\N	10
 \\D+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+\\D+	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=	<https://www.example.com/a/b?q=>1	[]1	\N	21
+\\D+	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 \\w+		false	\N	0	0			\N	1
 \\w+	a	true	0	1	1a	<a>	[]	\N	2
 \\w+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -1918,6 +2044,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\w+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 \\w+	0	true	0	1	10	<0>	[]	\N	2
 \\w+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+\\w+	https://www.example.com/a/b?q=1	true	0	8	8httpswwwexamplecomabq1	<https>://<www>.<example>.<com>/<a>/<b>?<q>=<1>	[]://www.example.com/a/b?q=1	\N	9://..//?=
+\\w+	http://foo.org/	true	0	3	3httpfooorg	<http>://<foo>.<org>/	[]://foo.org/	\N	4://./
 \\W+		false	\N	0	0			\N	1
 \\W+	a	false	\N	0	0	a	a	\N	1a
 \\W+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1948,6 +2076,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\W+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\W+	0	false	\N	0	0	0	0	\N	10
 \\W+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\W+	https://www.example.com/a/b?q=1	true	5	7	7://..//?=	https<://>www<.>example<.>com</>a</>b<?>q<=>1	https[]www.example.com/a/b?q=1	\N	8httpswwwexamplecomabq1
+\\W+	http://foo.org/	true	4	3	3://./	http<://>foo<.>org</>	http[]foo.org/	\N	4httpfooorg
 \\s+		false	\N	0	0			\N	1
 \\s+	a	false	\N	0	0	a	a	\N	1a
 \\s+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -1978,6 +2108,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\s+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\s+	0	false	\N	0	0	0	0	\N	10
 \\s+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\s+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\s+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\S+		false	\N	0	0			\N	1
 \\S+	a	true	0	1	1a	<a>	[]	\N	2
 \\S+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -2008,6 +2140,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\S+	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 \\S+	0	true	0	1	10	<0>	[]	\N	2
 \\S+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+\\S+	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[]	\N	2
+\\S+	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[]	\N	2
 \\w		false	\N	0	0			\N	1
 \\w	a	true	0	1	1a	<a>	[]	\N	2
 \\w	abc	true	0	3	3abc	<a><b><c>	[]bc	\N	4
@@ -2038,6 +2172,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\w	_under_score_	true	0	13	13_under_score_	<_><u><n><d><e><r><_><s><c><o><r><e><_>	[]under_score_	\N	14
 \\w	0	true	0	1	10	<0>	[]	\N	2
 \\w	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[]babab	\N	7
+\\w	https://www.example.com/a/b?q=1	true	0	22	22httpswwwexamplecomabq1	<h><t><t><p><s>://<w><w><w>.<e><x><a><m><p><l><e>.<c><o><m>/<a>/<b>?<q>=<1>	[]ttps://www.example.com/a/b?q=1	\N	23://..//?=
+\\w	http://foo.org/	true	0	10	10httpfooorg	<h><t><t><p>://<f><o><o>.<o><r><g>/	[]ttp://foo.org/	\N	11://./
 \\s		false	\N	0	0			\N	1
 \\s	a	false	\N	0	0	a	a	\N	1a
 \\s	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2068,6 +2204,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\s	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\s	0	false	\N	0	0	0	0	\N	10
 \\s	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\s	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\s	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^		true	0	1	1	<>	[]	\N	2
 ^	a	true	0	1	1	<>a	[]a	\N	2a
 ^	abc	true	0	1	1	<>abc	[]abc	\N	2abc
@@ -2098,6 +2236,8 @@ x.y	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ^	_under_score_	true	0	1	1	<>_under_score_	[]_under_score_	\N	2_under_score_
 ^	0	true	0	1	1	<>0	[]0	\N	20
 ^	ababab	true	0	1	1	<>ababab	[]ababab	\N	2ababab
+^	https://www.example.com/a/b?q=1	true	0	1	1	<>https://www.example.com/a/b?q=1	[]https://www.example.com/a/b?q=1	\N	2https://www.example.com/a/b?q=1
+^	http://foo.org/	true	0	1	1	<>http://foo.org/	[]http://foo.org/	\N	2http://foo.org/
 $		true	0	1	1	<>	[]	\N	2
 $	a	true	1	1	1	a<>	a[]	\N	2a
 $	abc	true	3	1	1	abc<>	abc[]	\N	2abc
@@ -2128,6 +2268,8 @@ $	١٢٣ ٤٥	true	11	1	1	١٢٣ ٤٥<>	١٢٣ ٤٥[]	\N	2١٢٣ ٤٥
 $	_under_score_	true	13	1	1	_under_score_<>	_under_score_[]	\N	2_under_score_
 $	0	true	1	1	1	0<>	0[]	\N	20
 $	ababab	true	6	1	1	ababab<>	ababab[]	\N	2ababab
+$	https://www.example.com/a/b?q=1	true	31	1	1	https://www.example.com/a/b?q=1<>	https://www.example.com/a/b?q=1[]	\N	2https://www.example.com/a/b?q=1
+$	http://foo.org/	true	15	1	1	http://foo.org/<>	http://foo.org/[]	\N	2http://foo.org/
 ^a		false	\N	0	0			\N	1
 ^a	a	true	0	1	1a	<a>	[]	\N	2
 ^a	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -2158,6 +2300,8 @@ $	ababab	true	6	1	1	ababab<>	ababab[]	\N	2ababab
 ^a	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ^a	0	false	\N	0	0	0	0	\N	10
 ^a	ababab	true	0	1	1a	<a>babab	[]babab	\N	2babab
+^a	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^a	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a$		false	\N	0	0			\N	1
 a$	a	true	0	1	1a	<a>	[]	\N	2
 a$	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2188,6 +2332,8 @@ a$	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a$	0	false	\N	0	0	0	0	\N	10
 a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^abc$		false	\N	0	0			\N	1
 ^abc$	a	false	\N	0	0	a	a	\N	1a
 ^abc$	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -2218,6 +2364,8 @@ a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ^abc$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ^abc$	0	false	\N	0	0	0	0	\N	10
 ^abc$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+^abc$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^abc$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^$		true	0	1	1	<>	[]	\N	2
 ^$	a	false	\N	0	0	a	a	\N	1a
 ^$	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2248,6 +2396,8 @@ a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ^$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ^$	0	false	\N	0	0	0	0	\N	10
 ^$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+^$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\A		true	0	1	1	<>	[]	\N	2
 \\A	a	true	0	1	1	<>a	[]a	\N	2a
 \\A	abc	true	0	1	1	<>abc	[]abc	\N	2abc
@@ -2278,6 +2428,8 @@ a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\A	_under_score_	true	0	1	1	<>_under_score_	[]_under_score_	\N	2_under_score_
 \\A	0	true	0	1	1	<>0	[]0	\N	20
 \\A	ababab	true	0	1	1	<>ababab	[]ababab	\N	2ababab
+\\A	https://www.example.com/a/b?q=1	true	0	1	1	<>https://www.example.com/a/b?q=1	[]https://www.example.com/a/b?q=1	\N	2https://www.example.com/a/b?q=1
+\\A	http://foo.org/	true	0	1	1	<>http://foo.org/	[]http://foo.org/	\N	2http://foo.org/
 \\z		true	0	1	1	<>	[]	\N	2
 \\z	a	true	1	1	1	a<>	a[]	\N	2a
 \\z	abc	true	3	1	1	abc<>	abc[]	\N	2abc
@@ -2308,6 +2460,8 @@ a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\z	_under_score_	true	13	1	1	_under_score_<>	_under_score_[]	\N	2_under_score_
 \\z	0	true	1	1	1	0<>	0[]	\N	20
 \\z	ababab	true	6	1	1	ababab<>	ababab[]	\N	2ababab
+\\z	https://www.example.com/a/b?q=1	true	31	1	1	https://www.example.com/a/b?q=1<>	https://www.example.com/a/b?q=1[]	\N	2https://www.example.com/a/b?q=1
+\\z	http://foo.org/	true	15	1	1	http://foo.org/<>	http://foo.org/[]	\N	2http://foo.org/
 \\Aab		false	\N	0	0			\N	1
 \\Aab	a	false	\N	0	0	a	a	\N	1a
 \\Aab	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -2338,6 +2492,8 @@ a$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\Aab	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\Aab	0	false	\N	0	0	0	0	\N	10
 \\Aab	ababab	true	0	1	1ab	<ab>abab	[]abab	\N	2abab
+\\Aab	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\Aab	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 b\\z		false	\N	0	0			\N	1
 b\\z	a	false	\N	0	0	a	a	\N	1a
 b\\z	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2368,6 +2524,8 @@ b\\z	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 b\\z	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 b\\z	0	false	\N	0	0	0	0	\N	10
 b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
+b\\z	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+b\\z	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?m)^		true	0	1	1	<>	[]	\N	2
 (?m)^	a	true	0	1	1	<>a	[]a	\N	2a
 (?m)^	abc	true	0	1	1	<>abc	[]abc	\N	2abc
@@ -2398,6 +2556,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 (?m)^	_under_score_	true	0	1	1	<>_under_score_	[]_under_score_	\N	2_under_score_
 (?m)^	0	true	0	1	1	<>0	[]0	\N	20
 (?m)^	ababab	true	0	1	1	<>ababab	[]ababab	\N	2ababab
+(?m)^	https://www.example.com/a/b?q=1	true	0	1	1	<>https://www.example.com/a/b?q=1	[]https://www.example.com/a/b?q=1	\N	2https://www.example.com/a/b?q=1
+(?m)^	http://foo.org/	true	0	1	1	<>http://foo.org/	[]http://foo.org/	\N	2http://foo.org/
 (?m)$		true	0	1	1	<>	[]	\N	2
 (?m)$	a	true	1	1	1	a<>	a[]	\N	2a
 (?m)$	abc	true	3	1	1	abc<>	abc[]	\N	2abc
@@ -2428,6 +2588,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 (?m)$	_under_score_	true	13	1	1	_under_score_<>	_under_score_[]	\N	2_under_score_
 (?m)$	0	true	1	1	1	0<>	0[]	\N	20
 (?m)$	ababab	true	6	1	1	ababab<>	ababab[]	\N	2ababab
+(?m)$	https://www.example.com/a/b?q=1	true	31	1	1	https://www.example.com/a/b?q=1<>	https://www.example.com/a/b?q=1[]	\N	2https://www.example.com/a/b?q=1
+(?m)$	http://foo.org/	true	15	1	1	http://foo.org/<>	http://foo.org/[]	\N	2http://foo.org/
 (?m)^line		false	\N	0	0			\N	1
 (?m)^line	a	false	\N	0	0	a	a	\N	1a
 (?m)^line	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2458,6 +2620,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 (?m)^line	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?m)^line	0	false	\N	0	0	0	0	\N	10
 (?m)^line	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?m)^line	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?m)^line	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?m)\\d$		false	\N	0	0			\N	1
 (?m)\\d$	a	false	\N	0	0	a	a	\N	1a
 (?m)\\d$	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2488,6 +2652,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 (?m)\\d$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?m)\\d$	0	true	0	1	10	<0>	[]	\N	2
 (?m)\\d$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?m)\\d$	https://www.example.com/a/b?q=1	true	30	1	11	https://www.example.com/a/b?q=<1>	https://www.example.com/a/b?q=[]	\N	2https://www.example.com/a/b?q=
+(?m)\\d$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?m)^$		true	0	1	1	<>	[]	\N	2
 (?m)^$	a	false	\N	0	0	a	a	\N	1a
 (?m)^$	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2518,6 +2684,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 (?m)^$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?m)^$	0	false	\N	0	0	0	0	\N	10
 (?m)^$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?m)^$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?m)^$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\b		false	\N	0	0			\N	1
 \\b	a	true	0	2	2	<>a<>	[]a	\N	3a
 \\b	abc	true	0	2	2	<>abc<>	[]abc	\N	3abc
@@ -2548,6 +2716,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\b	_under_score_	true	0	2	2	<>_under_score_<>	[]_under_score_	\N	3_under_score_
 \\b	0	true	0	2	2	<>0<>	[]0	\N	30
 \\b	ababab	true	0	2	2	<>ababab<>	[]ababab	\N	3ababab
+\\b	https://www.example.com/a/b?q=1	true	0	16	16	<>https<>://<>www<>.<>example<>.<>com<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	17https://www.example.com/a/b?q=1
+\\b	http://foo.org/	true	0	6	6	<>http<>://<>foo<>.<>org<>/	[]http://foo.org/	\N	7http://foo.org/
 \\B		true	0	1	1	<>	[]	\N	2
 \\B	a	false	\N	0	0	a	a	\N	1a
 \\B	abc	true	1	2	2	a<>b<>c	a[]bc	\N	3abc
@@ -2578,6 +2748,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\B	_under_score_	true	1	12	12	_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_	_[]under_score_	\N	13_under_score_
 \\B	0	false	\N	0	0	0	0	\N	10
 \\B	ababab	true	1	5	5	a<>b<>a<>b<>a<>b	a[]babab	\N	6ababab
+\\B	https://www.example.com/a/b?q=1	true	1	16	16	h<>t<>t<>p<>s:<>/<>/w<>w<>w.e<>x<>a<>m<>p<>l<>e.c<>o<>m/a/b?q=1	h[]ttps://www.example.com/a/b?q=1	\N	17https://www.example.com/a/b?q=1
+\\B	http://foo.org/	true	1	10	10	h<>t<>t<>p:<>/<>/f<>o<>o.o<>r<>g/<>	h[]ttp://foo.org/	\N	11http://foo.org/
 \\bfoo\\b		false	\N	0	0			\N	1
 \\bfoo\\b	a	false	\N	0	0	a	a	\N	1a
 \\bfoo\\b	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2608,6 +2780,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\bfoo\\b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\bfoo\\b	0	false	\N	0	0	0	0	\N	10
 \\bfoo\\b	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\bfoo\\b	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\bfoo\\b	http://foo.org/	true	7	1	1foo	http://<foo>.org/	http://[].org/	\N	2http://.org/
 \\b\\w+\\b		false	\N	0	0			\N	1
 \\b\\w+\\b	a	true	0	1	1a	<a>	[]	\N	2
 \\b\\w+\\b	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -2638,6 +2812,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\b\\w+\\b	_under_score_	true	0	1	1_under_score_	<_under_score_>	[]	\N	2
 \\b\\w+\\b	0	true	0	1	10	<0>	[]	\N	2
 \\b\\w+\\b	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+\\b\\w+\\b	https://www.example.com/a/b?q=1	true	0	8	8httpswwwexamplecomabq1	<https>://<www>.<example>.<com>/<a>/<b>?<q>=<1>	[]://www.example.com/a/b?q=1	\N	9://..//?=
+\\b\\w+\\b	http://foo.org/	true	0	3	3httpfooorg	<http>://<foo>.<org>/	[]://foo.org/	\N	4://./
 \\B\\w		false	\N	0	0			\N	1
 \\B\\w	a	false	\N	0	0	a	a	\N	1a
 \\B\\w	abc	true	1	2	2bc	a<b><c>	a[]c	\N	3a
@@ -2668,6 +2844,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\B\\w	_under_score_	true	1	12	12under_score_	_<u><n><d><e><r><_><s><c><o><r><e><_>	_[]nder_score_	\N	13_
 \\B\\w	0	false	\N	0	0	0	0	\N	10
 \\B\\w	ababab	true	1	5	5babab	a<b><a><b><a><b>	a[]abab	\N	6a
+\\B\\w	https://www.example.com/a/b?q=1	true	1	14	14ttpswwxampleom	h<t><t><p><s>://w<w><w>.e<x><a><m><p><l><e>.c<o><m>/a/b?q=1	h[]tps://www.example.com/a/b?q=1	\N	15h://w.e.c/a/b?q=1
+\\B\\w	http://foo.org/	true	1	7	7ttpoorg	h<t><t><p>://f<o><o>.o<r><g>/	h[]tp://foo.org/	\N	8h://f.o/
 \\bé		false	\N	0	0			\N	1
 \\bé	a	false	\N	0	0	a	a	\N	1a
 \\bé	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2698,6 +2876,8 @@ b\\z	ababab	true	5	1	1b	ababa<b>	ababa[]	\N	2ababa
 \\bé	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\bé	0	false	\N	0	0	0	0	\N	10
 \\bé	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\bé	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\bé	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ab\\b		false	\N	0	0			\N	1
 ab\\b	a	false	\N	0	0	a	a	\N	1a
 ab\\b	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2728,6 +2908,8 @@ ab\\b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 ab\\b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ab\\b	0	false	\N	0	0	0	0	\N	10
 ab\\b	ababab	true	4	1	1ab	abab<ab>	abab[]	\N	2abab
+ab\\b	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+ab\\b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^*		true	0	1	1	<>	[]	\N	2
 ^*	a	true	0	2	2	<>a<>	[]a	\N	3a
 ^*	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -2758,6 +2940,8 @@ ab\\b	ababab	true	4	1	1ab	abab<ab>	abab[]	\N	2abab
 ^*	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 ^*	0	true	0	2	2	<>0<>	[]0	\N	30
 ^*	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+^*	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	33https://www.example.com/a/b?q=1
+^*	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 $+		true	0	1	1	<>	[]	\N	2
 $+	a	true	1	1	1	a<>	a[]	\N	2a
 $+	abc	true	3	1	1	abc<>	abc[]	\N	2abc
@@ -2788,6 +2972,264 @@ $+	١٢٣ ٤٥	true	11	1	1	١٢٣ ٤٥<>	١٢٣ ٤٥[]	\N	2١٢٣ ٤٥
 $+	_under_score_	true	13	1	1	_under_score_<>	_under_score_[]	\N	2_under_score_
 $+	0	true	1	1	1	0<>	0[]	\N	20
 $+	ababab	true	6	1	1	ababab<>	ababab[]	\N	2ababab
+$+	https://www.example.com/a/b?q=1	true	31	1	1	https://www.example.com/a/b?q=1<>	https://www.example.com/a/b?q=1[]	\N	2https://www.example.com/a/b?q=1
+$+	http://foo.org/	true	15	1	1	http://foo.org/<>	http://foo.org/[]	\N	2http://foo.org/
+^(a+)(b)?		false	\N	0	0			\N	1
+^(a+)(b)?	a	true	0	1	1a	<a>	[a]	a	2
+^(a+)(b)?	abc	true	0	1	1ab	<ab>c	[a]c	a	2c
+^(a+)(b)?	aaa	true	0	1	1aaa	<aaa>	[aaa]	aaa	2
+^(a+)(b)?	abcabcabc	true	0	1	1ab	<ab>cabcabc	[a]cabcabc	a	2cabcabc
+^(a+)(b)?	ab ab	true	0	1	1ab	<ab> ab	[a] ab	a	2 ab
+^(a+)(b)?	foo bar baz	false	\N	0	0	foo bar baz	foo bar baz	\N	1foo bar baz
+^(a+)(b)?	Foo BAR baZ	false	\N	0	0	Foo BAR baZ	Foo BAR baZ	\N	1Foo BAR baZ
+^(a+)(b)?	x1y22z333	false	\N	0	0	x1y22z333	x1y22z333	\N	1x1y22z333
+^(a+)(b)?	hello, world!	false	\N	0	0	hello, world!	hello, world!	\N	1hello, world!
+^(a+)(b)?	été café naïve	false	\N	0	0	été café naïve	été café naïve	\N	1été café naïve
+^(a+)(b)?	日本語のテキスト	false	\N	0	0	日本語のテキスト	日本語のテキスト	\N	1日本語のテキスト
+^(a+)(b)?	Straße STRASSE straẞe	false	\N	0	0	Straße STRASSE straẞe	Straße STRASSE straẞe	\N	1Straße STRASSE straẞe
+^(a+)(b)?	line1\nline2\n	false	\N	0	0	line1\nline2\n	line1\nline2\n	\N	1line1\nline2\n
+^(a+)(b)?	\n	false	\N	0	0	\n	\n	\N	1\n
+^(a+)(b)?	\nfoo\n\nbar	false	\N	0	0	\nfoo\n\nbar	\nfoo\n\nbar	\N	1\nfoo\n\nbar
+^(a+)(b)?	a.b*c+d?	true	0	1	1a	<a>.b*c+d?	[a].b*c+d?	a	2.b*c+d?
+^(a+)(b)?	tab\there	false	\N	0	0	tab\there	tab\there	\N	1tab\there
+^(a+)(b)?	αβγ ΑΒΓ σς	false	\N	0	0	αβγ ΑΒΓ σς	αβγ ΑΒΓ σς	\N	1αβγ ΑΒΓ σς
+^(a+)(b)?	emoji 😀 ok 😀	false	\N	0	0	emoji 😀 ok 😀	emoji 😀 ok 😀	\N	1emoji 😀 ok 😀
+^(a+)(b)?	KELVIN K K k	false	\N	0	0	KELVIN K K k	KELVIN K K k	\N	1KELVIN K K k
+^(a+)(b)?	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+^(a+)(b)?	x-y_z	false	\N	0	0	x-y_z	x-y_z	\N	1x-y_z
+^(a+)(b)?	2024-01-15 and 1999-12-31	false	\N	0	0	2024-01-15 and 1999-12-31	2024-01-15 and 1999-12-31	\N	12024-01-15 and 1999-12-31
+^(a+)(b)?	bob@example.com, amy@test.org	false	\N	0	0	bob@example.com, amy@test.org	bob@example.com, amy@test.org	\N	1bob@example.com, amy@test.org
+^(a+)(b)?	the special big requests here	false	\N	0	0	the special big requests here	the special big requests here	\N	1the special big requests here
+^(a+)(b)?	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
+^(a+)(b)?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
+^(a+)(b)?	0	false	\N	0	0	0	0	\N	10
+^(a+)(b)?	ababab	true	0	1	1ab	<ab>abab	[a]abab	a	2abab
+^(a+)(b)?	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^(a+)(b)?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
+^(\\w+)\\s		false	\N	0	0			\N	1
+^(\\w+)\\s	a	false	\N	0	0	a	a	\N	1a
+^(\\w+)\\s	abc	false	\N	0	0	abc	abc	\N	1abc
+^(\\w+)\\s	aaa	false	\N	0	0	aaa	aaa	\N	1aaa
+^(\\w+)\\s	abcabcabc	false	\N	0	0	abcabcabc	abcabcabc	\N	1abcabcabc
+^(\\w+)\\s	ab ab	true	0	1	1ab 	<ab >ab	[ab]ab	ab	2ab
+^(\\w+)\\s	foo bar baz	true	0	1	1foo 	<foo >bar baz	[foo]bar baz	foo	2bar baz
+^(\\w+)\\s	Foo BAR baZ	true	0	1	1Foo 	<Foo >BAR baZ	[Foo]BAR baZ	Foo	2BAR baZ
+^(\\w+)\\s	x1y22z333	false	\N	0	0	x1y22z333	x1y22z333	\N	1x1y22z333
+^(\\w+)\\s	hello, world!	false	\N	0	0	hello, world!	hello, world!	\N	1hello, world!
+^(\\w+)\\s	été café naïve	true	0	1	1été 	<été >café naïve	[été]café naïve	été	2café naïve
+^(\\w+)\\s	日本語のテキスト	false	\N	0	0	日本語のテキスト	日本語のテキスト	\N	1日本語のテキスト
+^(\\w+)\\s	Straße STRASSE straẞe	true	0	1	1Straße 	<Straße >STRASSE straẞe	[Straße]STRASSE straẞe	Straße	2STRASSE straẞe
+^(\\w+)\\s	line1\nline2\n	true	0	1	1line1\n	<line1\n>line2\n	[line1]line2\n	line1	2line2\n
+^(\\w+)\\s	\n	false	\N	0	0	\n	\n	\N	1\n
+^(\\w+)\\s	\nfoo\n\nbar	false	\N	0	0	\nfoo\n\nbar	\nfoo\n\nbar	\N	1\nfoo\n\nbar
+^(\\w+)\\s	a.b*c+d?	false	\N	0	0	a.b*c+d?	a.b*c+d?	\N	1a.b*c+d?
+^(\\w+)\\s	tab\there	true	0	1	1tab\t	<tab\t>here	[tab]here	tab	2here
+^(\\w+)\\s	αβγ ΑΒΓ σς	true	0	1	1αβγ 	<αβγ >ΑΒΓ σς	[αβγ]ΑΒΓ σς	αβγ	2ΑΒΓ σς
+^(\\w+)\\s	emoji 😀 ok 😀	true	0	1	1emoji 	<emoji >😀 ok 😀	[emoji]😀 ok 😀	emoji	2😀 ok 😀
+^(\\w+)\\s	KELVIN K K k	true	0	1	1KELVIN 	<KELVIN >K K k	[KELVIN]K K k	KELVIN	2K K k
+^(\\w+)\\s	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+^(\\w+)\\s	x-y_z	false	\N	0	0	x-y_z	x-y_z	\N	1x-y_z
+^(\\w+)\\s	2024-01-15 and 1999-12-31	false	\N	0	0	2024-01-15 and 1999-12-31	2024-01-15 and 1999-12-31	\N	12024-01-15 and 1999-12-31
+^(\\w+)\\s	bob@example.com, amy@test.org	false	\N	0	0	bob@example.com, amy@test.org	bob@example.com, amy@test.org	\N	1bob@example.com, amy@test.org
+^(\\w+)\\s	the special big requests here	true	0	1	1the 	<the >special big requests here	[the]special big requests here	the	2special big requests here
+^(\\w+)\\s	١٢٣ ٤٥	true	0	1	1١٢٣ 	<١٢٣ >٤٥	[١٢٣]٤٥	١٢٣	2٤٥
+^(\\w+)\\s	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
+^(\\w+)\\s	0	false	\N	0	0	0	0	\N	10
+^(\\w+)\\s	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+^(\\w+)\\s	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^(\\w+)\\s	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
+\\A(?:x|(a))+		false	\N	0	0			\N	1
+\\A(?:x|(a))+	a	true	0	1	1a	<a>	[a]	a	2
+\\A(?:x|(a))+	abc	true	0	1	1a	<a>bc	[a]bc	a	2bc
+\\A(?:x|(a))+	aaa	true	0	1	1aaa	<aaa>	[a]	a	2
+\\A(?:x|(a))+	abcabcabc	true	0	1	1a	<a>bcabcabc	[a]bcabcabc	a	2bcabcabc
+\\A(?:x|(a))+	ab ab	true	0	1	1a	<a>b ab	[a]b ab	a	2b ab
+\\A(?:x|(a))+	foo bar baz	false	\N	0	0	foo bar baz	foo bar baz	\N	1foo bar baz
+\\A(?:x|(a))+	Foo BAR baZ	false	\N	0	0	Foo BAR baZ	Foo BAR baZ	\N	1Foo BAR baZ
+\\A(?:x|(a))+	x1y22z333	true	0	1	1x	<x>1y22z333	[]1y22z333	\N	21y22z333
+\\A(?:x|(a))+	hello, world!	false	\N	0	0	hello, world!	hello, world!	\N	1hello, world!
+\\A(?:x|(a))+	été café naïve	false	\N	0	0	été café naïve	été café naïve	\N	1été café naïve
+\\A(?:x|(a))+	日本語のテキスト	false	\N	0	0	日本語のテキスト	日本語のテキスト	\N	1日本語のテキスト
+\\A(?:x|(a))+	Straße STRASSE straẞe	false	\N	0	0	Straße STRASSE straẞe	Straße STRASSE straẞe	\N	1Straße STRASSE straẞe
+\\A(?:x|(a))+	line1\nline2\n	false	\N	0	0	line1\nline2\n	line1\nline2\n	\N	1line1\nline2\n
+\\A(?:x|(a))+	\n	false	\N	0	0	\n	\n	\N	1\n
+\\A(?:x|(a))+	\nfoo\n\nbar	false	\N	0	0	\nfoo\n\nbar	\nfoo\n\nbar	\N	1\nfoo\n\nbar
+\\A(?:x|(a))+	a.b*c+d?	true	0	1	1a	<a>.b*c+d?	[a].b*c+d?	a	2.b*c+d?
+\\A(?:x|(a))+	tab\there	false	\N	0	0	tab\there	tab\there	\N	1tab\there
+\\A(?:x|(a))+	αβγ ΑΒΓ σς	false	\N	0	0	αβγ ΑΒΓ σς	αβγ ΑΒΓ σς	\N	1αβγ ΑΒΓ σς
+\\A(?:x|(a))+	emoji 😀 ok 😀	false	\N	0	0	emoji 😀 ok 😀	emoji 😀 ok 😀	\N	1emoji 😀 ok 😀
+\\A(?:x|(a))+	KELVIN K K k	false	\N	0	0	KELVIN K K k	KELVIN K K k	\N	1KELVIN K K k
+\\A(?:x|(a))+	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+\\A(?:x|(a))+	x-y_z	true	0	1	1x	<x>-y_z	[]-y_z	\N	2-y_z
+\\A(?:x|(a))+	2024-01-15 and 1999-12-31	false	\N	0	0	2024-01-15 and 1999-12-31	2024-01-15 and 1999-12-31	\N	12024-01-15 and 1999-12-31
+\\A(?:x|(a))+	bob@example.com, amy@test.org	false	\N	0	0	bob@example.com, amy@test.org	bob@example.com, amy@test.org	\N	1bob@example.com, amy@test.org
+\\A(?:x|(a))+	the special big requests here	false	\N	0	0	the special big requests here	the special big requests here	\N	1the special big requests here
+\\A(?:x|(a))+	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
+\\A(?:x|(a))+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
+\\A(?:x|(a))+	0	false	\N	0	0	0	0	\N	10
+\\A(?:x|(a))+	ababab	true	0	1	1a	<a>babab	[a]babab	a	2babab
+\\A(?:x|(a))+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\A(?:x|(a))+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
+^(|a)		true	0	1	1	<>	[]		2
+^(|a)	a	true	0	1	1	<>a	[]a		2a
+^(|a)	abc	true	0	1	1	<>abc	[]abc		2abc
+^(|a)	aaa	true	0	1	1	<>aaa	[]aaa		2aaa
+^(|a)	abcabcabc	true	0	1	1	<>abcabcabc	[]abcabcabc		2abcabcabc
+^(|a)	ab ab	true	0	1	1	<>ab ab	[]ab ab		2ab ab
+^(|a)	foo bar baz	true	0	1	1	<>foo bar baz	[]foo bar baz		2foo bar baz
+^(|a)	Foo BAR baZ	true	0	1	1	<>Foo BAR baZ	[]Foo BAR baZ		2Foo BAR baZ
+^(|a)	x1y22z333	true	0	1	1	<>x1y22z333	[]x1y22z333		2x1y22z333
+^(|a)	hello, world!	true	0	1	1	<>hello, world!	[]hello, world!		2hello, world!
+^(|a)	été café naïve	true	0	1	1	<>été café naïve	[]été café naïve		2été café naïve
+^(|a)	日本語のテキスト	true	0	1	1	<>日本語のテキスト	[]日本語のテキスト		2日本語のテキスト
+^(|a)	Straße STRASSE straẞe	true	0	1	1	<>Straße STRASSE straẞe	[]Straße STRASSE straẞe		2Straße STRASSE straẞe
+^(|a)	line1\nline2\n	true	0	1	1	<>line1\nline2\n	[]line1\nline2\n		2line1\nline2\n
+^(|a)	\n	true	0	1	1	<>\n	[]\n		2\n
+^(|a)	\nfoo\n\nbar	true	0	1	1	<>\nfoo\n\nbar	[]\nfoo\n\nbar		2\nfoo\n\nbar
+^(|a)	a.b*c+d?	true	0	1	1	<>a.b*c+d?	[]a.b*c+d?		2a.b*c+d?
+^(|a)	tab\there	true	0	1	1	<>tab\there	[]tab\there		2tab\there
+^(|a)	αβγ ΑΒΓ σς	true	0	1	1	<>αβγ ΑΒΓ σς	[]αβγ ΑΒΓ σς		2αβγ ΑΒΓ σς
+^(|a)	emoji 😀 ok 😀	true	0	1	1	<>emoji 😀 ok 😀	[]emoji 😀 ok 😀		2emoji 😀 ok 😀
+^(|a)	KELVIN K K k	true	0	1	1	<>KELVIN K K k	[]KELVIN K K k		2KELVIN K K k
+^(|a)	  spaced  out  	true	0	1	1	<>  spaced  out  	[]  spaced  out  		2  spaced  out  
+^(|a)	x-y_z	true	0	1	1	<>x-y_z	[]x-y_z		2x-y_z
+^(|a)	2024-01-15 and 1999-12-31	true	0	1	1	<>2024-01-15 and 1999-12-31	[]2024-01-15 and 1999-12-31		22024-01-15 and 1999-12-31
+^(|a)	bob@example.com, amy@test.org	true	0	1	1	<>bob@example.com, amy@test.org	[]bob@example.com, amy@test.org		2bob@example.com, amy@test.org
+^(|a)	the special big requests here	true	0	1	1	<>the special big requests here	[]the special big requests here		2the special big requests here
+^(|a)	١٢٣ ٤٥	true	0	1	1	<>١٢٣ ٤٥	[]١٢٣ ٤٥		2١٢٣ ٤٥
+^(|a)	_under_score_	true	0	1	1	<>_under_score_	[]_under_score_		2_under_score_
+^(|a)	0	true	0	1	1	<>0	[]0		20
+^(|a)	ababab	true	0	1	1	<>ababab	[]ababab		2ababab
+^(|a)	https://www.example.com/a/b?q=1	true	0	1	1	<>https://www.example.com/a/b?q=1	[]https://www.example.com/a/b?q=1		2https://www.example.com/a/b?q=1
+^(|a)	http://foo.org/	true	0	1	1	<>http://foo.org/	[]http://foo.org/		2http://foo.org/
+^([^/]+)/?.*$		false	\N	0	0			\N	1
+^([^/]+)/?.*$	a	true	0	1	1a	<a>	[a]	a	2
+^([^/]+)/?.*$	abc	true	0	1	1abc	<abc>	[abc]	abc	2
+^([^/]+)/?.*$	aaa	true	0	1	1aaa	<aaa>	[aaa]	aaa	2
+^([^/]+)/?.*$	abcabcabc	true	0	1	1abcabcabc	<abcabcabc>	[abcabcabc]	abcabcabc	2
+^([^/]+)/?.*$	ab ab	true	0	1	1ab ab	<ab ab>	[ab ab]	ab ab	2
+^([^/]+)/?.*$	foo bar baz	true	0	1	1foo bar baz	<foo bar baz>	[foo bar baz]	foo bar baz	2
+^([^/]+)/?.*$	Foo BAR baZ	true	0	1	1Foo BAR baZ	<Foo BAR baZ>	[Foo BAR baZ]	Foo BAR baZ	2
+^([^/]+)/?.*$	x1y22z333	true	0	1	1x1y22z333	<x1y22z333>	[x1y22z333]	x1y22z333	2
+^([^/]+)/?.*$	hello, world!	true	0	1	1hello, world!	<hello, world!>	[hello, world!]	hello, world!	2
+^([^/]+)/?.*$	été café naïve	true	0	1	1été café naïve	<été café naïve>	[été café naïve]	été café naïve	2
+^([^/]+)/?.*$	日本語のテキスト	true	0	1	1日本語のテキスト	<日本語のテキスト>	[日本語のテキスト]	日本語のテキスト	2
+^([^/]+)/?.*$	Straße STRASSE straẞe	true	0	1	1Straße STRASSE straẞe	<Straße STRASSE straẞe>	[Straße STRASSE straẞe]	Straße STRASSE straẞe	2
+^([^/]+)/?.*$	line1\nline2\n	true	0	1	1line1\nline2\n	<line1\nline2\n>	[line1\nline2\n]	line1\nline2\n	2
+^([^/]+)/?.*$	\n	true	0	1	1\n	<\n>	[\n]	\n	2
+^([^/]+)/?.*$	\nfoo\n\nbar	true	0	1	1\nfoo\n\nbar	<\nfoo\n\nbar>	[\nfoo\n\nbar]	\nfoo\n\nbar	2
+^([^/]+)/?.*$	a.b*c+d?	true	0	1	1a.b*c+d?	<a.b*c+d?>	[a.b*c+d?]	a.b*c+d?	2
+^([^/]+)/?.*$	tab\there	true	0	1	1tab\there	<tab\there>	[tab\there]	tab\there	2
+^([^/]+)/?.*$	αβγ ΑΒΓ σς	true	0	1	1αβγ ΑΒΓ σς	<αβγ ΑΒΓ σς>	[αβγ ΑΒΓ σς]	αβγ ΑΒΓ σς	2
+^([^/]+)/?.*$	emoji 😀 ok 😀	true	0	1	1emoji 😀 ok 😀	<emoji 😀 ok 😀>	[emoji 😀 ok 😀]	emoji 😀 ok 😀	2
+^([^/]+)/?.*$	KELVIN K K k	true	0	1	1KELVIN K K k	<KELVIN K K k>	[KELVIN K K k]	KELVIN K K k	2
+^([^/]+)/?.*$	  spaced  out  	true	0	1	1  spaced  out  	<  spaced  out  >	[  spaced  out  ]	  spaced  out  	2
+^([^/]+)/?.*$	x-y_z	true	0	1	1x-y_z	<x-y_z>	[x-y_z]	x-y_z	2
+^([^/]+)/?.*$	2024-01-15 and 1999-12-31	true	0	1	12024-01-15 and 1999-12-31	<2024-01-15 and 1999-12-31>	[2024-01-15 and 1999-12-31]	2024-01-15 and 1999-12-31	2
+^([^/]+)/?.*$	bob@example.com, amy@test.org	true	0	1	1bob@example.com, amy@test.org	<bob@example.com, amy@test.org>	[bob@example.com, amy@test.org]	bob@example.com, amy@test.org	2
+^([^/]+)/?.*$	the special big requests here	true	0	1	1the special big requests here	<the special big requests here>	[the special big requests here]	the special big requests here	2
+^([^/]+)/?.*$	١٢٣ ٤٥	true	0	1	1١٢٣ ٤٥	<١٢٣ ٤٥>	[١٢٣ ٤٥]	١٢٣ ٤٥	2
+^([^/]+)/?.*$	_under_score_	true	0	1	1_under_score_	<_under_score_>	[_under_score_]	_under_score_	2
+^([^/]+)/?.*$	0	true	0	1	10	<0>	[0]	0	2
+^([^/]+)/?.*$	ababab	true	0	1	1ababab	<ababab>	[ababab]	ababab	2
+^([^/]+)/?.*$	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[https:]	https:	2
+^([^/]+)/?.*$	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[http:]	http:	2
+^https?://(?:www\\.)?([^/]+)/.*$		false	\N	0	0			\N	1
+^https?://(?:www\\.)?([^/]+)/.*$	a	false	\N	0	0	a	a	\N	1a
+^https?://(?:www\\.)?([^/]+)/.*$	abc	false	\N	0	0	abc	abc	\N	1abc
+^https?://(?:www\\.)?([^/]+)/.*$	aaa	false	\N	0	0	aaa	aaa	\N	1aaa
+^https?://(?:www\\.)?([^/]+)/.*$	abcabcabc	false	\N	0	0	abcabcabc	abcabcabc	\N	1abcabcabc
+^https?://(?:www\\.)?([^/]+)/.*$	ab ab	false	\N	0	0	ab ab	ab ab	\N	1ab ab
+^https?://(?:www\\.)?([^/]+)/.*$	foo bar baz	false	\N	0	0	foo bar baz	foo bar baz	\N	1foo bar baz
+^https?://(?:www\\.)?([^/]+)/.*$	Foo BAR baZ	false	\N	0	0	Foo BAR baZ	Foo BAR baZ	\N	1Foo BAR baZ
+^https?://(?:www\\.)?([^/]+)/.*$	x1y22z333	false	\N	0	0	x1y22z333	x1y22z333	\N	1x1y22z333
+^https?://(?:www\\.)?([^/]+)/.*$	hello, world!	false	\N	0	0	hello, world!	hello, world!	\N	1hello, world!
+^https?://(?:www\\.)?([^/]+)/.*$	été café naïve	false	\N	0	0	été café naïve	été café naïve	\N	1été café naïve
+^https?://(?:www\\.)?([^/]+)/.*$	日本語のテキスト	false	\N	0	0	日本語のテキスト	日本語のテキスト	\N	1日本語のテキスト
+^https?://(?:www\\.)?([^/]+)/.*$	Straße STRASSE straẞe	false	\N	0	0	Straße STRASSE straẞe	Straße STRASSE straẞe	\N	1Straße STRASSE straẞe
+^https?://(?:www\\.)?([^/]+)/.*$	line1\nline2\n	false	\N	0	0	line1\nline2\n	line1\nline2\n	\N	1line1\nline2\n
+^https?://(?:www\\.)?([^/]+)/.*$	\n	false	\N	0	0	\n	\n	\N	1\n
+^https?://(?:www\\.)?([^/]+)/.*$	\nfoo\n\nbar	false	\N	0	0	\nfoo\n\nbar	\nfoo\n\nbar	\N	1\nfoo\n\nbar
+^https?://(?:www\\.)?([^/]+)/.*$	a.b*c+d?	false	\N	0	0	a.b*c+d?	a.b*c+d?	\N	1a.b*c+d?
+^https?://(?:www\\.)?([^/]+)/.*$	tab\there	false	\N	0	0	tab\there	tab\there	\N	1tab\there
+^https?://(?:www\\.)?([^/]+)/.*$	αβγ ΑΒΓ σς	false	\N	0	0	αβγ ΑΒΓ σς	αβγ ΑΒΓ σς	\N	1αβγ ΑΒΓ σς
+^https?://(?:www\\.)?([^/]+)/.*$	emoji 😀 ok 😀	false	\N	0	0	emoji 😀 ok 😀	emoji 😀 ok 😀	\N	1emoji 😀 ok 😀
+^https?://(?:www\\.)?([^/]+)/.*$	KELVIN K K k	false	\N	0	0	KELVIN K K k	KELVIN K K k	\N	1KELVIN K K k
+^https?://(?:www\\.)?([^/]+)/.*$	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+^https?://(?:www\\.)?([^/]+)/.*$	x-y_z	false	\N	0	0	x-y_z	x-y_z	\N	1x-y_z
+^https?://(?:www\\.)?([^/]+)/.*$	2024-01-15 and 1999-12-31	false	\N	0	0	2024-01-15 and 1999-12-31	2024-01-15 and 1999-12-31	\N	12024-01-15 and 1999-12-31
+^https?://(?:www\\.)?([^/]+)/.*$	bob@example.com, amy@test.org	false	\N	0	0	bob@example.com, amy@test.org	bob@example.com, amy@test.org	\N	1bob@example.com, amy@test.org
+^https?://(?:www\\.)?([^/]+)/.*$	the special big requests here	false	\N	0	0	the special big requests here	the special big requests here	\N	1the special big requests here
+^https?://(?:www\\.)?([^/]+)/.*$	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
+^https?://(?:www\\.)?([^/]+)/.*$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
+^https?://(?:www\\.)?([^/]+)/.*$	0	false	\N	0	0	0	0	\N	10
+^https?://(?:www\\.)?([^/]+)/.*$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+^https?://(?:www\\.)?([^/]+)/.*$	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b?q=1	<https://www.example.com/a/b?q=1>	[example.com]	example.com	2
+^https?://(?:www\\.)?([^/]+)/.*$	http://foo.org/	true	0	1	1http://foo.org/	<http://foo.org/>	[foo.org]	foo.org	2
+^(a)|b		false	\N	0	0			\N	1
+^(a)|b	a	true	0	1	1a	<a>	[a]	a	2
+^(a)|b	abc	true	0	2	2ab	<a><b>c	[a]bc	a	3c
+^(a)|b	aaa	true	0	1	1a	<a>aa	[a]aa	a	2aa
+^(a)|b	abcabcabc	true	0	4	4abbb	<a><b>ca<b>ca<b>c	[a]bcabcabc	a	5cacac
+^(a)|b	ab ab	true	0	3	3abb	<a><b> a<b>	[a]b ab	a	4 a
+^(a)|b	foo bar baz	true	4	2	2bb	foo <b>ar <b>az	foo []ar baz	\N	3foo ar az
+^(a)|b	Foo BAR baZ	true	8	1	1b	Foo BAR <b>aZ	Foo BAR []aZ	\N	2Foo BAR aZ
+^(a)|b	x1y22z333	false	\N	0	0	x1y22z333	x1y22z333	\N	1x1y22z333
+^(a)|b	hello, world!	false	\N	0	0	hello, world!	hello, world!	\N	1hello, world!
+^(a)|b	été café naïve	false	\N	0	0	été café naïve	été café naïve	\N	1été café naïve
+^(a)|b	日本語のテキスト	false	\N	0	0	日本語のテキスト	日本語のテキスト	\N	1日本語のテキスト
+^(a)|b	Straße STRASSE straẞe	false	\N	0	0	Straße STRASSE straẞe	Straße STRASSE straẞe	\N	1Straße STRASSE straẞe
+^(a)|b	line1\nline2\n	false	\N	0	0	line1\nline2\n	line1\nline2\n	\N	1line1\nline2\n
+^(a)|b	\n	false	\N	0	0	\n	\n	\N	1\n
+^(a)|b	\nfoo\n\nbar	true	6	1	1b	\nfoo\n\n<b>ar	\nfoo\n\n[]ar	\N	2\nfoo\n\nar
+^(a)|b	a.b*c+d?	true	0	2	2ab	<a>.<b>*c+d?	[a].b*c+d?	a	3.*c+d?
+^(a)|b	tab\there	true	2	1	1b	ta<b>\there	ta[]\there	\N	2ta\there
+^(a)|b	αβγ ΑΒΓ σς	false	\N	0	0	αβγ ΑΒΓ σς	αβγ ΑΒΓ σς	\N	1αβγ ΑΒΓ σς
+^(a)|b	emoji 😀 ok 😀	false	\N	0	0	emoji 😀 ok 😀	emoji 😀 ok 😀	\N	1emoji 😀 ok 😀
+^(a)|b	KELVIN K K k	false	\N	0	0	KELVIN K K k	KELVIN K K k	\N	1KELVIN K K k
+^(a)|b	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+^(a)|b	x-y_z	false	\N	0	0	x-y_z	x-y_z	\N	1x-y_z
+^(a)|b	2024-01-15 and 1999-12-31	false	\N	0	0	2024-01-15 and 1999-12-31	2024-01-15 and 1999-12-31	\N	12024-01-15 and 1999-12-31
+^(a)|b	bob@example.com, amy@test.org	true	0	2	2bb	<b>o<b>@example.com, amy@test.org	[]ob@example.com, amy@test.org	\N	3o@example.com, amy@test.org
+^(a)|b	the special big requests here	true	12	1	1b	the special <b>ig requests here	the special []ig requests here	\N	2the special ig requests here
+^(a)|b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
+^(a)|b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
+^(a)|b	0	false	\N	0	0	0	0	\N	10
+^(a)|b	ababab	true	0	4	4abbb	<a><b>a<b>a<b>	[a]babab	a	5aa
+^(a)|b	https://www.example.com/a/b?q=1	true	26	1	1b	https://www.example.com/a/<b>?q=1	https://www.example.com/a/[]?q=1	\N	2https://www.example.com/a/?q=1
+^(a)|b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
+(?m)^(\\w+)		false	\N	0	0			\N	1
+(?m)^(\\w+)	a	true	0	1	1a	<a>	[a]	a	2
+(?m)^(\\w+)	abc	true	0	1	1abc	<abc>	[abc]	abc	2
+(?m)^(\\w+)	aaa	true	0	1	1aaa	<aaa>	[aaa]	aaa	2
+(?m)^(\\w+)	abcabcabc	true	0	1	1abcabcabc	<abcabcabc>	[abcabcabc]	abcabcabc	2
+(?m)^(\\w+)	ab ab	true	0	1	1ab	<ab> ab	[ab] ab	ab	2 ab
+(?m)^(\\w+)	foo bar baz	true	0	1	1foo	<foo> bar baz	[foo] bar baz	foo	2 bar baz
+(?m)^(\\w+)	Foo BAR baZ	true	0	1	1Foo	<Foo> BAR baZ	[Foo] BAR baZ	Foo	2 BAR baZ
+(?m)^(\\w+)	x1y22z333	true	0	1	1x1y22z333	<x1y22z333>	[x1y22z333]	x1y22z333	2
+(?m)^(\\w+)	hello, world!	true	0	1	1hello	<hello>, world!	[hello], world!	hello	2, world!
+(?m)^(\\w+)	été café naïve	true	0	1	1été	<été> café naïve	[été] café naïve	été	2 café naïve
+(?m)^(\\w+)	日本語のテキスト	true	0	1	1日本語のテキスト	<日本語のテキスト>	[日本語のテキスト]	日本語のテキスト	2
+(?m)^(\\w+)	Straße STRASSE straẞe	true	0	1	1Straße	<Straße> STRASSE straẞe	[Straße] STRASSE straẞe	Straße	2 STRASSE straẞe
+(?m)^(\\w+)	line1\nline2\n	true	0	2	2line1line2	<line1>\n<line2>\n	[line1]\nline2\n	line1	3\n\n
+(?m)^(\\w+)	\n	false	\N	0	0	\n	\n	\N	1\n
+(?m)^(\\w+)	\nfoo\n\nbar	true	1	2	2foobar	\n<foo>\n\n<bar>	\n[foo]\n\nbar	foo	3\n\n\n
+(?m)^(\\w+)	a.b*c+d?	true	0	1	1a	<a>.b*c+d?	[a].b*c+d?	a	2.b*c+d?
+(?m)^(\\w+)	tab\there	true	0	1	1tab	<tab>\there	[tab]\there	tab	2\there
+(?m)^(\\w+)	αβγ ΑΒΓ σς	true	0	1	1αβγ	<αβγ> ΑΒΓ σς	[αβγ] ΑΒΓ σς	αβγ	2 ΑΒΓ σς
+(?m)^(\\w+)	emoji 😀 ok 😀	true	0	1	1emoji	<emoji> 😀 ok 😀	[emoji] 😀 ok 😀	emoji	2 😀 ok 😀
+(?m)^(\\w+)	KELVIN K K k	true	0	1	1KELVIN	<KELVIN> K K k	[KELVIN] K K k	KELVIN	2 K K k
+(?m)^(\\w+)	  spaced  out  	false	\N	0	0	  spaced  out  	  spaced  out  	\N	1  spaced  out  
+(?m)^(\\w+)	x-y_z	true	0	1	1x	<x>-y_z	[x]-y_z	x	2-y_z
+(?m)^(\\w+)	2024-01-15 and 1999-12-31	true	0	1	12024	<2024>-01-15 and 1999-12-31	[2024]-01-15 and 1999-12-31	2024	2-01-15 and 1999-12-31
+(?m)^(\\w+)	bob@example.com, amy@test.org	true	0	1	1bob	<bob>@example.com, amy@test.org	[bob]@example.com, amy@test.org	bob	2@example.com, amy@test.org
+(?m)^(\\w+)	the special big requests here	true	0	1	1the	<the> special big requests here	[the] special big requests here	the	2 special big requests here
+(?m)^(\\w+)	١٢٣ ٤٥	true	0	1	1١٢٣	<١٢٣> ٤٥	[١٢٣] ٤٥	١٢٣	2 ٤٥
+(?m)^(\\w+)	_under_score_	true	0	1	1_under_score_	<_under_score_>	[_under_score_]	_under_score_	2
+(?m)^(\\w+)	0	true	0	1	10	<0>	[0]	0	2
+(?m)^(\\w+)	ababab	true	0	1	1ababab	<ababab>	[ababab]	ababab	2
+(?m)^(\\w+)	https://www.example.com/a/b?q=1	true	0	1	1https	<https>://www.example.com/a/b?q=1	[https]://www.example.com/a/b?q=1	https	2://www.example.com/a/b?q=1
+(?m)^(\\w+)	http://foo.org/	true	0	1	1http	<http>://foo.org/	[http]://foo.org/	http	2://foo.org/
 a|b		false	\N	0	0			\N	1
 a|b	a	true	0	1	1a	<a>	[]	\N	2
 a|b	abc	true	0	2	2ab	<a><b>c	[]bc	\N	3c
@@ -2818,6 +3260,8 @@ a|b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a|b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a|b	0	false	\N	0	0	0	0	\N	10
 a|b	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[]babab	\N	7
+a|b	https://www.example.com/a/b?q=1	true	14	3	3aab	https://www.ex<a>mple.com/<a>/<b>?q=1	https://www.ex[]mple.com/a/b?q=1	\N	4https://www.exmple.com//?q=1
+a|b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 foo|bar		false	\N	0	0			\N	1
 foo|bar	a	false	\N	0	0	a	a	\N	1a
 foo|bar	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -2848,6 +3292,8 @@ foo|bar	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 foo|bar	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 foo|bar	0	false	\N	0	0	0	0	\N	10
 foo|bar	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+foo|bar	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+foo|bar	http://foo.org/	true	7	1	1foo	http://<foo>.org/	http://[].org/	\N	2http://.org/
 a|ab|abc		false	\N	0	0			\N	1
 a|ab|abc	a	true	0	1	1a	<a>	[]	\N	2
 a|ab|abc	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -2878,6 +3324,8 @@ a|ab|abc	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a|ab|abc	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a|ab|abc	0	false	\N	0	0	0	0	\N	10
 a|ab|abc	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+a|ab|abc	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a|ab|abc	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 abc|ab|a		false	\N	0	0			\N	1
 abc|ab|a	a	true	0	1	1a	<a>	[]	\N	2
 abc|ab|a	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -2908,6 +3356,8 @@ abc|ab|a	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 abc|ab|a	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 abc|ab|a	0	false	\N	0	0	0	0	\N	10
 abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+abc|ab|a	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+abc|ab|a	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (a|b)+		false	\N	0	0			\N	1
 (a|b)+	a	true	0	1	1a	<a>	[a]	a	2
 (a|b)+	abc	true	0	1	1ab	<ab>c	[b]c	b	2c
@@ -2938,6 +3388,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (a|b)+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (a|b)+	0	false	\N	0	0	0	0	\N	10
 (a|b)+	ababab	true	0	1	1ababab	<ababab>	[b]	b	2
+(a|b)+	https://www.example.com/a/b?q=1	true	14	3	3aab	https://www.ex<a>mple.com/<a>/<b>?q=1	https://www.ex[a]mple.com/a/b?q=1	a	4https://www.exmple.com//?q=1
+(a|b)+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?:ab)+		false	\N	0	0			\N	1
 (?:ab)+	a	false	\N	0	0	a	a	\N	1a
 (?:ab)+	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -2968,6 +3420,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?:ab)+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?:ab)+	0	false	\N	0	0	0	0	\N	10
 (?:ab)+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+(?:ab)+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?:ab)+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (ab)+		false	\N	0	0			\N	1
 (ab)+	a	false	\N	0	0	a	a	\N	1a
 (ab)+	abc	true	0	1	1ab	<ab>c	[ab]c	ab	2c
@@ -2998,6 +3452,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (ab)+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (ab)+	0	false	\N	0	0	0	0	\N	10
 (ab)+	ababab	true	0	1	1ababab	<ababab>	[ab]	ab	2
+(ab)+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(ab)+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (a)(b)?(c)?		false	\N	0	0			\N	1
 (a)(b)?(c)?	a	true	0	1	1a	<a>	[a]	a	2
 (a)(b)?(c)?	abc	true	0	1	1abc	<abc>	[a]	a	2
@@ -3028,6 +3484,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (a)(b)?(c)?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (a)(b)?(c)?	0	false	\N	0	0	0	0	\N	10
 (a)(b)?(c)?	ababab	true	0	3	3ababab	<ab><ab><ab>	[a]abab	a	4
+(a)(b)?(c)?	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[a]mple.com/a/b?q=1	a	3https://www.exmple.com//b?q=1
+(a)(b)?(c)?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (a|ab)(c|bcd)		false	\N	0	0			\N	1
 (a|ab)(c|bcd)	a	false	\N	0	0	a	a	\N	1a
 (a|ab)(c|bcd)	abc	true	0	1	1abc	<abc>	[ab]	ab	2
@@ -3058,6 +3516,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (a|ab)(c|bcd)	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (a|ab)(c|bcd)	0	false	\N	0	0	0	0	\N	10
 (a|ab)(c|bcd)	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(a|ab)(c|bcd)	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(a|ab)(c|bcd)	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ()		true	0	1	1	<>	[]		2
 ()	a	true	0	2	2	<>a<>	[]a		3a
 ()	abc	true	0	4	4	<>a<>b<>c<>	[]abc		5abc
@@ -3088,6 +3548,8 @@ abc|ab|a	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 ()	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_		15_under_score_
 ()	0	true	0	2	2	<>0<>	[]0		30
 ()	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab		8ababab
+()	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1		33https://www.example.com/a/b?q=1
+()	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/		17http://foo.org/
 a|		true	0	1	1	<>	[]	\N	2
 a|	a	true	0	1	1a	<a>	[]	\N	2
 a|	abc	true	0	3	3a	<a>b<>c<>	[]bc	\N	4bc
@@ -3118,6 +3580,8 @@ a|	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8�
 a|	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a|	0	true	0	2	2	<>0<>	[]0	\N	30
 a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
+a|	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	31https://www.exmple.com//b?q=1
+a|	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 |		true	0	1	1	<>	[]	\N	2
 |	a	true	0	2	2	<>a<>	[]a	\N	3a
 |	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -3148,6 +3612,8 @@ a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
 |	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 |	0	true	0	2	2	<>0<>	[]0	\N	30
 |	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+|	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	33https://www.example.com/a/b?q=1
+|	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 (|a)		true	0	1	1	<>	[]		2
 (|a)	a	true	0	2	2	<>a<>	[]a		3a
 (|a)	abc	true	0	4	4	<>a<>b<>c<>	[]abc		5abc
@@ -3178,6 +3644,8 @@ a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
 (|a)	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_		15_under_score_
 (|a)	0	true	0	2	2	<>0<>	[]0		30
 (|a)	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab		8ababab
+(|a)	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1		33https://www.example.com/a/b?q=1
+(|a)	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/		17http://foo.org/
 (a)|b		false	\N	0	0			\N	1
 (a)|b	a	true	0	1	1a	<a>	[a]	a	2
 (a)|b	abc	true	0	2	2ab	<a><b>c	[a]bc	a	3c
@@ -3208,6 +3676,8 @@ a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
 (a)|b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (a)|b	0	false	\N	0	0	0	0	\N	10
 (a)|b	ababab	true	0	6	6ababab	<a><b><a><b><a><b>	[a]babab	a	7
+(a)|b	https://www.example.com/a/b?q=1	true	14	3	3aab	https://www.ex<a>mple.com/<a>/<b>?q=1	https://www.ex[a]mple.com/a/b?q=1	a	4https://www.exmple.com//?q=1
+(a)|b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?P<word>\\w+)		false	\N	0	0			\N	1
 (?P<word>\\w+)	a	true	0	1	1a	<a>	[a]	a	2
 (?P<word>\\w+)	abc	true	0	1	1abc	<abc>	[abc]	abc	2
@@ -3238,6 +3708,8 @@ a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
 (?P<word>\\w+)	_under_score_	true	0	1	1_under_score_	<_under_score_>	[_under_score_]	_under_score_	2
 (?P<word>\\w+)	0	true	0	1	10	<0>	[0]	0	2
 (?P<word>\\w+)	ababab	true	0	1	1ababab	<ababab>	[ababab]	ababab	2
+(?P<word>\\w+)	https://www.example.com/a/b?q=1	true	0	8	8httpswwwexamplecomabq1	<https>://<www>.<example>.<com>/<a>/<b>?<q>=<1>	[https]://www.example.com/a/b?q=1	https	9://..//?=
+(?P<word>\\w+)	http://foo.org/	true	0	3	3httpfooorg	<http>://<foo>.<org>/	[http]://foo.org/	http	4://./
 (?<x>a)(?<y>b)		false	\N	0	0			\N	1
 (?<x>a)(?<y>b)	a	false	\N	0	0	a	a	\N	1a
 (?<x>a)(?<y>b)	abc	true	0	1	1ab	<ab>c	[a]c	a	2c
@@ -3268,6 +3740,8 @@ a|	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
 (?<x>a)(?<y>b)	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?<x>a)(?<y>b)	0	false	\N	0	0	0	0	\N	10
 (?<x>a)(?<y>b)	ababab	true	0	3	3ababab	<ab><ab><ab>	[a]abab	a	4
+(?<x>a)(?<y>b)	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?<x>a)(?<y>b)	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a*		true	0	1	1	<>	[]	\N	2
 a*	a	true	0	1	1a	<a>	[]	\N	2
 a*	abc	true	0	3	3a	<a>b<>c<>	[]bc	\N	4bc
@@ -3298,6 +3772,8 @@ a*	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8�
 a*	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a*	0	true	0	2	2	<>0<>	[]0	\N	30
 a*	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
+a*	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	31https://www.exmple.com//b?q=1
+a*	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 a+		false	\N	0	0			\N	1
 a+	a	true	0	1	1a	<a>	[]	\N	2
 a+	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3328,6 +3804,8 @@ a+	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a+	0	false	\N	0	0	0	0	\N	10
 a+	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+a+	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a?		true	0	1	1	<>	[]	\N	2
 a?	a	true	0	1	1a	<a>	[]	\N	2
 a?	abc	true	0	3	3a	<a>b<>c<>	[]bc	\N	4bc
@@ -3358,6 +3836,8 @@ a?	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8�
 a?	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a?	0	true	0	2	2	<>0<>	[]0	\N	30
 a?	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
+a?	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	31https://www.exmple.com//b?q=1
+a?	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 a{2}		false	\N	0	0			\N	1
 a{2}	a	false	\N	0	0	a	a	\N	1a
 a{2}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3388,6 +3868,8 @@ a{2}	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a{2}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a{2}	0	false	\N	0	0	0	0	\N	10
 a{2}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a{2}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a{2}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a{2,}		false	\N	0	0			\N	1
 a{2,}	a	false	\N	0	0	a	a	\N	1a
 a{2,}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3418,6 +3900,8 @@ a{2,}	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a{2,}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a{2,}	0	false	\N	0	0	0	0	\N	10
 a{2,}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a{2,}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a{2,}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a{1,2}		false	\N	0	0			\N	1
 a{1,2}	a	true	0	1	1a	<a>	[]	\N	2
 a{1,2}	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3448,6 +3932,8 @@ a{1,2}	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a{1,2}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a{1,2}	0	false	\N	0	0	0	0	\N	10
 a{1,2}	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+a{1,2}	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a{1,2}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a{0,1}		true	0	1	1	<>	[]	\N	2
 a{0,1}	a	true	0	1	1a	<a>	[]	\N	2
 a{0,1}	abc	true	0	3	3a	<a>b<>c<>	[]bc	\N	4bc
@@ -3478,6 +3964,8 @@ a{0,1}	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	
 a{0,1}	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a{0,1}	0	true	0	2	2	<>0<>	[]0	\N	30
 a{0,1}	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
+a{0,1}	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	31https://www.exmple.com//b?q=1
+a{0,1}	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 a{ 2 }		false	\N	0	0			\N	1
 a{ 2 }	a	false	\N	0	0	a	a	\N	1a
 a{ 2 }	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3508,6 +3996,8 @@ a{ 2 }	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a{ 2 }	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a{ 2 }	0	false	\N	0	0	0	0	\N	10
 a{ 2 }	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+a{ 2 }	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a{ 2 }	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a*?		true	0	1	1	<>	[]	\N	2
 a*?	a	true	0	2	2	<>a<>	[]a	\N	3a
 a*?	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -3538,6 +4028,8 @@ a*?	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8
 a*?	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a*?	0	true	0	2	2	<>0<>	[]0	\N	30
 a*?	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+a*?	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	33https://www.example.com/a/b?q=1
+a*?	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 a+?		false	\N	0	0			\N	1
 a+?	a	true	0	1	1a	<a>	[]	\N	2
 a+?	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3568,6 +4060,8 @@ a+?	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a+?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a+?	0	false	\N	0	0	0	0	\N	10
 a+?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+a+?	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a+?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a??		true	0	1	1	<>	[]	\N	2
 a??	a	true	0	2	2	<>a<>	[]a	\N	3a
 a??	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -3598,6 +4092,8 @@ a??	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8
 a??	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a??	0	true	0	2	2	<>0<>	[]0	\N	30
 a??	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+a??	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	33https://www.example.com/a/b?q=1
+a??	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 a{1,2}?		false	\N	0	0			\N	1
 a{1,2}?	a	true	0	1	1a	<a>	[]	\N	2
 a{1,2}?	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3628,6 +4124,8 @@ a{1,2}?	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a{1,2}?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a{1,2}?	0	false	\N	0	0	0	0	\N	10
 a{1,2}?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+a{1,2}?	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+a{1,2}?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (a*)*		true	0	1	1	<>	[]		2
 (a*)*	a	true	0	1	1a	<a>	[a]	a	2
 (a*)*	abc	true	0	3	3a	<a>b<>c<>	[a]bc	a	4bc
@@ -3658,6 +4156,8 @@ a{1,2}?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
 (a*)*	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_		15_under_score_
 (a*)*	0	true	0	2	2	<>0<>	[]0		30
 (a*)*	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[a]babab	a	5bbb
+(a*)*	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1		31https://www.exmple.com//b?q=1
+(a*)*	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/		17http://foo.org/
 (a*)+		true	0	1	1	<>	[]		2
 (a*)+	a	true	0	1	1a	<a>	[a]	a	2
 (a*)+	abc	true	0	3	3a	<a>b<>c<>	[a]bc	a	4bc
@@ -3688,6 +4188,8 @@ a{1,2}?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
 (a*)+	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_		15_under_score_
 (a*)+	0	true	0	2	2	<>0<>	[]0		30
 (a*)+	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[a]babab	a	5bbb
+(a*)+	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1		31https://www.exmple.com//b?q=1
+(a*)+	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/		17http://foo.org/
 (a|b)*c		false	\N	0	0			\N	1
 (a|b)*c	a	false	\N	0	0	a	a	\N	1a
 (a|b)*c	abc	true	0	1	1abc	<abc>	[b]	b	2
@@ -3718,6 +4220,8 @@ a{1,2}?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
 (a|b)*c	_under_score_	true	8	1	1c	_under_s<c>ore_	_under_s[]ore_	\N	2_under_sore_
 (a|b)*c	0	false	\N	0	0	0	0	\N	10
 (a|b)*c	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(a|b)*c	https://www.example.com/a/b?q=1	true	20	1	1c	https://www.example.<c>om/a/b?q=1	https://www.example.[]om/a/b?q=1	\N	2https://www.example.om/a/b?q=1
+(a|b)*c	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 x*		true	0	1	1	<>	[]	\N	2
 x*	a	true	0	2	2	<>a<>	[]a	\N	3a
 x*	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -3748,6 +4252,8 @@ x*	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8�
 x*	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 x*	0	true	0	2	2	<>0<>	[]0	\N	30
 x*	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+x*	https://www.example.com/a/b?q=1	true	0	31	31x	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<x>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	32https://www.eample.com/a/b?q=1
+x*	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 x+		false	\N	0	0			\N	1
 x+	a	false	\N	0	0	a	a	\N	1a
 x+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3778,6 +4284,8 @@ x+	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 x+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 x+	0	false	\N	0	0	0	0	\N	10
 x+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+x+	https://www.example.com/a/b?q=1	true	13	1	1x	https://www.e<x>ample.com/a/b?q=1	https://www.e[]ample.com/a/b?q=1	\N	2https://www.eample.com/a/b?q=1
+x+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a**		true	0	1	1	<>	[]	\N	2
 a**	a	true	0	1	1a	<a>	[]	\N	2
 a**	abc	true	0	3	3a	<a>b<>c<>	[]bc	\N	4bc
@@ -3808,6 +4316,8 @@ a**	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8
 a**	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a**	0	true	0	2	2	<>0<>	[]0	\N	30
 a**	ababab	true	0	4	4aaa	<a>b<a>b<a>b<>	[]babab	\N	5bbb
+a**	https://www.example.com/a/b?q=1	true	0	30	30aa	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<a>m<>p<>l<>e<>.<>c<>o<>m<>/<a>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	31https://www.exmple.com//b?q=1
+a**	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 x{2}{3}		false	\N	0	0			\N	1
 x{2}{3}	a	false	\N	0	0	a	a	\N	1a
 x{2}{3}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3838,6 +4348,8 @@ x{2}{3}	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 x{2}{3}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 x{2}{3}	0	false	\N	0	0	0	0	\N	10
 x{2}{3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+x{2}{3}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+x{2}{3}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\d{2,3}		false	\N	0	0			\N	1
 \\d{2,3}	a	false	\N	0	0	a	a	\N	1a
 \\d{2,3}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3868,6 +4380,8 @@ x{2}{3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\d{2,3}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\d{2,3}	0	false	\N	0	0	0	0	\N	10
 \\d{2,3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\d{2,3}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\d{2,3}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\d{4}-\\d{2}-\\d{2}		false	\N	0	0			\N	1
 \\d{4}-\\d{2}-\\d{2}	a	false	\N	0	0	a	a	\N	1a
 \\d{4}-\\d{2}-\\d{2}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -3898,6 +4412,8 @@ x{2}{3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\d{4}-\\d{2}-\\d{2}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\d{4}-\\d{2}-\\d{2}	0	false	\N	0	0	0	0	\N	10
 \\d{4}-\\d{2}-\\d{2}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\d{4}-\\d{2}-\\d{2}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\d{4}-\\d{2}-\\d{2}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?U)a+		false	\N	0	0			\N	1
 (?U)a+	a	true	0	1	1a	<a>	[]	\N	2
 (?U)a+	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3928,6 +4444,8 @@ x{2}{3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (?U)a+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?U)a+	0	false	\N	0	0	0	0	\N	10
 (?U)a+	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+(?U)a+	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+(?U)a+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?U)a+?		false	\N	0	0			\N	1
 (?U)a+?	a	true	0	1	1a	<a>	[]	\N	2
 (?U)a+?	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -3958,6 +4476,8 @@ x{2}{3}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (?U)a+?	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?U)a+?	0	false	\N	0	0	0	0	\N	10
 (?U)a+?	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+(?U)a+?	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+(?U)a+?	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a{0}		true	0	1	1	<>	[]	\N	2
 a{0}	a	true	0	2	2	<>a<>	[]a	\N	3a
 a{0}	abc	true	0	4	4	<>a<>b<>c<>	[]abc	\N	5abc
@@ -3988,6 +4508,8 @@ a{0}	١٢٣ ٤٥	true	0	7	7	<>١<>٢<>٣<> <>٤<>٥<>	[]١٢٣ ٤٥	\N	8
 a{0}	_under_score_	true	0	14	14	<>_<>u<>n<>d<>e<>r<>_<>s<>c<>o<>r<>e<>_<>	[]_under_score_	\N	15_under_score_
 a{0}	0	true	0	2	2	<>0<>	[]0	\N	30
 a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
+a{0}	https://www.example.com/a/b?q=1	true	0	32	32	<>h<>t<>t<>p<>s<>:<>/<>/<>w<>w<>w<>.<>e<>x<>a<>m<>p<>l<>e<>.<>c<>o<>m<>/<>a<>/<>b<>?<>q<>=<>1<>	[]https://www.example.com/a/b?q=1	\N	33https://www.example.com/a/b?q=1
+a{0}	http://foo.org/	true	0	16	16	<>h<>t<>t<>p<>:<>/<>/<>f<>o<>o<>.<>o<>r<>g<>/<>	[]http://foo.org/	\N	17http://foo.org/
 (ab){2}		false	\N	0	0			\N	1
 (ab){2}	a	false	\N	0	0	a	a	\N	1a
 (ab){2}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4018,6 +4540,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (ab){2}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (ab){2}	0	false	\N	0	0	0	0	\N	10
 (ab){2}	ababab	true	0	1	1abab	<abab>ab	[ab]ab	ab	2ab
+(ab){2}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(ab){2}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 .*?b		false	\N	0	0			\N	1
 .*?b	a	false	\N	0	0	a	a	\N	1a
 .*?b	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -4048,6 +4572,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 .*?b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 .*?b	0	false	\N	0	0	0	0	\N	10
 .*?b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+.*?b	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b	<https://www.example.com/a/b>?q=1	[]?q=1	\N	2?q=1
+.*?b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 .*b		false	\N	0	0			\N	1
 .*b	a	false	\N	0	0	a	a	\N	1a
 .*b	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -4078,6 +4604,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 .*b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 .*b	0	false	\N	0	0	0	0	\N	10
 .*b	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+.*b	https://www.example.com/a/b?q=1	true	0	1	1https://www.example.com/a/b	<https://www.example.com/a/b>?q=1	[]?q=1	\N	2?q=1
+.*b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)a		false	\N	0	0			\N	1
 (?i)a	a	true	0	1	1a	<a>	[]	\N	2
 (?i)a	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -4108,6 +4636,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)a	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)a	0	false	\N	0	0	0	0	\N	10
 (?i)a	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+(?i)a	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+(?i)a	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)foo		false	\N	0	0			\N	1
 (?i)foo	a	false	\N	0	0	a	a	\N	1a
 (?i)foo	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4138,6 +4668,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)foo	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)foo	0	false	\N	0	0	0	0	\N	10
 (?i)foo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)foo	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)foo	http://foo.org/	true	7	1	1foo	http://<foo>.org/	http://[].org/	\N	2http://.org/
 (?i)straße		false	\N	0	0			\N	1
 (?i)straße	a	false	\N	0	0	a	a	\N	1a
 (?i)straße	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4168,6 +4700,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)straße	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)straße	0	false	\N	0	0	0	0	\N	10
 (?i)straße	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)straße	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)straße	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)σ		false	\N	0	0			\N	1
 (?i)σ	a	false	\N	0	0	a	a	\N	1a
 (?i)σ	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4198,6 +4732,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)σ	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)σ	0	false	\N	0	0	0	0	\N	10
 (?i)σ	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)σ	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)σ	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)k		false	\N	0	0			\N	1
 (?i)k	a	false	\N	0	0	a	a	\N	1a
 (?i)k	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4228,6 +4764,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)k	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)k	0	false	\N	0	0	0	0	\N	10
 (?i)k	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)k	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)k	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)[a-c]+		false	\N	0	0			\N	1
 (?i)[a-c]+	a	true	0	1	1a	<a>	[]	\N	2
 (?i)[a-c]+	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -4258,6 +4796,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)[a-c]+	_under_score_	true	8	1	1c	_under_s<c>ore_	_under_s[]ore_	\N	2_under_sore_
 (?i)[a-c]+	0	false	\N	0	0	0	0	\N	10
 (?i)[a-c]+	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+(?i)[a-c]+	https://www.example.com/a/b?q=1	true	14	4	4acab	https://www.ex<a>mple.<c>om/<a>/<b>?q=1	https://www.ex[]mple.com/a/b?q=1	\N	5https://www.exmple.om//?q=1
+(?i)[a-c]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)[^a]		false	\N	0	0			\N	1
 (?i)[^a]	a	false	\N	0	0	a	a	\N	1a
 (?i)[^a]	abc	true	1	2	2bc	a<b><c>	a[]c	\N	3a
@@ -4288,6 +4828,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)[^a]	_under_score_	true	0	13	13_under_score_	<_><u><n><d><e><r><_><s><c><o><r><e><_>	[]under_score_	\N	14
 (?i)[^a]	0	true	0	1	10	<0>	[]	\N	2
 (?i)[^a]	ababab	true	1	3	3bbb	a<b>a<b>a<b>	a[]abab	\N	4aaa
+(?i)[^a]	https://www.example.com/a/b?q=1	true	0	29	29https://www.exmple.com//b?q=1	<h><t><t><p><s><:></></><w><w><w><.><e><x>a<m><p><l><e><.><c><o><m></>a</><b><?><q><=><1>	[]ttps://www.example.com/a/b?q=1	\N	30aa
+(?i)[^a]	http://foo.org/	true	0	15	15http://foo.org/	<h><t><t><p><:></></><f><o><o><.><o><r><g></>	[]ttp://foo.org/	\N	16
 (?i)é		false	\N	0	0			\N	1
 (?i)é	a	false	\N	0	0	a	a	\N	1a
 (?i)é	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4318,6 +4860,8 @@ a{0}	ababab	true	0	7	7	<>a<>b<>a<>b<>a<>b<>	[]ababab	\N	8ababab
 (?i)é	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)é	0	false	\N	0	0	0	0	\N	10
 (?i)é	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)é	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)é	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 a(?i)b		false	\N	0	0			\N	1
 a(?i)b	a	false	\N	0	0	a	a	\N	1a
 a(?i)b	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -4348,6 +4892,8 @@ a(?i)b	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ ٤٥
 a(?i)b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 a(?i)b	0	false	\N	0	0	0	0	\N	10
 a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+a(?i)b	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+a(?i)b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i:F)oo		false	\N	0	0			\N	1
 (?i:F)oo	a	false	\N	0	0	a	a	\N	1a
 (?i:F)oo	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4378,6 +4924,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?i:F)oo	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i:F)oo	0	false	\N	0	0	0	0	\N	10
 (?i:F)oo	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i:F)oo	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i:F)oo	http://foo.org/	true	7	1	1foo	http://<foo>.org/	http://[].org/	\N	2http://.org/
 (?i)foo|BAR		false	\N	0	0			\N	1
 (?i)foo|BAR	a	false	\N	0	0	a	a	\N	1a
 (?i)foo|BAR	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4408,6 +4956,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?i)foo|BAR	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)foo|BAR	0	false	\N	0	0	0	0	\N	10
 (?i)foo|BAR	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)foo|BAR	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)foo|BAR	http://foo.org/	true	7	1	1foo	http://<foo>.org/	http://[].org/	\N	2http://.org/
 (?x) a b # c		false	\N	0	0			\N	1
 (?x) a b # c	a	false	\N	0	0	a	a	\N	1a
 (?x) a b # c	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -4438,6 +4988,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?x) a b # c	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?x) a b # c	0	false	\N	0	0	0	0	\N	10
 (?x) a b # c	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+(?x) a b # c	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?x) a b # c	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?x)a{ 2 }		false	\N	0	0			\N	1
 (?x)a{ 2 }	a	false	\N	0	0	a	a	\N	1a
 (?x)a{ 2 }	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4468,6 +5020,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?x)a{ 2 }	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?x)a{ 2 }	0	false	\N	0	0	0	0	\N	10
 (?x)a{ 2 }	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?x)a{ 2 }	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?x)a{ 2 }	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)ǆ		false	\N	0	0			\N	1
 (?i)ǆ	a	false	\N	0	0	a	a	\N	1a
 (?i)ǆ	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4498,6 +5052,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?i)ǆ	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)ǆ	0	false	\N	0	0	0	0	\N	10
 (?i)ǆ	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)ǆ	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)ǆ	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?-i)a		false	\N	0	0			\N	1
 (?-i)a	a	true	0	1	1a	<a>	[]	\N	2
 (?-i)a	abc	true	0	1	1a	<a>bc	[]bc	\N	2bc
@@ -4528,6 +5084,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?-i)a	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?-i)a	0	false	\N	0	0	0	0	\N	10
 (?-i)a	ababab	true	0	3	3aaa	<a>b<a>b<a>b	[]babab	\N	4bbb
+(?-i)a	https://www.example.com/a/b?q=1	true	14	2	2aa	https://www.ex<a>mple.com/<a>/b?q=1	https://www.ex[]mple.com/a/b?q=1	\N	3https://www.exmple.com//b?q=1
+(?-i)a	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)(?-i:a)b		false	\N	0	0			\N	1
 (?i)(?-i:a)b	a	false	\N	0	0	a	a	\N	1a
 (?i)(?-i:a)b	abc	true	0	1	1ab	<ab>c	[]c	\N	2c
@@ -4558,6 +5116,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 (?i)(?-i:a)b	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)(?-i:a)b	0	false	\N	0	0	0	0	\N	10
 (?i)(?-i:a)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
+(?i)(?-i:a)b	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)(?-i:a)b	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [\\w.]+@[\\w.]+\\.\\w+		false	\N	0	0			\N	1
 [\\w.]+@[\\w.]+\\.\\w+	a	false	\N	0	0	a	a	\N	1a
 [\\w.]+@[\\w.]+\\.\\w+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4588,6 +5148,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 [\\w.]+@[\\w.]+\\.\\w+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [\\w.]+@[\\w.]+\\.\\w+	0	false	\N	0	0	0	0	\N	10
 [\\w.]+@[\\w.]+\\.\\w+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[\\w.]+@[\\w.]+\\.\\w+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[\\w.]+@[\\w.]+\\.\\w+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\d+-\\d+		false	\N	0	0			\N	1
 \\d+-\\d+	a	false	\N	0	0	a	a	\N	1a
 \\d+-\\d+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4618,6 +5180,8 @@ a(?i)b	ababab	true	0	3	3ababab	<ab><ab><ab>	[]abab	\N	4
 \\d+-\\d+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\d+-\\d+	0	false	\N	0	0	0	0	\N	10
 \\d+-\\d+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\d+-\\d+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\d+-\\d+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 special.*requests		false	\N	0	0			\N	1
 special.*requests	a	false	\N	0	0	a	a	\N	1a
 special.*requests	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4648,6 +5212,8 @@ special.*requests	١٢٣ ٤٥	false	\N	0	0	١٢٣ ٤٥	١٢٣ ٤٥	\N	1١٢٣ �
 special.*requests	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 special.*requests	0	false	\N	0	0	0	0	\N	10
 special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+special.*requests	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+special.*requests	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^\\s+|\\s+$		false	\N	0	0			\N	1
 ^\\s+|\\s+$	a	false	\N	0	0	a	a	\N	1a
 ^\\s+|\\s+$	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4678,6 +5244,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ^\\s+|\\s+$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ^\\s+|\\s+$	0	false	\N	0	0	0	0	\N	10
 ^\\s+|\\s+$	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+^\\s+|\\s+$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^\\s+|\\s+$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (\\w+)@(\\w+)\\.com		false	\N	0	0			\N	1
 (\\w+)@(\\w+)\\.com	a	false	\N	0	0	a	a	\N	1a
 (\\w+)@(\\w+)\\.com	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4708,6 +5276,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (\\w+)@(\\w+)\\.com	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (\\w+)@(\\w+)\\.com	0	false	\N	0	0	0	0	\N	10
 (\\w+)@(\\w+)\\.com	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(\\w+)@(\\w+)\\.com	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(\\w+)@(\\w+)\\.com	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (\\d{4})-(\\d{2})-(\\d{2})		false	\N	0	0			\N	1
 (\\d{4})-(\\d{2})-(\\d{2})	a	false	\N	0	0	a	a	\N	1a
 (\\d{4})-(\\d{2})-(\\d{2})	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4738,6 +5308,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (\\d{4})-(\\d{2})-(\\d{2})	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (\\d{4})-(\\d{2})-(\\d{2})	0	false	\N	0	0	0	0	\N	10
 (\\d{4})-(\\d{2})-(\\d{2})	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(\\d{4})-(\\d{2})-(\\d{2})	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(\\d{4})-(\\d{2})-(\\d{2})	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [A-Z][a-z]+		false	\N	0	0			\N	1
 [A-Z][a-z]+	a	false	\N	0	0	a	a	\N	1a
 [A-Z][a-z]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4768,6 +5340,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [A-Z][a-z]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [A-Z][a-z]+	0	false	\N	0	0	0	0	\N	10
 [A-Z][a-z]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[A-Z][a-z]+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[A-Z][a-z]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 \\s{2,}		false	\N	0	0			\N	1
 \\s{2,}	a	false	\N	0	0	a	a	\N	1a
 \\s{2,}	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4798,6 +5372,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 \\s{2,}	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 \\s{2,}	0	false	\N	0	0	0	0	\N	10
 \\s{2,}	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+\\s{2,}	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+\\s{2,}	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?i)hello|world		false	\N	0	0			\N	1
 (?i)hello|world	a	false	\N	0	0	a	a	\N	1a
 (?i)hello|world	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4828,6 +5404,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 (?i)hello|world	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 (?i)hello|world	0	false	\N	0	0	0	0	\N	10
 (?i)hello|world	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+(?i)hello|world	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+(?i)hello|world	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 ^[a-z]+$		false	\N	0	0			\N	1
 ^[a-z]+$	a	true	0	1	1a	<a>	[]	\N	2
 ^[a-z]+$	abc	true	0	1	1abc	<abc>	[]	\N	2
@@ -4858,6 +5436,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 ^[a-z]+$	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 ^[a-z]+$	0	false	\N	0	0	0	0	\N	10
 ^[a-z]+$	ababab	true	0	1	1ababab	<ababab>	[]	\N	2
+^[a-z]+$	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+^[a-z]+$	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 [^\\x00-\\x7F]+		false	\N	0	0			\N	1
 [^\\x00-\\x7F]+	a	false	\N	0	0	a	a	\N	1a
 [^\\x00-\\x7F]+	abc	false	\N	0	0	abc	abc	\N	1abc
@@ -4888,6 +5468,8 @@ special.*requests	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
 [^\\x00-\\x7F]+	_under_score_	false	\N	0	0	_under_score_	_under_score_	\N	1_under_score_
 [^\\x00-\\x7F]+	0	false	\N	0	0	0	0	\N	10
 [^\\x00-\\x7F]+	ababab	false	\N	0	0	ababab	ababab	\N	1ababab
+[^\\x00-\\x7F]+	https://www.example.com/a/b?q=1	false	\N	0	0	https://www.example.com/a/b?q=1	https://www.example.com/a/b?q=1	\N	1https://www.example.com/a/b?q=1
+[^\\x00-\\x7F]+	http://foo.org/	false	\N	0	0	http://foo.org/	http://foo.org/	\N	1http://foo.org/
 (?=a)		ERROR
 (?!a)		ERROR
 (?<=a)b		ERROR

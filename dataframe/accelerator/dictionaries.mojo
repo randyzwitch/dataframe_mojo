@@ -13,7 +13,7 @@ from .code_domains import (
     CategoryField,
     CategoryOwner,
 )
-from dataframe.column import Column
+from dataframe.column import Column, _copy_validity
 from std.sys import size_of
 from .selectors import _live_nodes
 from std.collections import Dict
@@ -108,6 +108,40 @@ def dictionary_dtype(dtype: DataType) -> Bool:
     return dtype == DataType.STRING or dtype.is_categorical()
 
 
+def _staging_values(column: Series) raises -> CategoricalDictionary:
+    """Discover retained String values by integer code, not by hashing rows.
+
+    Visit only valid rows, in source order, so sliced/gathered inputs do not
+    introduce unused dictionary members into String lookup operations.
+    Categorical inputs retain their complete public dictionary as before.
+    """
+    var dtype = _coded_string_dtype(column)
+    if not dtype:
+        return _values_of(column)
+    var dictionary = dtype.value().dictionary()
+    var visited = List[UInt8](length=len(dictionary[]), fill=0)
+    var seen = Dict[String, Bool]()
+    var values = CategoricalDictionary()
+    for part in column.chunks():
+        ref strings = part._data[StringColumn]
+        ref held = strings._codes.value()[]
+        for row in range(len(strings)):
+            if not strings._valid(row):
+                continue
+            var index = row + strings._offset
+            if held.rows:
+                index = held.rows.value()[][held.first + index] + held.shift
+            var code = Int(held.codes[][index])
+            if visited[code]:
+                continue
+            visited[code] = 1
+            var label = String(dictionary[].get(code))
+            if label not in seen:
+                seen[label] = True
+                values.append(label)
+    return values^
+
+
 struct DictionaryCodes(Movable):
     var dtype: DataType
     var lookup: Dict[String, UInt32]
@@ -122,7 +156,7 @@ struct DictionaryCodes(Movable):
                     continue
                 # Include unused categorical members too: output metadata and
                 # literal comparisons must not depend on which rows are valid.
-                var dictionary = _values_of(column)
+                var dictionary = _staging_values(column)
                 for code in range(len(dictionary)):
                     var text = String(dictionary.get(code))
                     if text not in seen:
@@ -152,6 +186,32 @@ struct DictionaryCodes(Movable):
                 if dictionary_dtype(column.dtype()):
                     total = checked_add(total, checked_mul(len(column), 4))
                     total = checked_add(total, checked_add(len(column), 7) // 8)
+                    var retained = _coded_string_dtype(column)
+                    if column.dtype().is_categorical():
+                        retained = column.dtype()
+                    if retained:
+                        # Per-source code map and presence flags, plus integer
+                        # discovery scratch; all checked before recoding rows.
+                        total = checked_add(
+                            total,
+                            checked_mul(
+                                len(retained.value().dictionary()[]), 8
+                            ),
+                        )
+                        if column.dtype() == DataType.STRING:
+                            for part in column.chunks():
+                                if (
+                                    part._data[StringColumn]
+                                    ._codes.value()[]
+                                    .rows
+                                ):
+                                    total = checked_add(
+                                        total,
+                                        checked_add(
+                                            checked_mul(len(part), 4),
+                                            (len(part) + 7) // 8,
+                                        ),
+                                    )
                     if column.dtype().is_categorical() or _coded_string_dtype(
                         column
                     ):
@@ -252,6 +312,46 @@ struct DictionaryCodes(Movable):
     def encode(self, column: Series) raises -> Series:
         if not dictionary_dtype(column.dtype()):
             return column.copy()
+        var original = Optional[Series]()
+        if column.dtype().is_categorical():
+            original = column.copy()
+        elif _coded_string_dtype(column):
+            original = column._dictionary_codes()
+        if original:
+            var source = original.value().dtype().dictionary()
+            var mapping = List[UInt32](length=len(source[]), fill=0)
+            var present = List[UInt8](length=len(source[]), fill=0)
+            for code in range(len(source[])):
+                var label = String(source[].get(code))
+                if label in self.lookup:
+                    mapping[code] = self.lookup[label]
+                    present[code] = 1
+            var parts = List[Series]()
+            for part in original.value().chunks():
+                ref input = part._data[Column[UInt32]]
+                var values = List[UInt32](length=len(input), fill=0)
+                for row in range(len(input)):
+                    if input._valid(row):
+                        var code = Int(input._get(row))
+                        if not present[code]:
+                            raise Error(
+                                "Metal dictionary staging lost a source label"
+                            )
+                        values[row] = mapping[code]
+                var encoded = Series(
+                    column.name(),
+                    Column[UInt32](
+                        values=values^,
+                        bits=_copy_validity(
+                            input._bits[], input._offset, len(input)
+                        ),
+                    ),
+                ).with_dtype(self.dtype)
+                encoded._field_metadata = column._field_metadata
+                parts.append(encoded^)
+            var result = Series._from_chunks(parts)
+            result._field_metadata = column._field_metadata
+            return result^
         var result = recode(column, self.dtype)
         # Ordered codes are transport for this exact field, not a public cast.
         result._field_metadata = column._field_metadata
@@ -330,7 +430,7 @@ def _concat_pool(
                         ):
                             continue
                         found = True
-                        var dictionary = _values_of(column)
+                        var dictionary = _staging_values(column)
                         for i in range(len(dictionary)):
                             var value = String(dictionary.get(i))
                             if value not in seen:
@@ -448,7 +548,7 @@ def lower_dictionary_operations(
         for column in frame._columns:
             names[column.name()] = True
             if dictionary_dtype(column.dtype()):
-                var values = _values_of(column)
+                var values = _staging_values(column)
                 for i in range(len(values)):
                     var value = String(values.get(i))
                     if value not in seen:
