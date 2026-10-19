@@ -141,6 +141,7 @@ from .io.parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
+from .bool_column import true_count
 from .column import Column
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
@@ -6672,14 +6673,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 names.append(name)
         var sample = self._frames[source.offset].select(names)
         if height > runs * run:
-            var picked = List[Int](capacity=runs * run)
-            for k in range(runs):
-                var first = k * (height // runs)
-                for i in range(run):
-                    picked.append(first + i)
-            # Gathered within each stored chunk, so no column is merged first.
-            sample = sample._filter_rows(picked^)
-        var kept = sample.filter(node.exprs[0]).height()
+            # Each column's runs are copied end to end (zero-copy slices
+            # merged into one array), not gathered row by row.
+            var columns = List[Series](capacity=sample.width())
+            for column in sample._columns:
+                var parts = List[Series](capacity=runs)
+                for k in range(runs):
+                    parts.append(column.slice(k * (height // runs), run))
+                columns.append(Series._from_chunks(parts).rechunk())
+            sample = DataFrame(columns^, height=runs * run)
+        # Only the matches are counted: the predicate's mask, as DuckDB
+        # counts a selection vector, with no filtered frame built.
+        var kept = true_count(sample._selection(node.exprs[0], 8192))
         if height <= runs * run:
             return kept
         return Int(Float64(kept) / Float64(runs * run) * Float64(height))
