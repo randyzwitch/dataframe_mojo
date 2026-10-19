@@ -292,12 +292,23 @@ can lease them. Runtime copies share the service; dropping its final owner
 releases cached resources. Native column handles and arbitrary buffer views are
 not pooled because their aliases can outlive an individual operator.
 
+For the fused Int32 scalar reduction only, the service also retains up to nine
+public compiled function handles: eight nullable/filter/arithmetic partial
+specializations and one shared finish kernel. The cache is tied to the same
+exclusive context lease; an overlapping query launches through its private
+context and does not populate or consume these slots. Poison clears handles
+before releasing the cached context. The SDK keeps executable storage opaque,
+so this fixed handle count is reported as metadata and its unknown executable
+bytes are outside the requested-payload budget. Profiles expose current
+pipeline entries, cumulative hits and misses, poison clears, and the entry cap.
+
 Direct execution currently performs one conservative final drain before marking
 its context reusable. Profiles include this wait and expose cumulative service
-context generations, scratch hits/misses, and current idle scratch bytes/entries.
+context generations, scratch hits/misses, current idle scratch bytes/entries,
+and fused pipeline-cache counters.
 Context creation remains lazy: metadata-only work, empty native input and budget
 rejection before submission do not initialize the device. Pipeline-handle reuse
-and wider operator migration remain separate work.
+outside the fused scalar path remains separate work.
 
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and

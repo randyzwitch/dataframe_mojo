@@ -20,7 +20,6 @@ def _run[
     source: NativeColumn[DType.int32], program: Program, partial_count: Int
 ) raises -> List[Int64]:
     var scope = source.scope()
-    var ctx = scope.context()
     var values = source.values()
     var bits = values.create_sub_buffer[DType.uint8](0, 1)
     comptime if nullable:
@@ -31,9 +30,7 @@ def _run[
     var output = scope.scratch[DType.int64](3)
     var result = List[Int64](length=3, fill=0)
     try:
-        ctx.enqueue_function[
-            fused_int32.partials[nullable, filtered, arithmetic]
-        ](
+        scope.enqueue_fused_partials[nullable, filtered, arithmetic](
             values,
             bits,
             UInt32(source.validity_bit_offset),
@@ -45,19 +42,14 @@ def _run[
             sums,
             counts,
             faults,
-            grid_dim=partial_count,
-            block_dim=256,
         )
-        ctx.enqueue_function[fused_int32.finish](
+        scope.enqueue_fused_finish(
             sums,
             counts,
             faults,
-            UInt32(partial_count),
+            partial_count,
             output,
-            grid_dim=1,
-            block_dim=256,
         )
-        scope.record_launches(2)
         scope.read_control_into(output, result)
         scope.record_download(24)
     except error:
