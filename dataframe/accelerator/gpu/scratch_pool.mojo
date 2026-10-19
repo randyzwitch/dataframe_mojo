@@ -39,34 +39,68 @@ struct ScratchPool(Movable):
         self.idle_bytes = 0
         self.idle_entries = 0
 
-    def take[dtype: DType](
-        mut self, context: DeviceContext, length: Int
-    ) raises -> Optional[DeviceBuffer[dtype]]:
+    def take[
+        dtype: DType
+    ](mut self, context: DeviceContext, length: Int) raises -> Optional[
+        DeviceBuffer[dtype]
+    ]:
         comptime if METAL_TARGET:
             comptime if dtype == DType.int64:
                 for index in range(len(self.int64_buffers)):
-                    if len(self.int64_buffers[index]) == length:
-                        if self.int64_buffers[index].context() != context:
-                            raise Error("Mojo GPU scratch pool context mismatch")
+                    if (
+                        len(
+                            rebind[DeviceBuffer[DType.int64]](
+                                self.int64_buffers[index]
+                            )
+                        )
+                        == length
+                    ):
+                        if (
+                            rebind[DeviceBuffer[DType.int64]](
+                                self.int64_buffers[index]
+                            ).context()
+                            != context
+                        ):
+                            raise Error(
+                                "Mojo GPU scratch pool context mismatch"
+                            )
                         self.idle_bytes -= length * size_of[Int64]()
                         self.idle_entries -= 1
                         self.hits += 1
-                        return self.int64_buffers.pop(index)
+                        return rebind[DeviceBuffer[dtype]](
+                            self.int64_buffers.pop(index)
+                        )
             elif dtype == DType.uint32:
                 for index in range(len(self.uint32_buffers)):
-                    if len(self.uint32_buffers[index]) == length:
-                        if self.uint32_buffers[index].context() != context:
-                            raise Error("Mojo GPU scratch pool context mismatch")
+                    if (
+                        len(
+                            rebind[DeviceBuffer[DType.uint32]](
+                                self.uint32_buffers[index]
+                            )
+                        )
+                        == length
+                    ):
+                        if (
+                            rebind[DeviceBuffer[DType.uint32]](
+                                self.uint32_buffers[index]
+                            ).context()
+                            != context
+                        ):
+                            raise Error(
+                                "Mojo GPU scratch pool context mismatch"
+                            )
                         self.idle_bytes -= length * size_of[UInt32]()
                         self.idle_entries -= 1
                         self.hits += 1
-                        return self.uint32_buffers.pop(index)
+                        return rebind[DeviceBuffer[dtype]](
+                            self.uint32_buffers.pop(index)
+                        )
         self.misses += 1
         return None
 
-    def put[dtype: DType](
-        mut self, context: DeviceContext, var buffer: DeviceBuffer[dtype]
-    ) raises:
+    def put[
+        dtype: DType
+    ](mut self, context: DeviceContext, var buffer: DeviceBuffer[dtype]) raises:
         comptime if METAL_TARGET and (
             dtype == DType.int64 or dtype == DType.uint32
         ):
@@ -82,8 +116,8 @@ struct ScratchPool(Movable):
             ):
                 return
             comptime if dtype == DType.int64:
-                self.int64_buffers.append(buffer^)
+                self.int64_buffers.append(rebind[_Int64Buffer](buffer^))
             else:
-                self.uint32_buffers.append(buffer^)
+                self.uint32_buffers.append(rebind[_UInt32Buffer](buffer^))
             self.idle_bytes += bytes
             self.idle_entries += 1

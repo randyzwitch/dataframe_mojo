@@ -68,9 +68,13 @@ struct DeviceService(Copyable):
         idle_scratch_entries: Int = 32,
     ) raises:
         if device_id < 0 or idle_scratch_bytes < 0 or idle_scratch_entries < 0:
-            raise Error("Mojo GPU device service device or idle limit is invalid")
+            raise Error(
+                "Mojo GPU device service device or idle limit is invalid"
+            )
         self._state = ArcPointer(
-            _DeviceServiceState(device_id, idle_scratch_bytes, idle_scratch_entries)
+            _DeviceServiceState(
+                device_id, idle_scratch_bytes, idle_scratch_entries
+            )
         )
 
     def same_service(self, other: Self) -> Bool:
@@ -88,7 +92,8 @@ struct DeviceService(Copyable):
             unlocked = 0
 
     def scratch_info(self) -> Tuple[Int, Int, Int, Int]:
-        """Idle bytes, idle entries, hits and misses; separate from query peak."""
+        """Idle bytes, idle entries, hits and misses; separate from query peak.
+        """
         self._lock_pool()
         var result = (
             self._state[].pool.idle_bytes,
@@ -99,9 +104,9 @@ struct DeviceService(Copyable):
         self._state[].pool_lock.store(0)
         return result
 
-    def _scratch[dtype: DType](
-        self, context: DeviceContext, length: Int
-    ) raises -> DeviceBuffer[dtype]:
+    def _scratch[
+        dtype: DType
+    ](self, context: DeviceContext, length: Int) raises -> DeviceBuffer[dtype]:
         self._lock_pool()
         var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
         var found = Optional[DeviceBuffer[dtype]]()
@@ -115,9 +120,9 @@ struct DeviceService(Copyable):
             return found.take()
         return context.enqueue_create_buffer[dtype](length)
 
-    def _recycle_scratch[dtype: DType](
-        self, context: DeviceContext, var buffer: DeviceBuffer[dtype]
-    ) raises:
+    def _recycle_scratch[
+        dtype: DType
+    ](self, context: DeviceContext, var buffer: DeviceBuffer[dtype]) raises:
         self._lock_pool()
         var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
         try:
@@ -137,7 +142,8 @@ struct DeviceService(Copyable):
                 if not state[].context:
                     comptime if not METAL_TARGET:
                         raise Error(
-                            "Mojo GPU device service requires a compiled Metal target"
+                            "Mojo GPU device service requires a compiled Metal"
+                            " target"
                         )
                     else:
                         state[].context = _ContextCell(
@@ -318,17 +324,20 @@ struct Scope(Copyable):
         return self._state[].cached_context_lease
 
     def scratch[dtype: DType](self, length: Int) raises -> DeviceBuffer[dtype]:
-        """Obtain private scratch after its caller reserves the exact capacity."""
+        """Obtain private scratch after its caller reserves the exact capacity.
+        """
         if length <= 0:
             raise Error("Mojo GPU reusable scratch length must be positive")
         var context = self.context()
         if self._state[].cached_context_lease and self._state[].service:
-            return self._state[].service.value()._scratch[dtype](context, length)
+            return (
+                self._state[].service.value()._scratch[dtype](context, length)
+            )
         return context.enqueue_create_buffer[dtype](length)
 
-    def recycle_scratch[dtype: DType](
-        self, var buffer: DeviceBuffer[dtype]
-    ) raises:
+    def recycle_scratch[
+        dtype: DType
+    ](self, var buffer: DeviceBuffer[dtype]) raises:
         """Return an unaliased root after successful synchronization of its last use.
 
         Only lexical operator-private scratch may enter this API. Native-column
@@ -372,7 +381,8 @@ struct Scope(Copyable):
         var total = checked_add(Int(self._state[].live.load()), additional)
         if self._state[].budget >= 0 and total > self._state[].budget:
             raise Error(
-                "Mojo GPU resident query exceeds memory budget before submission"
+                "Mojo GPU resident query exceeds memory budget before"
+                " submission"
             )
         self._record_peak(total)
         return total
@@ -383,7 +393,8 @@ struct Scope(Copyable):
             var total = checked_add(Int(previous), bytes)
             if self._state[].budget >= 0 and total > self._state[].budget:
                 raise Error(
-                    "Mojo GPU resident query exceeds memory budget before submission"
+                    "Mojo GPU resident query exceeds memory budget before"
+                    " submission"
                 )
             if self._state[].live.compare_exchange(previous, Int64(total)):
                 self._record_peak(total)

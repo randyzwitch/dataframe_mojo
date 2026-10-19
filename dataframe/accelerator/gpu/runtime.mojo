@@ -289,7 +289,8 @@ def _preflight(
 ) raises -> RowPlan:
     if source_rows < -1 or source_rows > Int(Int32.MAX):
         raise Error(
-            "Mojo GPU source row override exceeds the supported device index range"
+            "Mojo GPU source row override exceeds the supported device index"
+            " range"
         )
     var plan = lower_rows(
         query,
@@ -546,7 +547,8 @@ def _preflight(
                     )
                 ):
                     raise Error(
-                        "Mojo GPU integer division and rounding are not implemented yet"
+                        "Mojo GPU integer division and rounding are not"
+                        " implemented yet"
                     )
             if (
                 op >= DT_YEAR
@@ -587,7 +589,8 @@ def _preflight(
                     plan.ordered_mode != 5 and plan.ordered_mode != 6
                 ) or plan.code[4 * node + 2] < 0:
                     raise Error(
-                        "Mojo GPU IANA mutation requires an occurrence-certified phase"
+                        "Mojo GPU IANA mutation requires an"
+                        " occurrence-certified phase"
                     )
                 validate_descriptor(
                     plan.zone_words, Int(plan.code[4 * node + 2])
@@ -873,7 +876,8 @@ def _iana_scalar_slots(plan: RowPlan) raises -> Int:
 
 
 def _source_high_words(plan: RowPlan) -> Bool:
-    """Only wide decimals and original category codes carry source high words."""
+    """Only wide decimals and original category codes carry source high words.
+    """
     for column in plan.source._columns:
         var dtype = column.dtype()
         if dtype.is_decimal() and dtype.decimal_width() == 128:
@@ -1524,13 +1528,18 @@ def execute(
         )
         if profiling:
             var scratch_cache = device_service.value().scratch_info()
-            for field in List[Tuple[String, Int]]([
-                ("service_context_generations", device_service.value().cached_generations()),
-                ("service_idle_scratch_bytes", scratch_cache[0]),
-                ("service_idle_scratch_entries", scratch_cache[1]),
-                ("service_scratch_hits", scratch_cache[2]),
-                ("service_scratch_misses", scratch_cache[3]),
-            ]):
+            for field in List[Tuple[String, Int]](
+                [
+                    (
+                        "service_context_generations",
+                        device_service.value().cached_generations(),
+                    ),
+                    ("service_idle_scratch_bytes", scratch_cache[0]),
+                    ("service_idle_scratch_entries", scratch_cache[1]),
+                    ("service_scratch_hits", scratch_cache[2]),
+                    ("service_scratch_misses", scratch_cache[3]),
+                ]
+            ):
                 report = report.with_column(
                     Series(field[0], Column[Int64]([Int64(field[1])]))
                 )
@@ -1683,7 +1692,8 @@ def execute_plan(
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
                 raise Error(
-                    "Mojo GPU ordered ROWS cannot feed row movement or state phases"
+                    "Mojo GPU ordered ROWS cannot feed row movement or state"
+                    " phases"
                 )
     if precision_rows:
         if (
@@ -1707,7 +1717,8 @@ def execute_plan(
         or len(plan.ordered_ranks[]) != len(plan.literals)
     ):
         raise Error(
-            "Mojo GPU ordered ROWS requires an original raw scan and terminal projections"
+            "Mojo GPU ordered ROWS requires an original raw scan and terminal"
+            " projections"
         )
     if ordered_private and (
         not terminal_boundary
@@ -1718,7 +1729,8 @@ def execute_plan(
         or len(plan.ordered_ranks[]) != len(plan.literals)
     ):
         raise Error(
-            "Mojo GPU ordered IMPLODE requires one certified observed row producer"
+            "Mojo GPU ordered IMPLODE requires one certified observed row"
+            " producer"
         )
     if ordered_decimal and (
         not terminal_boundary
@@ -1951,7 +1963,8 @@ def execute_plan(
                             break
                     if found < 0:
                         raise Error(
-                            "Mojo GPU resident source field does not match the row plan"
+                            "Mojo GPU resident source field does not match the"
+                            " row plan"
                         )
                     mapping.append(Int64(found))
                 _ = resident_input.value().copy_to(
@@ -2059,7 +2072,8 @@ def execute_plan(
                         waits += 1
                         if input_failure[0]:
                             raise Error(
-                                "Mojo GPU ordered scalar requires already observed successful inputs"
+                                "Mojo GPU ordered scalar requires already"
+                                " observed successful inputs"
                             )
                     if (
                         ordered_private
@@ -2100,7 +2114,8 @@ def execute_plan(
                         waits += 1
                         if input_failure[0]:
                             raise Error(
-                                "Mojo GPU ordered row producer requires already observed successful inputs"
+                                "Mojo GPU ordered row producer requires already"
+                                " observed successful inputs"
                             )
                 if len(plan.key_values):
                     var lookup = ctx.enqueue_create_buffer[DType.uint64](
@@ -2207,7 +2222,8 @@ def execute_plan(
                         waits += 1
                         if shape[1]:
                             raise data_fault(
-                                "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
+                                "Mojo GPU group key failed: checked arithmetic"
+                                " overflow or strict cast failed"
                             )
                         var gathered_words = ctx.enqueue_create_buffer[
                             DType.uint64
@@ -2492,7 +2508,8 @@ def execute_plan(
                         for failure in host_failures:
                             if failure:
                                 raise data_fault(
-                                    "Mojo GPU window key failed: checked arithmetic overflow or strict cast failed"
+                                    "Mojo GPU window key failed: checked"
+                                    " arithmetic overflow or strict cast failed"
                                 )
                         if header == ROW_RANK_KEY:
                             var dense_blocks = ctx.enqueue_create_buffer[
@@ -2610,15 +2627,18 @@ def execute_plan(
                                 for block in range(blocks):
                                     if host_failures[4 * block]:
                                         raise data_fault(
-                                            "Mojo GPU time window index contains nulls"
+                                            "Mojo GPU time window index"
+                                            " contains nulls"
                                         )
                                     if host_failures[4 * block + 1]:
                                         raise data_fault(
-                                            "Mojo GPU time window index is not sorted within its group"
+                                            "Mojo GPU time window index is not"
+                                            " sorted within its group"
                                         )
                                     if host_failures[4 * block + 2]:
                                         raise data_fault(
-                                            "Mojo GPU time window bounds overflow"
+                                            "Mojo GPU time window bounds"
+                                            " overflow"
                                         )
                                     if host_failures[4 * block + 3]:
                                         raise data_fault(
@@ -2630,7 +2650,9 @@ def execute_plan(
                                 for failure in host_failures:
                                     if failure:
                                         raise data_fault(
-                                            "Mojo GPU cumulative or rolling window overflow or input expression failure"
+                                            "Mojo GPU cumulative or rolling"
+                                            " window overflow or input"
+                                            " expression failure"
                                         )
                         continue
                     if step.order:
@@ -2744,7 +2766,8 @@ def execute_plan(
                         for failure in host_failures:
                             if failure:
                                 raise data_fault(
-                                    "Mojo GPU sort key failed: checked arithmetic overflow or strict cast failed"
+                                    "Mojo GPU sort key failed: checked"
+                                    " arithmetic overflow or strict cast failed"
                                 )
                         device_words = gathered_words^
                         device_valid = gathered_valid^
@@ -2951,7 +2974,8 @@ def execute_plan(
                             var category = ordered_faults.category(fault[0])
                             if ordered_precision and category != 8:
                                 raise data_fault(
-                                    "Mojo GPU narrow Decimal precision proof was violated"
+                                    "Mojo GPU narrow Decimal precision proof"
+                                    " was violated"
                                 )
                             if iana_certified and category > 64:
                                 var mask_base = -1
@@ -3030,7 +3054,10 @@ def execute_plan(
                                 )
                             raise_value_error(
                                 ordered_faults.category(fault[0]),
-                                "Mojo GPU arithmetic overflow or strict cast failed",
+                                (
+                                    "Mojo GPU arithmetic overflow or strict"
+                                    " cast failed"
+                                ),
                             )
                     else:
                         ctx.enqueue_function[row_program](
@@ -3115,7 +3142,8 @@ def execute_plan(
                         waits += 1
                         if shape[1]:
                             raise data_fault(
-                                "Mojo GPU filter predicate failed: checked arithmetic overflow or strict cast failed"
+                                "Mojo GPU filter predicate failed: checked"
+                                " arithmetic overflow or strict cast failed"
                             )
                         if shape[0] and step.gather_count:
                             var gathers = List[Int64](
@@ -3585,7 +3613,8 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
                 == 2 else " steps; certified IMPLODE batch/AST faults" if plan.ordered_mode
                 == 3 else " steps"
             )
-            + "; kernels and runtime execute directly in the dataframe library\n"
+            + "; kernels and runtime execute directly in the dataframe"
+            " library\n"
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"

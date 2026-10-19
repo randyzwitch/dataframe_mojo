@@ -12,9 +12,15 @@ def _sum_query(value: Int32, rows: Int = 513) raises -> LazyFrame:
     var source = DataFrame(
         [Series("x", Column[Int32](List[Int32](length=rows, fill=value)))]
     )
-    return source.lazy().filter(col("x") > lit(Int32(0))).select(
-        ((col("x") + lit(Int32(3))) * lit(Int32(2)))
-        .cast(DataType.INT64).sum().alias("total")
+    return (
+        source.lazy()
+        .filter(col("x") > lit(Int32(0)))
+        .select(
+            ((col("x") + lit(Int32(3))) * lit(Int32(2)))
+            .cast(DataType.INT64)
+            .sum()
+            .alias("total")
+        )
     )
 
 
@@ -50,7 +56,9 @@ def test_mojo_gpu_scratch_reuses_capacity_but_charges_each_query() raises:
     bounded._budget = peak
     var healthy = _sum_query(2).profile(engine="accel", accelerator=bounded)
     assert_equal(healthy[0].item(0, "total").int64(), Int64(5130))
-    assert_equal(healthy[1].item(0, "peak_requested_bytes").int64(), Int64(peak))
+    assert_equal(
+        healthy[1].item(0, "peak_requested_bytes").int64(), Int64(peak)
+    )
     assert_equal(runtime._device_service.scratch_info(), (72, 4, 8, 4))
 
 
@@ -73,7 +81,9 @@ def test_mojo_gpu_scratch_idle_caps_and_failure_evict_cached_buffers() raises:
     var runtime = MetalRuntime()
     _ = _sum_query(2).collect(engine="accel", accelerator=runtime)
     with assert_raises():
-        _ = _sum_query(Int32.MAX, 1).collect(engine="accel", accelerator=runtime)
+        _ = _sum_query(Int32.MAX, 1).collect(
+            engine="accel", accelerator=runtime
+        )
     assert_equal(runtime._device_service.scratch_info()[0], 0)
     assert_equal(runtime._device_service.scratch_info()[1], 0)
     var hits_after_failure = runtime._device_service.scratch_info()[2]
