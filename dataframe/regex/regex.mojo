@@ -12,10 +12,13 @@ engine goes:
 3. The forward DFA finds where the leftmost-first match ends, skipping
    input with a literal prefix or first-byte prefilter while it sits in its
    start state.
-4. The reverse DFA, run back from that end, finds where it starts.
+4. The reverse DFA, run back from that end, finds where it starts; a
+   pattern anchored at the start of the text needs no reverse pass.
 5. Only when capture groups are needed does a capture engine run,
    anchored to the match just found: the bounded backtracker for spans
-   whose visited set fits in 256 KiB, the Pike VM otherwise.
+   whose visited set fits in 256 KiB, the Pike VM otherwise. As in RE2,
+   an anchored pattern over a text the backtracker covers skips steps
+   3 and 4 and goes straight to the backtracker.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
@@ -605,6 +608,9 @@ struct Matcher(Movable):
             if at < 0:
                 return (-1, -1)
             return (at, at + len(c.text))
+        if c.anchored and start > 0:
+            # Every match starts at the start of the text.
+            return (-1, -1)
         if start == 0 and not _may_match(c, text):
             return (-1, -1)
         var end = self.forward.find_forward(
@@ -612,6 +618,10 @@ struct Matcher(Movable):
         )
         if end == -1:
             return (-1, -1)
+        if end != GAVE_UP and c.anchored:
+            # The anchored forward search already knows where the match
+            # starts; RE2 runs the reverse DFA only for unanchored ones.
+            return (start, end)
         if end != GAVE_UP:
             var begin = self.reverse.find_reverse(c.reverse, text, end, start)
             if begin >= 0:
@@ -628,10 +638,34 @@ struct Matcher(Movable):
         """Find the leftmost-first match at or after `start` and fill
         `slots`: group g spans `slots[2g] : slots[2g + 1]`, -1 when it took
         no part."""
+        if self._direct_captures(text):
+            return start == 0 and self._anchored_captures(text)
         var m = self.find(text, start)
         if m[0] < 0:
             return False
         return self._groups(text, m[0], m[1])
+
+    def _direct_captures(self, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
+        """Whether a capture search should skip the DFAs: RE2's `Match`
+        sends an anchored pattern with groups over a text the bounded
+        backtracker covers straight to it, since the DFA pass would only
+        find the span the backtracker then walks again."""
+        ref c = self.regex._compiled[]
+        return (
+            c.anchored
+            and len(self.slots) > 2
+            and Backtracker.fits(c.forward, 0, len(text))
+        )
+
+    def _anchored_captures(mut self, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
+        """The match of an anchored pattern, with its groups in `slots`,
+        found by the backtracker alone."""
+        ref c = self.regex._compiled[]
+        if not _may_match(c, text):
+            return False
+        return self.backtracker.search(
+            c.forward, text, 0, len(text), self.slots
+        )
 
     def _groups(
         mut self, text: Span[UInt8, ImmutAnyOrigin], begin: Int, end: Int
@@ -701,6 +735,15 @@ struct Matcher(Movable):
         var copied = 0
         var done = 0
         var p = text.unsafe_ptr()
+        if template.needs_groups and self._direct_captures(text):
+            # An anchored pattern matches at most once, at the start.
+            if limit != 0 and self._anchored_captures(text):
+                self.expand(text, template, out)
+                copied = self.slots[1]
+                done = 1
+            for i in range(copied, len(text)):
+                out.append(p[unsafe_offset=i])
+            return done > 0
         while limit < 0 or done < limit:
             var m = self.next(text)
             if m[0] < 0:
