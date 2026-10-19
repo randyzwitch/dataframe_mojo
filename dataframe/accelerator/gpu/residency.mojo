@@ -13,7 +13,7 @@ from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from .target import METAL_TARGET
-from .query_scope import Scope, checked_add, checked_mul
+from .query_scope import DeviceService, Scope, checked_add, checked_mul
 from .typed_storage import NativeColumn
 from dataframe.accelerator.code_domains import (
     TextField,

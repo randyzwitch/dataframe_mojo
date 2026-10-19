@@ -135,7 +135,7 @@ from dataframe.accelerator.rows import (
 from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
-from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
+from .residency import DeviceService, Scope, Matrix, Table, HostMatrix, raise_value_error
 from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
@@ -1368,26 +1368,17 @@ def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
     return DataFrame(columns^, height=host.rows)
 
 
-def execute(
-    query: LazyFrame,
-    device_id: Int,
-    budget: Int,
+def _execute_preflighted(
+    plan: RowPlan,
+    scope: Scope,
     profiling: Bool,
-    *,
-    terminal_boundary: Bool = True,
-    ordered_source: Bool = False,
-    observation_only: Bool = False,
+    started: Int,
+    preflight_ns: Int,
+    terminal_boundary: Bool,
+    observation_only: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     from . import fused_int32_plan, fused_int32_runtime
 
-    var started = Int(perf_counter_ns())
-    var plan = _preflight(
-        query,
-        terminal_boundary=terminal_boundary,
-        ordered_source=ordered_source,
-    )
-    var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
-    var scope = Scope(device_id, budget, profiling=profiling)
     if terminal_boundary and not observation_only:
         var program = fused_int32_plan.bind(plan)
         if program:
@@ -1473,6 +1464,78 @@ def execute(
         )
     )
     return (result^, report^)
+
+
+def execute(
+    query: LazyFrame,
+    device_id: Int,
+    budget: Int,
+    profiling: Bool,
+    *,
+    terminal_boundary: Bool = True,
+    ordered_source: Bool = False,
+    observation_only: Bool = False,
+    device_service: Optional[DeviceService] = None,
+) raises -> Tuple[DataFrame, DataFrame]:
+    var started = Int(perf_counter_ns())
+    var plan = _preflight(
+        query,
+        terminal_boundary=terminal_boundary,
+        ordered_source=ordered_source,
+    )
+    var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
+    var scope = Scope(
+        device_id, budget, profiling=profiling, service=device_service
+    )
+    try:
+        var executed = _execute_preflighted(
+            plan,
+            scope,
+            profiling,
+            started,
+            preflight_ns,
+            terminal_boundary,
+            observation_only,
+        )
+        if not device_service:
+            return executed^
+        # Runtime-owned services require a final drain before caching.
+        scope.synchronize()
+        var traffic = scope.transfers()
+        var timing = scope.timing_ns()
+        var report = executed[1].copy()
+        report = report.with_column(
+            Series("synchronizations", Column[Int64]([Int64(traffic[3])]))
+        )
+        report = report.with_column(
+            Series(
+                "query_wall_ms",
+                Column[Float64](
+                    [Float64(Int(perf_counter_ns()) - started) / 1e6]
+                ),
+            )
+        )
+        if profiling:
+            report = report.with_column(
+                Series(
+                    "synchronization_ms",
+                    Column[Float64]([Float64(timing[1]) / 1e6]),
+                )
+            )
+        var result = executed[0].copy()
+        scope.mark_success()
+        return (result^, report^)
+    except error:
+        scope.mark_failed()
+        # Inner helpers must drain while submitted-buffer owners are alive.
+        # The helper stack has unwound here, so this only drains remaining scope
+        # work; preserve the original error if cleanup also fails.
+        if device_service:
+            try:
+                scope.synchronize()
+            except cleanup_error:
+                _ = String(cleanup_error)
+        raise error^
 
 
 def execute_plan(

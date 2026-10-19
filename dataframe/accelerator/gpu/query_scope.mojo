@@ -25,8 +25,91 @@ def checked_mul(a: Int, b: Int) raises -> Int:
 comptime _ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
 
 
+struct _DeviceServiceState(Movable):
+    var context: _ContextCell
+    var device: Int
+    var cached_lease: Atomic[Int64]
+    var generation: Atomic[Int64]
+
+    def __init__(out self, device: Int):
+        self.context = None
+        self.device = device
+        self.cached_lease = Atomic[Int64](0)
+        self.generation = Atomic[Int64](0)
+
+
+struct DeviceService(Copyable):
+    """Lazy, runtime-owned cache for one reusable Metal context.
+
+    Only one Scope may lease the cached context at once. Overlapping scopes
+    receive a private context, so copies of MetalRuntime remain concurrent.
+    The service never owns DeviceBuffers or query budget reservations.
+    """
+
+    var _state: ArcPointer[_DeviceServiceState]
+
+    def __init__(out self, device_id: Int = 0) raises:
+        if device_id < 0:
+            raise Error("Mojo GPU device service requires a nonnegative device")
+        self._state = ArcPointer(_DeviceServiceState(device_id))
+
+    def same_service(self, other: Self) -> Bool:
+        return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
+
+    def cached_generations(self) -> Int:
+        return Int(self._state[].generation.load())
+
+    def device_id(self) -> Int:
+        return self._state[].device
+
+    def _acquire(self) raises -> Tuple[DeviceContext, Bool]:
+        var unlocked = Int64(0)
+        if self._state[].cached_lease.compare_exchange(unlocked, 1):
+            var state = Pointer(to=self._state[]).unsafe_origin_cast[
+                MutAnyOrigin
+            ]()
+            try:
+                if not state[].context:
+                    comptime if not METAL_TARGET:
+                        raise Error(
+                            "Mojo GPU device service requires a compiled Metal target"
+                        )
+                    else:
+                        state[].context = _ContextCell(
+                            rebind[DeviceContext if METAL_TARGET else Int](
+                                DeviceContext(state[].device, api="metal")
+                            )
+                        )
+                        _ = state[].generation.fetch_add(1)
+                var result = rebind[DeviceContext](
+                    state[].context.value()
+                ).copy()
+                return (result^, True)
+            except error:
+                state[].context = None
+                state[].cached_lease.store(0)
+                raise error^
+        comptime if not METAL_TARGET:
+            raise Error(
+                "Mojo GPU device service requires a compiled Metal target"
+            )
+        else:
+            return (DeviceContext(self._state[].device, api="metal"), False)
+
+    def _release(self, reusable: Bool):
+        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
+        if not reusable:
+            # The Scope still owns its context copy until after this method.
+            # Never make a context involved in a failed query available again.
+            state[].context = None
+        state[].cached_lease.store(0)
+
+
 struct _ScopeState(Movable):
     var context: _ContextCell
+    var service: Optional[DeviceService]
+    var cached_context_lease: Bool
+    var reusable: Atomic[Int64]
     var device: Int
     var budget: Int
     var live: Atomic[Int64]
@@ -41,8 +124,17 @@ struct _ScopeState(Movable):
     var context_ns: Atomic[Int64]
     var synchronization_ns: Atomic[Int64]
 
-    def __init__(out self, device: Int, budget: Int, profiling: Bool):
+    def __init__(
+        out self,
+        device: Int,
+        budget: Int,
+        profiling: Bool,
+        service: Optional[DeviceService],
+    ):
         self.context = None
+        self.service = service.copy()
+        self.cached_context_lease = False
+        self.reusable = Atomic[Int64](0)
         self.device = device
         self.budget = budget
         self.live = Atomic[Int64](0)
@@ -57,6 +149,10 @@ struct _ScopeState(Movable):
         self.context_ns = Atomic[Int64](0)
         self.synchronization_ns = Atomic[Int64](0)
 
+    def __deinit__(deinit self):
+        if self.cached_context_lease and self.service:
+            self.service.value()._release(self.reusable.load() == 1)
+
 
 struct Scope(Copyable):
     var _state: ArcPointer[_ScopeState]
@@ -67,10 +163,15 @@ struct Scope(Copyable):
         budget: Int = -1,
         *,
         profiling: Bool = False,
+        service: Optional[DeviceService] = None,
     ) raises:
         if device_id < 0 or budget < -1:
             raise Error("Mojo GPU resident device or budget is invalid")
-        self._state = ArcPointer(_ScopeState(device_id, budget, profiling))
+        if service and service.value().device_id() != device_id:
+            raise Error("Mojo GPU device service is for a different device")
+        self._state = ArcPointer(
+            _ScopeState(device_id, budget, profiling, service)
+        )
 
     @staticmethod
     def device_count() raises -> Int:
@@ -98,11 +199,22 @@ struct Scope(Copyable):
                     var started = Int(
                         perf_counter_ns()
                     ) if state[].profiling else 0
-                    state[].context = _ContextCell(
-                        rebind[DeviceContext if METAL_TARGET else Int](
-                            DeviceContext(state[].device, api="metal")
+                    if state[].service:
+                        var acquired = state[].service.value()._acquire()
+                        var cached_lease = acquired[1]
+                        var acquired_context = acquired[0]^
+                        state[].context = _ContextCell(
+                            rebind[DeviceContext if METAL_TARGET else Int](
+                                acquired_context^
+                            )
                         )
-                    )
+                        state[].cached_context_lease = cached_lease
+                    else:
+                        state[].context = _ContextCell(
+                            rebind[DeviceContext if METAL_TARGET else Int](
+                                DeviceContext(state[].device, api="metal")
+                            )
+                        )
                     if state[].profiling:
                         _ = state[].context_ns.fetch_add(
                             Int64(Int(perf_counter_ns()) - started)
@@ -114,8 +226,25 @@ struct Scope(Copyable):
                 state[].context_lock.store(0)
                 return result^
             except error:
+                if state[].cached_context_lease and state[].service:
+                    state[].service.value()._release(False)
+                    state[].cached_context_lease = False
                 state[].context_lock.store(0)
                 raise error^
+
+    def mark_success(self):
+        # The service lease is returned with _ScopeState destruction, after the
+        # wrapper has completed terminal materialization and its final drain.
+        var pending = Int64(0)
+        _ = self._state[].reusable.compare_exchange(pending, 1)
+
+    def mark_failed(self):
+        # Failure is terminal for one Scope: a later success mark cannot
+        # return the context from a failed invocation to the service.
+        _ = self._state[].reusable.store(2)
+
+    def uses_cached_context(self) -> Bool:
+        return self._state[].cached_context_lease
 
     def same_query(self, other: Self) -> Bool:
         return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
