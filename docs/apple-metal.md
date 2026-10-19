@@ -419,6 +419,60 @@ full CPU streaming schedule and checked state-feed equivalence still need
 separate proofs. Distribution expressions require equal output cardinalities;
 ordinary scalars broadcast, while differing distribution lengths raise.
 
+## Engine performance overhaul
+
+The CPU and Metal engines should select the same families of algorithms,
+with implementations appropriate to their hardware. The CPU already has
+bounded-domain aggregation, partitioned hash aggregation, bounded top-k,
+hash joins and fused expression batches. General Metal grouping currently
+sorts row indices, ranking materializes complete orderings, and row
+expressions interpret descriptors into a slot matrix. Narrow dictionary SUM
+paths avoid some of this work; they do not replace general operator dispatch.
+
+The implementation sequence is by operator, with small dependent PRs:
+
+| Order | Operator work | CPU implementation to reuse or match | Completion gate |
+| --- | --- | --- | --- |
+| 1 | General dense/hash grouped reductions; sorting only where reducer semantics require it | `GroupBy.agg`, `perfect_aggregate`, `aggregate_table` | Multiple keys and reducers share dispatch; runtime scales with rows and group count rather than full key sorting |
+| 2 | Bounded global and per-group top-k; fuse ordinal-rank predicates into selection | `top_k`, `aggregate_top_rows` | Work and storage depend on requested k; no complete ranking or sorting of rejected rows |
+| 3 | Equality hash joins with bounded-domain membership paths and late payload gathering | `join_hash`, bounded integer joins in `frame` | Build/probe paths cover supported join styles, duplicates, null policy and composite keys without sorting both inputs |
+| 4 | Typed fused expression regions and filter-to-reducer feeds | `execution`, `fusion`, reducer input/update/finish contracts | Simple arithmetic/filter/aggregate pipelines avoid per-node global intermediate columns |
+| 5 | One query execution scope with reusable resident buffers and device-side partial-state merging | `pipeline` ownership model; GPU `residency` | Batches and dependent operators retain device state instead of re-entering runtime and concatenating host partial frames |
+
+These overlap: grouping needs compact reducer states and device-side merging,
+and joins and selection need the same key equality and ordering contracts.
+Factor those contracts into shared descriptors rather than adding admission
+rules based on a benchmark name or one particular query shape. Existing CPU
+`PerfectLayout` and reducer descriptions are starting points; GPU state
+updates and parallel ownership remain backend implementations.
+
+For grouping, first separate algorithm admission, key identity, state
+accumulation and result publication. Choose dense slots when the complete
+key domain has a bounded layout, hash partitions for general equality keys,
+and retain the sorted implementation for states that require its ordering
+until an equivalent feed schedule exists. Admission must include key and
+reducer types, nulls, domain/cardinality bounds and memory budget. Sampling
+may choose an algorithm but cannot prove that a domain or capacity fits:
+capacity exhaustion needs a bounded retry or an explicit existing fallback.
+First/last, argument positions, stable representatives, checked feed errors
+and floating update order must survive changes in partitioning.
+
+Every operator PR has two short gates before broader work:
+
+1. A focused correctness matrix covering supported physical and logical
+   types, composite keys, nulls, empty inputs, sliced/chunked storage,
+   stable ties, checked errors, budget rejection and recovery. Compare
+   public CPU outcomes and independent typed or bitwise expectations where
+   available. Approximate numerical checks do not establish exact parity.
+2. A small repeatable performance experiment covering small and large
+   inputs, low and high cardinality, skew and relevant output sizes. Record
+   algorithm choice, launches, synchronization, transfers and peak memory
+   alongside warm timings. Separate primitive timings from complete query
+   timings and keep compilation, setup and output verification explicit.
+
+Broad query reports remain a separate milestone after these operator gates;
+they are not the development feedback loop.
+
 ## Validation
 
 Metal is validated on an Apple silicon Mac before a pull request, not in CI.

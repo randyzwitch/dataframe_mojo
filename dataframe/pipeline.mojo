@@ -264,6 +264,43 @@ struct _TopBound(Copyable, Movable):
         return None
 
 
+comptime _ZONE_SOME = 0
+comptime _ZONE_NONE = 1
+comptime _ZONE_ALL = 2
+
+
+def _zoned_top(frame: DataFrame, bound: _TopBound) raises -> Int:
+    """Whether a morsel's rows can enter a top-k, from the zone maps of
+    its integer key's buffers (DuckDB's dynamic top-k filter, checked
+    against row-group statistics): `_ZONE_NONE` when every value is worse
+    than the bound and no row is null (nulls always pass), `_ZONE_ALL`
+    when every value passes, `_ZONE_SOME` otherwise or without a usable
+    range. A morsel no row of which can enter is skipped unread
+    (ClickBench q26 compared all 10M event times with the bound and kept
+    2%)."""
+    if bound.name not in frame.columns():
+        return _ZONE_SOME
+    var key = frame.column(bound.name)
+    if not _range_key(key.dtype()):
+        return _ZONE_SOME
+    var bounds = _window_bounds(key)
+    if not bounds:
+        return _ZONE_SOME
+    var low = bounds.value()[0]
+    var high = bounds.value()[1]
+    if bound.descending:
+        if high < bound.integer and key.null_count() == 0:
+            return _ZONE_NONE
+        if low >= bound.integer:
+            return _ZONE_ALL
+    else:
+        if low > bound.integer and key.null_count() == 0:
+            return _ZONE_NONE
+        if high <= bound.integer:
+            return _ZONE_ALL
+    return _ZONE_SOME
+
+
 def _bare_columns(exprs: List[Expr]) -> Bool:
     """Whether every expression is one column, under its own name or an
     alias."""
@@ -799,6 +836,8 @@ struct Morsel(Movable):
             names = reads.take()
         else:
             names = self.frame.columns()
+        if self._with_columns_in_place(exprs, names, batch_size):
+            return
         var input = self._compact_frame(names)
         var result = input.with_columns(exprs, batch_size=batch_size)
         # Columns the expressions produced or replaced join the frame as
@@ -815,6 +854,56 @@ struct Morsel(Movable):
             else:
                 self.frame._columns.append(column.copy())
                 self.compact.append(True)
+
+    def _with_columns_in_place(
+        mut self, exprs: List[Expr], names: List[String], batch_size: Int
+    ) raises -> Bool:
+        """Row-local columns computed over every row of a morsel whose
+        selection keeps at least half of it, joining it uncompacted and
+        read through the selection like the columns it shares, as DuckDB
+        projects over a selection vector: the selection survives, so the
+        aggregate table can still read the morsel in place
+        (`_in_place_table_rows`). A common subexpression computed below
+        an aggregation (PDS-H q1's discounted prices) compacted the whole
+        morsel and cost q1 60%. False, with nothing changed, when the
+        selection is sparse or by rows, a column read is already compact,
+        or evaluating every row raises (a dropped row may hold the error,
+        so the compacting path decides what is raised)."""
+        var n = self.frame.height()
+        if not self.selected or self.by_rows or 2 * self.count < n:
+            return False
+        var whole = List[Series](capacity=len(names))
+        for name in names:
+            var at = self._index(name)
+            if self.compact[at]:
+                return False
+            whole.append(self.frame._columns[at].copy())
+        var result: DataFrame
+        try:
+            result = DataFrame(whole^, height=n).with_columns(
+                exprs, batch_size=batch_size
+            )
+        except:
+            return False
+        var produced = List[String]()
+        for e in exprs:
+            produced.append(e._name)
+        for c in range(result.width()):
+            ref column = result._columns[c]
+            # New columns, and read ones an expression replaces.
+            if column.name() in names and column.name() not in produced:
+                continue
+            var found = -1
+            for i in range(self.frame.width()):
+                if self.frame._columns[i].name() == column.name():
+                    found = i
+            if found >= 0:
+                self.frame._columns[found] = column.copy()
+                self.compact[found] = False
+            else:
+                self.frame._columns.append(column.copy())
+                self.compact.append(False)
+        return True
 
     def drop(mut self, names: List[String]) raises:
         var kept = List[Series]()
@@ -2447,7 +2536,20 @@ struct _PipelineJob(Job):
                     self.top_descending[0],
                     self.floating_key,
                 )
+            var zoned = _ZONE_SOME
             if self.top > 0 and self.bound.kind != _BOUND_NONE:
+                if self.bound.kind == _BOUND_INT:
+                    zoned = _zoned_top(morsel.frame, self.bound)
+                if zoned == _ZONE_NONE:
+                    # No row of the morsel can enter: it is left empty
+                    # and read no further.
+                    trace_path("pipeline.top_zone_skip")
+                    morsel.narrow(List[Int]())
+            if (
+                self.top > 0
+                and self.bound.kind != _BOUND_NONE
+                and zoned == _ZONE_SOME
+            ):
                 # Narrow to the rows that can still enter the top k when
                 # at most one in eight can: gathering a step's columns at
                 # scattered rows costs more than reading them whole past
@@ -3078,6 +3180,15 @@ def run_pipeline(
         trace_path("pipeline.key_range")
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
+    # A top-k on an integer key reads each morsel's key range from the
+    # zone maps before comparing its rows with the bound (`_zoned_top`).
+    if (
+        top > 0
+        and len(top_names) > 0
+        and top_names[0] in frame.columns()
+        and _range_key(frame.column(top_names[0]).dtype())
+    ):
+        _ensure_zones(frame.column(top_names[0]))
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
