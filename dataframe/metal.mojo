@@ -43,6 +43,11 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.source_projection import project_sources
+from .accelerator.late_payload import (
+    columns as late_payload_columns,
+    prepare as prepare_late_payload,
+    restore as restore_late_payload,
+)
 from .accelerator.memory import checked_add
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.code_domains import TextQuery
@@ -358,6 +363,84 @@ struct MetalRuntime(AcceleratorBackend):
                 observation_only=self._observation_only,
             )
         _reject_time_windows(query)
+        var late_started = Int(perf_counter_ns())
+        if (
+            original_entry
+            and self._execution_settings.optimize
+            and not self._observation_only
+        ):
+            var payload_columns = late_payload_columns(query)
+            if payload_columns:
+                var payload = prepare_late_payload(
+                    query, payload_columns.take(), self._budget
+                )
+                var reserved = checked_add(
+                    payload.staging_bytes, payload.restoration_bytes
+                )
+                var budget = self._budget
+                if budget >= 0:
+                    budget -= reserved
+                var runtime = MetalRuntime(
+                    self._device, memory_limit_bytes=budget
+                )
+                runtime._execution_settings = self._execution_settings.copy()
+                runtime._text_context = self._text_context.copy()
+                var executed = runtime._run(
+                    payload.query, profiling, original_entry=False
+                )
+                var result = restore_late_payload(executed[0], payload)
+                var report = executed[1].copy()
+                var peak_field = (
+                    "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                    in report.columns() else "peak_requested_bytes"
+                )
+                var inner_peak = 0
+                for row in range(report.height()):
+                    inner_peak = max(
+                        inner_peak, Int(report.item(row, peak_field).int64())
+                    )
+                for field in List[Tuple[String, Int64]](
+                    [
+                        ("late_payload_fields", Int64(result.width())),
+                        (
+                            "late_payload_staging_bytes",
+                            Int64(payload.staging_bytes),
+                        ),
+                        (
+                            "late_payload_restoration_bytes",
+                            Int64(payload.restoration_bytes),
+                        ),
+                        (
+                            "query_peak_requested_bytes",
+                            Int64(checked_add(inner_peak, reserved)),
+                        ),
+                    ]
+                ):
+                    report = report.with_column(
+                        Series(
+                            field[0],
+                            Column[Int64](
+                                List[Int64](
+                                    length=report.height(), fill=field[1]
+                                )
+                            ),
+                        )
+                    )
+                report = report.with_column(
+                    Series(
+                        "query_wall_ms",
+                        Column[Float64](
+                            List[Float64](
+                                length=report.height(),
+                                fill=Float64(
+                                    Int(perf_counter_ns()) - late_started
+                                )
+                                / 1e6,
+                            )
+                        ),
+                    )
+                )
+                return (result^, report^)
         from .accelerator.grouped_stream_routes import candidate
         from .accelerator.gpu.grouped_stream_dispatch import (
             execute as execute_float_stream,
@@ -1167,6 +1250,9 @@ struct MetalRuntime(AcceleratorBackend):
 
         try:
             _reject_time_windows(query)
+            if original_entry and self._execution_settings.optimize:
+                if late_payload_columns(query):
+                    return "Metal row selection and ordering over narrow operands and source-row identities; terminal host assembly of untouched source payload"
             var float_route = candidate(
                 query,
                 configured_workers(),
