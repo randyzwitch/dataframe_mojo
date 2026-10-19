@@ -139,7 +139,8 @@ def load_build_receipt(binary):
 def invocation_metadata(args, argv=None):
     return {
         "argv": list(sys.argv if argv is None else argv),
-        "cwd": str(ROOT),
+        "cwd": str(Path.cwd()),
+        "build_cwd": str(ROOT),
         "python_executable": sys.executable,
         "timeout_seconds": args.timeout_seconds,
         "binary": str(args.binary.resolve()),
