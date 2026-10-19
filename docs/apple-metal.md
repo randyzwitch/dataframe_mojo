@@ -353,6 +353,31 @@ DAG reports identify intermediate resident boundaries, final CPU export and
 whole-query traffic/peak/wall time. Whole-query wall time includes planning,
 staging and materialization; no driver-only interval is presented as that time.
 
+Profiled generic row regions additionally report host wall-clock phases:
+
+| Field | Measured interval |
+| --- | --- |
+| `preflight_ms` | Standalone row-plan binding and resource preparation before execution |
+| `host_prepare_ms` | Region checks, descriptors and host buffer preparation before source staging |
+| `staging_copy_ms` | CPU source conversion into the upload representation |
+| `initialization_ms` | First construction of the query's Metal context |
+| `submit_wait_ms` | Device allocation, enqueueing and completion waits, excluding context construction |
+| `synchronization_ms` | Time inside region synchronization calls; overlaps execution phases |
+| `readback_ms` | Final host matrix export, including its allocation and waits |
+| `result_copy_ms` | Typed CPU column construction from the completed host matrix |
+
+These clocks are enabled by profiling, not ordinary collection. They are not
+GPU event timings: submission can include lazy pipeline compilation, and
+readback can include device gathering. Do not add the synchronization interval
+to the other phases. Small accounting/reporting and ownership-cleanup costs
+remain outside these intervals; caller wall time is the complete measurement.
+Resident DAGs retain each measured region phase and use nulls for phases a
+specialized operator does not measure. Only the exporting region reports
+readback/result construction; `query_preflight_ms` is the whole DAG's metadata
+preflight, repeated on each report row, and must not be summed across rows.
+Allocation counts and isolated GPU/pipeline times are not supplied by these
+host intervals.
+
 ## Automatic placement and calibration
 
 `estimate_auto`, `calibration_key` and `select_auto` use metadata and

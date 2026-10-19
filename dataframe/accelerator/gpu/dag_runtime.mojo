@@ -163,6 +163,27 @@ def _int_column(
     )
 
 
+def _profile_phases(report: DataFrame) raises -> DataFrame:
+    """Keep measured row timings when other region types have no attribution."""
+    var result = report.copy()
+    for name in List[String](
+        [
+            "host_prepare_ms",
+            "staging_copy_ms",
+            "initialization_ms",
+            "submit_wait_ms",
+            "synchronization_ms",
+            "readback_ms",
+            "result_copy_ms",
+        ]
+    ):
+        if name not in result.columns():
+            result = result.with_column(
+                Series.full_null(name, DataType.FLOAT64, result.height())
+            )
+    return result^
+
+
 def _storage_report(
     root: Int,
     operator: String,
@@ -229,7 +250,8 @@ def execute(
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
-    var scope = Scope(device_id, budget)
+    var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
+    var scope = Scope(device_id, budget, profiling=profiling)
     var producer_metadata = MetadataReservation(scope, dag)
     var partition_context = ArcPointer(partition_cuts.StateContext())
     var base_domain = Optional[ArcPointer[TextDomain]]()
@@ -357,6 +379,8 @@ def execute(
                     Column[String](["Mojo GPU resident fields"]),
                 )
             )
+            if profiling:
+                region = _profile_phases(region)
             report = region^ if report.width() == 0 else report.vstack(
                 region.select(report.columns())
             )
@@ -645,7 +669,27 @@ def execute(
                         to=text_context.value()[]
                     ).unsafe_origin_cast[MutAnyOrigin]()
                     state[].record_final(domains)
-                result = rows.materialize(executed[0])
+                if profiling:
+                    var readback_started = Int(perf_counter_ns())
+                    var host = executed[0].readback()
+                    var readback_ns = Int(perf_counter_ns()) - readback_started
+                    var result_started = Int(perf_counter_ns())
+                    result = rows._materialize_host(executed[0], host)
+                    var result_ns = Int(perf_counter_ns()) - result_started
+                    for field in List[Tuple[String, Int]](
+                        [
+                            ("readback_ms", readback_ns),
+                            ("result_copy_ms", result_ns),
+                        ]
+                    ):
+                        region = region.with_column(
+                            Series(
+                                field[0],
+                                Column[Float64]([Float64(field[1]) / 1e6]),
+                            )
+                        )
+                else:
+                    result = rows.materialize(executed[0])
             for column in result._columns:
                 host_result_bytes = rows._checked_add(
                     host_result_bytes,
@@ -691,6 +735,8 @@ def execute(
                 ),
             )
         )
+        if profiling:
+            region = _profile_phases(region)
         report = region^ if report.width() == 0 else report.vstack(
             region.select(report.columns())
         )
@@ -706,6 +752,17 @@ def execute(
             if uses[task.right] == 0:
                 values[task.right] = None
                 nested[task.right] = None
+    if profiling:
+        report = report.with_column(
+            Series(
+                "query_preflight_ms",
+                Column[Float64](
+                    List[Float64](
+                        length=report.height(), fill=Float64(preflight_ns) / 1e6
+                    )
+                ),
+            )
+        )
     report = _int_column(report, "query_peak_requested_bytes", scope.info()[1])
     report = _int_column(
         report, "query_host_result_bytes", query_host_result_bytes
