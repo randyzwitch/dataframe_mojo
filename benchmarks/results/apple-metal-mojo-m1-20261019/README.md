@@ -1,0 +1,13 @@
+# Current Mojo Metal baseline, Apple M1, 2026-10-19
+
+Initial development checkpoint for #869 and #868. This is not an external-suite score, a placement calibration, or a claim that every operator has been profiled.
+
+The unmodified engine and benchmark driver at `ce86f3dd03539cefb432b4309cfd4f77632ed142` were built with `mojo build -O3 -I . benchmarks/bench_metal.mojo` on the physical Apple M1 / 16 GiB Mac mini. The raw record contains compiler/SDK/OS, source and binary fingerprints, clean engine status, load samples, first-use times and every warm observation. These measurements use the original runner, before the new skew/window cases and additional host phase export fields in this PR.
+
+The selected grid has 4,097 / 65,536 / 1,048,576 rows, nine mechanisms, base and nullable variants, two rounds, five warm samples per engine/process, and two additional warmups. CPU and Metal sample order alternates; every timed collection fully materializes its result. All 108 processes passed exact CPU-reference checks. This is CPU parity, not an independent SQL oracle. The sorted variant and broader dtype/window/fanout matrix remain follow-up measurements; the selected subset is explicit in the raw record.
+
+`baseline.json` retains the samples and metadata; `baseline.md` is the original driver's report; `baseline/` contains every process stdout. No compilation or other benchmark was run concurrently on this Mac during the measurement. Normal desktop applications remained present. First use means the first collection in a fresh process, not a cold filesystem or machine.
+
+At 1,048,576 rows, base-variant warm medians pooled across rounds were about 101 ms for projection, 65 ms for half-selective filtering, 328 ms for sorting and 665 ms for the join. CPU medians were approximately 3.4 / 2.1 / 10.8 / 34.2 ms respectively. CPU timings varied across rounds; use the individual samples and repeated comparisons rather than treating these ratios as universal hardware rates.
+
+The current Mojo engine is materially slower on these mechanisms. The baseline does not identify how much of each time is staging, kernel work, synchronization or output construction. Host phase attribution and a broader workload matrix are separate next steps. Existing native-Metal measurements elsewhere in this directory tree describe a different implementation and are not directly comparable to this checkpoint.
