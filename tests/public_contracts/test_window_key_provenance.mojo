@@ -67,11 +67,14 @@ def test_window_key_provenance_original_codes_and_explicit_column_reads() raises
     # then two retained five-entry UInt64 provenance tables. Only the one
     # categorical scan column retains an original-code category owner and
     # field; its unchunked input contributes one Column[UInt32] chunk header.
+    # Its four source-dictionary entries also reserve eight bytes apiece for
+    # the code map, presence flags and discovery scratch.
     assert_equal(
         codes.staging_bytes(staged),
         codes.bytes
         + 34
         + 80
+        + 4 * 8
         + size_of[CategoryOwner]()
         + size_of[CategoryField]()
         + size_of[Column[UInt32]](),
