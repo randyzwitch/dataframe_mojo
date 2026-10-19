@@ -27,15 +27,13 @@ comptime MAX_VISITED_BITS = 256 * 1024 * 8
 
 struct Backtracker(Movable):
     var visited: List[UInt64]
-    # Frames: an instruction and a position, or a slot to restore (the
-    # instruction is then -(slot + 1)).
-    var stack_pc: List[Int]
-    var stack_at: List[Int]
+    # Frames as (instruction, position) pairs, or a slot to restore (the
+    # instruction is then -(slot + 1) and the position the old value).
+    var stack: List[Int]
 
     def __init__(out self):
         self.visited = List[UInt64]()
-        self.stack_pc = List[Int]()
-        self.stack_at = List[Int]()
+        self.stack = List[Int]()
 
     @staticmethod
     def fits(program: Program, start: Int, end: Int) -> Bool:
@@ -56,28 +54,35 @@ struct Backtracker(Movable):
         if len(self.visited) < words:
             self.visited = List[UInt64](length=words, fill=0)
         else:
+            var clear = self.visited.unsafe_ptr()
             for i in range(words):
-                self.visited[i] = 0
+                clear[unsafe_offset=i] = 0
         for s in range(len(slots)):
             slots[s] = -1
-        self.stack_pc.clear()
-        self.stack_at.clear()
-        self.stack_pc.append(program.start)
-        self.stack_at.append(start)
-        while len(self.stack_pc) > 0:
-            var pc = self.stack_pc.pop()
-            var at = self.stack_at.pop()
+        # The loop below reads everything through raw pointers: the
+        # program and the scratch lists outlive it and do not move.
+        var visited = self.visited.unsafe_ptr()
+        var ops = program.op.unsafe_ptr()
+        var outs = program.out.unsafe_ptr()
+        var args = program.arg.unsafe_ptr()
+        var slot_count = len(slots)
+        self.stack.clear()
+        self.stack.append(program.start)
+        self.stack.append(start)
+        while len(self.stack) > 0:
+            var at = self.stack.pop()
+            var pc = self.stack.pop()
             if pc < 0:
                 slots[-pc - 1] = at
                 continue
             while True:
                 var bit = pc * width + (at - start)
-                var word = bit >> 6
+                var word = visited.unsafe_offset(bit >> 6)
                 var mask = UInt64(1) << UInt64(bit & 63)
-                if self.visited[word] & mask:
+                if word[] & mask:
                     break
-                self.visited[word] |= mask
-                var op = program.op[pc]
+                word[] |= mask
+                var op = ops[unsafe_offset=pc]
                 if op == OP_MATCH:
                     return True
                 if consumes(op):
@@ -87,30 +92,30 @@ struct Backtracker(Movable):
                     if not program.step(pc, UInt32(packed >> 3)):
                         break
                     at += packed & 7
-                    pc = Int(program.out[pc])
+                    pc = Int(outs[unsafe_offset=pc])
                     continue
                 if op == OP_SPLIT:
-                    self.stack_pc.append(Int(program.arg[pc]))
-                    self.stack_at.append(at)
-                    pc = Int(program.out[pc])
+                    self.stack.append(Int(args[unsafe_offset=pc]))
+                    self.stack.append(at)
+                    pc = Int(outs[unsafe_offset=pc])
                     continue
                 if op == OP_SAVE:
-                    var slot = Int(program.arg[pc])
-                    if slot < len(slots):
-                        self.stack_pc.append(-slot - 1)
-                        self.stack_at.append(slots[slot])
+                    var slot = Int(args[unsafe_offset=pc])
+                    if slot < slot_count:
+                        self.stack.append(-slot - 1)
+                        self.stack.append(slots[slot])
                         slots[slot] = at
-                    pc = Int(program.out[pc])
+                    pc = Int(outs[unsafe_offset=pc])
                     continue
                 if op == OP_LOOK:
                     if not look_holds(
-                        program, UInt32(program.arg[pc]), text, at
+                        program, UInt32(args[unsafe_offset=pc]), text, at
                     ):
                         break
-                    pc = Int(program.out[pc])
+                    pc = Int(outs[unsafe_offset=pc])
                     continue
                 if op == OP_NOP:
-                    pc = Int(program.out[pc])
+                    pc = Int(outs[unsafe_offset=pc])
                     continue
                 # OP_FAIL
                 break
