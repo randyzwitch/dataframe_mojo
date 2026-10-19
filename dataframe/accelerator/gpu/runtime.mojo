@@ -1389,12 +1389,18 @@ def _execute_preflighted(
     observation_only: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     from . import fused_int32_plan, fused_int32_runtime
+    from . import wide_integer_plan, wide_integer_runtime
 
     if terminal_boundary and not observation_only:
         var program = fused_int32_plan.bind(plan)
         if program:
             return fused_int32_runtime.execute(
                 plan, program.value(), scope, profiling, started, preflight_ns
+            )
+        var wide_programs = wide_integer_plan.bind(plan)
+        if wide_programs:
+            return wide_integer_runtime.execute(
+                plan, wide_programs.value(), scope, profiling, started, preflight_ns
             )
     var executed = execute_plan(
         plan,
@@ -3596,6 +3602,7 @@ def execute_plan(
 
 def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
     from .fused_int32_plan import bind as bind_fused_int32
+    from .wide_integer_plan import bind as bind_wide_integer
 
     try:
         var plan = _preflight(query, ordered_source=ordered_source)
@@ -3604,6 +3611,11 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
                 "ENGINE accel: Mojo GPU fused Int32 predicate/arithmetic and "
                 "Int64 SUM; native values, at most 4096 partial records, "
                 "scalar-only export\n"
+            )
+        if bind_wide_integer(plan):
+            return (
+                "ENGINE accel: Mojo GPU native wide integer SUM; exact two-word "
+                "state, at most 4096 shared partial records, scalar-only export\n"
             )
         return (
             "ENGINE accel: Mojo GPU row expressions; "
