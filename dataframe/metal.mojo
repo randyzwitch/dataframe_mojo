@@ -979,7 +979,18 @@ struct MetalRuntime(AcceleratorBackend):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
             var schema = schema_frame(query, len(query._nodes) - 1)
-            var lowered = lower_dictionary_operations(query, self._budget)
+            # Lookup lowering restores each operation's visible schema. Prune
+            # original sources first so those identity projections do not
+            # make unused payload columns live again across a GPU join.
+            var dictionary_source = query.copy()
+            if (
+                self._execution_settings.optimize
+                and not producer_phases.has_certified(dictionary_source)
+            ):
+                dictionary_source = project_sources(dictionary_source)
+            var lowered = lower_dictionary_operations(
+                dictionary_source, self._budget
+            )
             var staged_query = lowered[0].copy()
             if (
                 self._execution_settings.optimize
