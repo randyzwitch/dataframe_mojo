@@ -8,7 +8,25 @@ reassociate without introducing a narrow intermediate overflow.
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer, bitcast
-from .integers import _multiply
+from .floating import product
+
+
+@always_inline
+def _multiply64[unsigned: Bool](a: UInt64, b: UInt64) -> Tuple[UInt64, UInt32]:
+    # Exact 32-bit limbs avoid a device UInt64 division in the overflow check.
+    var negative = False
+    var left = a
+    var right = b
+    var limit = UInt64.MAX
+    comptime if not unsigned:
+        negative = (a ^ b) >> 63 != 0
+        left = UInt64(0) - a if a >> 63 else a
+        right = UInt64(0) - b if b >> 63 else b
+        limit = (UInt64(1) << 63) - UInt64(not negative)
+    var multiplied = product(left, right)
+    if multiplied[0] != 0 or multiplied[1] > limit:
+        return (UInt64(0), UInt32(1))
+    return (UInt64(0) - multiplied[1] if negative else multiplied[1], UInt32(0))
 
 
 @always_inline
@@ -81,9 +99,9 @@ def partials[
                 value = added
             comptime if multiply:
                 if not failed:
-                    var product = _multiply(value, factor, 64, unsigned)
-                    value = product[0]
-                    failed = product[1] != 0
+                    var multiplied = _multiply64[unsigned](value, factor)
+                    value = multiplied[0]
+                    failed = multiplied[1] != 0
             if failed:
                 failures += 1
             else:
