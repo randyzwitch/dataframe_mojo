@@ -323,7 +323,7 @@ def _strings[mode: Int](var jobs: List[_RegexJob[mode]]) -> StringColumn:
     for j in range(len(jobs)):
         ref job = jobs[j]
         var base = Int64(len(bytes))
-        bytes.extend(job.out.bytes.copy())
+        bytes.extend(Span(job.out.bytes))
         for end in job.out.ends:
             offsets.append(base + end)
         for flag in job.out.valid:
@@ -398,7 +398,7 @@ def _strings_without_nulls[
     for j in range(len(jobs)):
         ref job = jobs[j]
         var base = Int64(len(bytes))
-        bytes.extend(job.out.bytes.copy())
+        bytes.extend(Span(job.out.bytes))
         for k in range(len(job.out.ends)):
             if job.out.valid[k]:
                 offsets.append(base + job.out.ends[k])
