@@ -26,32 +26,48 @@ import time
 # --- answer summaries ---------------------------------------------------
 
 
-def summary(frame) -> tuple:
-    """Order-insensitive summary of a Polars result: its height and one
-    number per column. Numbers and booleans sum (nulls skipped); strings sum
-    their UTF-8 byte lengths; dates sum days since 1970-01-01; datetimes sum
-    whole seconds. The Mojo runners compute the same values."""
+def _row_number(frame, name):
+    """The per-row number a column contributes to the summary: numbers and
+    booleans as they are; strings their UTF-8 byte length; dates days since
+    1970-01-01; datetimes whole seconds; anything else 1 when not null."""
     import polars as pl
 
-    values = []
-    for name, dtype in frame.schema.items():
-        column = pl.col(name)
-        if dtype == pl.String:
-            expr = column.str.len_bytes().sum()
-        elif dtype == pl.Date:
-            expr = column.cast(pl.Int64).sum()
-        elif isinstance(dtype, pl.Datetime):
-            expr = column.dt.epoch("s").sum()
-        elif dtype == pl.Boolean:
-            expr = column.cast(pl.Int64).sum()
-        elif dtype.is_numeric():
-            expr = column.cast(pl.Float64).sum()
-        else:
-            expr = column.is_not_null().sum()
-        value = frame.select(expr).item()
-        values.append(float(value or 0))
-    return frame.height, values
+    dtype = frame.schema[name]
+    column = pl.col(name)
+    if dtype == pl.String:
+        expr = column.str.len_bytes()
+    elif dtype == pl.Date:
+        expr = column.cast(pl.Int64)
+    elif isinstance(dtype, pl.Datetime):
+        expr = column.dt.epoch("s")
+    elif dtype == pl.Boolean or dtype.is_numeric():
+        expr = column
+    else:
+        expr = column.is_not_null()
+    return expr.cast(pl.Float64)
 
+
+def summary(frame) -> tuple:
+    """Order-insensitive summary of a Polars result: its height, one number
+    per column (the sum of its per-row numbers, nulls skipped) and one per
+    pair of neighbouring columns (the sum of the products of their per-row
+    numbers, a null counting as 0). The pair sums keep rows together:
+    results that swap values between rows, such as [(1, 0), (2, 2)] and
+    [(1, 2), (2, 0)], share every column sum but not the pair sums (#606).
+    The Mojo runners compute the same values."""
+    values = []
+    for name in frame.columns:
+        value = frame.select(_row_number(frame, name).sum()).item()
+        values.append(float(value or 0))
+    pairs = []
+    for left, right in zip(frame.columns, frame.columns[1:]):
+        product = (
+            _row_number(frame, left).fill_null(0.0)
+            * _row_number(frame, right).fill_null(0.0)
+        ).sum()
+        value = frame.select(product).item()
+        pairs.append(float(value or 0))
+    return frame.height, values, pairs
 
 # --- H2O.ai db-benchmark ------------------------------------------------
 
@@ -4570,12 +4586,14 @@ POLARS = {
 def _report(query, times, result):
     for ns in times:
         print(f"time\t{query}\t{ns}")
-    height, values = summary(result)
+    height, values, pairs = summary(result)
     print(
         f"summary\t{query}\t{height}\t"
         + ",".join(repr(v) for v in values)
         + "\t"
         + ",".join(result.columns)
+        + "\t"
+        + ",".join(repr(v) for v in pairs)
     )
 
 
