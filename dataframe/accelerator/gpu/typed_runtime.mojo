@@ -318,7 +318,7 @@ def execute(
         host_ns += computed[1]
         staging_ns += computed[2]
         submit_ns = computed[3]
-    elif plan.limit >= 0:
+    if plan.limit >= 0:
         result = result.view(0, min(result.length, plan.limit))
     var field = Series(plan.outputs[0].name, Column[Float32](List[Float32]()))
     field._field_metadata = plan.outputs[0].field_metadata

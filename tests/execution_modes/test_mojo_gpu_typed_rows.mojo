@@ -130,6 +130,57 @@ def test_mojo_gpu_typed_rows_filter_head_after_filter_and_zero_rows() raises:
 
 
 # requires: mojo_gpu
+def test_mojo_gpu_typed_rows_computed_head_preserves_limits() raises:
+    var original = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Float32](
+                    [-3, -2, -1, 0, 1, 2, 3],
+                    [True, False, True, True, False, True, True],
+                ),
+            )
+        ]
+    )
+    for source in [
+        original.copy(),
+        offset_layout(original),
+        chunk_layout(original),
+    ]:
+        var runtime = MetalRuntime()
+        for limit in [0, 1, 4, 30]:
+            var query = (
+                source.lazy()
+                .select((col("x") * lit(Float32(3))).alias("v"))
+                .head(limit)
+            )
+            for optimize in [False, True]:
+                var expected = query.collect(
+                    engine="cpu", optimize=optimize, streaming=False
+                )
+                var measured = query.profile(
+                    engine="accel",
+                    accelerator=runtime,
+                    optimize=optimize,
+                    streaming=False,
+                )
+                var collected = query.collect(
+                    engine="accel",
+                    accelerator=runtime,
+                    optimize=optimize,
+                    streaming=False,
+                )
+                assert_equal(collected.height(), min(limit, source.height()))
+                assert_true(collected.equals(expected))
+                assert_true(measured[0].equals(expected))
+                if not optimize and limit > 0:
+                    assert_equal(
+                        measured[1].item(0, "algorithm").string(),
+                        "mojo_gpu_native_float32_rows",
+                    )
+
+
+# requires: mojo_gpu
 def test_mojo_gpu_typed_rows_float32_special_values_and_sum_fallback() raises:
     var patterns: List[UInt32] = [
         0x00000000,

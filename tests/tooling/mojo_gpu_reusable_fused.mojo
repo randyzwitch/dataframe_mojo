@@ -21,6 +21,7 @@ from tests.execution_modes.test_mojo_gpu_typed_rows import (
     test_mojo_gpu_typed_rows_float32_projection_and_arithmetic15,
     test_mojo_gpu_typed_rows_nullable_offset_slices_chunks_and_field_metadata,
     test_mojo_gpu_typed_rows_filter_head_after_filter_and_zero_rows,
+    test_mojo_gpu_typed_rows_computed_head_preserves_limits,
     test_mojo_gpu_typed_rows_float32_special_values_and_sum_fallback,
     test_mojo_gpu_typed_filter_multiple_blocks_and_query_budget,
 )
@@ -62,6 +63,7 @@ def main() raises:
     test_mojo_gpu_typed_rows_float32_projection_and_arithmetic15()
     test_mojo_gpu_typed_rows_nullable_offset_slices_chunks_and_field_metadata()
     test_mojo_gpu_typed_rows_filter_head_after_filter_and_zero_rows()
+    test_mojo_gpu_typed_rows_computed_head_preserves_limits()
     test_mojo_gpu_typed_rows_float32_special_values_and_sum_fallback()
     test_mojo_gpu_typed_filter_multiple_blocks_and_query_budget()
     test_metal_profile_phases_preserve_results_and_empty_execution()
