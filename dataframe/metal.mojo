@@ -48,6 +48,12 @@ from .accelerator.late_payload import (
     prepare as prepare_late_payload,
     restore as restore_late_payload,
 )
+from .accelerator.scalar_sum_batches import (
+    prepare as prepare_sum_batches,
+    partial_query as sum_partial_query,
+    merge_query as sum_merge_query,
+    narrow_query as sum_narrow_query,
+)
 from .accelerator.memory import checked_add
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.code_domains import TextQuery
@@ -114,7 +120,7 @@ from .lazy import (
     ROLLING,
 )
 from .column import Column
-from .frame import DataFrame
+from .frame import DataFrame, concat
 from .series import Series
 from .execution_settings import ExecutionSettings
 from std.time import perf_counter_ns
@@ -363,6 +369,106 @@ struct MetalRuntime(AcceleratorBackend):
                 observation_only=self._observation_only,
             )
         _reject_time_windows(query)
+        var sums_started = Int(perf_counter_ns())
+        if (
+            original_entry
+            and self._execution_settings.optimize
+            and not self._observation_only
+        ):
+            var batched_sums = prepare_sum_batches(query)
+            if batched_sums:
+                var plan = batched_sums.take()
+                var budget = self._budget
+                if budget >= 0:
+                    if plan.reservation > budget:
+                        raise Error(
+                            "Metal scalar SUM partials exceed memory budget"
+                        )
+                    budget -= plan.reservation
+                var runtime = MetalRuntime(
+                    self._device, memory_limit_bytes=budget
+                )
+                runtime._execution_settings = self._execution_settings.copy()
+                runtime._text_context = self._text_context.copy()
+                var partials = List[DataFrame](capacity=plan.batches)
+                var reports = List[DataFrame](capacity=plan.batches + 2)
+                for batch in range(plan.batches):
+                    var executed = runtime._run(
+                        sum_partial_query(plan, batch),
+                        profiling,
+                        original_entry=False,
+                    )
+                    partials.append(executed[0].copy())
+                    reports.append(executed[1].copy())
+                var merged = runtime._run(
+                    sum_merge_query(concat(partials), plan),
+                    profiling,
+                    original_entry=False,
+                )
+                reports.append(merged[1].copy())
+                var narrowed = runtime._run(
+                    sum_narrow_query(merged[0], plan),
+                    profiling,
+                    original_entry=False,
+                )
+                reports.append(narrowed[1].copy())
+                var result = narrowed[0].copy()
+                for field in range(result.width()):
+                    result._columns[
+                        field
+                    ]._field_metadata = plan.schema._columns[
+                        field
+                    ]._field_metadata
+                var report = concat(reports, "diagonal")
+                var peak_field = (
+                    "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                    in report.columns() else "peak_requested_bytes"
+                )
+                var inner_peak = 0
+                for row in range(report.height()):
+                    if not report.item(row, peak_field).is_null():
+                        inner_peak = max(
+                            inner_peak,
+                            Int(report.item(row, peak_field).int64()),
+                        )
+                for field in List[Tuple[String, Int64]](
+                    [
+                        ("integer_sum_batches", Int64(plan.batches)),
+                        (
+                            "scalar_partial_reservation_bytes",
+                            Int64(plan.reservation),
+                        ),
+                        (
+                            "query_peak_requested_bytes",
+                            Int64(checked_add(inner_peak, plan.reservation)),
+                        ),
+                    ]
+                ):
+                    report = report.with_column(
+                        Series(
+                            field[0],
+                            Column[Int64](
+                                List[Int64](
+                                    length=report.height(), fill=field[1]
+                                )
+                            ),
+                        )
+                    )
+                report = report.with_column(
+                    Series(
+                        "query_wall_ms",
+                        Column[Float64](
+                            List[Float64](
+                                length=report.height(),
+                                fill=Float64(
+                                    Int(perf_counter_ns()) - sums_started
+                                )
+                                / 1e6,
+                            )
+                        ),
+                    )
+                )
+                return (result^, report^)
         var late_started = Int(perf_counter_ns())
         if (
             original_entry
@@ -1251,6 +1357,8 @@ struct MetalRuntime(AcceleratorBackend):
         try:
             _reject_time_windows(query)
             if original_entry and self._execution_settings.optimize:
+                if prepare_sum_batches(query):
+                    return "Metal bounded integer scalar SUM tiles; exact Decimal128 GPU partials and final GPU merge with one narrowing boundary"
                 if late_payload_columns(query):
                     return "Metal row selection and ordering over narrow operands and source-row identities; terminal host assembly of untouched source payload"
             var float_route = candidate(
