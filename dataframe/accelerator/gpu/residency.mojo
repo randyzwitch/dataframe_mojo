@@ -707,8 +707,6 @@ struct Table(Copyable):
         mapping: List[Int64],
         target_start: Int = 0,
     ) raises -> Int:
-        if len(self.native_columns):
-            raise Error("Mojo GPU native input requires a typed consumer")
         var target_cells = checked_mul(capacity, slots)
         if (
             capacity < self.rows
@@ -724,6 +722,102 @@ struct Table(Copyable):
                 raise Error("Mojo GPU resident input column mapping is invalid")
         if not self.rows or not len(mapping):
             return 0
+        if len(self.native_columns):
+            # The first generic boundary for native storage is deliberately
+            # narrow: one certified Float32 column, copied into the caller's
+            # already allocated generic matrix. This preserves raw bits and
+            # expands packed validity without a host roundtrip or side buffer.
+            if (
+                self.schema.width() != 1
+                or len(self.native_columns) != 1
+                or len(mapping) != 1
+                or mapping[0] != 0
+                or self.columns[0] != 0
+                or self.schema._columns[0].dtype() != DataType.FLOAT32
+                or self.native_columns[0].logical != DataType.FLOAT32
+                or self.text[0]
+                or self.categories[0]
+                or self.grouped_keys[0]
+                or self.native_columns[0].has_errors()
+            ):
+                raise Error(
+                    "Mojo GPU native input requires one infallible Float32 consumer"
+                )
+            var native = self.native_columns[0].view(self.offset, self.rows)
+            if not native.scope().same_query(scope):
+                raise Error(
+                    "Mojo GPU native input belongs to another query context"
+                )
+            var values = native.values()
+            var source_bits = values.create_sub_buffer[DType.uint32](
+                native.value_offset, self.rows
+            )
+            var source_valid = values.create_sub_buffer[DType.uint8](0, 1)
+            if native.has_validity():
+                source_valid = native.validity().value().copy()
+            var target = checked_mul(target_start, capacity)
+            var high_target = checked_add(target_cells, target)
+            var target_words = words.copy()
+            var low = target_words.create_sub_buffer[DType.uint64](
+                target, self.rows
+            )
+            var high = target_words.create_sub_buffer[DType.uint64](
+                high_target, self.rows
+            )
+            var target_validity = validity.create_sub_buffer[DType.uint8](
+                target, self.rows
+            )
+            var target_errors = errors.create_sub_buffer[DType.uint32](
+                target, self.rows
+            )
+            var ctx = scope.context()
+            try:
+                if native.has_validity():
+                    ctx.enqueue_function[copy_native_float32[True]](
+                        source_bits,
+                        source_valid,
+                        UInt32(native.validity_bit_offset),
+                        UInt32(self.rows),
+                        low,
+                        high,
+                        target_validity,
+                        target_errors,
+                        grid_dim=(self.rows + 255) // 256,
+                        block_dim=256,
+                    )
+                else:
+                    ctx.enqueue_function[copy_native_float32[False]](
+                        source_bits,
+                        source_valid,
+                        UInt32(0),
+                        UInt32(self.rows),
+                        low,
+                        high,
+                        target_validity,
+                        target_errors,
+                        grid_dim=(self.rows + 255) // 256,
+                        block_dim=256,
+                    )
+                scope.record_launches()
+                # Keep the NativeColumn, its DeviceBuffer handles, and the
+                # caller's target owners alive until this device-side copy is
+                # complete. Join consumers also drain on success and failure;
+                # this local wait keeps Table.copy_to safe for other callers.
+                scope.synchronize()
+            except error:
+                scope.synchronize()
+                _ = target_words^
+                _ = source_bits^
+                _ = source_valid^
+                _ = values^
+                _ = native^
+                raise error^
+            _ = target_words^
+            _ = source_bits^
+            _ = source_valid^
+            _ = values^
+            _ = native^
+            return checked_mul(self.rows, CELL_BYTES)
         if self.identity_storage:
             var owner = self.identity_storage.value().copy()
             if not owner[].scope.same_query(scope):
@@ -838,6 +932,33 @@ struct Table(Copyable):
         # Raw copy pointers do not retain the source List across queued work.
         _ = descriptors^
         return 1
+
+
+def copy_native_float32[
+    nullable: Bool
+](
+    values: Pointer[UInt32, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    validity_offset: UInt32,
+    rows: UInt32,
+    low: Pointer[UInt64, MutAnyOrigin],
+    high: Pointer[UInt64, MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+):
+    var row = global_idx.x
+    if row >= Int(rows):
+        return
+    var present = True
+    comptime if nullable:
+        var bit = Int(validity_offset) + row
+        present = (
+            validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)
+        ) & 1 != 0
+    low[unsafe_offset=row] = UInt64(values[unsafe_offset=row]) if present else 0
+    high[unsafe_offset=row] = 0
+    output_validity[unsafe_offset=row] = UInt8(present)
+    output_errors[unsafe_offset=row] = 0
 
 
 def copy_columns(

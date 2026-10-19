@@ -304,3 +304,205 @@ def test_mojo_gpu_typed_filter_multiple_blocks_and_query_budget() raises:
             measured[0]
         )
     )
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
+    var values: List[Float32] = [
+        Float32(0),
+        Float32(1),
+        Float32(2),
+        Float32(3),
+        Float32(4),
+        Float32(5),
+        Float32(6),
+    ]
+    var valid: List[Bool] = [True, False, True, True, True, False, True]
+    var original = DataFrame(
+        [Series("k", Column[Float32](values^, valid^))]
+    )
+    var right = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Float32](
+                    [Float32(3), Float32(4), Float32(5), Float32(7)]
+                ),
+            ),
+            Series("payload", Column[Int64]([30, 40, 50, 70])),
+        ]
+    )
+    for frame in [
+        offset_layout(original.slice(1, 5)),
+        chunk_layout(original.slice(1, 5)),
+    ]:
+        var query = frame.lazy().select(
+            (col("k") + lit(Float32(1))).alias("k")
+        ).join(right.lazy(), on="k", how="left")
+        var runtime = MetalRuntime()
+        assert_true(
+            "certified native Float32 JOIN input" in runtime.describe(query)
+        )
+        var measured = _assert_typed_rows_profile(query)
+        var native_rows = -1
+        var native_bytes = -1
+        var bridge_bytes = -1
+        var join_seen = False
+        for row in range(measured[1].height()):
+            var algorithm = measured[1].item(row, "algorithm").string()
+            if algorithm == "mojo_gpu_native_float32_rows":
+                native_rows = Int(
+                    measured[1].item(row, "output_rows").int64()
+                )
+                native_bytes = Int(
+                    measured[1].item(row, "resident_output_bytes").int64()
+                )
+                assert_equal(
+                    measured[1]
+                    .item(row, "materialization_boundary")
+                    .string(),
+                    "Mojo GPU resident table",
+                )
+                assert_equal(
+                    measured[1].item(row, "download_bytes").int64(),
+                    Int64(0),
+                )
+            if algorithm == "mojo_gpu_sorted_join":
+                bridge_bytes = Int(
+                    measured[1]
+                    .item(row, "native_input_conversion_bytes")
+                    .int64()
+                )
+                join_seen = True
+        assert_true(native_rows >= 0)
+        assert_equal(native_bytes, native_rows * 4 + (native_rows + 7) // 8)
+        assert_true(join_seen)
+        assert_equal(bridge_bytes, native_rows * 21)
+        assert_true(measured[0].equals(query.collect(engine="cpu")))
+
+        var peak = Int(
+            measured[1].item(0, "query_peak_requested_bytes").int64()
+        )
+        var exact = query.collect(
+            engine="accel",
+            accelerator=MetalRuntime(memory_limit_bytes=peak),
+        )
+        assert_true(exact.equals(measured[0]))
+        with assert_raises(contains="memory budget"):
+            _ = query.collect(
+                engine="accel",
+                accelerator=MetalRuntime(memory_limit_bytes=peak - 1),
+            )
+
+    # Exercise the right-hand target offset in the generic join matrix too.
+    var raw_left = DataFrame(
+        [Series("k", Column[Float32]([Float32(4), Float32(5)]))]
+    )
+    var raw_right = DataFrame(
+        [Series("source", Column[Float32]([Float32(3), Float32(4)]))]
+    )
+    var right_query = raw_left.lazy().join(
+        raw_right.lazy().select(
+            (col("source") + lit(Float32(1))).alias("k")
+        ),
+        on="k",
+    )
+    var right_measured = _assert_typed_rows_profile(right_query)
+    var right_bridge_bytes = -1
+    for row in range(right_measured[1].height()):
+        if (
+            right_measured[1].item(row, "algorithm").string()
+            == "mojo_gpu_sorted_join"
+        ):
+            right_bridge_bytes = Int(
+                right_measured[1]
+                .item(row, "native_input_conversion_bytes")
+                .int64()
+            )
+    assert_equal(right_bridge_bytes, 2 * 21)
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Float32]([Float32(1), Float32(2)])),
+            Series("v", Column[Float32]([Float32(10), Float32(20)])),
+        ]
+    )
+    var right = DataFrame(
+        [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
+    )
+    var query = left.lazy().with_columns(
+        (col("v") + lit(Float32(1))).alias("v")
+    ).join(right.lazy(), on="k")
+    var runtime = MetalRuntime()
+    assert_true(
+        "0 certified native Float32 JOIN input" in runtime.describe(query)
+    )
+    var measured = _assert_typed_rows_profile(query)
+    var generic_producer = False
+    for row in range(measured[1].height()):
+        if measured[1].item(row, "operator").string() == "ROW EXPRESSIONS":
+            generic_producer = (
+                measured[1].item(row, "algorithm").string()
+                == "mojo_gpu_row_program"
+            )
+            assert_equal(
+                measured[1]
+                .item(row, "native_input_conversion_bytes")
+                .int64(),
+                Int64(0),
+            )
+    assert_true(generic_producer)
+
+    # An input row limit is also outside the typed join producer certificate;
+    # the typed runtime does not compact an unfiltered projection after its
+    # expression kernel, so this must stay on the generic matrix path.
+    var limited_source = DataFrame(
+        [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
+    )
+    var limited_query = limited_source.lazy().select(
+        (col("k") + lit(Float32(1))).alias("k")
+    ).head(1).join(right.lazy(), on="k")
+    assert_true(
+        "0 certified native Float32 JOIN input"
+        in MetalRuntime().describe(limited_query)
+    )
+    var limited_measured = _assert_typed_rows_profile(limited_query)
+    assert_true(limited_measured[0].equals(limited_query.collect(engine="cpu")))
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped() raises:
+    var source = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Float32]([Float32(1), Float32(2), Float32(3)]),
+            )
+        ]
+    )
+    var branch = source.lazy().select(
+        (col("k") + lit(Float32(1))).alias("k")
+    )
+    var query = branch.join(branch, on="k")
+    var runtime = MetalRuntime()
+    assert_true(
+        "2 certified native Float32 JOIN input" in runtime.describe(query)
+    )
+    var measured = _assert_typed_rows_profile(query)
+    var typed_regions = 0
+    var conversion_bytes = -1
+    for row in range(measured[1].height()):
+        var algorithm = measured[1].item(row, "algorithm").string()
+        if algorithm == "mojo_gpu_native_float32_rows":
+            typed_regions += 1
+        elif algorithm == "mojo_gpu_sorted_join":
+            conversion_bytes = Int(
+                measured[1]
+                .item(row, "native_input_conversion_bytes")
+                .int64()
+            )
+    assert_equal(typed_regions, 2)
+    assert_equal(conversion_bytes, 2 * 3 * 21)

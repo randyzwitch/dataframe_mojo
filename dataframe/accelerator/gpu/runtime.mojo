@@ -1601,13 +1601,12 @@ def execute_plan(
     """
     if plan.source_failure:
         raise Error(plan.source_failure)
-    # Native owners are currently published only at terminal row boundaries.
-    # Other region families retain their existing representation explicitly.
+    # Native output is selected by the DAG's preflighted representation plan,
+    # or by the existing direct terminal route. Other families retain MATRIX.
     from . import typed_rows, typed_runtime
 
     if (
         native_output
-        and terminal_boundary
         and export_values
         and not resident_input
         and not text_domain
