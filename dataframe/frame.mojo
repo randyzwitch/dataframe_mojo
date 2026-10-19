@@ -6367,7 +6367,14 @@ struct GroupBy(Copyable):
                         bounds[w + 1],
                     )
                 )
-        run_jobs(jobs)
+        try:
+            run_jobs(jobs)
+        except:
+            # Windows here span several feed batches, so the first error
+            # raised need not be the one the batch order raises first.
+            # A failing aggregation is left to the other routes, which
+            # feed batch by batch and raise the error in that order.
+            return None
         # DuckDB's `Combine`: every worker's slots fold into the first's,
         # in row order, so first and last keep a single pass's answer.
         var merged = jobs.pop(0)
