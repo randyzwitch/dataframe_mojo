@@ -1386,6 +1386,14 @@ def execute(
     )
     var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
     var scope = Scope(device_id, budget, profiling=profiling)
+    if terminal_boundary and not observation_only:
+        from . import fused_int32_plan, fused_int32_runtime
+
+        var program = fused_int32_plan.bind(plan)
+        if program:
+            return fused_int32_runtime.execute(
+                plan, program.value(), scope, profiling, started, preflight_ns
+            )
     var executed = execute_plan(
         plan,
         scope,
@@ -3480,6 +3488,14 @@ def execute_plan(
 def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
     try:
         var plan = _preflight(query, ordered_source=ordered_source)
+        from .fused_int32_plan import bind as bind_fused_int32
+
+        if bind_fused_int32(plan):
+            return (
+                "ENGINE accel: Mojo GPU fused Int32 predicate/arithmetic and "
+                "Int64 SUM; native values, at most 4096 partial records, "
+                "scalar-only export\n"
+            )
         return (
             "ENGINE accel: Mojo GPU row expressions; "
             + String(len(plan.steps))

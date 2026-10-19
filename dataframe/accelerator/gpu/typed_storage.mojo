@@ -344,41 +344,39 @@ def allocate_native_column[
     )
 
 
-def upload_float32(
-    scope: Scope, series: Series
-) raises -> NativeColumn[DType.float32]:
-    """Bulk-upload a Float32 Series, preserving slices and packed validity.
+def upload_native[
+    dtype: DType
+](scope: Scope, series: Series) raises -> NativeColumn[dtype]:
+    """Bulk-upload a native-width primitive Series, preserving slices and packed validity.
 
-    Values always move as Float32 bytes. A single nullable chunk retains the
+    Values always move at their physical width. A single nullable chunk retains the
     source bitmap's bit offset; multiple chunks repack only their bitmap to
     concatenate row ranges. Source chunks remain alive through synchronization.
     """
-    if series.dtype() != DataType.FLOAT32:
-        raise Error("Native Float32 upload requires a Float32 Series")
+    if series.dtype() != DataType.of(dtype):
+        raise Error("Native upload requires the exact logical dtype")
     var chunks = series.chunks()
     var rows = 0
     var has_validity = False
     for part in chunks:
-        if not part._data.isa[Column[Float32]]():
-            raise Error(
-                "Native Float32 upload requires physical Float32 values"
-            )
-        ref column = part._data[Column[Float32]]
+        if not part._data.isa[Column[Scalar[dtype]]]():
+            raise Error("Native upload requires the exact physical dtype")
+        ref column = part._data[Column[Scalar[dtype]]]
         rows = checked_add(rows, len(column))
         if column.null_count() > 0:
             has_validity = True
     if rows != len(series):
-        raise Error("Native Float32 upload chunk lengths differ from Series")
+        raise Error("Native upload chunk lengths differ from Series")
 
     if rows == 0:
-        return NativeColumn[DType.float32](scope, DataType.FLOAT32, 0)
+        return NativeColumn[dtype](scope, DataType.of(dtype), 0)
 
     var source_bit_offset = 0
     var validity_bytes = 0
     var packed_bits = List[UInt8]()
     if has_validity:
         if len(chunks) == 1:
-            ref column = chunks[0]._data[Column[Float32]]
+            ref column = chunks[0]._data[Column[Scalar[dtype]]]
             source_bit_offset = column.validity_offset() % 8
             validity_bytes = (source_bit_offset + rows + 7) // 8
         else:
@@ -387,14 +385,12 @@ def upload_float32(
     # A multi-chunk nullable upload temporarily holds the packed host bitmap
     # alongside the device values and bitmap. Preflight all of it before
     # allocating that host bitmap or any device storage.
-    var preflight_bytes = native_column_bytes[DType.float32](
-        rows, validity_bytes, 0
-    )
+    var preflight_bytes = native_column_bytes[dtype](rows, validity_bytes, 0)
     if len(chunks) > 1 and has_validity:
         preflight_bytes = checked_add(preflight_bytes, validity_bytes)
     _ = scope.check(preflight_bytes)
     var reservation = _NativeReservation(
-        scope, native_column_bytes[DType.float32](rows, validity_bytes, 0)
+        scope, native_column_bytes[dtype](rows, validity_bytes, 0)
     )
     var bitmap_reservation = Optional[_NativeReservation]()
     if len(chunks) > 1 and has_validity:
@@ -404,7 +400,7 @@ def upload_float32(
         packed_bits = List[UInt8](capacity=validity_bytes)
         var appended = 0
         for part in chunks:
-            ref column = part._data[Column[Float32]]
+            ref column = part._data[Column[Scalar[dtype]]]
             ref source_bits = column._bits[]
             if len(source_bits) == 0:
                 var needed = checked_add(appended + len(column), 7) // 8
@@ -423,7 +419,7 @@ def upload_float32(
             appended += len(column)
 
     var ctx = scope.context()
-    var values = ctx.enqueue_create_buffer[DType.float32](rows)
+    var values = ctx.enqueue_create_buffer[dtype](rows)
     var validity = Optional[DeviceBuffer[DType.uint8]]()
     if validity_bytes:
         validity = Optional[DeviceBuffer[DType.uint8]](
@@ -434,18 +430,18 @@ def upload_float32(
     try:
         var target = 0
         for part in chunks:
-            ref column = part._data[Column[Float32]]
+            ref column = part._data[Column[Scalar[dtype]]]
             var count = len(column)
             if count:
-                var destination = values.create_sub_buffer[DType.float32](
-                    target, count
-                )
+                var destination = values.create_sub_buffer[dtype](target, count)
                 ctx.enqueue_copy(destination, column.unsafe_values())
-                uploaded = checked_add(uploaded, checked_mul(count, 4))
+                uploaded = checked_add(
+                    uploaded, checked_mul(count, size_of[Scalar[dtype]]())
+                )
             target += count
         if validity_bytes:
             if len(chunks) == 1:
-                ref column = chunks[0]._data[Column[Float32]]
+                ref column = chunks[0]._data[Column[Scalar[dtype]]]
                 var byte_offset = column.validity_offset() // 8
                 ctx.enqueue_copy(
                     validity.value(),
@@ -467,9 +463,9 @@ def upload_float32(
     _ = packed_bits^
     _ = bitmap_reservation^
 
-    return NativeColumn[DType.float32](
+    return NativeColumn[dtype](
         scope,
-        DataType.FLOAT32,
+        DataType.of(dtype),
         rows,
         values^,
         validity^,
@@ -478,6 +474,12 @@ def upload_float32(
         source_bit_offset,
         Optional[_NativeReservation](reservation^),
     )
+
+
+def upload_float32(
+    scope: Scope, series: Series
+) raises -> NativeColumn[DType.float32]:
+    return upload_native[DType.float32](scope, series)
 
 
 def readback_float32(
