@@ -135,7 +135,14 @@ from dataframe.accelerator.rows import (
 from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
-from .residency import DeviceService, Scope, Matrix, Table, HostMatrix, raise_value_error
+from .residency import (
+    DeviceService,
+    Scope,
+    Matrix,
+    Table,
+    HostMatrix,
+    raise_value_error,
+)
 from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode

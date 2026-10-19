@@ -142,8 +142,10 @@ def test_mojo_gpu_device_service_empty_and_preflight_leave_no_context() raises:
         [Series("x", Column[Float32]([Float32(1), Float32(2)]))]
     )
     with assert_raises(contains="memory budget"):
-        _ = nonempty.lazy().select(col("x")).collect(
-            accelerator=zero_budget, engine="accel"
+        _ = (
+            nonempty.lazy()
+            .select(col("x"))
+            .collect(accelerator=zero_budget, engine="accel")
         )
     assert_equal(zero_budget._device_service.cached_generations(), 0)
 
@@ -169,8 +171,10 @@ def test_mojo_gpu_device_service_budget_rejection_preserves_warm_context() raise
     var large_values = List[Float32](length=4097, fill=Float32(3))
     var large = DataFrame([Series("x", Column[Float32](large_values^))])
     with assert_raises(contains="memory budget"):
-        _ = large.lazy().select(col("x")).collect(
-            accelerator=runtime, engine="accel"
+        _ = (
+            large.lazy()
+            .select(col("x"))
+            .collect(accelerator=runtime, engine="accel")
         )
     assert_equal(runtime._budget, budget)
     assert_equal(runtime._device_service.cached_generations(), 1)
