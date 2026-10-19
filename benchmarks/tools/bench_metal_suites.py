@@ -36,7 +36,7 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def derive(source, name, engine):
+def derive(source, name, engine, *, audit_runtime=False):
     """Only change materialization boundaries, preserving query expressions."""
     if engine not in {"cpu", "metal"}:
         raise ValueError(engine)
@@ -49,8 +49,9 @@ def derive(source, name, engine):
     if engine == "cpu":
         return source.replace(".collect()", '.collect(engine="cpu")')
     source, _ = lift_scalar_selects(source)
+    runtime = "MetalRuntime"
     source = source.replace(
-        ".collect()", ".collect(accelerator=MetalRuntime())"
+        ".collect()", f".collect(accelerator={runtime}())"
     )
     if name == "h2o":
         if source.count('ref x = t["x"]') != 2:
@@ -84,7 +85,7 @@ def derive(source, name, engine):
                         stop,
                         " ("
                         + expression
-                        + ").collect(accelerator=MetalRuntime())",
+                        + f").collect(accelerator={runtime}())",
                     )
                 )
         if len(replacements) != 15:
@@ -94,7 +95,11 @@ def derive(source, name, engine):
     # Mojo only accepts the module docstring before imports. Keep it first.
     source, imports = re.subn(
         r"(?m)^from ",
-        "from dataframe.metal import MetalRuntime\nfrom ",
+        (
+            "from metal_coverage_audit import CoverageAuditRuntime as MetalRuntime\nfrom "
+            if audit_runtime
+            else "from dataframe.metal import MetalRuntime\nfrom "
+        ),
         source,
         count=1,
     )
@@ -103,7 +108,7 @@ def derive(source, name, engine):
     return source
 
 
-def stage_sources(destination):
+def stage_sources(destination, *, audit_runtime=True):
     destination.mkdir(parents=True, exist_ok=True)
     copied = {}
     materialization_proofs = {}
@@ -113,12 +118,17 @@ def stage_sources(destination):
         _, proof = lift_scalar_selects(original.read_text())
         proof["canonical_source_sha256"] = sha(original)
         proof["metal_derived_source_sha256"] = hashlib.sha256(
-            derive(original.read_text(), name, "metal").encode()
+            derive(original.read_text(), name, "metal", audit_runtime=audit_runtime).encode()
         ).hexdigest()
         materialization_proofs[str(original.relative_to(ROOT))] = proof
         for engine in ("cpu", "metal"):
             (destination / f"{engine}_{name}.mojo").write_text(
-                derive(original.read_text(), name, engine)
+                derive(
+                    original.read_text(),
+                    name,
+                    engine,
+                    audit_runtime=audit_runtime and engine == "metal",
+                )
             )
         if name == "h2o":
             wrapper = """from std.sys import argv
@@ -139,14 +149,19 @@ def main() raises:
     run[cpu_query, metal_query]()
 '''
         (destination / f"suite_{name}.mojo").write_text(wrapper)
-    for name, original in {
+    copied_sources = {
         "suite_common.mojo": ROOT / "benchmarks/suites/suite_common.mojo",
         "metal_suite_common.mojo": ROOT / "benchmarks/metal_suite_common.mojo",
         "metal_suite_answer_exports.mojo": ROOT
         / "benchmarks/metal_suite_answer_exports.mojo",
         "metal_suite_diagnostics.mojo": ROOT
         / "benchmarks/metal_suite_diagnostics.mojo",
-    }.items():
+    }
+    if audit_runtime:
+        copied_sources["metal_coverage_audit.mojo"] = (
+            ROOT / "benchmarks/metal_coverage_audit.mojo"
+        )
+    for name, original in copied_sources.items():
         shutil.copyfile(original, destination / name)
         copied[str(original.relative_to(ROOT))] = sha(original)
     return {
@@ -158,7 +173,7 @@ def main() raises:
         "derived_source_sha256": {
             p.name: sha(p) for p in destination.glob("*.mojo")
         },
-        "derivation": "Only materialization boundaries changed; token-reviewed scalar SELECT/item after collected DataFrames gains lazy/forced-collect boundaries, with exact expression hashes. H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
+        "derivation": "Only materialization boundaries changed; token-reviewed scalar SELECT/item after collected DataFrames gains lazy/forced-collect boundaries, with exact expression hashes. H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names the forced runtime; no automatic placement or CPU retry. Coverage-only builds wrap MetalRuntime to record its returned fault_adjudication marker; timing-worker builds use MetalRuntime directly.",
     }
 
 
@@ -183,9 +198,19 @@ def parse(output, query):
     result = {"status": status, "reason": rows[0][3]}
     diagnostics = {}
     exports = []
+    runtime_events = []
     for line in output.splitlines():
         fields = line.split("\t")
-        if fields[0] == "answer_export":
+        if fields[0] == "runtime_audit":
+            if len(fields) != 2 or fields[1] not in {
+                "cpu",
+                "no_marker",
+                "unknown",
+                "failed",
+            }:
+                raise ValueError("Malformed runtime adjudication audit")
+            runtime_events.append(fields[1])
+        elif fields[0] == "answer_export":
             if len(fields) != 2:
                 raise ValueError("Malformed answer export line")
             exports.append(parse_export(fields[1]))
@@ -275,11 +300,38 @@ def parse(output, query):
             diagnostics.setdefault("errors", []).append(
                 {"comparison": fields[1], "reason": fields[2]}
             )
+    if runtime_events:
+        runtime = {
+            "status": "complete",
+            "observed_calls": len(runtime_events),
+            "cpu_adjudicated_calls": runtime_events.count("cpu"),
+            "no_cpu_adjudication_marker_calls": runtime_events.count("no_marker"),
+            "unknown_calls": runtime_events.count("unknown"),
+            "failed_calls": runtime_events.count("failed"),
+            "events": runtime_events,
+            "interpretation": (
+                "no_cpu_adjudication_marker means only that the returned report "
+                "had no CPU data-fault adjudication marker; it is not a GPU-only certificate."
+            ),
+        }
+        if runtime["unknown_calls"] or runtime["failed_calls"]:
+            runtime["status"] = "incomplete"
+        result["runtime_adjudication"] = runtime
+    elif status == "ok":
+        raise ValueError("Successful outcome lacks per-collection runtime audit")
     if status == "ok" and (
         result.get("collections", 0) < 1 or "ordered_equal" not in result
     ):
         raise ValueError(
             "Successful outcome lacks correctness/repetition evidence"
+        )
+    if status == "ok" and (
+        result["runtime_adjudication"]["status"] != "complete"
+        or result["runtime_adjudication"]["observed_calls"]
+        < result.get("collections", 0)
+    ):
+        raise ValueError(
+            "Successful outcome lacks complete per-collection runtime audit"
         )
     if diagnostics:
         result["diagnostics"] = diagnostics
@@ -349,6 +401,15 @@ def case_audit(
 
 def command(args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+
+
+def driver_provenance():
+    return {
+        "driver_sha256": sha(__file__),
+        "answer_export_verifier_sha256": sha(
+            Path(__file__).with_name("metal_answer_exports.py")
+        ),
+    }
 
 
 def main():
@@ -430,10 +491,7 @@ def main():
             ),
             "mojo": command(["mojo", "--version"]),
             "platform": platform.platform(),
-            "driver_sha256": sha(__file__),
-            "answer_export_verifier_sha256": sha(
-                Path(__file__).with_name("metal_answer_exports.py")
-            ),
+            **driver_provenance(),
             "answer_exports_requested": args.export_answers,
             "implementation": "mojo",
             "binaries_sha256": {
