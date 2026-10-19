@@ -108,7 +108,8 @@ def bind(plan: RowPlan) -> Optional[Program]:
         or projection.grouped
         or projection.start != start
         or (projection.nodes != 2 and projection.nodes != 6)
-        or projection.gather_count != 0
+        or projection.gather_count != 1
+        or projection.gather_start != len(plan.gathers)
         or projection.slot != slot
         or plan.slots != slot + 1
         or plan.outputs[0].slot != slot

@@ -8,7 +8,10 @@ from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
 def _check(query: LazyFrame) raises -> DataFrame:
-    assert_true("fused Int32" in MetalRuntime().describe(query))
+    var description = MetalRuntime().describe(query)
+    if "fused Int32" not in description:
+        print("Unexpected fused-family description:", description)
+    assert_true("fused Int32" in description)
     var cpu = query.collect(engine="cpu", optimize=False, streaming=False)
     var profiled = query.profile(engine="accel", accelerator=MetalRuntime())
     assert_true(profiled[0].equals(cpu))

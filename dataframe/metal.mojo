@@ -1247,7 +1247,7 @@ struct MetalRuntime(AcceleratorBackend):
             profiling,
             observation_only=self._observation_only,
             ordered_source=original_entry,
-            device_service=self._device_service,
+            device_service=self._device_service.copy(),
         )
 
     def describe(self, query: LazyFrame) -> String:

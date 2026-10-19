@@ -15,7 +15,7 @@ def test_mojo_gpu_device_service_metadata_copy_and_budget_are_context_free() rai
     assert_equal(runtime._device_service.device_id(), 0)
     assert_equal(runtime._device_service.cached_generations(), 0)
 
-    var scope = Scope(0, 8, service=runtime._device_service)
+    var scope = Scope(0, 8, service=runtime._device_service.copy())
     assert_equal(scope.info()[2], 8)
     assert_equal(scope.check(8), 8)
     with assert_raises():
@@ -26,7 +26,7 @@ def test_mojo_gpu_device_service_metadata_copy_and_budget_are_context_free() rai
 
 
 def _complete_successful_scope(service: DeviceService) raises:
-    var scope = Scope(service.device_id(), 4096, service=service)
+    var scope = Scope(service.device_id(), 4096, service=service.copy())
     _ = scope.context()
     assert_true(scope.uses_cached_context())
     scope.synchronize()
@@ -34,11 +34,11 @@ def _complete_successful_scope(service: DeviceService) raises:
 
 
 def _overlap_scope_leases_private_context(service: DeviceService) raises:
-    var first = Scope(service.device_id(), 4096, service=service)
+    var first = Scope(service.device_id(), 4096, service=service.copy())
     _ = first.context()
     assert_true(first.uses_cached_context())
 
-    var overlapping = Scope(service.device_id(), 4096, service=service)
+    var overlapping = Scope(service.device_id(), 4096, service=service.copy())
     _ = overlapping.context()
     assert_false(overlapping.uses_cached_context())
 
@@ -49,7 +49,7 @@ def _overlap_scope_leases_private_context(service: DeviceService) raises:
 
 
 def _poison_cached_context(service: DeviceService) raises:
-    var scope = Scope(service.device_id(), 4096, service=service)
+    var scope = Scope(service.device_id(), 4096, service=service.copy())
     _ = scope.context()
     assert_true(scope.uses_cached_context())
     scope.synchronize()
