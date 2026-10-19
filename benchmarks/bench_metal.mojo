@@ -18,20 +18,30 @@ def make_algorithm_frame(
     var values = List[Int32](length=n, fill=0)
     var valid = List[Bool](length=n, fill=True)
     var value_valid = List[Bool](length=n, fill=True)
-    var cardinality = min(n, 1024) if workload == "group_hash" else max(
-        1, n // 2
+    var cardinality = (
+        min(n, 1024)
+        if workload == "group_hash" or workload == "group_skew"
+        else max(1, n // 2)
     )
     for i in range(n):
-        keys[i] = Int32(
-            i * cardinality // n if variant
-            == "sorted" else (i * 37) % cardinality
+        var key = (
+            i * cardinality // n
+            if variant == "sorted"
+            else (i * 37) % cardinality
         )
+        if workload == "group_skew" and i % 4 != 0:
+            key = 0
+        keys[i] = Int32(key)
         ids[i] = Int64(i)
         values[i] = Int32(i % 17 - 8)
         if variant == "nulls":
             valid[i] = i % 20 != 0
             value_valid[i] = i % 13 != 0
-    if workload == "group_hash" or workload == "group_high":
+    if (
+        workload == "group_hash"
+        or workload == "group_high"
+        or workload == "group_skew"
+    ):
         return DataFrame(
             [
                 Series("x", Column[Int32](keys^, valid^)),
@@ -103,6 +113,10 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
                 Float32(0.0001)
             )
         query = query.select(expression.alias("x"))
+    elif workload == "cumulative_sum":
+        query = query.select(col("x").cum_sum().alias("sum"))
+    elif workload == "rolling_sum":
+        query = query.select(col("x").rolling_sum(32, 1).alias("sum"))
     elif workload == "projection":
         query = query.select(
             (col("x") * lit(Float32(1.0001)) + lit(Float32(0.0001))).alias("x")
@@ -134,6 +148,10 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         query = query.group_by("x", maintain_order=True).agg(
             [col("y").sum().alias("s"), col("y").count().alias("n")]
         )
+    elif workload == "group_skew":
+        query = query.group_by("x", maintain_order=True).agg(
+            [col("y").sum().alias("s"), col("y").count().alias("n")]
+        )
     elif workload == "join_hash":
         query = query.join(frame.lazy(), "x", how="left", suffix="_right")
     else:
@@ -147,7 +165,7 @@ def timed(
     var start = perf_counter_ns()
     var result: DataFrame
     if gpu:
-        result = query.collect(accelerator=runtime)
+        result = query.collect(engine="accel", accelerator=runtime)
     else:
         result = query.collect(engine="cpu")
     var elapsed = Int(perf_counter_ns() - start)
@@ -198,12 +216,13 @@ def report_profile(profile: DataFrame) raises:
         print("PROFILE_S", name + "_basis", basis)
     var floats: List[String] = [
         "wall_ms",
-        "pipeline_compile_ms",
+        "host_prepare_ms",
         "staging_copy_ms",
         "submit_wait_ms",
+        "synchronization_ms",
+        "readback_ms",
         "result_copy_ms",
         "initialization_ms",
-        "gpu_ms",
     ]
     for name in floats:
         if name not in profile.columns():
@@ -221,6 +240,12 @@ def report_profile(profile: DataFrame) raises:
             "PROFILE_F",
             "query_wall_ms",
             profile.item(0, "query_wall_ms").float64(),
+        )
+    if "preflight_ms" in profile.columns():
+        print(
+            "PROFILE_F",
+            "preflight_ms",
+            profile.item(0, "preflight_ms").float64(),
         )
     var algorithms = String()
     for row in range(profile.height()):
@@ -245,6 +270,7 @@ def main() raises:
         workload == "sort_radix"
         or workload == "group_hash"
         or workload == "group_high"
+        or workload == "group_skew"
         or workload == "join_hash"
     )
     var frame = make_algorithm_frame(
@@ -271,7 +297,7 @@ def main() raises:
     print("OUTPUT_ROWS", expected.height())
     for _ in range(2):
         _ = query.collect(engine="cpu")
-        _ = query.collect(accelerator=runtime)
+        _ = query.collect(engine="accel", accelerator=runtime)
     for sample in range(reps):
         var gpu_leads = (sample % 2 == 0) == gpu_first
         var a = timed(query, runtime, gpu_leads)
@@ -284,7 +310,7 @@ def main() raises:
             b[1] if gpu_leads else a[1],
             a[1] if gpu_leads else b[1],
         )
-    var profile = query.profile(accelerator=runtime)
+    var profile = query.profile(engine="accel", accelerator=runtime)
     if not profile[0].equals(expected):
         raise Error("Profiled collection differs from CPU reference")
     report_profile(profile[1])

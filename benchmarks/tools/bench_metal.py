@@ -21,9 +21,12 @@ WORKLOADS = [
     "sort_radix",
     "group_hash",
     "group_high",
+    "group_skew",
     "join_hash",
     "projection",
     "expression15",
+    "cumulative_sum",
+    "rolling_sum",
     "chain32",
     "filter_half",
     "filter_sparse",
@@ -46,6 +49,10 @@ def command(args):
 
 
 def metadata(binaries, threads):
+    compiler = command(["mojo", "--version"])
+    source_diff = command(
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+    )
     return {
         "recorded_at_utc": datetime.datetime.now(
             datetime.timezone.utc
@@ -56,6 +63,15 @@ def metadata(binaries, threads):
         "physical_cores": command(["sysctl", "-n", "hw.physicalcpu"]),
         "memory_bytes": command(["sysctl", "-n", "hw.memsize"]),
         "git_commit": command(["git", "rev-parse", "HEAD"]),
+        "source_tree": {
+            "status": command(["git", "status", "--porcelain"]),
+            "dataframe_status": command(
+                ["git", "status", "--porcelain", "--", "dataframe"]
+            ),
+            "dataframe_diff_sha256": hashlib.sha256(
+                source_diff.encode()
+            ).hexdigest(),
+        },
         "engine_status": command(
             [
                 "git",
@@ -75,7 +91,8 @@ def metadata(binaries, threads):
                 "benchmarks/tools/bench_metal.py",
             ]
         ),
-        "mojo_version": command(["mojo", "--version"]),
+        "mojo_version": compiler,
+        "compiler_identity": compiler,
         "xcode": command(["xcodebuild", "-version"]),
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
@@ -91,12 +108,12 @@ def metadata(binaries, threads):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash has min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
         "limitations": [
             "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
             "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
-            "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure.",
+            "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure. Reported host phase timings are retained as measured and may overlap; they are not added. GPU-only time and pipeline compilation attribution are unavailable unless the runtime supplies those fields.",
             "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim.",
         ],
     }
@@ -168,6 +185,25 @@ def parse_run(output, reps):
     return result
 
 
+def captured_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def retain_timeout(error, timeout_seconds, log_path):
+    captured = captured_text(error.stdout or error.output)
+    Path(log_path).write_text(captured)
+    return {
+        "status": "failed",
+        "error": f"Timed out after {timeout_seconds} seconds",
+        "timeout_seconds": timeout_seconds,
+        "captured_output": captured,
+    }
+
+
 def render(data, target):
     lines = [
         "# Apple Metal development measurements",
@@ -224,6 +260,31 @@ def render(data, target):
         lines.append(
             f"| {runtime} | {rows} | {workload} | {variant} | {ratio:.2f} |"
         )
+    slowdowns = [
+        (runtime, rows, workload, variant, ratio)
+        for (runtime, rows, workload, variant), runs in groups.items()
+        if len([r for r in runs if r["status"] == "ok"]) == len(runs)
+        for ratio in [
+            statistics.median(s["cpu_ns"] for r in runs for s in r["samples"])
+            / statistics.median(s["metal_ns"] for r in runs for s in r["samples"])
+        ]
+        if ratio < 1
+    ]
+    lines += [
+        "",
+        "## Measured Metal slowdowns",
+        "",
+        "Cases with CPU/Metal below one, ordered by the largest Metal slowdown. The slowdown factor is Metal time divided by CPU time.",
+        "",
+        "| Runtime | Rows | Workload | Variant | CPU/Metal | Metal slower by |",
+        "|---|---:|---|---|---:|---:|",
+    ]
+    for runtime, rows, workload, variant, ratio in sorted(
+        slowdowns, key=lambda item: item[-1]
+    ):
+        lines.append(
+            f"| {runtime} | {rows} | {workload} | {variant} | {ratio:.2f} | {1 / ratio:.2f}x |"
+        )
     counts = {
         status: sum(r["status"] == status for r in data["runs"])
         for status in ("ok", "unsupported", "failed")
@@ -259,6 +320,12 @@ def main():
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=300,
+        help="Finite timeout for each benchmark process (default: 300 seconds)",
+    )
+    parser.add_argument(
         "--output", type=Path, default=ROOT / "build/metal/results.json"
     )
     parser.add_argument("--skip-build", action="store_true")
@@ -270,8 +337,8 @@ def main():
         return
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("This benchmark requires an Apple Silicon Mac")
-    if min(args.reps, args.rounds, args.threads) < 1:
-        parser.error("Repetitions, rounds and threads must be positive")
+    if min(args.reps, args.rounds, args.threads, args.timeout_seconds) < 1:
+        parser.error("Repetitions, rounds, threads and timeout must be positive")
     rows = [int(x) for x in args.rows.split(",")]
     workloads, variants = args.workloads.split(","), args.variants.split(",")
     if (
@@ -343,6 +410,7 @@ def main():
                     "load_before": list(os.getloadavg()),
                     "log": label + ".txt",
                 }
+                captured = ""
                 try:
                     process = subprocess.run(
                         [str(executable)],
@@ -351,22 +419,36 @@ def main():
                         text=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        timeout=300,
+                        timeout=args.timeout_seconds,
                     )
-                    (log_dir / run["log"]).write_text(process.stdout)
+                    captured = process.stdout
+                    (log_dir / run["log"]).write_text(captured)
                     if process.returncode:
                         run.update(
                             status="unsupported" if "unsupported"
                             in process.stdout else "failed",
                             error=process.stdout,
+                            captured_output=process.stdout,
                             exit_code=process.returncode,
                         )
                     else:
                         run.update(
                             parse_run(process.stdout, args.reps), status="ok"
                         )
-                except (subprocess.TimeoutExpired, ValueError) as error:
-                    run.update(status="failed", error=str(error))
+                except subprocess.TimeoutExpired as error:
+                    run.update(
+                        retain_timeout(
+                            error, args.timeout_seconds, log_dir / run["log"]
+                        )
+                    )
+                except (ValueError, OSError) as error:
+                    retained = captured or str(error)
+                    (log_dir / run["log"]).write_text(retained)
+                    run.update(
+                        status="failed",
+                        error=str(error),
+                        captured_output=retained,
+                    )
                 data["runs"].append(run)
                 args.output.write_text(json.dumps(data, indent=2) + "\n")
                 print(label, run["status"], flush=True)

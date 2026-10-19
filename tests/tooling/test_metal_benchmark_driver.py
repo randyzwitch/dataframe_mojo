@@ -1,6 +1,8 @@
 """Measured Mojo benchmark profiles accept operation-dependent synchronization."""
 import importlib.util
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +62,51 @@ class MetalBenchmarkDriver(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 driver.parse_run(text, 1)
+
+    def test_profile_timing_fields_are_retained(self):
+        parsed = driver.parse_run(
+            output()
+            + "PROFILE_F region_0_gpu_ms 2.5\n"
+            + "PROFILE_F region_0_staging_copy_ms 1.25\n"
+            + "PROFILE_F query_wall_ms 4.75\n",
+            1,
+        )
+        self.assertEqual(parsed["profile"]["region_0_gpu_ms"], 2.5)
+        self.assertEqual(parsed["profile"]["region_0_staging_copy_ms"], 1.25)
+        self.assertEqual(parsed["profile"]["query_wall_ms"], 4.75)
+
+    def test_timeout_keeps_partial_output_in_log_and_result(self):
+        error = subprocess.TimeoutExpired(["bench"], 3, output=b"partial\xff")
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / "worker.txt"
+            result = driver.retain_timeout(error, 3, log)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["timeout_seconds"], 3)
+            self.assertIn("Timed out", result["error"])
+            self.assertEqual(result["captured_output"], "partial\ufffd")
+            self.assertEqual(log.read_text(), result["captured_output"])
+
+    def test_report_lists_cases_where_metal_is_slower(self):
+        data = {
+            "metadata": {"scope": "Development mechanisms only."},
+            "runs": [
+                {
+                    "runtime": "mojo",
+                    "rows": 64,
+                    "workload": "projection",
+                    "variant": "base",
+                    "status": "ok",
+                    "samples": [{"cpu_ns": 100, "metal_ns": 200}],
+                    "profile": {"kernel_launches": 1, "peak_requested_bytes": 4},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "report.md"
+            driver.render(data, target)
+            report = target.read_text()
+        self.assertIn("## Measured Metal slowdowns", report)
+        self.assertIn("| mojo | 64 | projection | base | 0.50 | 2.00x |", report)
 
 
 if __name__ == "__main__":

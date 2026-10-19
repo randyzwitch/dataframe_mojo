@@ -160,6 +160,19 @@ exact comparison. The case audit registry records q24's eager CPU mean;
 forcing its `collect` calls does not make that aggregate a GPU operation.
 Coverage `collection_ns` values are diagnostic and are not performance results.
 
+`benchmarks/tools/bench_metal.py` is a development harness for individual
+mechanisms. It includes cumulative and fixed-width rolling sums, a skewed
+group-by (three quarters of rows share one key), and the existing mechanism
+cases. Each worker has a finite timeout (`--timeout-seconds`, default 300);
+timeout output is retained in its run log and raw JSON as a failed case. The
+raw metadata records the compiler version, checkout status, and a hash of the
+engine source diff alongside the benchmark and binary hashes. The Markdown
+report lists cases where Metal is slower than CPU as well as the worst variant
+for each mechanism. Profile phase fields are retained when supplied by the
+runtime. Host phase values may overlap and are reported separately; the report
+does not derive GPU-only or pipeline compilation time when the runtime does not
+provide it.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join
