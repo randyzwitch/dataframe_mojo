@@ -54,7 +54,7 @@ follow on every change; the full tier is what a report cites.
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
 | `pdsh` | development (held out until 2026-10-05) | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `tpcds` | development (held out until 2026-10-15) | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 55 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
+| `tpcds` | development (held out until 2026-10-15) | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 89 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
 | `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
@@ -260,6 +260,16 @@ SQL text before any query in it is timed:
 4. The 5 that add only EXISTS or NOT EXISTS (q10, q16, q35, q69, q94).
 5. The 7 whose WITH clause defines one table, under the same exclusions
    (q1, q24, q30, q39, q59, q81, q95).
+6. The 23 with set operations or several WITH tables, and no window
+   function or ROLLUP (q2, q4, q8, q11, q23, q27, q31, q33, q38, q54, q56,
+   q58, q60, q64, q66, q71, q74, q75, q76, q78, q83, q87, q97; #575).
+7. The 11 with window functions and no ROLLUP (q12, q20, q44, q47, q49,
+   q51, q53, q57, q63, q89, q98; #575).
+
+That is 89 of 99. The remaining 10 (q5, q14, q18, q22, q36, q67, q70, q77,
+q80, q86) use ROLLUP or GROUPING and stay `unsupported: not translated`
+until the library has ROLLUP, CUBE and GROUPING SETS (#802; #564 tracks
+their translation).
 
 Add further batches by a rule of the same kind, never by which queries run
 well. A translation uses the API as a user would; where the

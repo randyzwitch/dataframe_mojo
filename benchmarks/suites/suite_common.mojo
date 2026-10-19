@@ -10,7 +10,7 @@ times REPS runs, each producing a materialized DataFrame. It prints the same
 lines as benchmarks/suites/engines.py, each tagged with its query:
 
     time<TAB>QUERY<TAB>NANOSECONDS                  one per timed run
-    summary<TAB>QUERY<TAB>HEIGHT<TAB>V1,V2<TAB>N1,N2 see engines.py `summary`
+    summary<TAB>QUERY<TAB>HEIGHT<TAB>V1,V2<TAB>N1,N2<TAB>P1 see engines.py `summary`
     unsupported<TAB>QUERY<TAB>REASON
     failed<TAB>QUERY<TAB>MESSAGE
 
@@ -44,6 +44,37 @@ def load_tables() raises -> Dict[String, DataFrame]:
             raise Error("expected name=path, found " + arg)
         tables[String(parts[0])] = read_parquet(String(parts[1]))
     return tables^
+
+
+def row_number(frame: DataFrame, name: String) raises -> Expr:
+    """The per-row number a column contributes to the summary, matching
+    engines.py's `_row_number`."""
+    var dtype = frame.column(name).dtype()
+    if dtype == DataType.STRING:
+        return col(name).str().len_bytes().cast(DataType.FLOAT64)
+    if dtype.is_date():
+        return col(name).cast(DataType.INT64).cast(DataType.FLOAT64)
+    if dtype.is_datetime():
+        return (col(name).cast(DataType.INT64) // lit(dtype.per_second())).cast(
+            DataType.FLOAT64
+        )
+    if dtype == DataType.BOOL or dtype.is_numeric():
+        return col(name).cast(DataType.FLOAT64)
+    return col(name).is_not_null().cast(DataType.FLOAT64)
+
+
+def pair_value(frame: DataFrame, left: String, right: String) raises -> Float64:
+    """The sum of the products of two columns' per-row numbers, a null
+    counting as 0, matching engines.py's `summary` (it keeps rows
+    together where column sums alone would not, #606)."""
+    var product = (
+        row_number(frame, left).fill_null(lit(0.0))
+        * row_number(frame, right).fill_null(lit(0.0))
+    ).sum()
+    var cell = frame.select(product).item()
+    if cell.is_null():
+        return 0.0
+    return cell.float64()
 
 
 def summary_value(frame: DataFrame, name: String) raises -> Float64:
@@ -97,6 +128,15 @@ def run[
                     columns += ","
                 values += String(summary_value(result, result.columns()[i]))
                 columns += result.columns()[i]
+            var pairs = String()
+            for i in range(result.width() - 1):
+                if i > 0:
+                    pairs += ","
+                pairs += String(
+                    pair_value(
+                        result, result.columns()[i], result.columns()[i + 1]
+                    )
+                )
             print(
                 "summary\t"
                 + name
@@ -106,6 +146,8 @@ def run[
                 + values
                 + "\t"
                 + columns
+                + "\t"
+                + pairs
             )
         except e:
             var message = String(e)

@@ -322,15 +322,16 @@ def parse(output, queries):
             names = (
                 fields[4].split(",") if len(fields) > 4 and fields[4] else []
             )
-            entry.update(
-                status="ok",
-                reason="",
-                summary={
-                    "height": int(fields[2]),
-                    "values": values,
-                    "names": names,
-                },
-            )
+            summary = {
+                "height": int(fields[2]),
+                "values": values,
+                "names": names,
+            }
+            if len(fields) > 5:
+                summary["pairs"] = (
+                    [float(v) for v in fields[5].split(",")] if fields[5] else []
+                )
+            entry.update(status="ok", reason="", summary=summary)
         elif kind in ("unsupported", "failed"):
             entry.update(status=kind, reason=fields[2])
     return found
@@ -465,8 +466,13 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
 
 
 def _close(a, b):
-    if math.isnan(a) and math.isnan(b):
-        return True
+    """Whether two summary numbers agree: both NaN, the same infinity, or
+    finite and within a relative 1e-6. A finite number never matches an
+    infinity, nor one infinity the other (#606)."""
+    if math.isnan(a) or math.isnan(b):
+        return math.isnan(a) and math.isnan(b)
+    if math.isinf(a) or math.isinf(b):
+        return a == b
     return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
 
@@ -501,7 +507,16 @@ def same_answer(suite, query, got, want):
         pairs = [
             (got["values"][i], want["values"][j]) for i, j in zip(mine, theirs)
         ]
-    return all(_close(a, b) for a, b in pairs)
+    if not all(_close(a, b) for a, b in pairs):
+        return False
+    # Rows kept together (#606): the neighbouring-column product sums, when
+    # every column is compared and both sides carry them (a reference cached
+    # before they existed does not).
+    if spec is None and "pairs" in got and "pairs" in want:
+        if len(got["pairs"]) != len(want["pairs"]):
+            return False
+        return all(_close(a, b) for a, b in zip(got["pairs"], want["pairs"]))
+    return True
 
 
 # --- measurement -------------------------------------------------------------

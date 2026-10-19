@@ -192,12 +192,6 @@ def test_simd_column_statistics_match_wide_scalar_subranges_and_unaligned_validi
         _stats[INTEGER_DTYPES[index]]()
 
 
-# expected-failure: Verified two Int64.MAX inputs in separate SIMD lanes
-# expected-failure: return -2 before Int128 widening. Wide statistics contract
-# expected-failure: requires exact total. Later lane/layout dimensions await
-# expected-failure: repair.
-# expected-diagnostic: SIMD column statistics must widen before summing
-# expected-diagnostic: overflowing lanes
 def test_simd_column_statistics_do_not_wrap_before_widening_to_int128() raises:
     for n in [8, 9, 16, 17, 65]:
         for same_lane in [False, True]:
@@ -213,11 +207,6 @@ def test_simd_column_statistics_do_not_wrap_before_widening_to_int128() raises:
             )
 
 
-# expected-failure: Verified eight-row shifted SUM of two Int64.MAX values
-# expected-failure: plus zeros returns -2 instead of rejecting final overflow.
-# expected-failure: Subsequent wide-mean check awaits this repair.
-# expected-diagnostic: shifted SUM must reject a wide final total outside
-# expected-diagnostic: Int64
 def test_shifted_sum_shortcut_preserves_final_overflow_and_wide_mean() raises:
     var payload = List[Int64](length=8, fill=0)
     payload[0] = Int64.MAX
