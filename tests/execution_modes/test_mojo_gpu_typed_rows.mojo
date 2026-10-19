@@ -18,7 +18,7 @@ def _assert_typed_rows_profile(
     assert_true(measured[0].equals(expected))
     assert_true(collected.equals(expected))
     assert_equal(measured[1].item(0, "runtime_implementation").string(), "mojo")
-    return measured
+    return measured^
 
 
 # requires: mojo_gpu

@@ -141,7 +141,9 @@ def evaluate[
         var present = True
         comptime if nullable:
             var at = Int(source_bit_offset) + row
-            present = (source_valid[unsafe_offset=at // 8] >> (at % 8)) & 1 != 0
+            present = (
+                source_valid[unsafe_offset=at // 8] >> UInt8(at % 8)
+            ) & 1 != 0
         slots[unsafe_offset=0] = bitcast[DType.uint32](
             source[unsafe_offset=row]
         ) if present else 0
@@ -208,10 +210,10 @@ def evaluate[
         result[unsafe_offset=row] = bitcast[DType.float32](
             slots[unsafe_offset=Int(output_slot)]
         )
-        output_bits |= (
-            UInt8(slot_valid[unsafe_offset=Int(output_slot)] != 0) << bit
-        )
-        selected_bits |= UInt8(keep) << bit
+        output_bits |= UInt8(
+            slot_valid[unsafe_offset=Int(output_slot)] != 0
+        ) << UInt8(bit)
+        selected_bits |= UInt8(keep) << UInt8(bit)
     comptime if nullable:
         result_valid[unsafe_offset=byte] = output_bits
     comptime if filtered:
@@ -227,7 +229,7 @@ def selection_scan(
     var row = global_idx.x
     var keep = UInt32(0)
     if row < Int(rows):
-        keep = UInt32((selected[unsafe_offset=row // 8] >> (row % 8)) & 1)
+        keep = UInt32((selected[unsafe_offset=row // 8] >> UInt8(row % 8)) & 1)
     var prefix = prefix_sum[block_size=256](keep)
     if row < Int(rows):
         positions[unsafe_offset=row] = prefix - keep
@@ -256,7 +258,10 @@ def selection_indices(
     rows: UInt32,
 ):
     var row = global_idx.x
-    if row < Int(rows) and (selected[unsafe_offset=row // 8] >> (row % 8)) & 1:
+    if (
+        row < Int(rows)
+        and (selected[unsafe_offset=row // 8] >> UInt8(row % 8)) & 1
+    ):
         var target = (
             positions[unsafe_offset=row] + blocks[unsafe_offset=row // 256]
         )
@@ -285,7 +290,7 @@ def gather[
         result[unsafe_offset=target] = values[unsafe_offset=source]
         comptime if nullable:
             bits |= (
-                (validity[unsafe_offset=source // 8] >> (source % 8)) & 1
-            ) << bit
+                (validity[unsafe_offset=source // 8] >> UInt8(source % 8)) & 1
+            ) << UInt8(bit)
     comptime if nullable:
         result_valid[unsafe_offset=byte] = bits

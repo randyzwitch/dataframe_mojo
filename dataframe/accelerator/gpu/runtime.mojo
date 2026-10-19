@@ -1245,7 +1245,7 @@ def _readback_native(table: Table) raises -> List[Column[Float32]]:
 
     var additional = 0
     for slot in table.columns:
-        var column = table.native_columns[Int(slot)]
+        ref column = table.native_columns[Int(slot)]
         additional = _checked_add(additional, _checked_mul(table.rows, 4))
         var validity = column.validity()
         if validity:
@@ -1275,7 +1275,7 @@ def _materialize_native_host(
     var columns = List[Series](capacity=table.schema.width())
     for i in range(table.schema.width()):
         ref field = table.schema._columns[i]
-        var output = Series(field.name(), host[i])
+        var output = Series(field.name(), host[i].copy())
         output._field_metadata = field._field_metadata
         columns.append(output^)
     return DataFrame(columns^, height=table.rows)

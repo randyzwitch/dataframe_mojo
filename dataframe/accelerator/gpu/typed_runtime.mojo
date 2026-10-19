@@ -307,13 +307,13 @@ def execute(
         var computed: Tuple[NativeColumn[DType.float32], Int, Int, Int]
         if source.has_validity():
             if filtered:
-                computed = _compute[True, True](plan, source, profiling)
+                computed = _compute[True, True](plan, source.copy(), profiling)
             else:
-                computed = _compute[True, False](plan, source, profiling)
+                computed = _compute[True, False](plan, source.copy(), profiling)
         elif filtered:
-            computed = _compute[False, True](plan, source, profiling)
+            computed = _compute[False, True](plan, source.copy(), profiling)
         else:
-            computed = _compute[False, False](plan, source, profiling)
+            computed = _compute[False, False](plan, source.copy(), profiling)
         result = computed[0].copy()
         host_ns += computed[1]
         staging_ns += computed[2]

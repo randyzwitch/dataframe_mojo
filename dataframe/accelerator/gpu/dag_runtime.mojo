@@ -578,9 +578,6 @@ def execute(
                     resident.value(),
                     scope,
                     export_values=not (observation_only and index == dag.root),
-                    native_output=task.terminal
-                    and index == dag.root
-                    and not observation_only,
                     text_domain=target_domain,
                     state_context=partition_context,
                 )
@@ -618,6 +615,9 @@ def execute(
                     scope,
                     resident_input=resident,
                     profiling=profiling,
+                    native_output=task.terminal
+                    and index == dag.root
+                    and not observation_only,
                     terminal_boundary=task.terminal,
                     export_values=not (observation_only and index == dag.root),
                     text_domain=target_domain,

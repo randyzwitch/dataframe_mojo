@@ -64,7 +64,7 @@ struct _NativeReservation(Movable):
 struct _NativeColumnOwner[dtype: DType](Movable):
     var scope: Scope
     var retained: Int
-    var values: Optional[DeviceBuffer[dtype]]
+    var values: Optional[DeviceBuffer[Self.dtype]]
     var validity: Optional[DeviceBuffer[DType.uint8]]
     var errors: Optional[DeviceBuffer[DType.uint32]]
     var reservation: _NativeReservation
@@ -72,7 +72,7 @@ struct _NativeColumnOwner[dtype: DType](Movable):
     def __init__(
         out self,
         scope: Scope,
-        var values: Optional[DeviceBuffer[dtype]] = None,
+        var values: Optional[DeviceBuffer[Self.dtype]] = None,
         var validity: Optional[DeviceBuffer[DType.uint8]] = None,
         var errors: Optional[DeviceBuffer[DType.uint32]] = None,
         var reservation: Optional[_NativeReservation] = None,
@@ -80,7 +80,7 @@ struct _NativeColumnOwner[dtype: DType](Movable):
         var validity_bytes = len(validity.value()) if validity else 0
         var error_capacity = len(errors.value()) if errors else 0
         var value_capacity = len(values.value()) if values else 0
-        var retained = native_column_bytes[dtype](
+        var retained = native_column_bytes[Self.dtype](
             value_capacity, validity_bytes, error_capacity
         )
         if reservation:
@@ -107,7 +107,7 @@ struct _NativeColumnOwner[dtype: DType](Movable):
 struct NativeColumn[dtype: DType](Copyable):
     """Immutable row view over an Arc-owned typed device allocation."""
 
-    var _owner: ArcPointer[_NativeColumnOwner[dtype]]
+    var _owner: ArcPointer[_NativeColumnOwner[Self.dtype]]
     var logical: DataType
     var length: Int
     var value_offset: Int
@@ -118,14 +118,14 @@ struct NativeColumn[dtype: DType](Copyable):
         scope: Scope,
         logical: DataType,
         length: Int,
-        var values: DeviceBuffer[dtype],
+        var values: DeviceBuffer[Self.dtype],
         var validity: Optional[DeviceBuffer[DType.uint8]] = None,
         var errors: Optional[DeviceBuffer[DType.uint32]] = None,
         value_offset: Int = 0,
         validity_bit_offset: Int = 0,
         var reservation: Optional[_NativeReservation] = None,
     ) raises:
-        if logical.physical() != DataType.of(dtype):
+        if logical.physical() != DataType.of(Self.dtype):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
@@ -152,9 +152,9 @@ struct NativeColumn[dtype: DType](Copyable):
         ):
             raise Error("Mojo GPU typed column view is outside its errors")
         self._owner = ArcPointer(
-            _NativeColumnOwner[dtype](
+            _NativeColumnOwner[Self.dtype](
                 scope,
-                Optional[DeviceBuffer[dtype]](values^),
+                Optional[DeviceBuffer[Self.dtype]](values^),
                 validity^,
                 errors^,
                 reservation^,
@@ -166,14 +166,14 @@ struct NativeColumn[dtype: DType](Copyable):
         self.validity_bit_offset = validity_bit_offset
 
     def __init__(out self, scope: Scope, logical: DataType, length: Int) raises:
-        if logical.physical() != DataType.of(dtype):
+        if logical.physical() != DataType.of(Self.dtype):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
         if length != 0:
             raise Error("Mojo GPU typed column without values must be empty")
         self._owner = ArcPointer(
-            _NativeColumnOwner[dtype](scope, None, None, None)
+            _NativeColumnOwner[Self.dtype](scope, None, None, None)
         )
         self.logical = logical
         self.length = 0
@@ -182,13 +182,13 @@ struct NativeColumn[dtype: DType](Copyable):
 
     def __init__(
         out self,
-        owner: ArcPointer[_NativeColumnOwner[dtype]],
+        owner: ArcPointer[_NativeColumnOwner[Self.dtype]],
         logical: DataType,
         length: Int,
         value_offset: Int,
         validity_bit_offset: Int,
     ) raises:
-        if logical.physical() != DataType.of(dtype):
+        if logical.physical() != DataType.of(Self.dtype):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
@@ -242,7 +242,7 @@ struct NativeColumn[dtype: DType](Copyable):
             next_bit_offset,
         )
 
-    def values(self) raises -> DeviceBuffer[dtype]:
+    def values(self) raises -> DeviceBuffer[Self.dtype]:
         """Copy the device handle; keep this NativeColumn alive while using it."""
         if not self._owner[].values:
             raise Error("Empty Mojo GPU typed column has no values buffer")
