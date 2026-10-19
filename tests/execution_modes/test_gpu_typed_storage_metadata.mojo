@@ -74,6 +74,9 @@ def test_native_float32_upload_roundtrips_slice_and_packed_nulls() raises:
     assert_equal(result.is_valid(1), False)
     assert_equal(scope.transfers()[1], 9)
     assert_equal(scope.info()[0], 17)
+    _ = sliced^
+    _ = resident^
+    assert_equal(scope.info()[0], 0)
 
 
 # requires: metal
@@ -125,6 +128,8 @@ def test_native_float32_empty_and_budget_failure_allocate_nothing() raises:
     var exact_owner = upload_float32(exact, nullable)
     assert_equal(exact_owner.retained_bytes(), 13)
     assert_equal(exact.info()[0], 13)
+    _ = exact_owner^
+    assert_equal(exact.info()[0], 0)
 
     var too_small = Scope(budget=12)
     with assert_raises(contains="memory budget"):
