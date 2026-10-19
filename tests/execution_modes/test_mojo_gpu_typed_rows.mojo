@@ -423,6 +423,139 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
 
 
 # requires: mojo_gpu
+def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filter() raises:
+    # The generic JOIN key semantics equate every NaN payload and both signed
+    # zeros, while null keys remain unmatched. The native bridge must preserve
+    # the Float32 encodings and expand validity with the same semantics.
+    var nan_left = bitcast[DType.float32](UInt32(0x7FC00035))
+    var nan_right = bitcast[DType.float32](UInt32(0xFFC00002))
+    var special_left = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Float32](
+                    [
+                        nan_left,
+                        Float32(-0.0),
+                        Float32(0.0),
+                        Float32(0.0),
+                        Float32(8),
+                    ],
+                    [True, True, True, False, True],
+                ),
+            )
+        ]
+    )
+    var special_right = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Float32](
+                    [
+                        nan_right,
+                        Float32(0.0),
+                        Float32(-0.0),
+                        Float32(0.0),
+                        Float32(9),
+                    ],
+                    [True, True, True, False, True],
+                ),
+            )
+        ]
+    )
+    var special_query = special_left.lazy().select(
+        (col("k") * lit(Float32(1))).alias("k")
+    ).join(special_right.lazy(), on="k", how="full")
+    var special = _assert_typed_rows_profile(special_query)
+    assert_equal(special[0].height(), 9)
+    var special_rows = -1
+    var special_bridge_bytes = -1
+    for row in range(special[1].height()):
+        var algorithm = special[1].item(row, "algorithm").string()
+        if algorithm == "mojo_gpu_native_float32_rows":
+            special_rows = Int(special[1].item(row, "output_rows").int64())
+        elif algorithm == "mojo_gpu_sorted_join":
+            special_bridge_bytes = Int(
+                special[1].item(row, "native_input_conversion_bytes").int64()
+            )
+    assert_equal(special_rows, 5)
+    assert_equal(special_bridge_bytes, 5 * 21)
+
+    # Empty computed input still gets a certified native table, and the JOIN
+    # conversion is a zero-byte no-op while the right side remains observable.
+    var empty = DataFrame([Series("k", Column[Float32]([]))])
+    var empty_right = DataFrame(
+        [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
+    )
+    var empty_query = empty.lazy().select(
+        (col("k") + lit(Float32(1))).alias("k")
+    ).join(empty_right.lazy(), on="k", how="right")
+    var empty_measured = _assert_typed_rows_profile(empty_query)
+    assert_equal(empty_measured[0].height(), 2)
+    var empty_native_rows = -1
+    var empty_bridge_bytes = -1
+    for row in range(empty_measured[1].height()):
+        var algorithm = empty_measured[1].item(row, "algorithm").string()
+        if algorithm == "mojo_gpu_native_float32_rows":
+            empty_native_rows = Int(
+                empty_measured[1].item(row, "output_rows").int64()
+            )
+        elif algorithm == "mojo_gpu_sorted_join":
+            empty_bridge_bytes = Int(
+                empty_measured[1]
+                .item(row, "native_input_conversion_bytes")
+                .int64()
+            )
+    assert_equal(empty_native_rows, 0)
+    assert_equal(empty_bridge_bytes, 0)
+
+    # The filter compacts more than one validity byte before the bridge. Null
+    # source rows are excluded by the filter, and the compacted table still
+    # traverses every output byte in the generic consumer conversion.
+    var many_values = List[Float32]()
+    var many_valid = List[Bool]()
+    for row in range(48):
+        many_values.append(Float32(row))
+        many_valid.append(row % 7 != 0)
+    var many = DataFrame(
+        [Series("k", Column[Float32](many_values^, many_valid^))]
+    )
+    var many_right = DataFrame(
+        [Series("k", Column[Float32]([Float32(7), Float32(20), Float32(40)]))]
+    )
+    var compacted_query = many.lazy().filter(
+        col("k") > lit(Float32(5))
+    ).select((col("k") + lit(Float32(1))).alias("k")).join(
+        many_right.lazy(), on="k", how="left"
+    )
+    var compacted = _assert_typed_rows_profile(compacted_query)
+    var compacted_native_rows = -1
+    var compacted_native_bytes = -1
+    var compacted_bridge_bytes = -1
+    for row in range(compacted[1].height()):
+        var algorithm = compacted[1].item(row, "algorithm").string()
+        if algorithm == "mojo_gpu_native_float32_filter":
+            compacted_native_rows = Int(
+                compacted[1].item(row, "output_rows").int64()
+            )
+            compacted_native_bytes = Int(
+                compacted[1].item(row, "resident_output_bytes").int64()
+            )
+        elif algorithm == "mojo_gpu_sorted_join":
+            compacted_bridge_bytes = Int(
+                compacted[1]
+                .item(row, "native_input_conversion_bytes")
+                .int64()
+            )
+    assert_true(compacted_native_rows > 8)
+    assert_equal(
+        compacted_native_bytes,
+        compacted_native_rows * 4 + (compacted_native_rows + 7) // 8,
+    )
+    assert_equal(compacted_bridge_bytes, compacted_native_rows * 21)
+
+
+# requires: mojo_gpu
 def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises:
     var left = DataFrame(
         [
@@ -456,9 +589,8 @@ def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises
             )
     assert_true(generic_producer)
 
-    # An input row limit is also outside the typed join producer certificate;
-    # the typed runtime does not compact an unfiltered projection after its
-    # expression kernel, so this must stay on the generic matrix path.
+    # The internal native JOIN producer certificate admits only no-limit
+    # plans, so a limited producer stays on the generic matrix path.
     var limited_source = DataFrame(
         [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
     )

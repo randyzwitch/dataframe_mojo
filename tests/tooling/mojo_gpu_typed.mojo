@@ -16,6 +16,7 @@ from tests.execution_modes.test_mojo_gpu_typed_rows import (
     test_mojo_gpu_typed_rows_float32_special_values_and_sum_fallback,
     test_mojo_gpu_typed_filter_multiple_blocks_and_query_budget,
     test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge,
+    test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filter,
     test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic,
     test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped,
 )
@@ -40,6 +41,7 @@ def main() raises:
     test_mojo_gpu_typed_rows_float32_special_values_and_sum_fallback()
     test_mojo_gpu_typed_filter_multiple_blocks_and_query_budget()
     test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge()
+    test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filter()
     test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic()
     test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped()
     test_metal_profile_phases_preserve_results_and_empty_execution()
