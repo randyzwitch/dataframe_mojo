@@ -1,9 +1,12 @@
 """Dictionary staging must see only source fields the logical query reads."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, Series, StringColumn, col
+from dataframe import Column, DataFrame, Series, StringColumn, col, lit
 from dataframe.accelerator.source_projection import project_sources
-from dataframe.accelerator.dictionaries import DictionaryCodes
+from dataframe.accelerator.dictionaries import (
+    DictionaryCodes,
+    lower_dictionary_operations,
+)
 from tests.support.coverage_compare import assert_frame
 from tests.execution_modes.test_backend_metal import require_metal
 
@@ -51,6 +54,45 @@ def test_metal_source_projection_shared_frame_scans_and_height() raises:
     assert_equal(projected._frames[0].height(), frame.height())
     assert_equal(projected._frames[0].width(), 1)
     assert_frame(projected.collect(engine="cpu"), numeric.collect(engine="cpu"))
+
+
+def test_metal_source_projection_through_dictionary_restore() raises:
+    var frame = source()
+    for index in range(100):
+        frame = frame.with_column(
+            Series("payload" + String(index), Column[Int64]([1, 2, 3, 4]))
+        )
+    var query = (
+        frame.lazy()
+        .filter(col("key").str().contains("b"))
+        .select(col("value").sum().alias("sum"))
+    )
+    var lowered = lower_dictionary_operations(project_sources(query))
+    var projected = project_sources(lowered[0])
+    assert_equal(projected._frames[0].width(), 2)
+    assert_equal(frame.width(), 103)
+    assert_frame(projected.collect(engine="cpu"), query.collect(engine="cpu"))
+
+
+def test_metal_source_projection_keeps_computed_observations() raises:
+    var frame = source()
+    var query = (
+        frame.lazy()
+        .select_exprs(
+            [col("value"), (col("value") * lit(Int64.MAX)).alias("checked")]
+        )
+        .select(col("value"))
+    )
+    var projected = project_sources(query)
+    # The unused checked expression still raises on CPU/GPU; pruning an
+    # identity restoration must never erase this earlier observation.
+    assert_equal(len(projected._nodes[1].exprs), 2)
+    var raised = False
+    try:
+        _ = projected.collect(engine="cpu", optimize=False)
+    except:
+        raised = True
+    assert_true(raised)
 
 
 # requires: metal
