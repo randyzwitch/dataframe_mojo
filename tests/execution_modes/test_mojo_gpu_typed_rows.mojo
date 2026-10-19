@@ -318,9 +318,7 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
         Float32(6),
     ]
     var valid: List[Bool] = [True, False, True, True, True, False, True]
-    var original = DataFrame(
-        [Series("k", Column[Float32](values^, valid^))]
-    )
+    var original = DataFrame([Series("k", Column[Float32](values^, valid^))])
     var right = DataFrame(
         [
             Series(
@@ -336,9 +334,11 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
         offset_layout(original.slice(1, 5)),
         chunk_layout(original.slice(1, 5)),
     ]:
-        var query = frame.lazy().select(
-            (col("k") + lit(Float32(1))).alias("k")
-        ).join(right.lazy(), on="k", how="left")
+        var query = (
+            frame.lazy()
+            .select((col("k") + lit(Float32(1))).alias("k"))
+            .join(right.lazy(), on="k", how="left")
+        )
         var runtime = MetalRuntime()
         assert_true(
             "certified native Float32 JOIN input" in runtime.describe(query)
@@ -351,16 +351,12 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
         for row in range(measured[1].height()):
             var algorithm = measured[1].item(row, "algorithm").string()
             if algorithm == "mojo_gpu_native_float32_rows":
-                native_rows = Int(
-                    measured[1].item(row, "output_rows").int64()
-                )
+                native_rows = Int(measured[1].item(row, "output_rows").int64())
                 native_bytes = Int(
                     measured[1].item(row, "resident_output_bytes").int64()
                 )
                 assert_equal(
-                    measured[1]
-                    .item(row, "materialization_boundary")
-                    .string(),
+                    measured[1].item(row, "materialization_boundary").string(),
                     "Mojo GPU resident table",
                 )
                 assert_equal(
@@ -402,9 +398,7 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
         [Series("source", Column[Float32]([Float32(3), Float32(4)]))]
     )
     var right_query = raw_left.lazy().join(
-        raw_right.lazy().select(
-            (col("source") + lit(Float32(1))).alias("k")
-        ),
+        raw_right.lazy().select((col("source") + lit(Float32(1))).alias("k")),
         on="k",
     )
     var right_measured = _assert_typed_rows_profile(right_query)
@@ -463,9 +457,11 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
             )
         ]
     )
-    var special_query = special_left.lazy().select(
-        (col("k") * lit(Float32(1))).alias("k")
-    ).join(special_right.lazy(), on="k", how="full")
+    var special_query = (
+        special_left.lazy()
+        .select((col("k") * lit(Float32(1))).alias("k"))
+        .join(special_right.lazy(), on="k", how="full")
+    )
     var special = _assert_typed_rows_profile(special_query)
     assert_equal(special[0].height(), 9)
     var special_rows = -1
@@ -487,9 +483,11 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
     var empty_right = DataFrame(
         [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
     )
-    var empty_query = empty.lazy().select(
-        (col("k") + lit(Float32(1))).alias("k")
-    ).join(empty_right.lazy(), on="k", how="right")
+    var empty_query = (
+        empty.lazy()
+        .select((col("k") + lit(Float32(1))).alias("k"))
+        .join(empty_right.lazy(), on="k", how="right")
+    )
     var empty_measured = _assert_typed_rows_profile(empty_query)
     assert_equal(empty_measured[0].height(), 2)
     var empty_native_rows = -1
@@ -523,10 +521,11 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
     var many_right = DataFrame(
         [Series("k", Column[Float32]([Float32(7), Float32(20), Float32(40)]))]
     )
-    var compacted_query = many.lazy().filter(
-        col("k") > lit(Float32(5))
-    ).select((col("k") + lit(Float32(1))).alias("k")).join(
-        many_right.lazy(), on="k", how="left"
+    var compacted_query = (
+        many.lazy()
+        .filter(col("k") > lit(Float32(5)))
+        .select((col("k") + lit(Float32(1))).alias("k"))
+        .join(many_right.lazy(), on="k", how="left")
     )
     var compacted = _assert_typed_rows_profile(compacted_query)
     var compacted_native_rows = -1
@@ -543,9 +542,7 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
             )
         elif algorithm == "mojo_gpu_sorted_join":
             compacted_bridge_bytes = Int(
-                compacted[1]
-                .item(row, "native_input_conversion_bytes")
-                .int64()
+                compacted[1].item(row, "native_input_conversion_bytes").int64()
             )
     assert_true(compacted_native_rows > 8)
     assert_equal(
@@ -566,9 +563,11 @@ def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises
     var right = DataFrame(
         [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
     )
-    var query = left.lazy().with_columns(
-        (col("v") + lit(Float32(1))).alias("v")
-    ).join(right.lazy(), on="k")
+    var query = (
+        left.lazy()
+        .with_columns((col("v") + lit(Float32(1))).alias("v"))
+        .join(right.lazy(), on="k")
+    )
     var runtime = MetalRuntime()
     assert_true(
         "0 certified native Float32 JOIN input" in runtime.describe(query)
@@ -582,9 +581,7 @@ def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises
                 == "mojo_gpu_row_program"
             )
             assert_equal(
-                measured[1]
-                .item(row, "native_input_conversion_bytes")
-                .int64(),
+                measured[1].item(row, "native_input_conversion_bytes").int64(),
                 Int64(0),
             )
     assert_true(generic_producer)
@@ -594,9 +591,12 @@ def test_mojo_gpu_typed_float32_join_keeps_multicolumn_producer_generic() raises
     var limited_source = DataFrame(
         [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
     )
-    var limited_query = limited_source.lazy().select(
-        (col("k") + lit(Float32(1))).alias("k")
-    ).head(1).join(right.lazy(), on="k")
+    var limited_query = (
+        limited_source.lazy()
+        .select((col("k") + lit(Float32(1))).alias("k"))
+        .head(1)
+        .join(right.lazy(), on="k")
+    )
     assert_true(
         "0 certified native Float32 JOIN input"
         in MetalRuntime().describe(limited_query)
@@ -615,9 +615,7 @@ def test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped() raises:
             )
         ]
     )
-    var branch = source.lazy().select(
-        (col("k") + lit(Float32(1))).alias("k")
-    )
+    var branch = source.lazy().select((col("k") + lit(Float32(1))).alias("k"))
     var query = branch.join(branch, on="k")
     var runtime = MetalRuntime()
     assert_true(
@@ -632,9 +630,7 @@ def test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped() raises:
             typed_regions += 1
         elif algorithm == "mojo_gpu_sorted_join":
             conversion_bytes = Int(
-                measured[1]
-                .item(row, "native_input_conversion_bytes")
-                .int64()
+                measured[1].item(row, "native_input_conversion_bytes").int64()
             )
     assert_equal(typed_regions, 2)
     assert_equal(conversion_bytes, 2 * 3 * 21)

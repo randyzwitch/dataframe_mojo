@@ -363,7 +363,8 @@ struct Table(Copyable):
                 and not field.dtype.is_categorical()
             ):
                 raise Error(
-                    "Private text field must retain original String/categorical dtype"
+                    "Private text field must retain original String/categorical"
+                    " dtype"
                 )
             var index = -1
             for column in range(self.schema.width()):
@@ -626,7 +627,10 @@ struct Table(Copyable):
                     if errors[target]:
                         raise_value_error(
                             errors[target],
-                            "Mojo GPU resident arithmetic overflow, strict cast failed or input expression failure",
+                            (
+                                "Mojo GPU resident arithmetic overflow, strict"
+                                " cast failed or input expression failure"
+                            ),
                         )
             return HostMatrix(
                 self.schema.copy(), self.rows, words^, validity^, errors^
@@ -690,7 +694,10 @@ struct Table(Copyable):
             if error:
                 raise_value_error(
                     error,
-                    "Mojo GPU resident arithmetic overflow, strict cast failed or input expression failure",
+                    (
+                        "Mojo GPU resident arithmetic overflow, strict cast"
+                        " failed or input expression failure"
+                    ),
                 )
         return HostMatrix(
             self.schema.copy(), self.rows, words^, validity^, errors^
@@ -741,7 +748,8 @@ struct Table(Copyable):
                 or self.native_columns[0].has_errors()
             ):
                 raise Error(
-                    "Mojo GPU native input requires one infallible Float32 consumer"
+                    "Mojo GPU native input requires one infallible Float32"
+                    " consumer"
                 )
             var native = self.native_columns[0].view(self.offset, self.rows)
             if not native.scope().same_query(scope):
@@ -952,9 +960,7 @@ def copy_native_float32[
     var present = True
     comptime if nullable:
         var bit = Int(validity_offset) + row
-        present = (
-            validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)
-        ) & 1 != 0
+        present = (validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1 != 0
     low[unsafe_offset=row] = UInt64(values[unsafe_offset=row]) if present else 0
     high[unsafe_offset=row] = 0
     output_validity[unsafe_offset=row] = UInt8(present)

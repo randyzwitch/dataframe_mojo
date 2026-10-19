@@ -60,7 +60,8 @@ def preflight(
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> JoinDag:
-    """Check every reachable task and operation without device initialization."""
+    """Check every reachable task and operation without device initialization.
+    """
     var semantic = capabilities.copy()
     semantic.scalar_regions = True
     var dag = lower_join_dag(
@@ -119,7 +120,8 @@ def preflight(
             if task.source >= 0:
                 if plan.ordered_mode == 2:
                     raise Error(
-                        "Metal unsupported [ordered rows]: resident producer provenance is not proved"
+                        "Metal unsupported [ordered rows]: resident producer"
+                        " provenance is not proved"
                     )
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
@@ -129,7 +131,8 @@ def preflight(
                         and not capabilities.adjudicated_faults
                     ):
                         raise Error(
-                            "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
+                            "Metal unsupported [temporal]: prototype requires a"
+                            " direct scan before DAG submission"
                         )
         else:
             raise Error("Mojo GPU unexpected execution DAG task")
@@ -168,9 +171,7 @@ def _native_float32_join_inputs(dag: JoinDag) raises -> List[Bool]:
             or task.schema._columns[0].dtype() != DataType.FLOAT32
         ):
             continue
-        var plan = rows._preflight(
-            task.query, terminal_boundary=task.terminal
-        )
+        var plan = rows._preflight(task.query, terminal_boundary=task.terminal)
         if (
             len(plan.steps) > 0
             and plan.limit < 0
@@ -583,7 +584,8 @@ def execute(
                 )
                 if left_rows != right_rows:
                     raise Error(
-                        "explode: columns have different element counts at row 0"
+                        "explode: columns have different element counts at"
+                        " row 0"
                     )
             executed = joins.execute_plan(
                 task,
@@ -675,8 +677,9 @@ def execute(
                     ),
                     terminal_boundary=task.terminal,
                     export_values=not (observation_only and index == dag.root),
-                    text_domain=None if native_outputs[index]
-                    else target_domain,
+                    text_domain=None if native_outputs[
+                        index
+                    ] else target_domain,
                 )
         if target_domain and (task.kind == DAG_JOIN or task.kind == DAG_ASOF):
             executed[0].attach_text(
@@ -883,7 +886,8 @@ def describe(
             + String(len(dag.tasks))
             + " regions; "
             + String(native_count)
-            + " certified native Float32 JOIN input(s); immutable Mojo GPU resident tables; final CPU export\n"
+            + " certified native Float32 JOIN input(s); immutable Mojo GPU"
+            " resident tables; final CPU export\n"
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"
