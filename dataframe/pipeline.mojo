@@ -799,6 +799,8 @@ struct Morsel(Movable):
             names = reads.take()
         else:
             names = self.frame.columns()
+        if self._with_columns_in_place(exprs, names, batch_size):
+            return
         var input = self._compact_frame(names)
         var result = input.with_columns(exprs, batch_size=batch_size)
         # Columns the expressions produced or replaced join the frame as
@@ -815,6 +817,56 @@ struct Morsel(Movable):
             else:
                 self.frame._columns.append(column.copy())
                 self.compact.append(True)
+
+    def _with_columns_in_place(
+        mut self, exprs: List[Expr], names: List[String], batch_size: Int
+    ) raises -> Bool:
+        """Row-local columns computed over every row of a morsel whose
+        selection keeps at least half of it, joining it uncompacted and
+        read through the selection like the columns it shares, as DuckDB
+        projects over a selection vector: the selection survives, so the
+        aggregate table can still read the morsel in place
+        (`_in_place_table_rows`). A common subexpression computed below
+        an aggregation (PDS-H q1's discounted prices) compacted the whole
+        morsel and cost q1 60%. False, with nothing changed, when the
+        selection is sparse or by rows, a column read is already compact,
+        or evaluating every row raises (a dropped row may hold the error,
+        so the compacting path decides what is raised)."""
+        var n = self.frame.height()
+        if not self.selected or self.by_rows or 2 * self.count < n:
+            return False
+        var whole = List[Series](capacity=len(names))
+        for name in names:
+            var at = self._index(name)
+            if self.compact[at]:
+                return False
+            whole.append(self.frame._columns[at].copy())
+        var result: DataFrame
+        try:
+            result = DataFrame(whole^, height=n).with_columns(
+                exprs, batch_size=batch_size
+            )
+        except:
+            return False
+        var produced = List[String]()
+        for e in exprs:
+            produced.append(e._name)
+        for c in range(result.width()):
+            ref column = result._columns[c]
+            # New columns, and read ones an expression replaces.
+            if column.name() in names and column.name() not in produced:
+                continue
+            var found = -1
+            for i in range(self.frame.width()):
+                if self.frame._columns[i].name() == column.name():
+                    found = i
+            if found >= 0:
+                self.frame._columns[found] = column.copy()
+                self.compact[found] = False
+            else:
+                self.frame._columns.append(column.copy())
+                self.compact.append(False)
+        return True
 
     def drop(mut self, names: List[String]) raises:
         var kept = List[Series]()
