@@ -1,0 +1,32 @@
+FIRST 25410000 202683000
+WORKERS 8
+OUTPUT_ROWS 1048576
+SAMPLE 0 25001000 164520000
+SAMPLE 1 25118000 164766000
+SAMPLE 2 23830000 172808000
+PROFILE_I profile_regions 1
+PROFILE_I region_0_upload_bytes 9440112
+PROFILE_I upload_bytes 9440112
+PROFILE_S upload_bytes_basis single_region
+PROFILE_I region_0_download_bytes 22020096
+PROFILE_I download_bytes 22020096
+PROFILE_S download_bytes_basis single_region
+PROFILE_I region_0_host_result_bytes 4325376
+PROFILE_I host_result_bytes 4325376
+PROFILE_S host_result_bytes_basis single_region
+PROFILE_I region_0_peak_requested_bytes 96605920
+PROFILE_I peak_requested_bytes 96605920
+PROFILE_S peak_requested_bytes_basis single_region
+PROFILE_I region_0_kernel_launches 1
+PROFILE_I kernel_launches 1
+PROFILE_S kernel_launches_basis single_region
+PROFILE_I region_0_synchronizations 2
+PROFILE_I synchronizations 2
+PROFILE_S synchronizations_basis single_region
+PROFILE_F region_0_wall_ms 79.786
+PROFILE_F query_wall_ms 162.979
+PROFILE_S region_0_algorithm mojo_gpu_row_program
+PROFILE_S runtime_implementation mojo
+PROFILE_S algorithm mojo_gpu_row_program
+BUILD_ID development-source-no-calibration
+VALIDATED True
