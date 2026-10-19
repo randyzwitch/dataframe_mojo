@@ -45,6 +45,7 @@ from .pipeline import (
     _int_bounds,
     _range_key,
     _window_bounds,
+    _int_bounds,
     STEP_DROP,
     STEP_FILTER,
     STEP_JOIN,
