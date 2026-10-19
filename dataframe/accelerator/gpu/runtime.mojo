@@ -1234,8 +1234,51 @@ def estimate_resources(
 
 def materialize(table: Table) raises -> DataFrame:
     """Export one compact resident result through the existing typed builder."""
+    if len(table.native_columns):
+        return _materialize_native_host(table, _readback_native(table))
     var host = table.readback()
     return _materialize_host(table, host)
+
+
+def _readback_native(table: Table) raises -> List[Column[Float32]]:
+    from .typed_storage import readback_float32
+
+    var additional = 0
+    for slot in table.columns:
+        var column = table.native_columns[Int(slot)]
+        additional = _checked_add(additional, _checked_mul(table.rows, 4))
+        var validity = column.validity()
+        if validity:
+            additional = _checked_add(additional, len(validity.value()))
+            additional = _checked_add(
+                additional, _checked_add(table.rows, 7) // 8
+            )
+        var errors = column.errors()
+        if errors:
+            additional = _checked_add(
+                additional, _checked_mul(len(errors.value()), 4)
+            )
+    _ = table.native_columns[0].scope().check(additional)
+    var columns = List[Column[Float32]](capacity=table.schema.width())
+    for slot in table.columns:
+        columns.append(
+            readback_float32(
+                table.native_columns[Int(slot)].view(table.offset, table.rows)
+            )
+        )
+    return columns^
+
+
+def _materialize_native_host(
+    table: Table, var host: List[Column[Float32]]
+) raises -> DataFrame:
+    var columns = List[Series](capacity=table.schema.width())
+    for i in range(table.schema.width()):
+        ref field = table.schema._columns[i]
+        var output = Series(field.name(), host[i])
+        output._field_metadata = field._field_metadata
+        columns.append(output^)
+    return DataFrame(columns^, height=table.rows)
 
 
 def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
@@ -1350,6 +1393,7 @@ def execute(
         profiling,
         terminal_boundary=terminal_boundary,
         export_values=not observation_only,
+        native_output=not observation_only,
     )
     var result: DataFrame
     var readback_ns = 0
@@ -1360,11 +1404,18 @@ def execute(
         result = executed[0].schema.copy()
     elif profiling:
         var readback_started = Int(perf_counter_ns())
-        var host = executed[0].readback()
-        readback_ns = Int(perf_counter_ns()) - readback_started
-        var result_started = Int(perf_counter_ns())
-        result = _materialize_host(executed[0], host)
-        result_copy_ns = Int(perf_counter_ns()) - result_started
+        if len(executed[0].native_columns):
+            var host = _readback_native(executed[0])
+            readback_ns = Int(perf_counter_ns()) - readback_started
+            var result_started = Int(perf_counter_ns())
+            result = _materialize_native_host(executed[0], host^)
+            result_copy_ns = Int(perf_counter_ns()) - result_started
+        else:
+            var host = executed[0].readback()
+            readback_ns = Int(perf_counter_ns()) - readback_started
+            var result_started = Int(perf_counter_ns())
+            result = _materialize_host(executed[0], host)
+            result_copy_ns = Int(perf_counter_ns()) - result_started
     else:
         result = materialize(executed[0])
     var traffic = scope.transfers()
@@ -1424,6 +1475,7 @@ def execute_plan(
     *,
     terminal_boundary: Bool = True,
     export_values: Bool = True,
+    native_output: Bool = False,
     text_domain: Optional[ArcPointer[TextDomain]] = None,
 ) raises -> Tuple[Table, DataFrame]:
     """Execute one preflighted region on the query's shared Metal context.
@@ -1434,6 +1486,19 @@ def execute_plan(
     """
     if plan.source_failure:
         raise Error(plan.source_failure)
+    # Native owners are currently published only at terminal row boundaries.
+    # Other region families retain their existing representation explicitly.
+    from . import typed_rows, typed_runtime
+
+    if (
+        native_output
+        and terminal_boundary
+        and export_values
+        and not resident_input
+        and not text_domain
+        and typed_rows.supports(plan)
+    ):
+        return typed_runtime.execute(plan, scope, profiling)
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
     var timing_before = scope.timing_ns()

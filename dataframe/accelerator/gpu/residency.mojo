@@ -7,14 +7,14 @@ The MAX context is created lazily and always selects the Metal device API.
 """
 
 from max.gpu import global_idx
-from max.gpu.host import DeviceContext, DeviceBuffer
-from std.atomic import Atomic
+from max.gpu.host import DeviceBuffer
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
-from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from .target import METAL_TARGET
+from .query_scope import Scope, checked_add, checked_mul
+from .typed_storage import NativeColumn
 from dataframe.accelerator.code_domains import (
     TextField,
     CategoryField,
@@ -45,225 +45,6 @@ def raise_value_error(code: UInt32, message: String) raises:
         raise data_fault("Mojo GPU temporal value overflows Int64")
     if code:
         raise data_fault(message)
-
-
-def checked_add(a: Int, b: Int) raises -> Int:
-    if a < 0 or b < 0 or a > Int.MAX - b:
-        raise Error("Mojo GPU resident allocation size overflow")
-    return a + b
-
-
-def checked_mul(a: Int, b: Int) raises -> Int:
-    if a < 0 or b < 0 or (b and a > Int.MAX // b):
-        raise Error("Mojo GPU resident allocation size overflow")
-    return a * b
-
-
-# Metadata-only targets retain accounting and lease ownership without
-# instantiating an unavailable DeviceContext destructor. Real Metal keeps
-# the exact context owner type, including its queue lifetime and teardown.
-comptime _ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
-
-
-struct _ScopeState(Movable):
-    var context: _ContextCell
-    var device: Int
-    var budget: Int
-    var live: Atomic[Int64]
-    var peak: Atomic[Int64]
-    var uploads: Atomic[Int64]
-    var downloads: Atomic[Int64]
-    var launches: Atomic[Int64]
-    var waits: Atomic[Int64]
-    var context_lock: Atomic[Int64]
-    var context_ready: Atomic[Int64]
-    var profiling: Bool
-    var context_ns: Atomic[Int64]
-    var synchronization_ns: Atomic[Int64]
-
-    def __init__(out self, device: Int, budget: Int, profiling: Bool):
-        self.context = None
-        self.device = device
-        self.budget = budget
-        self.live = Atomic[Int64](0)
-        self.peak = Atomic[Int64](0)
-        self.uploads = Atomic[Int64](0)
-        self.downloads = Atomic[Int64](0)
-        self.launches = Atomic[Int64](0)
-        self.waits = Atomic[Int64](0)
-        self.context_lock = Atomic[Int64](0)
-        self.context_ready = Atomic[Int64](0)
-        self.profiling = profiling
-        self.context_ns = Atomic[Int64](0)
-        self.synchronization_ns = Atomic[Int64](0)
-
-
-struct Scope(Copyable):
-    var _state: ArcPointer[_ScopeState]
-
-    def __init__(
-        out self,
-        device_id: Int = 0,
-        budget: Int = -1,
-        *,
-        profiling: Bool = False,
-    ) raises:
-        if device_id < 0 or budget < -1:
-            raise Error("Mojo GPU resident device or budget is invalid")
-        self._state = ArcPointer(_ScopeState(device_id, budget, profiling))
-
-    @staticmethod
-    def device_count() raises -> Int:
-        return DeviceContext.number_of_devices(api="metal")
-
-    def initialized(self) -> Bool:
-        return self._state[].context_ready.load() != 0
-
-    def context(self) raises -> DeviceContext:
-        comptime if not METAL_TARGET:
-            raise Error(
-                "Mojo GPU resident context requires a compiled Metal target"
-            )
-        else:
-            # Arc ownership is immutable externally. This one protected cell is
-            # interior mutable so copied scopes initialize exactly the same queue.
-            var unlocked = Int64(0)
-            while not self._state[].context_lock.compare_exchange(unlocked, 1):
-                unlocked = 0
-            var state = Pointer(to=self._state[]).unsafe_origin_cast[
-                MutAnyOrigin
-            ]()
-            try:
-                if not state[].context:
-                    var started = Int(
-                        perf_counter_ns()
-                    ) if state[].profiling else 0
-                    state[].context = _ContextCell(
-                        rebind[DeviceContext if METAL_TARGET else Int](
-                            DeviceContext(state[].device, api="metal")
-                        )
-                    )
-                    if state[].profiling:
-                        _ = state[].context_ns.fetch_add(
-                            Int64(Int(perf_counter_ns()) - started)
-                        )
-                    state[].context_ready.store(1)
-                var result = rebind[DeviceContext](
-                    state[].context.value()
-                ).copy()
-                state[].context_lock.store(0)
-                return result^
-            except error:
-                state[].context_lock.store(0)
-                raise error^
-
-    def same_query(self, other: Self) -> Bool:
-        return Int(Pointer(to=self._state[])) == Int(Pointer(to=other._state[]))
-
-    def info(self) -> Tuple[Int, Int, Int]:
-        return (
-            Int(self._state[].live.load()),
-            Int(self._state[].peak.load()),
-            self._state[].budget,
-        )
-
-    def transfers(self) -> Tuple[Int, Int, Int, Int]:
-        return (
-            Int(self._state[].uploads.load()),
-            Int(self._state[].downloads.load()),
-            Int(self._state[].launches.load()),
-            Int(self._state[].waits.load()),
-        )
-
-    def _record_peak(self, total: Int):
-        var previous = self._state[].peak.load()
-        while Int64(total) > previous:
-            if self._state[].peak.compare_exchange(previous, Int64(total)):
-                break
-
-    def check(self, additional: Int) raises -> Int:
-        var total = checked_add(Int(self._state[].live.load()), additional)
-        if self._state[].budget >= 0 and total > self._state[].budget:
-            raise Error(
-                "Mojo GPU resident query exceeds memory budget before submission"
-            )
-        self._record_peak(total)
-        return total
-
-    def _retain(self, bytes: Int) raises:
-        var previous = self._state[].live.load()
-        while True:
-            var total = checked_add(Int(previous), bytes)
-            if self._state[].budget >= 0 and total > self._state[].budget:
-                raise Error(
-                    "Mojo GPU resident query exceeds memory budget before submission"
-                )
-            if self._state[].live.compare_exchange(previous, Int64(total)):
-                self._record_peak(total)
-                return
-
-    def _release(self, bytes: Int):
-        _ = self._state[].live.fetch_sub(Int64(bytes))
-
-    def record_upload(self, bytes: Int):
-        _ = self._state[].uploads.fetch_add(Int64(bytes))
-
-    def record_download(self, bytes: Int):
-        _ = self._state[].downloads.fetch_add(Int64(bytes))
-
-    def record_launches(self, count: Int = 1):
-        _ = self._state[].launches.fetch_add(Int64(count))
-
-    def synchronize(self) raises:
-        if self.initialized():
-            var started = Int(
-                perf_counter_ns()
-            ) if self._state[].profiling else 0
-            self.context().synchronize()
-            if self._state[].profiling:
-                _ = self._state[].synchronization_ns.fetch_add(
-                    Int64(Int(perf_counter_ns()) - started)
-                )
-            _ = self._state[].waits.fetch_add(1)
-
-    def timing_ns(self) -> Tuple[Int, Int]:
-        """Host context construction and waits; neither is GPU-only time."""
-        return (
-            Int(self._state[].context_ns.load()),
-            Int(self._state[].synchronization_ns.load()),
-        )
-
-    def read_control_into[
-        dtype: DType
-    ](
-        self, buffer: DeviceBuffer[dtype], mut values: List[Scalar[dtype]]
-    ) raises:
-        """Complete a control copy before its caller's host owner can unwind."""
-        if len(values) != len(buffer):
-            raise Error("Mojo GPU control readback shape mismatch")
-        var ctx = self.context()
-        try:
-            ctx.enqueue_copy(values.unsafe_ptr(), buffer)
-            self.synchronize()
-        except error:
-            self.synchronize()
-            raise error^
-
-    def read_control[
-        dtype: DType
-    ](self, buffer: DeviceBuffer[dtype]) raises -> List[Scalar[dtype]]:
-        """Read shape/error metadata while keeping its host owner alive.
-
-        Preserve the caller's existing synchronization point. Byte accounting
-        remains with the executor, which knows this control record's meaning.
-        """
-        var values = List[Scalar[dtype]](length=len(buffer), fill=0)
-        self.read_control_into(buffer, values)
-        return values^
-
-    def device_info(self) raises -> Tuple[Int, String, String]:
-        var ctx = self.context()
-        return (self._state[].device, ctx.name(), ctx.api())
 
 
 struct Matrix(Movable):
@@ -428,6 +209,7 @@ struct CategoryLease(Movable):
 struct Table(Copyable):
     var storage: Optional[ArcPointer[Matrix]]
     var identity_storage: Optional[ArcPointer[_Identity]]
+    var native_columns: List[NativeColumn[DType.float32]]
     var schema: DataFrame
     var columns: List[Int64]
     var rows: Int
@@ -460,6 +242,7 @@ struct Table(Copyable):
                 )
         self.storage = ArcPointer(matrix^)
         self.identity_storage = None
+        self.native_columns = List[NativeColumn[DType.float32]]()
         self.schema = schema^
         self.columns = columns^
         self.rows = rows
@@ -483,6 +266,7 @@ struct Table(Copyable):
             )
         self.storage = None
         self.identity_storage = None
+        self.native_columns = List[NativeColumn[DType.float32]]()
         self.schema = schema^
         self.columns = List[Int64]()
         self.rows = 0
@@ -502,6 +286,30 @@ struct Table(Copyable):
     @staticmethod
     def empty(var schema: DataFrame) raises -> Self:
         return Self(schema^)
+
+    @staticmethod
+    def native_float32(
+        var schema: DataFrame,
+        var columns: List[NativeColumn[DType.float32]],
+    ) raises -> Self:
+        if not len(columns) or schema.width() != len(columns):
+            raise Error("Mojo GPU typed table requires matching columns")
+        var rows = columns[0].length
+        var scope = columns[0].scope()
+        for i in range(len(columns)):
+            if (
+                columns[i].length != rows
+                or columns[i].logical != DataType.FLOAT32
+                or schema._columns[i].dtype() != DataType.FLOAT32
+                or not scope.same_query(columns[i].scope())
+            ):
+                raise Error("Mojo GPU typed table column mismatch")
+        var result = Self(schema^)
+        result.rows = rows
+        result.native_columns = columns^
+        for i in range(len(result.native_columns)):
+            result.columns.append(Int64(i))
+        return result^
 
     @staticmethod
     def rows_only(scope: Scope, rows: Int) raises -> Self:
@@ -603,6 +411,14 @@ struct Table(Copyable):
         var payload = self.storage.value()[].retained if self.storage else (
             self.identity_storage.value()[].retained if self.identity_storage else 0
         )
+        for i in range(len(self.native_columns)):
+            var duplicate = False
+            for j in range(i):
+                duplicate |= Int(
+                    Pointer(to=self.native_columns[i]._owner[])
+                ) == Int(Pointer(to=self.native_columns[j]._owner[]))
+            if not duplicate:
+                payload += self.native_columns[i].retained_bytes()
         # Domains are already charged exactly once by their scoped Arc owner.
         # This per-table report includes each retained dictionary once.
         var categories = 0
@@ -633,6 +449,15 @@ struct Table(Copyable):
         return payload + self._text_bytes() + categories + grouped
 
     def same_storage(self, other: Self) -> Bool:
+        if len(self.native_columns) or len(other.native_columns):
+            if len(self.native_columns) != len(other.native_columns):
+                return False
+            for i in range(len(self.native_columns)):
+                if Int(Pointer(to=self.native_columns[i]._owner[])) != Int(
+                    Pointer(to=other.native_columns[i]._owner[])
+                ):
+                    return False
+            return True
         if self.identity_storage and other.identity_storage:
             return Int(Pointer(to=self.identity_storage.value()[])) == Int(
                 Pointer(to=other.identity_storage.value()[])
@@ -666,7 +491,12 @@ struct Table(Copyable):
             or rows > self.rows
         ):
             raise Error("Mojo GPU resident projection shape mismatch")
-        if self.storage:
+        if len(self.native_columns):
+            if not self.native_columns[0].scope().same_query(scope):
+                raise Error(
+                    "Mojo GPU typed input belongs to another query context"
+                )
+        elif self.storage:
             if not self.storage.value()[].scope.same_query(scope):
                 raise Error(
                     "Mojo GPU resident input belongs to another query context"
@@ -714,6 +544,15 @@ struct Table(Copyable):
         var cells = checked_mul(self.rows, self.schema.width())
         if not cells:
             return
+        if len(self.native_columns):
+            for column in self.columns:
+                var view = self.native_columns[Int(column)].view(
+                    self.offset, self.rows
+                )
+                for failure in view.read_error_codes():
+                    if failure:
+                        raise_value_error(failure, message)
+            return
         if self.identity_storage:
             var owner = self.identity_storage.value().copy()
             for column in range(self.schema.width()):
@@ -755,6 +594,8 @@ struct Table(Copyable):
                 raise_value_error(failure, message)
 
     def readback(self) raises -> HostMatrix:
+        if len(self.native_columns):
+            raise Error("Mojo GPU typed table requires native materialization")
         var cells = checked_mul(self.rows, self.schema.width())
         if self.identity_storage:
             var owner = self.identity_storage.value().copy()
@@ -866,6 +707,8 @@ struct Table(Copyable):
         mapping: List[Int64],
         target_start: Int = 0,
     ) raises -> Int:
+        if len(self.native_columns):
+            raise Error("Mojo GPU native input requires a typed consumer")
         var target_cells = checked_mul(capacity, slots)
         if (
             capacity < self.rows
