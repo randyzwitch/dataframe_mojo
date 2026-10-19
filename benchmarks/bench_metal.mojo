@@ -18,19 +18,27 @@ def make_algorithm_frame(
     var values = List[Int32](length=n, fill=0)
     var valid = List[Bool](length=n, fill=True)
     var value_valid = List[Bool](length=n, fill=True)
-    var cardinality = (
-        min(n, 1024)
-        if workload == "group_hash" or workload == "group_skew"
-        else max(1, n // 2)
+    var cardinality = min(
+        n, 1024
+    ) if workload == "group_hash" or workload == "group_skew" else max(
+        1, n // 2
     )
     for i in range(n):
         var key = (
-            i * cardinality // n
-            if variant == "sorted"
-            else (i * 37) % cardinality
+            i * cardinality // n if variant
+            == "sorted" else (i * 37) % cardinality
         )
-        if workload == "group_skew" and i % 4 != 0:
-            key = 0
+        if workload == "group_skew":
+            if variant == "sorted":
+                var skew_start = (3 * n + 3) // 4
+                if i < skew_start:
+                    key = 0
+                else:
+                    key = 1 + (i - skew_start) * max(1, cardinality - 1) // max(
+                        1, n - skew_start
+                    )
+            elif i % 4 != 0:
+                key = 0
         keys[i] = Int32(key)
         ids[i] = Int64(i)
         values[i] = Int32(i % 17 - 8)
@@ -216,6 +224,7 @@ def report_profile(profile: DataFrame) raises:
         print("PROFILE_S", name + "_basis", basis)
     var floats: List[String] = [
         "wall_ms",
+        "pipeline_compile_ms",
         "host_prepare_ms",
         "staging_copy_ms",
         "submit_wait_ms",
@@ -223,6 +232,7 @@ def report_profile(profile: DataFrame) raises:
         "readback_ms",
         "result_copy_ms",
         "initialization_ms",
+        "gpu_ms",
     ]
     for name in floats:
         if name not in profile.columns():

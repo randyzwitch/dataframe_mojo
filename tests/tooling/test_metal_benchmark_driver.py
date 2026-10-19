@@ -75,6 +75,27 @@ class MetalBenchmarkDriver(unittest.TestCase):
         self.assertEqual(parsed["profile"]["region_0_staging_copy_ms"], 1.25)
         self.assertEqual(parsed["profile"]["query_wall_ms"], 4.75)
 
+    def test_optional_pipeline_and_gpu_timing_fields_are_retained(self):
+        parsed = driver.parse_run(
+            output()
+            + "PROFILE_F region_0_pipeline_compile_ms 0.75\n"
+            + "PROFILE_F region_0_gpu_ms 1.5\n",
+            1,
+        )
+        self.assertEqual(parsed["profile"]["region_0_pipeline_compile_ms"], 0.75)
+        self.assertEqual(parsed["profile"]["region_0_gpu_ms"], 1.5)
+
+    def test_source_fingerprint_includes_untracked_mojo_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source_root = Path(folder) / "dataframe"
+            source_root.mkdir()
+            source = source_root / "new_untracked_module.mojo"
+            source.write_text("fn first(): pass\n")
+            before = driver.source_fingerprint(source_root)
+            source.write_text("fn second(): pass\n")
+            after = driver.source_fingerprint(source_root)
+        self.assertNotEqual(before, after)
+
     def test_timeout_keeps_partial_output_in_log_and_result(self):
         error = subprocess.TimeoutExpired(["bench"], 3, output=b"partial\xff")
         with tempfile.TemporaryDirectory() as folder:

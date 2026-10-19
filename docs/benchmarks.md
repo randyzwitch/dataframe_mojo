@@ -165,8 +165,9 @@ mechanisms. It includes cumulative and fixed-width rolling sums, a skewed
 group-by (three quarters of rows share one key), and the existing mechanism
 cases. Each worker has a finite timeout (`--timeout-seconds`, default 300);
 timeout output is retained in its run log and raw JSON as a failed case. The
-raw metadata records the compiler version, checkout status, and a hash of the
-engine source diff alongside the benchmark and binary hashes. The Markdown
+raw metadata records the compiler version and executable hash, lockfile hash,
+checkout status, and a content hash of the full `dataframe/` tree, including
+untracked source files, alongside the benchmark and binary hashes. The Markdown
 report lists cases where Metal is slower than CPU as well as the worst variant
 for each mechanism. Profile phase fields are retained when supplied by the
 runtime. Host phase values may overlap and are reported separately; the report

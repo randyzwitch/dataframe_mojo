@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import statistics
 import subprocess
 import sys
@@ -42,6 +43,20 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def source_fingerprint(root):
+    """Hash source paths and contents, including untracked files."""
+    root = Path(root)
+    digest = hashlib.sha256()
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def command(args):
     return subprocess.check_output(
         args, cwd=ROOT, text=True, stderr=subprocess.STDOUT
@@ -50,6 +65,7 @@ def command(args):
 
 def metadata(binaries, threads):
     compiler = command(["mojo", "--version"])
+    compiler_path = shutil.which("mojo")
     source_diff = command(
         ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
     )
@@ -71,6 +87,7 @@ def metadata(binaries, threads):
             "dataframe_diff_sha256": hashlib.sha256(
                 source_diff.encode()
             ).hexdigest(),
+            "dataframe_content_sha256": source_fingerprint(ROOT / "dataframe"),
         },
         "engine_status": command(
             [
@@ -93,6 +110,15 @@ def metadata(binaries, threads):
         ),
         "mojo_version": compiler,
         "compiler_identity": compiler,
+        "compiler_executable": compiler_path,
+        "compiler_executable_sha256": (
+            sha(compiler_path)
+            if compiler_path and Path(compiler_path).is_file()
+            else None
+        ),
+        "pixi_lock_sha256": (
+            sha(ROOT / "pixi.lock") if (ROOT / "pixi.lock").is_file() else None
+        ),
         "xcode": command(["xcodebuild", "-version"]),
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
