@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKLOADS = [
+DEFAULT_WORKLOADS = [
     "sort_radix",
     "group_hash",
     "group_high",
@@ -40,6 +40,8 @@ WORKLOADS = [
     "filtered_int_sum",
     "filter_unused",
 ]
+OPTIONAL_WORKLOADS = ["int32_affine_sum", "filtered_int32_affine_sum"]
+WORKLOADS = DEFAULT_WORKLOADS + OPTIONAL_WORKLOADS
 VARIANTS = ["base", "sorted", "nulls"]
 
 
@@ -268,7 +270,7 @@ def metadata(binaries, threads, binary_receipts):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows. Optional int32_affine_sum and filtered_int32_affine_sum workloads use the same Int32 base/sorted/nulls input patterns as int_sum, compute sum(cast_Int64((x+3)*2)), and optionally filter x>0 before the expression. They are explicitly selectable with --workloads and excluded from the default set.",
         "limitations": [
             "No external-suite coverage claimed. Floating reductions remain outside these cases. Algorithm comparisons preserve complete output order and values against CPU; this CPU check is not an independent oracle.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
@@ -475,7 +477,7 @@ def main():
         help="Optional separately built Mojo baseline executable",
     )
     parser.add_argument("--rows", default="65536,1048576,8388608")
-    parser.add_argument("--workloads", default=",".join(WORKLOADS))
+    parser.add_argument("--workloads", default=",".join(DEFAULT_WORKLOADS))
     parser.add_argument("--variants", default=",".join(VARIANTS))
     parser.add_argument("--reps", type=int, default=7)
     parser.add_argument("--rounds", type=int, default=2)

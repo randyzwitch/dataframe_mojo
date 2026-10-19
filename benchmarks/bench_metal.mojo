@@ -209,6 +209,18 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         )
     elif workload == "int_sum":
         query = query.select(col("x").sum().alias("s"))
+    elif (
+        workload == "int32_affine_sum"
+        or workload == "filtered_int32_affine_sum"
+    ):
+        if workload == "filtered_int32_affine_sum":
+            query = query.filter(col("x") > lit(Int32(0)))
+        query = query.select(
+            ((col("x") + lit(Int32(3))) * lit(Int32(2)))
+            .cast(DataType.INT64)
+            .sum()
+            .alias("s")
+        )
     elif workload == "sort_radix":
         query = query.sort(["x"], nulls_last=True)
     elif workload == "group_hash" or workload == "group_high":
@@ -357,7 +369,10 @@ def main() raises:
         ) if algorithm else make_frame(
             n,
             variant,
-            workload == "int_sum" or workload == "filtered_int_sum",
+            workload == "int_sum"
+            or workload == "filtered_int_sum"
+            or workload == "int32_affine_sum"
+            or workload == "filtered_int32_affine_sum",
             extra_column=workload == "filter_unused",
         )
     )
