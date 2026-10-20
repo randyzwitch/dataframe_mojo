@@ -321,6 +321,18 @@ Context creation remains lazy: metadata-only work, empty native input and budget
 rejection before submission do not initialize the device. Pipeline-handle reuse
 outside the fused scalar path remains separate work.
 
+Plain grouped SUM, COUNT, MIN and MAX over integer columns can split each
+group across GPU blocks and merge exact partial states. The schedule uses
+row and group counts, with at most 4096 partial states across a batch;
+high-cardinality or small groups retain the existing reducer. One 256 KiB
+scratch buffer is reused across eligible outputs. Metadata resource estimates
+include that conservative cap whenever a plan could select the parallel path,
+while profiles report actual allocation and partial geometry through the
+`grouped_int_*` fields. Integer SUM keeps two-word totals until final narrowing,
+and every partial retains source error bits. Floating, decimal, temporal and
+window reductions retain their existing schedules. Group membership still
+uses the existing sorted generic representation.
+
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and
 field metadata; decoder temporary memory is outside that requested-payload
