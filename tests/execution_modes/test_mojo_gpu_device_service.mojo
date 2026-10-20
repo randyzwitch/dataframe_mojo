@@ -288,8 +288,28 @@ def test_mojo_gpu_service_backed_branched_join_dag_reuses_runtime_copies() raise
 
     var no_match = source.lazy().filter(col("x") > lit(Float64(1000)))
     var zero_query = no_match.join(source.lazy(), on="k")
-    var zero = zero_query.profile(accelerator=runtime, engine="accel")
+    var zero_baseline = execute_dag(
+        zero_query, runtime._device, runtime._budget, True, capabilities()
+    )
+    assert_true(zero_baseline[1].item(0, "kernel_launches").int64() > 0)
+    assert_true(zero_baseline[1].item(0, "synchronizations").int64() > 0)
+    var baseline_waits = _region_synchronizations(zero_baseline[1])
+    var baseline_terminal_waits = (
+        zero_baseline[1]
+        .item(zero_baseline[1].height() - 1, "synchronizations")
+        .int64()
+    )
+    var zero = zero_query.profile(
+        accelerator=runtime, engine="accel", optimize=False
+    )
     assert_equal(zero[0].height(), 0)
+    assert_equal(
+        zero[1].item(0, "query_synchronizations").int64(), baseline_waits + 1
+    )
+    assert_equal(
+        zero[1].item(zero[1].height() - 1, "synchronizations").int64(),
+        baseline_terminal_waits + 1,
+    )
     assert_true(zero[1].item(0, "query_synchronizations").int64() > 0)
     assert_equal(
         zero[1].item(0, "query_synchronizations").int64(),
