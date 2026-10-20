@@ -11,6 +11,14 @@
     {
       "source": "metal-group-integer/schedule-752eb233/previous-summary.json",
       "sha256": "af73f2b8d932234f2e7e243cb312f26495cf970344fbf256151eeee852df0724"
+    },
+    {
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "sha256": "c41404dfb02541a1129ed48e9cc1a95d64a05e6fc0eca7b82897a04e21bb41c8"
+    },
+    {
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "sha256": "3a4ac6ef95ea6673727dea08a12b3df80281012eec0cd1e6a0080ebeb9b43f18"
     }
   ],
   "cases": [
@@ -433,6 +441,306 @@
       "cpu_ms": 8.533,
       "metal_ms": 183.953,
       "metal_over_cpu": 21.55783429040197
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_radix",
+      "variant": "base",
+      "cpu_ms": 0.169,
+      "metal_ms": 5.901,
+      "metal_over_cpu": 34.917159763313606
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "cpu_ms": 0.069,
+      "metal_ms": 5.827,
+      "metal_over_cpu": 84.44927536231883
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "cpu_ms": 0.181,
+      "metal_ms": 6.112,
+      "metal_over_cpu": 33.767955801104975
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "base",
+      "cpu_ms": 0.04,
+      "metal_ms": 4.742,
+      "metal_over_cpu": 118.55
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "sorted",
+      "cpu_ms": 0.034,
+      "metal_ms": 4.579,
+      "metal_over_cpu": 134.67647058823528
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "nulls",
+      "cpu_ms": 0.049,
+      "metal_ms": 4.677,
+      "metal_over_cpu": 95.44897959183672
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "base",
+      "cpu_ms": 0.147,
+      "metal_ms": 4.965,
+      "metal_over_cpu": 33.775510204081634
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "sorted",
+      "cpu_ms": 0.056,
+      "metal_ms": 4.911,
+      "metal_over_cpu": 87.69642857142856
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "nulls",
+      "cpu_ms": 0.155,
+      "metal_ms": 5.129,
+      "metal_over_cpu": 33.09032258064516
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "base",
+      "cpu_ms": 10.041,
+      "metal_ms": 211.32,
+      "metal_over_cpu": 21.045712578428443
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "cpu_ms": 5.361,
+      "metal_ms": 209.435,
+      "metal_over_cpu": 39.06640552135796
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "cpu_ms": 14.557,
+      "metal_ms": 212.279,
+      "metal_over_cpu": 14.582606306244418
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "base",
+      "cpu_ms": 1.037,
+      "metal_ms": 42.679,
+      "metal_over_cpu": 41.15621986499519
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "sorted",
+      "cpu_ms": 1.246,
+      "metal_ms": 42.315,
+      "metal_over_cpu": 33.960674157303366
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "nulls",
+      "cpu_ms": 1.974,
+      "metal_ms": 43.018,
+      "metal_over_cpu": 21.792299898682877
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "base",
+      "cpu_ms": 2.575,
+      "metal_ms": 47.724,
+      "metal_over_cpu": 18.533592233009706
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "sorted",
+      "cpu_ms": 1.599,
+      "metal_ms": 46.742,
+      "metal_over_cpu": 29.232020012507817
+    },
+    {
+      "family": "Ordering vs frozen Metal",
+      "source": "metal-ordering/a52334e7-83e1988d/frozen-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "nulls",
+      "cpu_ms": 3.374,
+      "metal_ms": 46.847,
+      "metal_over_cpu": 13.884706579727327
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "base",
+      "cpu_ms": 0.038,
+      "metal_ms": 4.832,
+      "metal_over_cpu": 127.15789473684211
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "sorted",
+      "cpu_ms": 0.033,
+      "metal_ms": 5.267,
+      "metal_over_cpu": 159.60606060606062
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk31",
+      "variant": "nulls",
+      "cpu_ms": 0.042,
+      "metal_ms": 5.297,
+      "metal_over_cpu": 126.1190476190476
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "base",
+      "cpu_ms": 0.147,
+      "metal_ms": 5.134,
+      "metal_over_cpu": 34.925170068027214
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "sorted",
+      "cpu_ms": 0.05,
+      "metal_ms": 5.018,
+      "metal_over_cpu": 100.35999999999999
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 4097,
+      "workload": "sort_topk1024",
+      "variant": "nulls",
+      "cpu_ms": 0.157,
+      "metal_ms": 5.15,
+      "metal_over_cpu": 32.80254777070064
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "base",
+      "cpu_ms": 1.124,
+      "metal_ms": 44.17,
+      "metal_over_cpu": 39.29715302491103
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "sorted",
+      "cpu_ms": 1.021,
+      "metal_ms": 43.607,
+      "metal_over_cpu": 42.71008814887366
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk31",
+      "variant": "nulls",
+      "cpu_ms": 1.709,
+      "metal_ms": 43.287,
+      "metal_over_cpu": 25.32884727911059
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "base",
+      "cpu_ms": 3.154,
+      "metal_ms": 47.1,
+      "metal_over_cpu": 14.933417882054535
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "sorted",
+      "cpu_ms": 1.827,
+      "metal_ms": 46.596,
+      "metal_over_cpu": 25.504105090311985
+    },
+    {
+      "family": "Top-k vs radix intermediate",
+      "source": "metal-ordering/a52334e7-83e1988d/radix-summary.json",
+      "rows": 1048576,
+      "workload": "sort_topk1024",
+      "variant": "nulls",
+      "cpu_ms": 3.483,
+      "metal_ms": 47.356,
+      "metal_over_cpu": 13.59632500717772
     }
   ]
 }
