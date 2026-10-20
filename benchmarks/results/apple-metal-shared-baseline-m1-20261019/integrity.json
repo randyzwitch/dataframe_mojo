@@ -1,0 +1,495 @@
+{
+  "format": "metal-baseline-coverage-integrity-v1",
+  "receipt_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/coverage.json",
+  "receipt_sha256": "087e08b97d18ae2ef0490e3429ab300d1f37c67cf759bca51c47e493daabe874",
+  "integrity_verified": true,
+  "correctness_passed": false,
+  "driver_returncode": 1,
+  "cases": 302,
+  "statuses": {
+    "ok": 212,
+    "wrong_answer": 68,
+    "reference_unsupported": 20,
+    "unsupported": 2
+  },
+  "input_files_rehashed": 77,
+  "written_answer_files_rehashed": 2108,
+  "failures": [
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100",
+      "query": "q3",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100",
+      "query": "q4",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k10",
+      "query": "q3",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k10",
+      "query": "q4",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k10",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k10",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k2",
+      "query": "q3",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k2",
+      "query": "q4",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k2",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k2",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_na5",
+      "query": "q3",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_na5",
+      "query": "q4",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_na5",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_na5",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_na5",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_sorted",
+      "query": "q3",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_sorted",
+      "query": "q4",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_sorted",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_sorted",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "h2o_groupby",
+      "variant": "k100_sorted",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q1",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q5",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q6",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q7",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q8",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q10",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q14",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q15",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "base",
+      "query": "q17",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "pdsh",
+      "variant": "decimal",
+      "query": "q8",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q12",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q19",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q20",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q26",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q27",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q28",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q31",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q33",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q42",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q43",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q47",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q52",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q53",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q55",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q56",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q57",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q59",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q60",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q61",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q63",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q66",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q75",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q89",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "base",
+      "query": "q98",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q9",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q12",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q20",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q47",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q53",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q57",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q63",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q89",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    },
+    {
+      "suite": "tpcds",
+      "variant": "decimal",
+      "query": "q98",
+      "status": "wrong_answer",
+      "reason": "full result differs"
+    }
+  ]
+}
