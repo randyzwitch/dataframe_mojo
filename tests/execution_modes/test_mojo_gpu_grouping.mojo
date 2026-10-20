@@ -249,7 +249,7 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
             valid[row] = False
     var frame = DataFrame(
         [
-            Series("k", Column[Int32](keys^)),
+            Series("k", Column[Int32](keys.copy())),
             Series("x", Column[Int64](values^, valid^)),
         ]
     )
