@@ -164,6 +164,17 @@ def _int_column(
     )
 
 
+def _float_column(
+    report: DataFrame, name: String, value: Float64
+) raises -> DataFrame:
+    return report.with_column(
+        Series(
+            name,
+            Column[Float64](List[Float64](length=report.height(), fill=value)),
+        )
+    )
+
+
 def _profile_phases(report: DataFrame) raises -> DataFrame:
     """Keep measured row timings when other region types have no attribution."""
     var result = report.copy()
@@ -308,6 +319,7 @@ def execute(
                 raise Error(task.query._nodes[0].source_failure)
             var live_before = scope.info()[0]
             var traffic_before = scope.transfers()
+            var region_sync_before = scope.timing_ns()[1]
             var region_started = Int(perf_counter_ns())
             if (
                 task.kind == DAG_SOURCE_FIELDS
@@ -368,6 +380,9 @@ def execute(
                     owned,
                 )
                 if device_service and index == dag.root:
+                    # Lowering normally emits source/grouped fields as producer
+                    # tasks before EXPLODE; if terminal directly, keep its drain
+                    # in this region's timing and synchronization counters.
                     scope.synchronize()
                     service_drain_done = True
                 var after = scope.transfers()
@@ -396,6 +411,12 @@ def execute(
                 )
                 if profiling:
                     region = _profile_phases(region)
+                    region = _float_column(
+                        region,
+                        "synchronization_ms",
+                        Float64(scope.timing_ns()[1] - region_sync_before)
+                        / 1e6,
+                    )
                 report = region^ if report.width() == 0 else report.vstack(
                     region.select(report.columns())
                 )
@@ -790,6 +811,11 @@ def execute(
             )
             if profiling:
                 region = _profile_phases(region)
+                region = _float_column(
+                    region,
+                    "synchronization_ms",
+                    Float64(scope.timing_ns()[1] - region_sync_before) / 1e6,
+                )
             report = region^ if report.width() == 0 else report.vstack(
                 region.select(report.columns())
             )
@@ -848,6 +874,12 @@ def execute(
                 ),
             )
         )
+        if profiling:
+            report = _float_column(
+                report,
+                "query_synchronization_ms",
+                Float64(scope.timing_ns()[1]) / 1e6,
+            )
         if device_service and profiling:
             var scratch_cache = device_service.value().scratch_info()
             var pipeline_cache = device_service.value().pipeline_info()
@@ -878,18 +910,6 @@ def execute(
                         ),
                     )
                 )
-            var timing = scope.timing_ns()
-            report = report.with_column(
-                Series(
-                    "synchronization_ms",
-                    Column[Float64](
-                        List[Float64](
-                            length=report.height(),
-                            fill=Float64(timing[1]) / 1e6,
-                        )
-                    ),
-                )
-            )
         _ = producer_metadata^
         if device_service:
             scope.mark_success()

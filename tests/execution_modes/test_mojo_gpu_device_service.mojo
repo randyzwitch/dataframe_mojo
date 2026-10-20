@@ -22,6 +22,23 @@ def _region_synchronizations(report: DataFrame) -> Int64:
     return total
 
 
+def _assert_region_synchronization_ms_sums(report: DataFrame) raises:
+    assert_true(report.height() > 1)
+    var total = Float64(0)
+    for row in range(report.height()):
+        var measured = report.item(row, "synchronization_ms")
+        assert_true(not measured.is_null())
+        total += measured.float64()
+    var query_total = report.item(0, "query_synchronization_ms")
+    assert_true(not query_total.is_null())
+    var difference = total - query_total.float64()
+    # Each region is rounded to milliseconds separately; allow their combined
+    # sub-microsecond rounding error, without asserting an absolute duration.
+    var rounding_tolerance = Float64(report.height()) / 1000
+    assert_true(difference <= rounding_tolerance)
+    assert_true(difference >= -rounding_tolerance)
+
+
 def test_mojo_gpu_device_service_metadata_copy_and_budget_are_context_free() raises:
     var runtime = MetalRuntime(memory_limit_bytes=8)
     var copied = runtime.copy()
@@ -224,6 +241,7 @@ def test_mojo_gpu_service_backed_branched_join_dag_reuses_runtime_copies() raise
         first[1].item(0, "query_synchronizations").int64(),
         _region_synchronizations(first[1]),
     )
+    _assert_region_synchronization_ms_sums(first[1])
     for field in List[String](
         [
             "service_context_generations",
@@ -237,6 +255,7 @@ def test_mojo_gpu_service_backed_branched_join_dag_reuses_runtime_copies() raise
             "service_pipeline_clears",
             "service_pipeline_capacity",
             "synchronization_ms",
+            "query_synchronization_ms",
         ]
     ):
         assert_true(field in first[1].columns())
@@ -255,6 +274,7 @@ def test_mojo_gpu_service_backed_branched_join_dag_reuses_runtime_copies() raise
         second[1].item(0, "query_synchronizations").int64(),
         _region_synchronizations(second[1]),
     )
+    _assert_region_synchronization_ms_sums(second[1])
 
     var empty = DataFrame([Series("k", Column[Int64](List[Int64]()))])
     var empty_runtime = MetalRuntime(device_id=999999)
@@ -275,6 +295,7 @@ def test_mojo_gpu_service_backed_branched_join_dag_reuses_runtime_copies() raise
         zero[1].item(0, "query_synchronizations").int64(),
         _region_synchronizations(zero[1]),
     )
+    _assert_region_synchronization_ms_sums(zero[1])
 
 
 # requires: metal
@@ -313,6 +334,7 @@ def test_mojo_gpu_service_backed_grouped_fields_dag_counts_terminal_drain() rais
         measured[1].item(0, "query_synchronizations").int64(),
         _region_synchronizations(measured[1]),
     )
+    _assert_region_synchronization_ms_sums(measured[1])
     assert_true(
         measured[1].item(measured[1].height() - 1, "synchronizations").int64()
         >= 1
@@ -366,6 +388,7 @@ def test_mojo_gpu_service_backed_dag_overlap_and_post_submission_poison() raises
     assert_equal(runtime._device_service.cached_generations(), 1)
     held.synchronize()
     held.mark_success()
+    _ = held^
     assert_true(
         query.collect(accelerator=runtime.copy(), engine="accel").equals(
             expected
