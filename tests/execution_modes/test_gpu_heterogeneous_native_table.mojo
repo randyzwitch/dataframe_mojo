@@ -319,6 +319,107 @@ def test_native_gather_carries_deferred_error_sidecars() raises:
 
 
 # requires: metal
+def test_native_join_gather_float64_bits_and_coalescing_precedence() raises:
+    _ = require_metal()
+    var scope = Scope()
+    var left_bits = List[UInt64](
+        [
+            UInt64(0x7FF8000000000031),
+            UInt64(0x8000000000000000),
+            UInt64(0x7FF8000000000099),
+            UInt64(1),
+        ]
+    )
+    var right_bits = List[UInt64](
+        [
+            UInt64(0x7FF0000000000000),
+            UInt64(0xFFF0000000000000),
+            UInt64(0x7FF8000000000071),
+            UInt64(0x4000000000000000),
+        ]
+    )
+    var left_values = List[Float64]()
+    var right_values = List[Float64]()
+    for row in range(4):
+        left_values.append(bitcast[DType.float64](left_bits[row]))
+        right_values.append(bitcast[DType.float64](right_bits[row]))
+    var left_owner = upload_native[DType.float64](
+        scope,
+        Series("x", Column[Float64](left_values^, [True, True, False, True])),
+    )
+    var right_owner = upload_native[DType.float64](
+        scope, Series("x", Column[Float64](right_values^))
+    )
+    var schema = DataFrame(
+        List[Series]([Series("x", Column[Float64](List[Float64]()))])
+    )
+    var left = Table.native(
+        schema.copy(), List[NativeColumnAny]([NativeColumnAny(left_owner)])
+    )
+    var right = Table.native(
+        schema.copy(), List[NativeColumnAny]([NativeColumnAny(right_owner)])
+    )
+    var left_rows = List[UInt32](
+        [UInt32(0), UInt32(1), UInt32.MAX, UInt32(2), UInt32(3)]
+    )
+    var right_rows = List[UInt32](
+        [UInt32.MAX, UInt32(1), UInt32(0), UInt32(2), UInt32(3)]
+    )
+    var context = scope.context()
+    var left_device = context.enqueue_create_buffer[DType.uint32](5)
+    var right_device = context.enqueue_create_buffer[DType.uint32](5)
+    context.enqueue_copy(left_device, left_rows.unsafe_ptr())
+    context.enqueue_copy(right_device, right_rows.unsafe_ptr())
+    scope.record_upload(40)
+    scope.synchronize()
+    var left_map = NativeRowMap(scope, left_device, 5, 4, True)
+    var right_map = NativeRowMap(scope, right_device, 5, 4, True)
+    var output_schema = DataFrame(
+        List[Series](
+            [
+                Series("left_first", Column[Float64](List[Float64]())),
+                Series("right_first", Column[Float64](List[Float64]())),
+            ]
+        )
+    )
+    var fields = List[NativeJoinField](
+        [NativeJoinField(0, 0, False), NativeJoinField(0, 0, True)]
+    )
+    var before = scope.transfers()
+    var gathered = left.gather_join(
+        scope, right, output_schema, fields, left_map, right_map
+    )
+    assert_equal(scope.transfers()[3] - before[3], 1)
+    var output = materialize(gathered)
+    for row in range(5):
+        var l = left_rows[row]
+        var r = right_rows[row]
+        var left_valid = l == UInt32.MAX or l != 2
+        var expected_left = (
+            right_bits[Int(r)] if l == UInt32.MAX else left_bits[Int(l)]
+        ) if left_valid else UInt64(0)
+        var expected_right = (
+            left_bits[Int(l)] if r == UInt32.MAX else right_bits[Int(r)]
+        )
+        assert_equal(
+            output.column("left_first").float64().is_valid(row), left_valid
+        )
+        assert_true(output.column("right_first").float64().is_valid(row))
+        assert_equal(
+            bitcast[DType.uint64](
+                output.column("left_first").float64()._get(row)
+            ),
+            expected_left,
+        )
+        assert_equal(
+            bitcast[DType.uint64](
+                output.column("right_first").float64()._get(row)
+            ),
+            expected_right,
+        )
+
+
+# requires: metal
 def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
     _ = require_metal()
     var scope = Scope()
