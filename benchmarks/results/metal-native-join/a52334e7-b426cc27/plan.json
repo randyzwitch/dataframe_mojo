@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "label": "native-int32-single-key-join-pair-oct20",
+  "baseline_engine_revision": "a52334e758b7138c547883eb776d744442a1a0db",
+  "baseline_engine_tree": "59b09b93fb3e7c2d5ea046f7eecfcf860b524915",
+  "baseline_engine_content_sha256": "579b19cbd598cf423107a282daccf7ecc154fdae820700d6290b91fb917f4c32",
+  "baseline_revision": "46aea1f009fe9b7f038a10c1fde97d29fb5f99cf",
+  "baseline_remote": "dataframe_mojo-metal-native-join-baseline-a523",
+  "candidate_engine_revision": "b426cc27f0d87df9dcd469c1843a0ef1e578ad45",
+  "candidate_engine_tree": "abcff13a31279cd6bb0e26fe9d60a754129f7f6d",
+  "candidate_engine_content_sha256": "dae9ea5fa4928ecbd9ce5494e5d3952b841e8adeb92f84563a242f556d5d45b4",
+  "candidate_revision": "01f05c364790da1144b3bea8152a50bc0522cccc",
+  "candidate_remote": "dataframe_mojo-metal-native-join-candidate-b426",
+  "gate_receipt": "/tmp/metal-passed-gates-oct20/hash-receipt.json",
+  "gate_receipt_sha256": "55c72b506e6debe102de03f0b46386031c763193691db8ecaf9c90dc943b6ce0",
+  "gate_artifact_fallback_dir": "/tmp/metal-passed-gates-oct20",
+  "required_gates": [
+    {
+      "label": "hash-v6",
+      "revision": "b426cc27f0d87df9dcd469c1843a0ef1e578ad45",
+      "engine_tree": "abcff13a31279cd6bb0e26fe9d60a754129f7f6d",
+      "build_exit": 0,
+      "test_exit": 0,
+      "clean": true,
+      "artifacts": {
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-hash-v6/build/gate": "48b761fd47fef7d18f3bd31004e79826b3e48c04d080ec740e738d2abb539599",
+        "/tmp/metal-oct20-hash-v6-build.log": "22bab37b404d8826b2b1e48d7350f28df2ec6e9c26d883137a0d7450698a5403",
+        "/tmp/metal-oct20-hash-v6-test.log": "5967cc6db1b90e5880a72b6543d8b0016202fa90e2f6a15273d1df0e01146e07"
+      }
+    }
+  ],
+  "guard_pids": [
+    74693,
+    74724,
+    76036
+  ],
+  "worktree_root": "/Users/randyzwitch/GitHub",
+  "pixi": "/Users/randyzwitch/.pixi/bin/pixi",
+  "manifest": "/Users/randyzwitch/github/dataframe_mojo-metal-868/pixi.toml",
+  "harness_revision": "ee063de049f9fcbfd95184c9b310304e1ce1fe56",
+  "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+  "harness_file_sha256": {
+    "benchmarks/bench_metal.mojo": "cd8db3c71a6d4acb08bc71f1a8d14bedf64dcdbb7ea9697c152b3a4a0d2ad360",
+    "benchmarks/tools/bench_metal.py": "81d2f14b5d59cc03a40d25e75899ce2f30091eef3f1ceba141fd9216184dc5b0",
+    "docs/benchmarks.md": "2af88bfb58a5cb7f82c96a1ca000958b1b090bacc5a077979b2b7903284982cf"
+  },
+  "rows": [
+    4097,
+    262144
+  ],
+  "workloads": [
+    "join_hash",
+    "join_fanout"
+  ],
+  "variants": [
+    "base",
+    "sorted",
+    "nulls"
+  ],
+  "rounds": 3,
+  "reps": 3,
+  "warmups": 1,
+  "threads": 8,
+  "timeout_seconds": 300,
+  "reported_peak_ceiling_bytes": 1073741824,
+  "reported_peak_semantics": "Post-run ceiling for peak_requested_bytes reported by the profile; this is not an enforced runtime allocation budget.",
+  "profile_algorithm": "mojo_gpu_native_hash_join",
+  "expected_max_output_rows_by_workload": {
+    "join_hash": "3 * input_rows (conservative; one class may contain three rows)",
+    "join_fanout": "4 * input_rows"
+  },
+  "expected_process_workers": 72,
+  "smoke_workers": 2,
+  "estimated_completion": "About 10-20 minutes after staging/build setup; hard timeout ceiling is 300 seconds per worker, so full worst-case timeout is 6 hours. Run serially after correctness gates clear.",
+  "benchmark_scope": "Single-key Int32 self-left-join mechanisms only; join_hash has cardinality max(1,N/2), join_fanout has cardinality ceil(N/4) and at most four matching rows per key. The 262144-row fanout case is capped at 1048576 output rows. This does not satisfy broader join coverage in #875."
+}

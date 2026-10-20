@@ -1,0 +1,129 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-metal-0.schema.json","status":"written"}
+coverage	q47	wrong_answer	full result differs
+expected_rows	100
+actual_rows	100
+expected_sample
+shape: (100, 10)
+┌────────────┬─────────────────────┬──────────────┬────────────────┬────────┬───────┬────────────────────┬────────────────────┬────────────────────┬────────────────────┐
+│ i_category ┆ i_brand             ┆ s_store_name ┆ s_company_name ┆ d_year ┆ d_moy ┆ avg_monthly_sales  ┆ sum_sales          ┆ psum               ┆ nsum               │
+│ ---        ┆ ---                 ┆ ---          ┆ ---            ┆ ---    ┆ ---   ┆ ---                ┆ ---                ┆ ---                ┆ ---                │
+│ str        ┆ str                 ┆ str          ┆ str            ┆ i64    ┆ i64   ┆ f64                ┆ f64                ┆ f64                ┆ f64                │
+╞════════════╪═════════════════════╪══════════════╪════════════════╪════════╪═══════╪════════════════════╪════════════════════╪════════════════════╪════════════════════╡
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 4116.620833333333  ┆ 1721.4799999999998 ┆ 2369.3999999999996 ┆ 1917.8199999999997 │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 4116.620833333333  ┆ 1917.8199999999997 ┆ 1721.4799999999998 ┆ 2444.59            │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 3576.660833333334  ┆ 1508.7999999999997 ┆ 2037.7300000000002 ┆ 4505.319999999999  │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3033.4991666666665 ┆ 978.11             ┆ 2013.85            ┆ 1677.0199999999995 │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 3576.660833333334  ┆ 1604.8700000000001 ┆ 2728.6800000000003 ┆ 2037.7300000000002 │
+│ Music      ┆ amalgscholar #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3433.143333333333  ┆ 1469.95            ┆ 1713.01            ┆ 2433.3799999999997 │
+│ Men        ┆ edu packimporto #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3302.8050000000003 ┆ 1377.0700000000002 ┆ 1878.5500000000002 ┆ 1780.0900000000001 │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3576.660833333334  ┆ 1776.7999999999997 ┆ 2307.4             ┆ 1878.0800000000002 │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2732.193333333333  ┆ 970.6600000000001  ┆ 2187.1             ┆ 1793.52            │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 4     ┆ 4116.620833333333  ┆ 2369.3999999999996 ┆ 2400.75            ┆ 1721.4799999999998 │
+│ …          ┆ …                   ┆ …            ┆ …              ┆ …      ┆ …     ┆ …                  ┆ …                  ┆ …                  ┆ …                  │
+│ Shoes      ┆ importoedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2246.6575          ┆ 1203.31            ┆ 995.49             ┆ 1464.6299999999999 │
+│ Women      ┆ exportiamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 1477.3308333333334 ┆ 440.04999999999995 ┆ 624.12             ┆ 1584.91            │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2732.193333333333  ┆ 1698.7199999999998 ┆ 1401.2799999999997 ┆ 1212.39            │
+│ Music      ┆ exportischolar #2   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2284.681666666667  ┆ 1254.12            ┆ 1046.7             ┆ 1529.3600000000001 │
+│ Shoes      ┆ amalgedu pack #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 2763.523333333333  ┆ 1742.8             ┆ 1518.47            ┆ 3530.2400000000002 │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 1     ┆ 3033.4991666666665 ┆ 2013.85            ┆ 5132.85            ┆ 978.11             │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2423.258333333333  ┆ 1406.0200000000002 ┆ 1507.7             ┆ 1893.8200000000002 │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 2423.258333333333  ┆ 1411.0099999999998 ┆ 1893.8200000000002 ┆ 1549.04            │
+│ Women      ┆ importoamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 1954.2516666666668 ┆ 942.06             ┆ 1360.6899999999998 ┆ 1183.95            │
+│ Children   ┆ importoexporti #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2470.683333333333  ┆ 1465.6000000000001 ┆ 1770.5099999999998 ┆ 1407.8200000000002 │
+└────────────┴─────────────────────┴──────────────┴────────────────┴────────┴───────┴────────────────────┴────────────────────┴────────────────────┴────────────────────┘
+actual_sample
+shape: (100, 10)
+┌────────────┬─────────────────────┬──────────────┬────────────────┬────────┬───────┬────────────────────┬────────────────────┬────────────────────┬────────────────────┐
+│ i_category ┆ i_brand             ┆ s_store_name ┆ s_company_name ┆ d_year ┆ d_moy ┆ avg_monthly_sales  ┆ sum_sales          ┆ psum               ┆ nsum               │
+│ ---        ┆ ---                 ┆ ---          ┆ ---            ┆ ---    ┆ ---   ┆ ---                ┆ ---                ┆ ---                ┆ ---                │
+│ str        ┆ str                 ┆ str          ┆ str            ┆ i64    ┆ i64   ┆ f64                ┆ f64                ┆ f64                ┆ f64                │
+╞════════════╪═════════════════════╪══════════════╪════════════════╪════════╪═══════╪════════════════════╪════════════════════╪════════════════════╪════════════════════╡
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 4116.620833333333  ┆ 1721.4799999999998 ┆ 2369.3999999999996 ┆ 1917.8199999999997 │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 4116.620833333333  ┆ 1917.8199999999997 ┆ 1721.4799999999998 ┆ 2444.5899999999992 │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 3576.6608333333334 ┆ 1508.8000000000002 ┆ 2037.7299999999998 ┆ 4505.32            │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3033.4991666666665 ┆ 978.11             ┆ 2013.8500000000006 ┆ 1677.02            │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 3576.6608333333334 ┆ 1604.8699999999997 ┆ 2728.6799999999994 ┆ 2037.7299999999998 │
+│ Music      ┆ amalgscholar #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3433.143333333333  ┆ 1469.9500000000003 ┆ 1713.01            ┆ 2433.3800000000006 │
+│ Men        ┆ edu packimporto #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3302.804999999999  ┆ 1377.0700000000002 ┆ 1878.55            ┆ 1780.09            │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3576.6608333333334 ┆ 1776.8000000000006 ┆ 2307.4000000000005 ┆ 1878.0800000000008 │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2732.193333333333  ┆ 970.6600000000001  ┆ 2187.0999999999995 ┆ 1793.5199999999995 │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 4     ┆ 4116.620833333333  ┆ 2369.3999999999996 ┆ 2400.7500000000005 ┆ 1721.4799999999998 │
+│ …          ┆ …                   ┆ …            ┆ …              ┆ …      ┆ …     ┆ …                  ┆ …                  ┆ …                  ┆ …                  │
+│ Shoes      ┆ importoedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2246.6575          ┆ 1203.31            ┆ 995.49             ┆ 1464.6300000000003 │
+│ Women      ┆ exportiamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 1477.3308333333334 ┆ 440.05000000000007 ┆ 624.12             ┆ 1584.9100000000003 │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2732.193333333333  ┆ 1698.7200000000003 ┆ 1401.2799999999997 ┆ 1212.3899999999999 │
+│ Music      ┆ exportischolar #2   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2284.681666666667  ┆ 1254.1200000000001 ┆ 1046.7             ┆ 1529.3600000000001 │
+│ Shoes      ┆ amalgedu pack #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 2763.523333333333  ┆ 1742.8000000000006 ┆ 1518.47            ┆ 3530.2400000000007 │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 1     ┆ 3033.4991666666665 ┆ 2013.8500000000006 ┆ 5132.850000000004  ┆ 978.11             │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2423.2583333333328 ┆ 1406.0200000000004 ┆ 1507.7             ┆ 1893.82            │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 2423.2583333333328 ┆ 1411.0100000000002 ┆ 1893.82            ┆ 1549.04            │
+│ Women      ┆ importoamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 1954.251666666667  ┆ 942.0600000000003  ┆ 1360.6899999999996 ┆ 1183.9500000000003 │
+│ Children   ┆ importoexporti #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2470.6833333333334 ┆ 1465.6             ┆ 1770.51            ┆ 1407.8199999999997 │
+└────────────┴─────────────────────┴──────────────┴────────────────┴────────┴───────┴────────────────────┴────────────────────┴────────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	i_category	True
+column_bag	cpu_metal	i_brand	True
+column_bag	cpu_metal	s_store_name	True
+column_bag	cpu_metal	s_company_name	True
+column_bag	cpu_metal	d_year	True
+column_bag	cpu_metal	d_moy	True
+column_bag	cpu_metal	avg_monthly_sales	False
+column_bag	cpu_metal	sum_sales	False
+column_bag	cpu_metal	psum	False
+column_bag	cpu_metal	nsum	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q47-vke9tc71/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	i_category	True
+column_bag	cpu_repeat	i_brand	True
+column_bag	cpu_repeat	s_store_name	True
+column_bag	cpu_repeat	s_company_name	True
+column_bag	cpu_repeat	d_year	True
+column_bag	cpu_repeat	d_moy	True
+column_bag	cpu_repeat	avg_monthly_sales	True
+column_bag	cpu_repeat	sum_sales	True
+column_bag	cpu_repeat	psum	True
+column_bag	cpu_repeat	nsum	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (100, 10)
+┌────────────┬─────────────────────┬──────────────┬────────────────┬────────┬───────┬────────────────────┬────────────────────┬────────────────────┬────────────────────┐
+│ i_category ┆ i_brand             ┆ s_store_name ┆ s_company_name ┆ d_year ┆ d_moy ┆ avg_monthly_sales  ┆ sum_sales          ┆ psum               ┆ nsum               │
+│ ---        ┆ ---                 ┆ ---          ┆ ---            ┆ ---    ┆ ---   ┆ ---                ┆ ---                ┆ ---                ┆ ---                │
+│ str        ┆ str                 ┆ str          ┆ str            ┆ i64    ┆ i64   ┆ f64                ┆ f64                ┆ f64                ┆ f64                │
+╞════════════╪═════════════════════╪══════════════╪════════════════╪════════╪═══════╪════════════════════╪════════════════════╪════════════════════╪════════════════════╡
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 4116.620833333333  ┆ 1721.4799999999998 ┆ 2369.3999999999996 ┆ 1917.8199999999997 │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 4116.620833333333  ┆ 1917.8199999999997 ┆ 1721.4799999999998 ┆ 2444.59            │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 3576.660833333334  ┆ 1508.7999999999997 ┆ 2037.7300000000002 ┆ 4505.319999999999  │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3033.4991666666665 ┆ 978.11             ┆ 2013.85            ┆ 1677.0199999999995 │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 3576.660833333334  ┆ 1604.8700000000001 ┆ 2728.6800000000003 ┆ 2037.7300000000002 │
+│ Music      ┆ amalgscholar #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3433.143333333333  ┆ 1469.95            ┆ 1713.01            ┆ 2433.3799999999997 │
+│ Men        ┆ edu packimporto #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 3302.8050000000003 ┆ 1377.0700000000002 ┆ 1878.5500000000002 ┆ 1780.0900000000001 │
+│ Shoes      ┆ exportiedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 3576.660833333334  ┆ 1776.7999999999997 ┆ 2307.4             ┆ 1878.0800000000002 │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2732.193333333333  ┆ 970.6600000000001  ┆ 2187.1             ┆ 1793.52            │
+│ Shoes      ┆ edu packedu pack #1 ┆ ought        ┆ Unknown        ┆ 1999   ┆ 4     ┆ 4116.620833333333  ┆ 2369.3999999999996 ┆ 2400.75            ┆ 1721.4799999999998 │
+│ …          ┆ …                   ┆ …            ┆ …              ┆ …      ┆ …     ┆ …                  ┆ …                  ┆ …                  ┆ …                  │
+│ Shoes      ┆ importoedu pack #1  ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2246.6575          ┆ 1203.31            ┆ 995.49             ┆ 1464.6299999999999 │
+│ Women      ┆ exportiamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 1477.3308333333334 ┆ 440.04999999999995 ┆ 624.12             ┆ 1584.91            │
+│ Women      ┆ exportiamalg #1     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 6     ┆ 2732.193333333333  ┆ 1698.7199999999998 ┆ 1401.2799999999997 ┆ 1212.39            │
+│ Music      ┆ exportischolar #2   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2284.681666666667  ┆ 1254.12            ┆ 1046.7             ┆ 1529.3600000000001 │
+│ Shoes      ┆ amalgedu pack #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 7     ┆ 2763.523333333333  ┆ 1742.8             ┆ 1518.47            ┆ 3530.2400000000002 │
+│ Women      ┆ edu packamalg #1    ┆ ought        ┆ Unknown        ┆ 1999   ┆ 1     ┆ 3033.4991666666665 ┆ 2013.85            ┆ 5132.85            ┆ 978.11             │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 3     ┆ 2423.258333333333  ┆ 1406.0200000000002 ┆ 1507.7             ┆ 1893.8200000000002 │
+│ Men        ┆ importoimporto #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 5     ┆ 2423.258333333333  ┆ 1411.0099999999998 ┆ 1893.8200000000002 ┆ 1549.04            │
+│ Women      ┆ importoamalg #2     ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 1954.2516666666668 ┆ 942.06             ┆ 1360.6899999999998 ┆ 1183.95            │
+│ Children   ┆ importoexporti #1   ┆ ought        ┆ Unknown        ┆ 1999   ┆ 2     ┆ 2470.683333333333  ┆ 1465.6000000000001 ┆ 1770.5099999999998 ┆ 1407.8200000000002 │
+└────────────┴─────────────────────┴──────────────┴────────────────┴────────┴───────┴────────────────────┴────────────────────┴────────────────────┴────────────────────┘

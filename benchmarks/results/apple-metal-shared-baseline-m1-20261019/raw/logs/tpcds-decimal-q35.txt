@@ -1,0 +1,16 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":1,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-1.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-1.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":2,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-2.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q35-2rl0c7n6/answer-metal-2.schema.json","status":"written"}
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.row_multiset_equal	True
+diagnostic	cpu_metal.classification	equal
+coverage	q35	ok	
+ordered_equal	True
+output_rows	100
+collections	3
+collection_ns	580638000

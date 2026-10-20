@@ -134,6 +134,8 @@ from .frame import (
     _reduce_column,
     _row_local,
     _stream_reductions,
+    group_by_workers,
+    range_states,
     table_supported,
 )
 from .io.parquet import (
@@ -3295,6 +3297,51 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             picked.append(source.column(name).take(rows))
         return encode_rows(picked, nulls_equal=True).count()
 
+    def _batch_states_win(
+        self, keys: List[String], frame: Int, batch_size: Int
+    ) raises -> Bool:
+        """Whether an unfiltered grouped reduction over in-memory `frame`
+        runs faster as batches, each reduced into a state of its own, than
+        through the eager group-by (#608). Each route's own tests decide,
+        not a count of groups:
+        - The eager group-by keeps private per-worker states when its keys
+          have few values (`range_states`); batch states are the same work
+          plus batching and a merge per batch.
+        - Otherwise it hash-partitions every row, which costs more than
+          batch states while a batch holds few of its rows' groups. A
+          batch that shows many (`_batch_shows_many_groups`, the stream's
+          own test) makes the stream collect its batches into that same
+          partitioned group-by, which then also pays the copy.
+        - The stream reduces one batch per worker, so with fewer batches
+          than the eager group-by has workers (or one worker) it leaves
+          threads idle.
+        Measured on generated int, string and two-key frames of 100K to
+        10M rows, 50 to 5,000 groups, uniform and skewed, one and six
+        aggregates, 1 and 8 threads: batch states won only where all three
+        hold (int and string keys of about 190 to 1,000 groups at 1M and
+        10M rows, 8 threads: 0.4-0.85 of the eager time); everywhere else
+        the eager route was as fast or faster (up to 2.6 times)."""
+        ref source = self._frames[frame]
+        var height = source.height()
+        var columns = List[Series](capacity=len(keys))
+        for name in keys:
+            if name not in source.columns():
+                # Made by an earlier step: ClickBench q18's (UserID,
+                # minute, SearchPhrase) took 354 ms eagerly, 1,645 batched.
+                return False
+            columns.append(source.column(name).copy())
+        var workers = group_by_workers(height)
+        if workers <= 1 or (height + batch_size - 1) // batch_size < workers:
+            return False
+        if range_states(columns) or _batch_shows_many_groups(
+            source.slice(0, min(height, batch_size)),
+            keys,
+            _stream_split_groups(),
+        ):
+            return False
+        trace_path("stream.batch_states")
+        return True
+
     def _joins_below(self, index: Int) -> Bool:
         """Whether a join sits under `index` along its left inputs, through
         the row-local steps a stream applies."""
@@ -4412,15 +4459,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if _counts_distinct(expressions):
                 eager = True
             elif len(keys) > 0:
-                if _filters(operations):
-                    eager = True
-                else:
-                    var frame = self._nodes[cursor].offset
-                    var sampled = self._sampled_groups(keys, frame)
-                    var sample = min(self._frames[frame].height(), 4096)
-                    eager = (
-                        sampled < 0 or sampled <= 192 or 2 * sampled > sample
-                    )
+                eager = _filters(operations) or not self._batch_states_win(
+                    keys, self._nodes[cursor].offset, batch_size
+                )
         if eager:
             # Over a frame already in memory, filtered or projected at most,
             # batches save no memory, and most grouped aggregations run
@@ -4432,18 +4473,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             #   where every batch state holds and merges its groups again:
             #   non-empty SearchPhrase counts take 66 ms against 358
             #   streamed, and q39's five keys 99 against 371.
-            # - Keys made by an earlier step, which the sample cannot read:
-            #   q18's (UserID, minute, SearchPhrase) take 354 ms against
-            #   1,645 streamed.
-            # - Few groups (at most 192 in the sample) take 33 ms against
-            #   64; ResolutionWidth (134 in the sample) 35 against 67.
-            # - Many groups (more than half the sample) are encoded once by
-            #   hash partition, where every batch state would hold most of
-            #   them: on 1M rows URL takes 40 ms against 63 streamed.
-            # Unfiltered keys in between keep streaming, which is faster
-            # there: RegionID (364 in the sample) takes 75 ms against 99,
-            # and SearchPhrase (574, one dominant value) 353 against 375,
-            # or on 1M rows (212) 8 against 13.
+            # - Unfiltered, the eager group-by wins unless its keys would be
+            #   hash-partitioned while the batches keep states of their own
+            #   (`_batch_states_win`).
             # Ungrouped reductions stream, as do plans with a join, whose
             # batched probes beat the eager join.
             return None

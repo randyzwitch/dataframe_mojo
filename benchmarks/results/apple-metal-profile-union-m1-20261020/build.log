@@ -1,0 +1,155 @@
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:596:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/join_runtime.mojo:205:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/native_hash_join.mojo:715:13: warning: transfer from an owned value has no effect and can be removed
+            ^
+            ^
+            
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:1022:21: warning: transfer from an owned value has no effect and can be removed
+                    ^
+                    ^
+                    
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:2068:17: warning: transfer from an owned value has no effect and can be removed
+                ^
+                ^
+                
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:2001:73: warning: transfer from an owned value has no effect and can be removed
+                _native_null_join_typed[D](scope, logical, rows, queued)^
+                                                                        ^
+                                                                        
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:288:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/decimal_sum_receipts.mojo:54:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:744:39: warning: assignment to 'readback_ns' was never used; assign to '_' instead?
+                    var readback_ns = 0
+                                      ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:745:37: warning: assignment to 'result_ns' was never used; assign to '_' instead?
+                    var result_ns = 0
+                                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:596:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/join_runtime.mojo:205:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/native_hash_join.mojo:87:22: warning: assignment to 'bits' was never used; assign to '_' instead?
+    var bits = UInt32(0)
+                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:596:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/join_runtime.mojo:205:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/native_hash_join.mojo:536:17: warning: assignment to 'upper' was never used; assign to '_' instead?
+    var upper = 0
+                ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:596:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/join_runtime.mojo:205:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/native_hash_join.mojo:706:49: warning: assignment to 'right_key_optional' was never used; assign to '_' instead?
+    var right_key_optional = Optional[PackedKey]()
+                                                ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/dag_runtime.mojo:596:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/join_runtime.mojo:205:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/native_hash_join.mojo:810:33: warning: assignment to 'members_b' was never used; assign to '_' instead?
+                members_b = swap^
+                                ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:1873:67: warning: assignment to 'left_validity_buffer' was never used; assign to '_' instead?
+    var left_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+                                                                  ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:1878:68: warning: assignment to 'right_validity_buffer' was never used; assign to '_' instead?
+    var right_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+                                                                   ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:1883:66: warning: assignment to 'left_errors_buffer' was never used; assign to '_' instead?
+    var left_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+                                                                 ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:1888:67: warning: assignment to 'right_errors_buffer' was never used; assign to '_' instead?
+    var right_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+                                                                  ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:2316:55: warning: assignment to 'validity' was never used; assign to '_' instead?
+    var validity = Optional[DeviceBuffer[DType.uint8]]()
+                                                      ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:2321:54: warning: assignment to 'errors' was never used; assign to '_' instead?
+    var errors = Optional[DeviceBuffer[DType.uint32]]()
+                                                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:3460:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:1627:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/typed_runtime.mojo:163:22: warning: assignment to 'staging_ns' was never used; assign to '_' instead?
+    var staging_ns = 0
+                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:1627:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/typed_runtime.mojo:164:21: warning: assignment to 'submit_ns' was never used; assign to '_' instead?
+    var submit_ns = 0
+                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:139:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/residency.mojo:20:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/typed_storage.mojo:953:31: warning: assignment to 'errors' was never used; assign to '_' instead?
+    var errors = column.errors()
+                              ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/tooling/mojo_gpu_profile_phases.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/tests/execution_modes/test_metal_profile_phases.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/runtime.mojo:1414:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-profile-union-oct20/dataframe/accelerator/gpu/wide_integer_runtime.mojo:258:22: warning: assignment to 'offset' was never used; assign to '_' instead?
+        var offset = 0
+                     ^

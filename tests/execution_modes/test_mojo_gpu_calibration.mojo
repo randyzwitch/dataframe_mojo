@@ -84,8 +84,11 @@ def test_mojo_gpu_calibration_metadata() raises:
     var profiled = query.profile(accelerator=MetalRuntime(), engine="accel")
     assert_true(profiled[0].equals(query.collect(engine="cpu")))
     var report = profiled[1].copy()
-    assert_equal(
-        report.item(0, "peak_requested_bytes").int64(), Int64(facts.peak_bytes)
+    # Metadata retains the generic allocation envelope; native typed routes
+    # can use less storage without weakening the preflight budget bound.
+    assert_true(
+        report.item(0, "peak_requested_bytes").int64()
+        <= Int64(facts.peak_bytes)
     )
     var names = List[String](
         [
@@ -100,6 +103,20 @@ def test_mojo_gpu_calibration_metadata() raises:
             Float64(report.item(0, names[i]).int64())
             <= facts.accelerator[8 + i]
         )
+    # An unfiltered native computation has a distinct owner-lifetime drain.
+    # Check both cold and reused contexts against the metadata-only bound.
+    var projection = source.lazy().select(
+        (col("x") * lit(Float32(2))).alias("x")
+    )
+    var runtime = MetalRuntime()
+    for repeat in range(2):
+        var projected = projection.profile(accelerator=runtime, engine="accel")
+        assert_true(projected[0].equals(projection.collect(engine="cpu")))
+        for i in range(len(names)):
+            assert_true(
+                Float64(projected[1].item(0, names[i]).int64())
+                <= multiplication.accelerator[8 + i]
+            )
     var reductions = estimate(
         source.lazy().select_exprs(
             [col("x").sum().alias("sum"), col("x").count().alias("count")]

@@ -1,0 +1,4 @@
+# Preserve exact compiler diagnostics in the archived evidence.
+validation/*.log -whitespace
+validation/failed/*.log -whitespace
+buildlogs/*.log -whitespace

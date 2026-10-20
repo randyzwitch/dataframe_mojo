@@ -1,0 +1,61 @@
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:421:71: warning: transfer from an owned value has no effect and can be removed
+            Series("x", Column[Int64](List[Int64](length=rows, fill=1)^)),
+                                                                      ^
+                                                                      
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:451:71: warning: transfer from an owned value has no effect and can be removed
+            Series("k", Column[Int32](List[Int32](length=rows, fill=0)^)),
+                                                                      ^
+                                                                      
+Imported from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:454:71: warning: transfer from an owned value has no effect and can be removed
+                Column[Int64](List[Int64](length=rows, fill=Int64.MAX)^),
+                                                                      ^
+                                                                      
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:11:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_hash_grouping.mojo:202:13: warning: ref 'row' was never used, remove it?
+        for row in range(1024):
+            ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:21:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/runtime.mojo:291:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/decimal_sum_receipts.mojo:54:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:17:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/dag_runtime.mojo:709:39: warning: assignment to 'readback_ns' was never used; assign to '_' instead?
+                    var readback_ns = 0
+                                      ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:17:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/dag_runtime.mojo:710:37: warning: assignment to 'result_ns' was never used; assign to '_' instead?
+                    var result_ns = 0
+                                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:21:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/runtime.mojo:3664:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:21:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/runtime.mojo:1693:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/typed_runtime.mojo:163:22: warning: assignment to 'staging_ns' was never used; assign to '_' instead?
+    var staging_ns = 0
+                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:21:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/runtime.mojo:1693:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/typed_runtime.mojo:164:21: warning: assignment to 'submit_ns' was never used; assign to '_' instead?
+    var submit_ns = 0
+                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/tooling/mojo_gpu_group_integer.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/tests/execution_modes/test_mojo_gpu_grouping.mojo:21:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/runtime.mojo:1479:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/dataframe/accelerator/gpu/wide_integer_runtime.mojo:258:22: warning: assignment to 'offset' was never used; assign to '_' instead?
+        var offset = 0
+                     ^
