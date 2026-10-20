@@ -865,7 +865,7 @@ def _quantile_indices(plan: RowPlan) -> Bool:
     return False
 
 
-def _radix_sort_passes(plan: RowPlan, step: RowStep) -> Int:
+def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
     """Admit only one direct, untransformed fixed-width integer sort key."""
     if (
         not step.order
@@ -3076,6 +3076,13 @@ def execute_plan(
                                     "Mojo GPU sort key failed: checked"
                                     " arithmetic overflow or strict cast failed"
                                 )
+                        # The readback above drains every radix read. Drop and
+                        # reinitialize the scratch owners before a later sort
+                        # allocates its own histograms on this context.
+                        _ = radix_counts^
+                        _ = radix_offsets^
+                        radix_counts = Optional[DeviceBuffer[DType.uint32]]()
+                        radix_offsets = Optional[DeviceBuffer[DType.uint32]]()
                         device_words = gathered_words^
                         device_valid = gathered_valid^
                         device_errors = gathered_errors^
@@ -3705,6 +3712,8 @@ def execute_plan(
             _ = iana_replay^
             _ = ordered_control^
             _ = ordered_partials^
+            _ = radix_counts^
+            _ = radix_offsets^
             _ = remap_owner^
             raise error^
     elif plan.reductions:
@@ -3751,6 +3760,8 @@ def execute_plan(
     _ = iana_replay^
     _ = ordered_control^
     _ = ordered_partials^
+    _ = radix_counts^
+    _ = radix_offsets^
     _ = remap_owner^
     if not resident_result:
         if plan.reductions and count:

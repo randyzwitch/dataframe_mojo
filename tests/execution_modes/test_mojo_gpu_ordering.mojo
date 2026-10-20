@@ -284,6 +284,37 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
         chained.collect(accelerator=runtime, engine="accel"),
         chained.collect(engine="cpu"),
     )
+    var chained_radix = (
+        source.lazy()
+        .sort("x")
+        .sort("id", descending=True)
+        .select(["id", "x"])
+    )
+    var radix_actual = chained_radix.collect(
+        accelerator=runtime, engine="accel"
+    )
+    same(radix_actual, chained_radix.collect(engine="cpu"))
+    var radix_profile = chained_radix.profile(
+        accelerator=runtime, engine="accel"
+    )
+    var radix_peak = Int(
+        radix_profile[1].item(0, "peak_requested_bytes").int64()
+    )
+    assert_true(
+        radix_profile[1].item(0, "kernel_launches").int64() >= 100
+    )
+    with assert_raises(contains="budget"):
+        _ = chained_radix.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=radix_peak - 1),
+            engine="accel",
+        )
+    same(
+        chained_radix.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=radix_peak),
+            engine="accel",
+        ),
+        radix_actual,
+    )
     var no_rows = source.lazy().filter(col("x") < 0).sort("x")
     assert_equal(
         no_rows.collect(accelerator=runtime, engine="accel").height(), 0
