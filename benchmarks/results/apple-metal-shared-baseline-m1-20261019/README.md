@@ -39,7 +39,7 @@ Each report includes source Mac paths and hashes for available logs, schemas, an
 
 `coverage-run-wrapper.sh` is the exact coverage-only wrapper used for the run. It invokes the strict coverage driver, whose original comparator classified cases using exact comparisons, then performs the run's full-grid, provenance, runtime-audit, typed-answer, and input-integrity validation. It deliberately exits unsuccessfully when the driver reports wrong answers. `audit_coverage_integrity.py` is a separate integrity validator derived from that strict wrapper's checks and retained as a convenient standalone artifact; it validates the receipt grid and recorded artifact hashes while preserving the strict statuses. It does not rerun or recompare CPU and Metal outputs. The integrity summary is retained in `integrity.json`, including its receipt SHA, 302-case grid, status counts, and rehashed artifact counts. The summary's `correctness_passed` is `false`, and `driver_returncode` is `1`, as expected for the 68 exact mismatches. The validator requires the original answer and input trees at their recorded Mac paths; the large answer files were not vendored here.
 
-The existing coverage, typed-answer-export, and materialization-adapter Python harness tests passed under the locked oracle environment: 23 tests passed. No benchmark run was repeated during this evidence packaging.
+The existing coverage, typed-answer-export, and materialization-adapter Python harness tests passed under the locked oracle environment: 23 tests passed. All 13 performance-collector tests also passed, including receipt and ratio-admission guards. No benchmark run was repeated during this evidence packaging.
 
 To verify the copied receipt and evidence hashes from this directory:
 
