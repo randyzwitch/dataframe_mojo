@@ -712,9 +712,7 @@ struct Table(Copyable):
         var device_indices = Optional[DeviceBuffer[DType.int32]]()
         if len(indices):
             device_indices = Optional[DeviceBuffer[DType.int32]](
-                scope.context().enqueue_create_buffer[DType.int32](
-                    len(indices)
-                )
+                scope.context().enqueue_create_buffer[DType.int32](len(indices))
             )
         var outputs = List[NativeColumnAny](capacity=self.schema.width())
         var queued = False
@@ -814,12 +812,18 @@ struct Table(Copyable):
                 or (field.left < 0 and field.right < 0)
             ):
                 raise Error("Mojo GPU native join output source is invalid")
-            if left_map.rows and field.left >= 0 and field.right < 0 and (
-                self.rows == 0 and not left_map.may_be_missing
+            if (
+                left_map.rows
+                and field.left >= 0
+                and field.right < 0
+                and (self.rows == 0 and not left_map.may_be_missing)
             ):
                 raise Error("Mojo GPU native join left source cannot be empty")
-            if left_map.rows and field.right >= 0 and field.left < 0 and (
-                right.rows == 0 and not right_map.may_be_missing
+            if (
+                left_map.rows
+                and field.right >= 0
+                and field.left < 0
+                and (right.rows == 0 and not right_map.may_be_missing)
             ):
                 raise Error("Mojo GPU native join right source cannot be empty")
             var left_possible = field.left >= 0 and (
@@ -875,10 +879,9 @@ struct Table(Copyable):
                     valid_sidecar |= column.has_validity()
                     error_sidecar |= column.has_errors()
             var nullable = (
-                (field.left >= 0 and field.right < 0
-                    and left_map.may_be_missing)
-                or (field.right >= 0 and field.left < 0
-                    and right_map.may_be_missing)
+                field.left >= 0 and field.right < 0 and left_map.may_be_missing
+            ) or (
+                field.right >= 0 and field.left < 0 and right_map.may_be_missing
             )
             bytes = checked_add(
                 bytes,
@@ -896,8 +899,10 @@ struct Table(Copyable):
             for output in range(len(fields)):
                 var field = fields[output]
                 var selected = (
-                    self.native_columns[Int(self.columns[field.left])]
-                    if field.left >= 0 else right.native_columns[
+                    self.native_columns[
+                        Int(self.columns[field.left])
+                    ] if field.left
+                    >= 0 else right.native_columns[
                         Int(right.columns[field.right])
                     ]
                 )
@@ -960,10 +965,13 @@ struct Table(Copyable):
                     )
                 )
                 var nullable = (
-                    (field.left >= 0 and field.right < 0
-                        and left_map.may_be_missing)
-                    or (field.right >= 0 and field.left < 0
-                        and right_map.may_be_missing)
+                    field.left >= 0
+                    and field.right < 0
+                    and left_map.may_be_missing
+                ) or (
+                    field.right >= 0
+                    and field.left < 0
+                    and right_map.may_be_missing
                 )
                 outputs.append(
                     _native_join_gather_column(
@@ -984,7 +992,8 @@ struct Table(Copyable):
                         status,
                         schema._columns[output].dtype(),
                         queued,
-                    )^
+                    )
+                    ^
                 )
             ctx.enqueue_copy(host_status.unsafe_ptr(), status)
             scope.record_download(4)
@@ -1000,7 +1009,9 @@ struct Table(Copyable):
             _ = outputs^
             _ = status^
             _ = status_reservation^
+            _ = host_status^
             raise error^
+        _ = host_status^
         _ = status^
         _ = status_reservation^
         return Self.native(schema.copy(), outputs^)
@@ -1666,7 +1677,9 @@ def validate_native_join_maps(
         Atomic[UInt32].max(status, fault)
 
 
-def native_join_gather_column[dtype: DType](
+def native_join_gather_column[
+    dtype: DType
+](
     left_values: Pointer[Scalar[dtype], ImmutAnyOrigin],
     left_validity: Pointer[UInt8, ImmutAnyOrigin],
     left_errors: Pointer[UInt32, ImmutAnyOrigin],
@@ -1783,7 +1796,9 @@ def native_join_gather_column[dtype: DType](
         output_validity[unsafe_offset=byte] = mask
 
 
-def _native_join_gather_typed[dtype: DType](
+def _native_join_gather_typed[
+    dtype: DType
+](
     scope: Scope,
     left: NativeColumn[dtype],
     right: NativeColumn[dtype],
@@ -1805,12 +1820,14 @@ def _native_join_gather_typed[dtype: DType](
 ) raises -> NativeColumn[dtype]:
     var left_view = left.view(left_offset, left_rows)
     var right_view = right.view(right_offset, right_rows)
-    var output_has_validity = nullable or (
-        left_possible and left_view.has_validity()
-    ) or (right_possible and right_view.has_validity())
-    var output_has_errors = (
-        left_possible and left_view.has_errors()
-    ) or (right_possible and right_view.has_errors())
+    var output_has_validity = (
+        nullable
+        or (left_possible and left_view.has_validity())
+        or (right_possible and right_view.has_validity())
+    )
+    var output_has_errors = (left_possible and left_view.has_errors()) or (
+        right_possible and right_view.has_errors()
+    )
     var output = allocate_native_column[dtype](
         scope,
         left.logical,
@@ -1904,9 +1921,9 @@ def _native_join_gather_typed[dtype: DType](
     return output^
 
 
-def _native_join_typed_source[dtype: DType](
-    column: NativeColumnAny,
-) raises -> NativeColumn[dtype]:
+def _native_join_typed_source[
+    dtype: DType
+](column: NativeColumnAny,) raises -> NativeColumn[dtype]:
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype == D and column._storage.isa[NativeColumn[D]]():
@@ -1914,7 +1931,9 @@ def _native_join_typed_source[dtype: DType](
     raise Error("Mojo GPU native join physical dtype differs")
 
 
-def _native_null_join_typed[dtype: DType](
+def _native_null_join_typed[
+    dtype: DType
+](
     scope: Scope, logical: DataType, rows: Int, mut queued: Bool
 ) raises -> NativeColumn[dtype]:
     var output = allocate_native_column[dtype](
@@ -1983,14 +2002,12 @@ def _native_join_gather_column(
             var fallback = _native_join_typed_source[D](
                 left.value() if left else right.value()
             )
-            var l = (
-                _native_join_typed_source[D](left.value())
-                if left else fallback.copy()
-            )
-            var r = (
-                _native_join_typed_source[D](right.value())
-                if right else fallback.copy()
-            )
+            var l = _native_join_typed_source[D](
+                left.value()
+            ) if left else fallback.copy()
+            var r = _native_join_typed_source[D](
+                right.value()
+            ) if right else fallback.copy()
             return NativeColumnAny(
                 _native_join_gather_typed[D](
                     scope,
@@ -2011,7 +2028,8 @@ def _native_join_gather_column(
                     rows,
                     status,
                     queued,
-                )^
+                )
+                ^
             )
     raise Error("Mojo GPU native join payload dtype is unsupported")
 
