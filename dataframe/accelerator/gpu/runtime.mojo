@@ -1234,7 +1234,8 @@ def estimate_resources(
     # A reusable standalone service drains its stream once more before the
     # context can return to the idle pool. Shared-region and uncached calls
     # may omit this drain; the metadata estimate remains an upper bound.
-    if rows:
+    # Zero-column inputs carry row metadata without creating a device context.
+    if rows and cells:
         waits = _checked_add(waits, 1)
         # Native computation drains before its temporary owners leave scope;
         # terminal readback is a separate phase from that ownership boundary.
