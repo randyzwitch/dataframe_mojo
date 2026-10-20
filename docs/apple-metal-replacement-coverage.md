@@ -16,7 +16,7 @@ This matrix tracks the incremental engine-replacement work in [#877](https://git
 | Windows and ordered operations ([#876](https://github.com/randyzwitch/dataframe_mojo/issues/876)) | Existing ordering/window kernels and row-plan machinery remain. | No window replacement is in PR #888. | Partition boundaries, reverse order, cumulative overflow, rolling/null semantics, stable ordering and large/skewed partitions need explicit replacement coverage. | Existing window/ordered tests remain regression coverage; no #876 replacement result is claimed here. |
 | Sources, text, nested and temporal values | Existing scan staging and specialized text, nested-value and temporal paths remain. | No broad source/text/nested/temporal replacement is in PR #888. | Their current operation-specific restrictions remain documented in [Apple Metal](apple-metal.md#remaining-cpu-coverage). | The preserved contracts are regression coverage, not evidence of a new replacement in this PR. |
 
-Separate prototypes for grouping, ordering, windows and native join inputs are not present in the PR #888 candidate. They are in progress and queued for Apple hardware validation; none is recorded here as having passed that gate. The earlier archived Int32 affine comparison is pinned to its own earlier candidate and is not evidence for the current PR head. The Int64/UInt64 archive above is pinned to `52efeb3a`, an ancestor of the PR #888 head, and remains a comparison for those recorded cases only.
+Separate implementations for grouping, ordering, windows and native join inputs are not present in the PR #888 candidate. Their independently pinned validation results are recorded below as they become available. The earlier archived Int32 affine comparison is pinned to its own earlier candidate and is not evidence for the current PR head. The Int64/UInt64 archive above is pinned to `52efeb3a`, an ancestor of the PR #888 head, and remains a comparison for those recorded cases only.
 
 ## Follow-up evidence recorded on 2026-10-20
 
@@ -53,11 +53,25 @@ retroactively change its validation scope.
   at `40c4e6c2eabb9ebd51c03a4057007541b8af3c06`, covering coalescing precedence,
   exact Float64 bits, missing rows, bounds/errors and budgets with a shared
   final drain. This is a join foundation, not public native hash-join dispatch.
+- [PR #900](https://github.com/randyzwitch/dataframe_mojo/pull/900) adds bounded
+  top-k selection for eligible terminal raw sorts with
+  `0 < K <= 4096` and K smaller than the input row count. Its five-test ordering gate passed at
+  `83e1988db1815b4cc2a29c87d4310a94e68f34e1`, including the four full-sort
+  regression groups. Candidate selection is bounded by K; input storage and
+  initial indices remain O(N), so total query memory is not O(K).
+- [PR #901](https://github.com/randyzwitch/dataframe_mojo/pull/901) adds public
+  native single-key hash-join dispatch for Int32, UInt32 and Float32 keys.
+  Its eight-test gate passed at
+  `b426cc27f0d87df9dcd469c1843a0ef1e578ad45`, covering keyed styles, null
+  equality, exact payloads, empty sides, collision fallback, profile counts
+  and budget rejection/recovery, with bounded cross-join regression coverage.
+  Composite, wide and dictionary keys and ordered merge joins remain follow-ups.
 
 These follow-ups do not establish parity across all operation families or
-justify legacy-path retirement. Grouping, top-k, hash/merge joins and windows
-still need their own implementation-specific correctness and performance
-evidence. The typed-storage and join-gather PRs make no new timing claim.
+justify legacy-path retirement. Broader family correctness and complete-query
+performance evidence remain required, including grouping and windows gates
+and top-k/hash-join measurements. The typed-storage, join-gather, top-k and
+hash-join PRs make no new timing claim.
 
 ## Retirement and validation gates
 
