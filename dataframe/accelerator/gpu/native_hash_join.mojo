@@ -420,7 +420,7 @@ def _upload_table(scope: Scope, frame: DataFrame) raises -> Table:
     var columns = List[NativeColumnAny](capacity=frame.width())
     for series in frame._columns:
         columns.append(_upload_column(scope, series))
-    return Table.native(frame.copy(), columns^)
+    return Table.native(frame.clear(), columns^)
 
 
 def _table_supported(table: Table, frame: DataFrame, scope: Scope) -> Bool:
