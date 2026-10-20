@@ -8,6 +8,12 @@ from tests.execution_modes.test_gpu_typed_storage_metadata import (
     test_native_float32_empty_and_budget_failure_allocate_nothing,
     test_native_float32_views_retain_one_owner_and_readback_checks_budget,
 )
+from tests.execution_modes.test_gpu_heterogeneous_native_table import (
+    test_native_bool_descriptor_is_tagged_without_admitting_host_transport,
+    test_native_any_view_preserves_temporal_logical_dtype_and_bitmap,
+    test_native_table_mixed_gather_reuses_one_index_map_and_materializes,
+    test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer,
+)
 from tests.execution_modes.test_mojo_gpu_typed_rows import (
     test_mojo_gpu_typed_rows_float32_projection_and_arithmetic15,
     test_mojo_gpu_typed_rows_nullable_offset_slices_chunks_and_field_metadata,
@@ -33,6 +39,10 @@ def main() raises:
     test_native_float32_upload_rechunks_only_validity_for_chunked_series()
     test_native_float32_empty_and_budget_failure_allocate_nothing()
     test_native_float32_views_retain_one_owner_and_readback_checks_budget()
+    test_native_bool_descriptor_is_tagged_without_admitting_host_transport()
+    test_native_any_view_preserves_temporal_logical_dtype_and_bitmap()
+    test_native_table_mixed_gather_reuses_one_index_map_and_materializes()
+    test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer()
     print("PASS native storage slices, chunks, nulls, lifetimes and budgets")
     test_mojo_gpu_typed_rows_float32_projection_and_arithmetic15()
     test_mojo_gpu_typed_rows_nullable_offset_slices_chunks_and_field_metadata()
