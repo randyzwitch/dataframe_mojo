@@ -78,9 +78,9 @@ retroactively change its validation scope.
 
 These follow-ups do not establish parity across all operation families or
 justify legacy-path retirement. Broader family correctness and complete-query
-performance evidence remain required, including window gates and top-k
-measurements. Typed-storage, join-gather and top-k performance is not established
-by the narrow join measurements below.
+performance evidence remain required, including window gates. Ordering and
+top-k now have the separate measurements below; the narrow join comparison
+does not isolate typed-storage or join-gather performance.
 
 ## Paired performance evidence recorded on 2026-10-20
 
@@ -99,14 +99,17 @@ cold machine; allocation counters do not measure device residency.
 | [Fused Float32 reductions, `004d73e7`](https://github.com/randyzwitch/dataframe_mojo/blob/2f9d29922c4ff913e664402df69259c7405c74a2/benchmarks/results/metal-float32/a52334e7-004d73e7/README.md) | 84 workers; affine SUM with/without filtering, two sizes and three variants against frozen `a52334e7`; correctness qualification logs retained. | Warm complete-query medians improve 3.610–6.517×; requested peak allocations fall approximately 95.0–97.9%. This is an unpublished engine candidate with narrow expression/type coverage, not a broad #872 replacement. |
 | [Native Int32 join, `b426cc27`](https://github.com/randyzwitch/dataframe_mojo/blob/2f9d29922c4ff913e664402df69259c7405c74a2/benchmarks/results/metal-native-join/a52334e7-b426cc27/README.md) | 74 workers; bounded self-left-joins, two sizes and three variants against frozen `a52334e7`. | Warm medians improve 1.056–1.383× at 4,097 rows and 2.352–2.672× at 262,144 rows. Requested peak allocations fall 54.8–69.4%, but launches increase by 11 per case. Other key types, join modes and compositions need their own performance evidence. |
 | [Grouped scheduling correction, `752eb233`](https://github.com/randyzwitch/dataframe_mojo/blob/98e0c2d9fe06897075c22cba3b6ca89909b0ae26/benchmarks/results/metal-group-integer/schedule-752eb233/README.md) | 333 primary workers against frozen `a52334e7`, #865 `158285f7` and prior `0a9297c3`; 20 follow-up workers for one small case. | The two large uniform cases improve 1.100×/1.070× over #865 and 1.152×/1.139× over the prior candidate, with four fewer launches. Large skewed gains remain. Requested peak allocations are unchanged versus the prior candidate. Small sorted skew is inconclusive: 1.7% slower initially, 1.1% faster in the longer follow-up; both results are retained. First-use results remain mixed. |
+| [Ordering/top-k, `83e1988d`](https://github.com/randyzwitch/dataframe_mojo/blob/2b33b04adaaa1a81f52a9b4a124337c08b1d3da7/benchmarks/results/metal-ordering/a52334e7-83e1988d/README.md) | 204 workers; full radix and top-k 31/1024 versus frozen `a52334e7`, with a separate top-k comparison against radix intermediate `a03f7edf`; two sizes and three variants. | Small top-k-31 remains 95.4–159.6× slower than CPU across the collections; large top-k-31 remains 21.8–42.7× slower. Against radix, large K=31 improves 1.077–1.105× while K=1024 is effectively flat. Requested top-k memory falls about 45.7–62.7%; first-use results are mixed. Sorter identity is inferred from pinned admission and launch counts, not directly named by the generic profile. |
 
 CPU is faster in every case in these archives. The comparisons measure
 whole candidate stacks and do not isolate each preceding PR's contribution.
 They support measured improvements in the stated cases and document the
 large-uniform regression's correction without erasing the original results or
-claiming uniform small-input/first-use improvement. Primitive measurements,
+claiming uniform small-input/first-use improvement. The [absolute CPU-gap report](https://github.com/randyzwitch/dataframe_mojo/blob/2b33b04adaaa1a81f52a9b4a124337c08b1d3da7/benchmarks/results/metal-cpu-gap.md) records gaps up to 159.6×. Remaining primitive measurements,
 fallback-frequency reporting, remaining serial-state coverage and broader
-family/whole-query validation remain outstanding under #873 and #877.
+family/whole-query validation remain outstanding under #873, #874 and #877.
+
+The [wrapped-host primitive](https://github.com/randyzwitch/dataframe_mojo/blob/2b33b04adaaa1a81f52a9b4a124337c08b1d3da7/benchmarks/results/apple-metal-wrapped-host-m1-20261020/README.md) validates 30 samples and reduces 4 MiB readback through owned storage from 14.2215 ms to 0.9680 ms. Small payloads do not improve and the path adds staging memory. This motivates a large-export experiment; it is not an engine integration, semantic-family replacement or complete-query gain.
 
 ## Retirement and validation gates
 
