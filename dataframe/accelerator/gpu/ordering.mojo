@@ -406,13 +406,13 @@ def _radix_digit(
     key_node: UInt32,
     stride: UInt32,
     shift: UInt32,
-    null_marker: Bool,
+    null_marker: UInt32,
 ) -> UInt32:
     var node = Int(key_node)
     var source = Int(code[unsafe_offset=4 * node + 1]) * Int(stride) + Int(row)
     var present = validity[unsafe_offset=source] != 0
     var nulls_last = (code[unsafe_offset=4 * node + 3] & 1) != 0
-    if null_marker:
+    if null_marker != 0:
         return UInt32(nulls_last != present)
     if not present:
         return 0
@@ -424,7 +424,7 @@ def _radix_digit(
         value ^= UInt64(1) << UInt64(width - 1)
     if code[unsafe_offset=4 * node + 2] != 0:
         value = (~value) & mask
-    return UInt32((value >> shift) & UInt64(15))
+    return UInt32((value >> UInt64(shift)) & UInt64(15))
 
 
 def radix_histogram(
@@ -439,7 +439,7 @@ def radix_histogram(
     stride: UInt32,
     bucket_span: UInt32,
     shift: UInt32,
-    null_marker: Bool,
+    null_marker: UInt32,
 ):
     """Build one stable-scatter histogram for each 256-row tile."""
     var position = Int(global_idx.x)
@@ -544,7 +544,7 @@ def radix_scatter(
     stride: UInt32,
     bucket_span: UInt32,
     shift: UInt32,
-    null_marker: Bool,
+    null_marker: UInt32,
 ):
     """Stable tile scatter using predicate prefixes, never atomic ranks."""
     var position = Int(global_idx.x)
