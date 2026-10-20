@@ -330,8 +330,9 @@ include that conservative cap whenever a plan could select the parallel path,
 while profiles report actual allocation and partial geometry through the
 `grouped_int_*` fields. Integer SUM keeps two-word totals until final narrowing,
 and every partial retains source error bits. Floating, decimal, temporal and
-window reductions retain their existing schedules. Group membership still
-uses the existing sorted generic representation.
+window reductions retain their existing schedules. Group membership uses the
+existing hash or sorted partition builder; both supply the same generic
+index and group-start representation to these reducers.
 
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and
@@ -503,10 +504,12 @@ ordinary scalars broadcast, while differing distribution lengths raise.
 The CPU and Metal engines should select the same families of algorithms,
 with implementations appropriate to their hardware. The CPU already has
 bounded-domain aggregation, partitioned hash aggregation, bounded top-k,
-hash joins and fused expression batches. General Metal grouping currently
-sorts row indices, ranking materializes complete orderings, and row
-expressions interpret descriptors into a slot matrix. Narrow dictionary SUM
-paths avoid some of this work; they do not replace general operator dispatch.
+hash joins and fused expression batches. Metal grouping now has a bounded
+equality hash route for reducers that support unordered traversal. Other
+grouped states still sort row indices, ranking materializes complete
+orderings, and row expressions interpret descriptors into a slot matrix.
+Narrow dictionary SUM paths avoid some of this work; they do not replace
+general operator dispatch.
 
 The implementation sequence is by operator, with small dependent PRs:
 
@@ -535,6 +538,24 @@ may choose an algorithm but cannot prove that a domain or capacity fits:
 capacity exhaustion needs a bounded retry or an explicit existing fallback.
 First/last, argument positions, stable representatives, checked feed errors
 and floating update order must survive changes in partitioning.
+
+The first general dispatch admits integer SUM/MEAN/MIN/MAX, counts,
+first/last and Boolean reductions for inputs of at least 256 rows. It uses
+complete key equality and the existing reducer states. Key representatives
+come from the earliest input row; first/last select by source position,
+independently of scatter order. Floating numeric reductions, Decimal arithmetic,
+argument positions, ordered collections and window schedules retain sorted
+grouping. A bounded table/probe failure also selects sorted grouping. The
+preflight estimate includes both temporary hash arrays, at most 8 MiB.
+
+The focused physical-GPU gate runs in the pinned GPU environment:
+
+```sh
+mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo
+```
+
+Timing programs are reviewed separately from engine changes, as required by
+the benchmark separation rule.
 
 Every operator PR has two short gates before broader work:
 

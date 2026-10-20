@@ -7,6 +7,13 @@ from tests.execution_modes.test_mojo_gpu_grouping import (
     test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback,
 )
 
+from tests.execution_modes.test_mojo_gpu_hash_grouping import (
+    test_mojo_gpu_hash_grouping_unordered_integer_reductions,
+    test_mojo_gpu_hash_grouping_boundaries_and_integer_states,
+    test_mojo_gpu_hash_grouping_composite_null_nan_keys_and_source_order,
+    test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum,
+)
+
 
 def main() raises:
     test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg()
@@ -19,3 +26,8 @@ def main() raises:
     print("PASS exact wide totals, argument positions and overflow")
     test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback()
     print("PASS parallel grouped integers, budgets and generic consumers")
+    test_mojo_gpu_hash_grouping_unordered_integer_reductions()
+    test_mojo_gpu_hash_grouping_boundaries_and_integer_states()
+    test_mojo_gpu_hash_grouping_composite_null_nan_keys_and_source_order()
+    test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum()
+    print("PASS hash grouping admission, representatives and fallback")
