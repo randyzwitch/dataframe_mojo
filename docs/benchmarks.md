@@ -146,6 +146,12 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
+The [completed M1 forced-Metal development baseline](../benchmarks/results/metal-development-baseline/50137ecc-m1-20261020/)
+retains 1,812 worker records across 302 cases, exact correctness receipts, raw
+logs and a hash verifier. Only 210 cases qualify for CPU/Metal timing ratios;
+unsupported and unverified cases remain visible. This is development-scale
+evidence for #869, not a full-scale headline or a GPU-only execution certificate.
+
 `benchmarks/tools/bench_metal_suites.py` separately checks exact CPU/Apple
 query results with every query `collect` forced onto Metal. Summarize one or
 more immutable receipt files with
