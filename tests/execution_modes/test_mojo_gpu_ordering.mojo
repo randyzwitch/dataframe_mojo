@@ -128,9 +128,13 @@ def _topk_composite_frame(rows: Int, chunked: Bool) raises -> DataFrame:
     for physical in range(rows + 6):
         major.append(Int64((physical * 17 + physical // 7) % 19 - 9))
         major_valid.append(physical % 97 != 0)
-        float_words.append(encodings[(physical * 3 + physical // 11) % len(encodings)])
+        float_words.append(
+            encodings[(physical * 3 + physical // 11) % len(encodings)]
+        )
         float_valid.append(physical % 113 != 0)
-        wide.append(decimal_keys[(physical * 5 + physical // 13) % len(decimal_keys)])
+        wide.append(
+            decimal_keys[(physical * 5 + physical // 13) % len(decimal_keys)]
+        )
         wide_valid.append(physical % 131 != 0)
         ids.append(Int64(physical - 3))
     var float_values = List[Float64](capacity=len(float_words))
@@ -156,9 +160,9 @@ def _topk_composite_frame(rows: Int, chunked: Bool) raises -> DataFrame:
                 chunked,
             ),
             _layout(
-                Series("wide", Column[Int128](wide^, wide_valid^)).with_dtype(
-                    DataType.decimal(38, 0)
-                ).slice(3, rows),
+                Series("wide", Column[Int128](wide^, wide_valid^))
+                .with_dtype(DataType.decimal(38, 0))
+                .slice(3, rows),
                 chunked,
             ),
             _layout(Series("id", Column[Int64](ids^)).slice(3, rows), chunked),
@@ -231,9 +235,7 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
         result,
     )
     var full = frame.lazy().sort("major")
-    var full_profile = full.profile(
-        accelerator=MetalRuntime(), engine="accel"
-    )
+    var full_profile = full.profile(accelerator=MetalRuntime(), engine="accel")
     assert_true(
         topk_launches < full_profile[1].item(0, "kernel_launches").int64()
     )
@@ -252,6 +254,8 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
         filtered_profile[1].item(0, "resident_output_bytes").int64()
         > Int64(31 * frame.width() * 21)
     )
+
+
 # requires: mojo_gpu
 def test_mojo_gpu_ordering_integer_layouts_nulls_mixed_keys_and_stability() raises:
     comptime types = (
@@ -443,10 +447,7 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
         chained.collect(engine="cpu"),
     )
     var chained_radix = (
-        source.lazy()
-        .sort("x")
-        .sort("id", descending=True)
-        .select(["id", "x"])
+        source.lazy().sort("x").sort("id", descending=True).select(["id", "x"])
     )
     var radix_actual = chained_radix.collect(
         accelerator=runtime, engine="accel"
@@ -458,9 +459,7 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
     var radix_peak = Int(
         radix_profile[1].item(0, "peak_requested_bytes").int64()
     )
-    assert_true(
-        radix_profile[1].item(0, "kernel_launches").int64() >= 100
-    )
+    assert_true(radix_profile[1].item(0, "kernel_launches").int64() >= 100)
     with assert_raises(contains="budget"):
         _ = chained_radix.collect(
             accelerator=MetalRuntime(memory_limit_bytes=radix_peak - 1),

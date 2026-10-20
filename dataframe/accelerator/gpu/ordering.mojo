@@ -545,9 +545,9 @@ def order_merge_topk(
                     slots,
                     literals,
                 )
-        target[unsafe_offset=output_start + tile_start + lane_diagonal + offset] = (
-            index[unsafe_offset=a] if from_a else index[unsafe_offset=b]
-        )
+        target[
+            unsafe_offset=output_start + tile_start + lane_diagonal + offset
+        ] = index[unsafe_offset=a] if from_a else index[unsafe_offset=b]
         if from_a:
             a += 1
         else:
@@ -576,9 +576,7 @@ def _radix_digit(
         return 0
     var dtype = types[unsafe_offset=node]
     var width = integer_width(dtype)
-    var mask = (
-        UInt64.MAX if width == 64 else (UInt64(1) << UInt64(width)) - 1
-    )
+    var mask = UInt64.MAX if width == 64 else (UInt64(1) << UInt64(width)) - 1
     var value = words[unsafe_offset=source] & mask
     if not unsigned_type(dtype):
         value ^= UInt64(1) << UInt64(width - 1)
@@ -622,7 +620,9 @@ def radix_histogram(
             UInt32(position < Int(rows) and digit == UInt32(bucket))
         )
         if lane == 255:
-            counts[unsafe_offset=Int(bucket) * Int(bucket_span) + Int(block_idx.x)] = prefix
+            counts[
+                unsafe_offset=Int(bucket) * Int(bucket_span) + Int(block_idx.x)
+            ] = prefix
 
 
 def radix_scan_level(
@@ -645,7 +645,9 @@ def radix_scan_level(
     if position < Int(count):
         counts[unsafe_offset=source] = prefix
     if thread_idx.x == 255:
-        counts[unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk] = prefix
+        counts[
+            unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk
+        ] = prefix
 
 
 def radix_apply_carries(
@@ -813,8 +815,12 @@ def order_gather_topk(
         return
     var source = Int(index[unsafe_offset=row])
     for column in range(Int(count)):
-        var source_base = Int(gathers[unsafe_offset=column]) * Int(source_stride)
-        var output_base = Int(gathers[unsafe_offset=column]) * Int(output_stride)
+        var source_base = Int(gathers[unsafe_offset=column]) * Int(
+            source_stride
+        )
+        var output_base = Int(gathers[unsafe_offset=column]) * Int(
+            output_stride
+        )
         output_words[unsafe_offset=output_base + row] = words[
             unsafe_offset=source_base + source
         ]

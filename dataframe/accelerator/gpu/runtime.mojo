@@ -148,7 +148,12 @@ from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
-from .rows import integer_width, row_program, row_program_ordered, row_program_iana
+from .rows import (
+    integer_width,
+    row_program,
+    row_program_ordered,
+    row_program_iana,
+)
 from . import iana_scalar_scopes
 from dataframe.accelerator import iana_certificate, checked_rank
 from dataframe.accelerator.iana_mutations import (
@@ -893,7 +898,8 @@ def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
 def _topk_limit(
     plan: RowPlan, rows: Int, terminal_boundary: Bool
 ) raises -> Int:
-    """Certify only a terminal ORDER BY over raw input columns followed by head."""
+    """Certify only a terminal ORDER BY over raw input columns followed by head.
+    """
     if (
         not terminal_boundary
         or plan.ordered_mode != 0
@@ -932,7 +938,8 @@ def _topk_limit(
         if (
             plan.outputs[output].slot != output
             or plan.outputs[output].reduction >= 0
-            or plan.outputs[output].dtype != plan.source._columns[output].dtype()
+            or plan.outputs[output].dtype
+            != plan.source._columns[output].dtype()
         ):
             return -1
     return plan.limit
@@ -942,9 +949,7 @@ def _topk_retained_rows(rows: Int, run_width: Int, limit: Int) raises -> Int:
     var full_runs = rows // run_width
     var tail = rows % run_width
     var keep = min(limit, run_width)
-    return _checked_add(
-        _checked_mul(full_runs, keep), min(limit, tail)
-    )
+    return _checked_add(_checked_mul(full_runs, keep), min(limit, tail))
 
 
 def _iana_scalar_slots(plan: RowPlan) raises -> Int:
@@ -1080,9 +1085,7 @@ def estimate_resources(
                 level_count = (level_count + 255) // 256
             shared = _checked_add(
                 shared,
-                _checked_add(
-                    _checked_mul(summary_count, 16 * 4), 16 * 4
-                ),
+                _checked_add(_checked_mul(summary_count, 16 * 4), 16 * 4),
             )
         if ranking:
             # The idle sort-index owner supplies dense prefixes. Only the
@@ -1106,9 +1109,9 @@ def estimate_resources(
         # One device UInt32 source-index plane is reused across scalar outputs
         # and grouped phases; no host copy, download or extra wait is needed.
         shared = _checked_add(shared, _checked_mul(rows, 4))
-    var result_bytes = (
-        _checked_add(result_matrix_bytes, program_bytes) if rows else 0
-    )
+    var result_bytes = _checked_add(
+        result_matrix_bytes, program_bytes
+    ) if rows else 0
     if rows and grouping:
         result_bytes = _checked_add(result_bytes, _checked_mul(plan.slots, 8))
     if plan.reductions:
@@ -1285,9 +1288,7 @@ def estimate_resources(
                         if level_count > 256:
                             down_carries += 1
                         level_count = (level_count + 255) // 256
-                    var per_digit_launches = (
-                        3 + level_total - 1 + down_carries
-                    )
+                    var per_digit_launches = 3 + level_total - 1 + down_carries
                     order_launch_bound = max(
                         order_launch_bound,
                         2
@@ -2996,7 +2997,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=merge_grid(current_rows, run_width),
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                                 var previous = index^
@@ -3004,9 +3007,7 @@ def execute_plan(
                                 next_index = previous^
                                 run_width *= 2
                                 submissions += 1
-                            var keep_per_run = min(
-                                topk, TOPK_BASE_RUN_ROWS
-                            )
+                            var keep_per_run = min(topk, TOPK_BASE_RUN_ROWS)
                             var active_rows = _topk_retained_rows(
                                 current_rows, TOPK_BASE_RUN_ROWS, topk
                             )
@@ -3094,7 +3095,9 @@ def execute_plan(
                                 )
                                 var digits = Int(width // 4) + 1
                                 for pass_index in range(digits):
-                                    var null_marker = pass_index == Int(width // 4)
+                                    var null_marker = pass_index == Int(
+                                        width // 4
+                                    )
                                     var shift = UInt32(pass_index * 4)
                                     ctx.enqueue_function[radix_histogram](
                                         device_words.unsafe_ptr(),
@@ -3115,14 +3118,17 @@ def execute_plan(
                                     submissions += 1
                                     for level in range(len(level_counts) - 1):
                                         var count = level_counts[level]
-                                        var parent_base = level_offsets[level + 1]
+                                        var parent_base = level_offsets[
+                                            level + 1
+                                        ]
                                         ctx.enqueue_function[radix_scan_level](
                                             radix_counts.value().unsafe_ptr(),
                                             UInt32(count),
                                             UInt32(level_offsets[level]),
                                             UInt32(parent_base),
                                             UInt32(summary_count),
-                                            grid_dim=16 * ((count + 255) // 256),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
                                             block_dim=256,
                                         )
                                         submissions += 1
@@ -3131,13 +3137,16 @@ def execute_plan(
                                         var count = level_counts[at]
                                         if count <= 256:
                                             continue
-                                        ctx.enqueue_function[radix_apply_carries](
+                                        ctx.enqueue_function[
+                                            radix_apply_carries
+                                        ](
                                             radix_counts.value().unsafe_ptr(),
                                             UInt32(count),
                                             UInt32(level_offsets[at]),
                                             UInt32(level_offsets[at + 1]),
                                             UInt32(summary_count),
-                                            grid_dim=16 * ((count + 255) // 256),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
                                             block_dim=256,
                                         )
                                         submissions += 1
@@ -3189,7 +3198,9 @@ def execute_plan(
                                         UInt32(run_width),
                                         UInt32(plan.slots),
                                         device_literals.unsafe_ptr(),
-                                        grid_dim=merge_grid(current_rows, run_width),
+                                        grid_dim=merge_grid(
+                                            current_rows, run_width
+                                        ),
                                         block_dim=256,
                                     )
                                     # Swapping owners keeps both buffers alive across queued passes.
@@ -3199,8 +3210,8 @@ def execute_plan(
                                     run_width *= 2
                                     submissions += 1
                         var selected_cells = (
-                            _checked_mul(current_rows, plan.slots)
-                            if topk > 0 else cells
+                            _checked_mul(current_rows, plan.slots) if topk
+                            > 0 else cells
                         )
                         var gather_blocks = (current_rows + 255) // 256
                         var gathered_words = ctx.enqueue_create_buffer[
