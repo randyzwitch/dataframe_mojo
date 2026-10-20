@@ -63,7 +63,9 @@ def test_native_any_view_preserves_temporal_logical_dtype_and_bitmap() raises:
     var field = Series("day", Column[Int64](List[Int64]())).with_dtype(
         DataType.DATE
     )
-    field._field_metadata = ArcPointer(List[UInt8]([1, 2, 3]))
+    field._field_metadata = ArcPointer(
+        List[UInt8]([UInt8(1), UInt8(2), UInt8(3)])
+    )
     var result = view.readback_series(field)
     assert_equal(result.dtype(), DataType.DATE)
     assert_equal(
@@ -112,7 +114,7 @@ def test_native_table_mixed_gather_reuses_one_index_map_and_materializes() raise
         matrix_errors,
         3,
         2,
-        List[Int64]([0, 1]),
+        List[Int64]([Int64(0), Int64(1)]),
     )
     assert_equal(copied_bytes, 3 * 2 * 21)
     var matrix_table = Table(
@@ -125,7 +127,7 @@ def test_native_table_mixed_gather_reuses_one_index_map_and_materializes() raise
             matrix_errors^,
         ),
         schema.copy(),
-        List[Int64]([0, 1]),
+        List[Int64]([Int64(0), Int64(1)]),
         3,
     )
     var copied = materialize(matrix_table)
@@ -177,7 +179,7 @@ def test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer
         )
     )
     var table = Table.native(
-        schema,
+        schema.copy(),
         List[NativeColumnAny](
             [NativeColumnAny(floats), NativeColumnAny(small)]
         ),
@@ -225,8 +227,8 @@ def test_native_gather_carries_deferred_error_sidecars() raises:
     )
     var values = source.values()
     var errors = source.errors()
-    var host_values = List[Int16]([10, 20, 30])
-    var host_errors = List[UInt32]([5, 17, 29])
+    var host_values = List[Int16]([Int16(10), Int16(20), Int16(30)])
+    var host_errors = List[UInt32]([UInt32(5), UInt32(17), UInt32(29)])
     var context = scope.context()
     context.enqueue_copy(values, host_values.unsafe_ptr())
     context.enqueue_copy(errors.value(), host_errors.unsafe_ptr())

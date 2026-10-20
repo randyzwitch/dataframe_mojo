@@ -606,10 +606,12 @@ struct Table(Copyable):
         var host_indices = List[Int32](capacity=len(indices))
         for row in indices:
             host_indices.append(Int32(row))
-        var device_indices: Optional[DeviceBuffer[DType.int32]]()
+        var device_indices = Optional[DeviceBuffer[DType.int32]]()
         if len(indices):
-            device_indices = scope.context().enqueue_create_buffer[DType.int32](
-                len(indices)
+            device_indices = Optional[DeviceBuffer[DType.int32]](
+                scope.context().enqueue_create_buffer[DType.int32](
+                    len(indices)
+                )
             )
         var outputs = List[NativeColumnAny](capacity=self.schema.width())
         var queued = False
@@ -1187,9 +1189,9 @@ def gather_native_column[
     source_offset: UInt32,
     validity_offset: UInt32,
     error_offset: UInt32,
-    source_has_validity: Bool,
-    source_has_errors: Bool,
-    output_has_validity: Bool,
+    source_has_validity: UInt8,
+    source_has_errors: UInt8,
+    output_has_validity: UInt8,
     rows: UInt32,
     output: Pointer[Scalar[dtype], MutAnyOrigin],
     output_validity: Pointer[UInt8, MutAnyOrigin],
@@ -1207,7 +1209,7 @@ def gather_native_column[
             break
         var selected = indices[unsafe_offset=row]
         var present = selected >= 0
-        if present and source_has_validity:
+        if present and source_has_validity != 0:
             var source_bit = Int(validity_offset) + Int(selected)
             present = (
                 (
@@ -1224,11 +1226,11 @@ def gather_native_column[
             output[unsafe_offset=row] = Scalar[dtype](0)
         if present:
             mask |= UInt8(1) << UInt8(bit)
-        if source_has_errors:
+        if source_has_errors != 0:
             output_errors[unsafe_offset=row] = source_errors[
                 unsafe_offset=Int(error_offset) + Int(selected)
             ] if selected >= 0 else UInt32(0)
-    if output_has_validity:
+    if output_has_validity != 0:
         output_validity[unsafe_offset=byte] = mask
 
 
@@ -1335,9 +1337,9 @@ def _gather_native_typed[
             UInt32(input.value_offset),
             UInt32(input.validity_bit_offset),
             UInt32(input.value_offset),
-            input.has_validity(),
-            input.has_errors(),
-            Bool(output_validity_buffer),
+            UInt8(input.has_validity()),
+            UInt8(input.has_errors()),
+            UInt8(Bool(output_validity_buffer)),
             UInt32(rows),
             output_values,
             output_validity,
@@ -1353,7 +1355,6 @@ def _gather_native_typed[
         scope.synchronize()
         _ = output^
         _ = input^
-        _ = indices^
         raise error^
     return output^
 
