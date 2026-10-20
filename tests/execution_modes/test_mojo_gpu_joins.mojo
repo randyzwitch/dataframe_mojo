@@ -314,6 +314,89 @@ def test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads() raises:
 
 
 # requires: mojo_gpu
+def test_mojo_gpu_native_hash_join_float32_encodings_and_nulls() raises:
+    var left_bits: List[UInt32] = [
+        0x00000000,
+        0x80000000,
+        0x7FC00001,
+        0xFFC00002,
+        0x00000001,
+        0x80000001,
+        0x40400000,
+    ]
+    var right_bits: List[UInt32] = [
+        0x80000000,
+        0x00000000,
+        0xFFC00003,
+        0x7FC01234,
+        0x80000001,
+        0x00000001,
+        0x40A00000,
+    ]
+    var left_keys = List[Float32]()
+    var right_keys = List[Float32]()
+    for bits in left_bits:
+        left_keys.append(bitcast[DType.float32](bits))
+    for bits in right_bits:
+        right_keys.append(bitcast[DType.float32](bits))
+    var validity: List[Bool] = [True, True, True, True, True, True, False]
+    var left_ids: List[Int32] = [10, 11, 12, 13, 14, 15, 16]
+    var right_ids: List[Int32] = [20, 21, 22, 23, 24, 25, 26]
+    var left = DataFrame(
+        [
+            Series("k", Column[Float32](left_keys^, validity.copy())),
+            Series("left_id", Column[Int32](left_ids^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Float32](right_keys^, validity.copy())),
+            Series("right_id", Column[Int32](right_ids^)),
+        ]
+    )
+    var query = left.lazy().join(
+        right.lazy(), on="k", how="inner", coalesce=False
+    )
+    var measured = query.profile(accelerator=MetalRuntime(), engine="accel")
+    var native_row = _profile_row_for_algorithm(
+        measured[1], "mojo_gpu_native_hash_join"
+    )
+    var actual = measured[0]
+    assert_equal(actual.height(), 10)
+
+    # The expected relation explicitly covers both zeros, distinct NaN
+    # payloads, both subnormal signs, and excludes the null rows.
+    var expected_left: List[Int] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 5]
+    var expected_right: List[Int] = [0, 1, 0, 1, 2, 3, 2, 3, 5, 4]
+    var observed = List[Bool](length=10, fill=False)
+    for row in range(actual.height()):
+        var li = Int(actual.item(row, "left_id").int32()) - 10
+        var ri = Int(actual.item(row, "right_id").int32()) - 20
+        var expected_at = -1
+        for at in range(len(expected_left)):
+            if expected_left[at] == li and expected_right[at] == ri:
+                expected_at = at
+        assert_true(expected_at >= 0)
+        assert_true(not observed[expected_at])
+        observed[expected_at] = True
+        assert_equal(
+            bitcast[DType.uint32](actual.item(row, "k").float32()),
+            left_bits[li],
+        )
+        assert_equal(
+            bitcast[DType.uint32](actual.item(row, "k_right").float32()),
+            right_bits[ri],
+        )
+    for found in observed:
+        assert_true(found)
+    assert_true(
+        measured[1].item(native_row, "native_hash_phase_launches").int64() > 0
+    )
+    same(actual, query.collect(engine="cpu", streaming=False))
+    print("PASS native Float32 NaN/zero/subnormal/null keys and payload bits")
+
+
+# requires: mojo_gpu
 def test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles() raises:
     var runtime = MetalRuntime()
     for how in ["inner", "left", "right", "full", "semi", "anti"]:
@@ -394,6 +477,16 @@ def test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal() rai
 
 
 # requires: mojo_gpu
+def _profile_row_for_algorithm(
+    report: DataFrame, algorithm: String
+) raises -> Int:
+    for row in range(report.height()):
+        if report.item(row, "algorithm").string() == algorithm:
+            return row
+    raise Error("Expected join algorithm is absent from profile")
+
+
+# requires: mojo_gpu
 def test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts() raises:
     var runtime = MetalRuntime()
     var empty = DataFrame(
@@ -402,29 +495,55 @@ def test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts() raises
     var nonempty = DataFrame(
         [Series("k", Column[Int32]([1])), Series("x", Column[Float64]([2]))]
     )
-    var inner_profile = (
+    var both_empty = (
         empty.lazy()
         .join(empty.lazy(), on="k", how="inner", coalesce=False)
         .profile(accelerator=runtime, engine="accel")
     )
-    assert_equal(inner_profile[0].height(), 0)
-    assert_equal(
-        inner_profile[1].item(0, "algorithm").string(),
-        "mojo_gpu_native_hash_join",
+    assert_equal(both_empty[0].height(), 0)
+    var both_empty_row = _profile_row_for_algorithm(
+        both_empty[1], "mojo_gpu_sorted_join"
     )
-    assert_equal(inner_profile[1].item(0, "kernel_launches").int64(), Int64(5))
+    assert_equal(
+        both_empty[1].item(both_empty_row, "algorithm").string(),
+        "mojo_gpu_sorted_join",
+    )
 
-    var empty_full = (
+    var empty_probe = (
         empty.lazy()
-        .join(empty.lazy(), on="k", how="full", coalesce=False)
+        .join(nonempty.lazy(), on="k", how="inner", coalesce=False)
         .profile(accelerator=runtime, engine="accel")
     )
-    assert_equal(empty_full[0].height(), 0)
-    assert_equal(
-        empty_full[1].item(0, "algorithm").string(),
-        "mojo_gpu_native_hash_join",
+    assert_equal(empty_probe[0].height(), 0)
+    var empty_probe_row = _profile_row_for_algorithm(
+        empty_probe[1], "mojo_gpu_native_hash_join"
     )
-    assert_equal(empty_full[1].item(0, "kernel_launches").int64(), Int64(7))
+    assert_equal(
+        empty_probe[1]
+        .item(empty_probe_row, "native_hash_phase_launches")
+        .int64(),
+        # initialize hash + build hash/members + three slot scans + offsets
+        # + one key pack; the empty probe skips both probe kernels.
+        Int64(8),
+    )
+
+    var empty_build = (
+        nonempty.lazy()
+        .join(empty.lazy(), on="k", how="inner", coalesce=False)
+        .profile(accelerator=runtime, engine="accel")
+    )
+    assert_equal(empty_build[0].height(), 0)
+    var empty_build_row = _profile_row_for_algorithm(
+        empty_build[1], "mojo_gpu_native_hash_join"
+    )
+    assert_equal(
+        empty_build[1]
+        .item(empty_build_row, "native_hash_phase_launches")
+        .int64(),
+        # initialize hash + three slot scans + probe/hash scan/offsets
+        # + one key pack; no build-row or pair-map kernels run.
+        Int64(8),
+    )
 
     var full_profile = (
         nonempty.lazy()
@@ -432,12 +551,16 @@ def test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts() raises
         .profile(accelerator=runtime, engine="accel")
     )
     assert_equal(full_profile[0].height(), 1)
-    assert_equal(
-        full_profile[1].item(0, "algorithm").string(),
-        "mojo_gpu_native_hash_join",
+    var full_row = _profile_row_for_algorithm(
+        full_profile[1], "mojo_gpu_native_hash_join"
     )
-    assert_equal(full_profile[1].item(0, "kernel_launches").int64(), Int64(21))
-    print("PASS native hash join empty and full profile launch counts")
+    assert_equal(
+        full_profile[1].item(full_row, "native_hash_phase_launches").int64(),
+        # initialize/build/members (3), slot scans (3), probe/hash scan (2),
+        # offsets (1), full unmatched path (4), map emit (1), key packs (2).
+        Int64(16),
+    )
+    print("PASS native hash join empty/full profile launch counts")
 
 
 # requires: mojo_gpu
@@ -450,6 +573,7 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
                 DataType.DATE
             ),
             Series("small", Column[Int8]([1, 2, 3])),
+            Series("left_id", Column[Int32]([10, 11, 12])),
         ]
     )
     var right = DataFrame(
@@ -460,6 +584,7 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
                 DataType.DATE
             ),
             Series("small_r", Column[Int8]([4, 5, 6])),
+            Series("right_id", Column[Int32]([20, 21, 22])),
         ]
     )
     var query = left.lazy().join(
@@ -467,21 +592,60 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
     )
     var measured = query.profile(accelerator=MetalRuntime(), engine="accel")
     assert_equal(measured[0].height(), 4)
-    var native = False
-    var peak = 0
-    for row in range(measured[1].height()):
-        native |= (
-            measured[1].item(row, "algorithm").string()
-            == "mojo_gpu_native_hash_join"
-        )
-        peak = max(
-            peak,
-            Int(measured[1].item(row, "peak_requested_bytes").int64()),
-        )
-    assert_true(native and peak > 0)
-    var bounded = query.profile(
-        accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
+    var native_row = _profile_row_for_algorithm(
+        measured[1], "mojo_gpu_native_hash_join"
     )
+    var peak = Int(measured[1].item(native_row, "peak_requested_bytes").int64())
+    assert_true(peak > 0)
+    assert_equal(measured[0].column("day").dtype(), DataType.DATE)
+    assert_equal(measured[0].column("day_r").dtype(), DataType.DATE)
+    var cpu = query.collect(engine="cpu", streaming=False)
+    same(measured[0], cpu)
+    var expected_left_amount: List[Float64] = [10.5, 11.5, 12.5]
+    var expected_right_amount: List[Float32] = [20.5, 21.5, 22.5]
+    var expected_left_day: List[Int64] = [100, 101, 102]
+    var expected_right_day: List[Int64] = [200, 201, 202]
+    for row in range(measured[0].height()):
+        var left_id = Int(measured[0].item(row, "left_id").int32())
+        var right_id = Int(measured[0].item(row, "right_id").int32())
+        var left_index = left_id - 10
+        var right_index = right_id - 20
+        assert_true(
+            (left_index < 2 and right_index == 0)
+            or (left_index == 2 and (right_index == 1 or right_index == 2))
+        )
+        assert_equal(
+            measured[0].item(row, "k").float32(),
+            Float32(1) if left_index < 2 else Float32(2),
+        )
+        assert_equal(
+            measured[0].item(row, "k_right").float32(),
+            Float32(1) if right_index == 0 else Float32(2),
+        )
+        assert_equal(
+            measured[0].item(row, "amount").float64(),
+            expected_left_amount[left_index],
+        )
+        assert_equal(
+            measured[0].item(row, "amount_r").float32(),
+            expected_right_amount[right_index],
+        )
+        assert_equal(
+            measured[0].item(row, "day").int64(),
+            expected_left_day[left_index],
+        )
+        assert_equal(
+            measured[0].item(row, "day_r").int64(),
+            expected_right_day[right_index],
+        )
+        assert_equal(
+            measured[0].item(row, "small").int8(), Int8(left_index + 1)
+        )
+        assert_equal(
+            measured[0].item(row, "small_r").int8(), Int8(right_index + 4)
+        )
+    var limited_runtime = MetalRuntime(memory_limit_bytes=peak)
+    var bounded = query.profile(accelerator=limited_runtime, engine="accel")
     assert_equal(bounded[0].height(), 4)
     var bounded_peak = 0
     for row in range(bounded[1].height()):
@@ -490,12 +654,19 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
             Int(bounded[1].item(row, "peak_requested_bytes").int64()),
         )
     assert_true(bounded_peak <= peak)
+    same(bounded[0], cpu)
+    var ids = List[Int32]()
+    for row in range(512):
+        ids.append(Int32(row))
+    var source = DataFrame([Series("id", Column[Int32](ids^))])
+    var too_large = source.lazy().join(source.lazy(), how="cross")
     with assert_raises(contains="memory budget"):
-        _ = query.collect(
-            accelerator=MetalRuntime(memory_limit_bytes=1), engine="accel"
-        )
-    var recovered = query.collect(accelerator=MetalRuntime(), engine="accel")
-    same(measured[0], recovered)
+        _ = too_large.collect(accelerator=limited_runtime, engine="accel")
+    var tiny = left.head(1).join(
+        right.head(1), on="k", how="inner", coalesce=False
+    )
+    var recovered = tiny.collect(accelerator=limited_runtime, engine="accel")
+    same(recovered, tiny.collect(engine="cpu", streaming=False))
     print("PASS native hash join mixed payload budgets and recovery")
 
 

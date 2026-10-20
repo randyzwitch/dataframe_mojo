@@ -1026,6 +1026,7 @@ def try_execute(
         var extra = List[Tuple[String, Int]](
             [
                 ("kernel_launches", traffic[2] - before[2]),
+                ("native_hash_phase_launches", launches),
                 ("synchronizations", traffic[3] - before[3]),
                 ("peak_requested_bytes", scope.info()[1]),
                 ("upload_bytes", traffic[0] - before[0]),
