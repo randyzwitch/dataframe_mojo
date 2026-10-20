@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import statistics
 import subprocess
 import sys
@@ -21,9 +22,16 @@ WORKLOADS = [
     "sort_radix",
     "group_hash",
     "group_high",
+    "group_skew",
     "join_hash",
+    "join_fanout",
     "projection",
     "expression15",
+    "cumulative_sum",
+    "rolling_sum",
+    "float64_arithmetic",
+    "decimal_sum",
+    "wide_float32",
     "chain32",
     "filter_half",
     "filter_sparse",
@@ -39,13 +47,160 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def source_fingerprint(root):
+    """Hash source paths and contents, including untracked files."""
+    root = Path(root)
+    digest = hashlib.sha256()
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def build_receipt_path(binary):
+    return Path(str(Path(binary).resolve()) + ".receipt.json")
+
+
+def powerconditions():
+    """Best-effort read-only macOS power and thermal snapshot."""
+    snapshot = {}
+    for name, args in (("battery", ["pmset", "-g", "batt"]),
+                       ("thermal", ["pmset", "-g", "therm"])):
+        try:
+            result = subprocess.run(
+                args, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, timeout=5, check=False,
+            )
+            snapshot[name] = {
+                "status": "available" if result.returncode == 0 else "unavailable",
+                "returncode": result.returncode,
+                "output": result.stdout.strip(),
+            }
+        except (OSError, subprocess.TimeoutExpired) as error:
+            output = captured_text(error.stdout or error.output) if isinstance(
+                error, subprocess.TimeoutExpired
+            ) else str(error)
+            snapshot[name] = {
+                "status": "unavailable",
+                "error": str(error),
+                "output": output,
+            }
+    return snapshot
+
+
+def capture_build_identity(compile_flags):
+    compiler = command(["mojo", "--version"])
+    compiler_path = shutil.which("mojo")
+    source_diff = command(
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+    )
+    return {
+        "git_commit": command(["git", "rev-parse", "HEAD"]),
+        "git_status": command(["git", "status", "--porcelain"]),
+        "engine_status": command(
+            ["git", "status", "--porcelain", "--", "dataframe"]
+        ),
+        "engine_content_sha256": source_fingerprint(ROOT / "dataframe"),
+        "engine_diff_sha256": hashlib.sha256(source_diff.encode()).hexdigest(),
+        "compiler_identity": compiler,
+        "build_platform": platform.platform(),
+        "build_sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+        "build_xcode": command(["xcodebuild", "-version"]),
+        "compiler_executable": compiler_path,
+        "compiler_executable_sha256": (
+            sha(compiler_path)
+            if compiler_path and Path(compiler_path).is_file()
+            else None
+        ),
+        "pixi_lock_sha256": (
+            sha(ROOT / "pixi.lock") if (ROOT / "pixi.lock").is_file() else None
+        ),
+        "benchmark_source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
+        "driver_source_sha256": sha(__file__),
+        "compile_flags": list(compile_flags),
+        "powerconditions": powerconditions(),
+    }
+
+
+def write_build_receipt(binary, compile_flags, build_identity=None):
+    binary = Path(binary).resolve()
+    if build_identity is None:
+        build_identity = capture_build_identity(compile_flags)
+    receipt = {
+        "schema_version": 1,
+        "built_at_utc": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+        "binary_path": str(binary),
+        "binary_sha256": sha(binary),
+        "build_command": [
+            "mojo",
+            "build",
+            *compile_flags,
+            "benchmarks/bench_metal.mojo",
+            "-o",
+            str(binary),
+        ],
+        **build_identity,
+    }
+    path = build_receipt_path(binary)
+    path.write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def load_build_receipt(binary):
+    binary = Path(binary).resolve()
+    binary_sha256 = sha(binary)
+    path = build_receipt_path(binary)
+    if not path.is_file():
+        return {
+            "status": "unknown",
+            "reason": "No build receipt; binary source attribution is unknown",
+            "binary_path": str(binary),
+            "binary_sha256": binary_sha256,
+        }
+    receipt = json.loads(path.read_text())
+    if receipt.get("binary_sha256") != binary_sha256:
+        raise ValueError(f"Stale build receipt for {binary}")
+    if receipt.get("schema_version") != 1:
+        raise ValueError(f"Unsupported build receipt schema for {binary}")
+    return {"status": "verified", **receipt}
+
+
+def invocation_metadata(args, argv=None):
+    return {
+        "argv": list(sys.argv if argv is None else argv),
+        "cwd": str(Path.cwd()),
+        "build_cwd": str(ROOT),
+        "python_executable": sys.executable,
+        "timeout_seconds": args.timeout_seconds,
+        "binary": str(args.binary.resolve()),
+        "baseline_binary": (
+            str(args.baseline_binary.resolve())
+            if args.baseline_binary
+            else None
+        ),
+        "output": str(args.output.resolve()),
+        "skip_build": args.skip_build,
+    }
+
+
 def command(args):
     return subprocess.check_output(
         args, cwd=ROOT, text=True, stderr=subprocess.STDOUT
     ).strip()
 
 
-def metadata(binaries, threads):
+def metadata(binaries, threads, binary_receipts):
+    compiler = command(["mojo", "--version"])
+    compiler_path = shutil.which("mojo")
+    source_diff = command(
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+    )
     return {
         "recorded_at_utc": datetime.datetime.now(
             datetime.timezone.utc
@@ -56,6 +211,16 @@ def metadata(binaries, threads):
         "physical_cores": command(["sysctl", "-n", "hw.physicalcpu"]),
         "memory_bytes": command(["sysctl", "-n", "hw.memsize"]),
         "git_commit": command(["git", "rev-parse", "HEAD"]),
+        "source_tree": {
+            "status": command(["git", "status", "--porcelain"]),
+            "dataframe_status": command(
+                ["git", "status", "--porcelain", "--", "dataframe"]
+            ),
+            "dataframe_diff_sha256": hashlib.sha256(
+                source_diff.encode()
+            ).hexdigest(),
+            "dataframe_content_sha256": source_fingerprint(ROOT / "dataframe"),
+        },
         "engine_status": command(
             [
                 "git",
@@ -75,13 +240,25 @@ def metadata(binaries, threads):
                 "benchmarks/tools/bench_metal.py",
             ]
         ),
-        "mojo_version": command(["mojo", "--version"]),
+        "mojo_version": compiler,
+        "compiler_identity": compiler,
+        "compiler_executable": compiler_path,
+        "compiler_executable_sha256": (
+            sha(compiler_path)
+            if compiler_path and Path(compiler_path).is_file()
+            else None
+        ),
+        "pixi_lock_sha256": (
+            sha(ROOT / "pixi.lock") if (ROOT / "pixi.lock").is_file() else None
+        ),
         "xcode": command(["xcodebuild", "-version"]),
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
         "dataframe_threads": threads,
+        "powerconditions": powerconditions(),
         "implementation": "mojo",
         "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
+        "binary_receipts": binary_receipts,
         "source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
         "driver_sha256": sha(__file__),
         "environment": {
@@ -91,13 +268,14 @@ def metadata(binaries, threads):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash has min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash and group_skew have min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes; join_fanout uses ceil(N/4) cyclic or monotone balanced classes, so each key occurs at most four times and a self-left-join emits at most 4N rows. Base non-fanout keys are (37*i) modulo cardinality; sorted keys are monotone bins. group_skew maps three quarters of rows to key zero. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024. Float64 arithmetic uses exact binary fractions k/1024 with k in [0,1023] and evaluates x*2+0.25. Decimal input is Decimal(15,2) cents with unscaled values in [-8,8]; the query multiplies by Decimal(15,2) 1.25 then sums. Wide Float32 projects eight columns with binary-exact offsets [0,0.125,...,0.875], at most 8N output values or 256 MiB at the default 8,388,608 rows.",
         "limitations": [
-            "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
+            "No external-suite coverage claimed. Floating reductions remain outside these cases. Algorithm comparisons preserve complete output order and values against CPU; this CPU check is not an independent oracle.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
             "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
-            "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure.",
+            "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure. Reported host phase timings are retained as measured and may overlap; they are not added. GPU-only time and pipeline compilation attribution are unavailable unless the runtime supplies those fields.",
             "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim.",
+            "Power and thermal snapshots use read-only pmset queries when available. Missing commands, unsupported output, and timeouts are retained as unavailable; the snapshot is context, not a controlled power measurement.",
         ],
     }
 
@@ -168,6 +346,25 @@ def parse_run(output, reps):
     return result
 
 
+def captured_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def retain_timeout(error, timeout_seconds, log_path):
+    captured = captured_text(error.stdout or error.output)
+    Path(log_path).write_text(captured)
+    return {
+        "status": "failed",
+        "error": f"Timed out after {timeout_seconds} seconds",
+        "timeout_seconds": timeout_seconds,
+        "captured_output": captured,
+    }
+
+
 def render(data, target):
     lines = [
         "# Apple Metal development measurements",
@@ -224,6 +421,31 @@ def render(data, target):
         lines.append(
             f"| {runtime} | {rows} | {workload} | {variant} | {ratio:.2f} |"
         )
+    slowdowns = [
+        (runtime, rows, workload, variant, ratio)
+        for (runtime, rows, workload, variant), runs in groups.items()
+        if len([r for r in runs if r["status"] == "ok"]) == len(runs)
+        for ratio in [
+            statistics.median(s["cpu_ns"] for r in runs for s in r["samples"])
+            / statistics.median(s["metal_ns"] for r in runs for s in r["samples"])
+        ]
+        if ratio < 1
+    ]
+    lines += [
+        "",
+        "## Measured Metal slowdowns",
+        "",
+        "Cases with CPU/Metal below one, ordered by the largest Metal slowdown. The slowdown factor is Metal time divided by CPU time.",
+        "",
+        "| Runtime | Rows | Workload | Variant | CPU/Metal | Metal slower by |",
+        "|---|---:|---|---|---:|---:|",
+    ]
+    for runtime, rows, workload, variant, ratio in sorted(
+        slowdowns, key=lambda item: item[-1]
+    ):
+        lines.append(
+            f"| {runtime} | {rows} | {workload} | {variant} | {ratio:.2f} | {1 / ratio:.2f}x |"
+        )
     counts = {
         status: sum(r["status"] == status for r in data["runs"])
         for status in ("ok", "unsupported", "failed")
@@ -259,6 +481,12 @@ def main():
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=300,
+        help="Finite timeout for each benchmark process (default: 300 seconds)",
+    )
+    parser.add_argument(
         "--output", type=Path, default=ROOT / "build/metal/results.json"
     )
     parser.add_argument("--skip-build", action="store_true")
@@ -270,8 +498,8 @@ def main():
         return
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("This benchmark requires an Apple Silicon Mac")
-    if min(args.reps, args.rounds, args.threads) < 1:
-        parser.error("Repetitions, rounds and threads must be positive")
+    if min(args.reps, args.rounds, args.threads, args.timeout_seconds) < 1:
+        parser.error("Repetitions, rounds, threads and timeout must be positive")
     rows = [int(x) for x in args.rows.split(",")]
     workloads, variants = args.workloads.split(","), args.variants.split(",")
     if (
@@ -281,15 +509,15 @@ def main():
     ):
         parser.error("Invalid rows, workload or variant")
     binary = args.binary.resolve()
+    compile_flags = ["-O3", "-I", "."]
     if not args.skip_build:
         binary.parent.mkdir(parents=True, exist_ok=True)
+        build_identity = capture_build_identity(compile_flags)
         subprocess.run(
             [
                 "mojo",
                 "build",
-                "-O3",
-                "-I",
-                ".",
+                *compile_flags,
                 "benchmarks/bench_metal.mojo",
                 "-o",
                 str(binary),
@@ -297,18 +525,26 @@ def main():
             cwd=ROOT,
             check=True,
         )
+        write_build_receipt(binary, compile_flags, build_identity)
     binaries = {"mojo": binary}
     if args.baseline_binary:
         binaries["baseline"] = args.baseline_binary.resolve()
+    binary_receipts = {
+        name: load_build_receipt(executable)
+        for name, executable in binaries.items()
+    }
     data = {
         "schema_version": 2,
-        "metadata": metadata(binaries, args.threads),
+        "metadata": metadata(binaries, args.threads, binary_receipts),
+        "invocation": invocation_metadata(args),
         "selection": {
             "rows": rows,
             "workloads": workloads,
             "variants": variants,
             "rounds": args.rounds,
             "reps": args.reps,
+            "threads": args.threads,
+            "timeout_seconds": args.timeout_seconds,
         },
         "runs": [],
     }
@@ -341,8 +577,10 @@ def main():
                     "variant": variant,
                     "gpu_first": env["BENCH_GPU_FIRST"] == "1",
                     "load_before": list(os.getloadavg()),
+                    "power_before": powerconditions(),
                     "log": label + ".txt",
                 }
+                captured = ""
                 try:
                     process = subprocess.run(
                         [str(executable)],
@@ -351,22 +589,36 @@ def main():
                         text=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        timeout=300,
+                        timeout=args.timeout_seconds,
                     )
-                    (log_dir / run["log"]).write_text(process.stdout)
+                    captured = process.stdout
+                    (log_dir / run["log"]).write_text(captured)
                     if process.returncode:
                         run.update(
                             status="unsupported" if "unsupported"
                             in process.stdout else "failed",
                             error=process.stdout,
+                            captured_output=process.stdout,
                             exit_code=process.returncode,
                         )
                     else:
                         run.update(
                             parse_run(process.stdout, args.reps), status="ok"
                         )
-                except (subprocess.TimeoutExpired, ValueError) as error:
-                    run.update(status="failed", error=str(error))
+                except subprocess.TimeoutExpired as error:
+                    run.update(
+                        retain_timeout(
+                            error, args.timeout_seconds, log_dir / run["log"]
+                        )
+                    )
+                except (ValueError, OSError) as error:
+                    retained = captured or str(error)
+                    (log_dir / run["log"]).write_text(retained)
+                    run.update(
+                        status="failed",
+                        error=str(error),
+                        captured_output=retained,
+                    )
                 data["runs"].append(run)
                 args.output.write_text(json.dumps(data, indent=2) + "\n")
                 print(label, run["status"], flush=True)
