@@ -426,3 +426,61 @@ the measured alignment or hybrid classification. The CPU-only literal entry
 `tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo` validates diagnostic
 behavior independently of GPU execution (include `-I benchmarks`). Collection
 durations remain diagnostic and are not performance measurements.
+
+For ClickBench q11, q17, q18, q30–q32 and q38–q40, an independent ordering
+audit can distinguish a valid unordered selection from a wrong result:
+
+```sh
+pixi run -e oracle python benchmarks/tools/metal_ordering_oracle.py \
+  --coverage /path/to/coverage/coverage.json \
+  --answer-root /path/to/coverage/answers \
+  --input-root /path/to/benchdata \
+  --output /path/to/ordering-audit.json
+```
+
+The audit requires exported answers and the original input files. It verifies
+their receipt hashes and schemas, then uses DuckDB to calculate each complete
+grouped relation. Every selected row must belong to that relation with the
+correct multiplicity and aggregate values. Sorted queries must also return the
+requested descending rank sequence, including the slice offset. This permits
+different rows at tied boundaries only when both selections satisfy the query;
+q17 permits any valid subset of up to ten rows because its group order is unspecified.
+The reference definitions accept only the reviewed suite-source hash and fail
+closed on unhandled null or nonfinite values. Numerical differences are not
+tolerated by this audit.
+
+The resulting `selection_valid` evidence is separate from the retained
+`strict_status`. It does not rewrite coverage receipts, qualify timing pairs,
+or certify GPU-only execution. Other queries require their own independent
+references; a matching rank sequence alone never establishes correctness.
+
+Float64 aggregate and arithmetic results use a separate numerical comparison
+policy with relative tolerance `1e-9` and absolute tolerance `1e-12`:
+
+```text
+abs(actual - expected) <= max(1e-12, 1e-9 * max(abs(actual), abs(expected)))
+```
+
+The absolute threshold applies in the output column's units near zero; the
+relative threshold scales with the result's magnitude. These are comparison
+tolerances, not rounding of the computed results. Source-pinned entries in
+`benchmarks/tools/metal_numerical_policy.json` identify eligible result fields.
+Group keys, copied source attributes, integers, decimals, schemas and row
+multiplicities remain exact. Nulls match only nulls, NaNs match only NaNs, and
+infinities require the same sign. Signed zeros follow `DataFrame.equals`.
+
+```sh
+pixi run -e oracle python benchmarks/tools/metal_numerical_audit.py \
+  --coverage /path/to/coverage/coverage.json \
+  --answer-root /path/to/coverage/answers \
+  --output /path/to/numerical-audit.json
+```
+
+This compares complete retained CPU and Metal row multisets. Exact fields
+partition the rows; a one-to-one matching of the remaining fields preserves
+duplicate counts without relying on a greedy pairing of approximately equal
+values. If the comparison exceeds its candidate-pair limit, it reports
+`unverified`. The original strict status remains available alongside the
+numerical result. Agreement with CPU under this policy is not an independent
+query oracle or a certificate of output ordering, and does not itself change
+performance admission.
