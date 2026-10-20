@@ -87,7 +87,8 @@ def test_mojo_gpu_calibration_metadata() raises:
     # Metadata retains the generic allocation envelope; native typed routes
     # can use less storage without weakening the preflight budget bound.
     assert_true(
-        report.item(0, "peak_requested_bytes").int64() <= Int64(facts.peak_bytes)
+        report.item(0, "peak_requested_bytes").int64()
+        <= Int64(facts.peak_bytes)
     )
     var names = List[String](
         [
