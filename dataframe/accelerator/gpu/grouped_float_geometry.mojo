@@ -240,8 +240,7 @@ def _merge_first(
 def build_groups(
     source: Table, keys: List[String], scope: Scope
 ) raises -> Optional[ArcPointer[GroupOwner]]:
-    """Return actual GPU stable runs and first-occurrence canonical group IDs.
-    """
+    """Return actual GPU stable runs and first-occurrence canonical group IDs."""
     if not len(keys):
         raise Error("Grouped float requires at least one key")
     # Binding is metadata-only, using the same descriptors as normal grouping.
