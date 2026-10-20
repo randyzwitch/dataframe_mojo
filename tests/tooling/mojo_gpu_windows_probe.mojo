@@ -363,5 +363,6 @@ def main() raises:
         _case(11, n, True)
     print(
         "PASS Mojo GPU windows: 26 layouts x19 variants, all scalar kinds,"
-        " cumulative directions, checked prefixes, extreme shifts and bounded fills"
+        " cumulative directions, checked prefixes, extreme shifts and bounded"
+        " fills"
     )

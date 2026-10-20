@@ -387,9 +387,9 @@ def order_merge(
                     slots,
                     literals,
                 )
-        target[unsafe_offset=base + tile_start + lane_diagonal + offset] = (
-            index[unsafe_offset=a] if from_a else index[unsafe_offset=b]
-        )
+        target[
+            unsafe_offset=base + tile_start + lane_diagonal + offset
+        ] = index[unsafe_offset=a] if from_a else index[unsafe_offset=b]
         if from_a:
             a += 1
         else:

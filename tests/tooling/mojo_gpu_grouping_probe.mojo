@@ -364,5 +364,6 @@ def main() raises:
     check(257, True)
     check(257, False, True)
     print(
-        "PASS Mojo grouping: IEEE/mixed/null keys, stable starts, basic/stat reductions, local args, key errors"
+        "PASS Mojo grouping: IEEE/mixed/null keys, stable starts, basic/stat"
+        " reductions, local args, key errors"
     )

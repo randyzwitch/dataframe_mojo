@@ -385,7 +385,9 @@ def test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings
     var valid = List[Bool](length=4097, fill=True)
     var ids = List[Int64](length=4097, fill=0)
     for row in range(4097):
-        floats[row] = bitcast[DType.float64](encodings[(row * 5 + row // 7) % len(encodings)])
+        floats[row] = bitcast[DType.float64](
+            encodings[(row * 5 + row // 7) % len(encodings)]
+        )
         secondary[row] = Int16((row * 3 + row // 11) % 7)
         valid[row] = row % 113 != 0
         ids[row] = Int64(row)

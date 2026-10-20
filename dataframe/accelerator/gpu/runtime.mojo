@@ -2311,7 +2311,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=merge_grid(current_rows, run_width),
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                                 var previous = index^
@@ -2623,7 +2625,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=merge_grid(current_rows, run_width),
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                             var previous = index^

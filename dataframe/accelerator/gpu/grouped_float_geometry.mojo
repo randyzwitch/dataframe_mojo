@@ -240,7 +240,8 @@ def _merge_first(
 def build_groups(
     source: Table, keys: List[String], scope: Scope
 ) raises -> Optional[ArcPointer[GroupOwner]]:
-    """Return actual GPU stable runs and first-occurrence canonical group IDs."""
+    """Return actual GPU stable runs and first-occurrence canonical group IDs.
+    """
     if not len(keys):
         raise Error("Grouped float requires at least one key")
     # Binding is metadata-only, using the same descriptors as normal grouping.
@@ -378,7 +379,8 @@ def build_groups(
         scope.record_download(16)
         if shape[1]:
             raise data_fault(
-                "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
+                "Mojo GPU group key failed: checked arithmetic overflow or"
+                " strict cast failed"
             )
         var groups = Int(shape[0])
         if groups < 1 or groups > rows:

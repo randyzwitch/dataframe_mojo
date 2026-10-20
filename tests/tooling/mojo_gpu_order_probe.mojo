@@ -234,5 +234,6 @@ def main() raises:
         _case(10, n, True, False)
     print(
         "PASS Mojo GPU stable ordering: 58 mixed-key cases, every scalar kind,"
-        " null placement, NaNs, signed zeros, subnormals, exact gathers and errors"
+        " null placement, NaNs, signed zeros, subnormals, exact gathers and"
+        " errors"
     )
