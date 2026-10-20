@@ -196,6 +196,26 @@ Xcode version. Engine commit and engine-source hashes may differ. This guard
 checks those recorded identity fields; host hardware and runtime conditions
 remain separate recorded context.
 
+The paired native Int64/UInt64 run is archived at
+[`benchmarks/results/metal-native64/a52334e7-52efeb3a/`](../benchmarks/results/metal-native64/a52334e7-52efeb3a/).
+It compares baseline engine `a52334e758b7138c547883eb776d744442a1a0db` with
+candidate `52efeb3ab784c8949366870b7cd6b007b3bf77f9`, using benchmark and driver
+file contents matching commit
+`3447f6026a4a9d3745d56040ae4b93bc157de477`. The run contains
+144 validated baseline/candidate run keys across two row counts, four SUM
+workloads and three input variants. At 1,048,576 rows, baseline-to-candidate
+Metal median ratios range from 3.07× to 8.08× across the four workloads and
+their variants. Candidate CPU warm medians are lower than candidate Metal in
+all 24 workload/size/variant cells, so these are implementation comparisons,
+not evidence of a general GPU advantage. The package retains raw samples,
+source and binary receipts, and qualification logs. The archived prior
+full-gate log records four failures: selector expansion, categorical grouped
+row count and qcut whole-DAG synchronization parity were independently
+reproduced on baseline; an ordered profile/resource-estimate failure was
+followed by focused resource-bound fixes whose tests passed. The full gate was
+not rerun as all-green. See `summary.md` for the paired table and `validation/`
+for qualification details.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join
