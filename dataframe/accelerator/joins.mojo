@@ -542,6 +542,9 @@ struct DagTask(Copyable):
     var schema: DataFrame
     var terminal: Bool
     var how: Int
+    # Keyed joins may opt into matching null keys. Keep this separately from
+    # `how`, since left-join null matching has a legacy internal how code.
+    var nulls_equal: Bool
     var limit: Int
     var keys: List[Int64]
     var fields: List[JoinField]
@@ -799,6 +802,7 @@ def _join_task(
             7 if node.how == 1
             and len(node.flags)
             and node.flags[0] else node.how,
+            len(node.flags) > 0 and node.flags[0],
             limit,
             keys^,
             fields^,
@@ -917,6 +921,7 @@ def _asof_task(
             0 if node.text
             == "backward" else 1 if node.text
             == "forward" else 2,
+            False,
             limit,
             keys^,
             fields^,
@@ -996,6 +1001,7 @@ def _grouped_fields_task(
             schema^,
             True,
             -1,
+            False,
             -1,
             List[Int64](),
             List[JoinField](),
@@ -1055,6 +1061,7 @@ def _explode_task(
                     source.clear(),
                     True,
                     -1,
+                    False,
                     -1,
                     List[Int64](),
                     List[JoinField](),
@@ -1093,6 +1100,7 @@ def _explode_task(
             schema^,
             True,
             -1,
+            False,
             -1,
             List[Int64](),
             List[JoinField](),
@@ -1335,6 +1343,7 @@ def _task(
                 schema^,
                 True,
                 -1,
+                False,
                 -1,
                 List[Int64](),
                 List[JoinField](),
@@ -1392,6 +1401,7 @@ def _task(
             DataFrame(columns^),
             boundary,
             -1,
+            False,
             -1,
             List[Int64](),
             List[JoinField](),

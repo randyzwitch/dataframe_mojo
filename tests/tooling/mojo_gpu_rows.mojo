@@ -56,6 +56,8 @@ from tests.execution_modes.test_mojo_gpu_quantiles import (
 from tests.execution_modes.test_mojo_gpu_joins import (
     test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides,
     test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads,
+    test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles,
+    test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal,
     test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget,
     test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight,
     test_mojo_gpu_join_empty_projection_preserves_cardinality_and_zero_column_contract,
@@ -233,6 +235,14 @@ def main() raises:
     test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides()
     print("RUN test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads")
     test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads()
+    print(
+        "RUN test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles"
+    )
+    test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles()
+    print(
+        "RUN test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal"
+    )
+    test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal()
     print("RUN test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget")
     test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget()
     print(
