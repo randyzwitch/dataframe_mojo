@@ -1,0 +1,112 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-metal-0.schema.json","status":"written"}
+coverage	q55	wrong_answer	full result differs
+expected_rows	20
+actual_rows	20
+expected_sample
+shape: (20, 3)
+┌──────────┬────────────────────────┬────────────────────┐
+│ brand_id ┆ brand                  ┆ ext_price          │
+│ ---      ┆ ---                    ┆ ---                │
+│ i64      ┆ str                    ┆ f64                │
+╞══════════╪════════════════════════╪════════════════════╡
+│ 9016003  ┆ corpunivamalg #3       ┆ 46123.99           │
+│ 2001001  ┆ amalgimporto #1        ┆ 40059.799999999996 │
+│ 6015001  ┆ scholarbrand #1        ┆ 32295.100000000006 │
+│ 1001001  ┆ amalgamalg #1          ┆ 31858.13           │
+│ 3003001  ┆ exportiexporti #1      ┆ 30335.32           │
+│ 5001001  ┆ amalgscholar #1        ┆ 28664.199999999997 │
+│ 3004001  ┆ edu packexporti #1     ┆ 24372.56           │
+│ 1002001  ┆ importoamalg #1        ┆ 22671.78           │
+│ 1001002  ┆ amalgamalg #2          ┆ 22143.980000000003 │
+│ 8006005  ┆ corpnameless #5        ┆ 21510.96           │
+│ 3002001  ┆ importoexporti #1      ┆ 20523.44           │
+│ 4001001  ┆ amalgedu pack #1       ┆ 20354.12           │
+│ 10014016 ┆ edu packamalgamalg #16 ┆ 19367.66           │
+│ 5002001  ┆ importoscholar #1      ┆ 18155.88           │
+│ 4003001  ┆ exportiedu pack #1     ┆ 17913.61           │
+│ 2001002  ┆ amalgimporto #2        ┆ 14692.65           │
+│ 5004001  ┆ edu packscholar #1     ┆ 13321.56           │
+│ 10015011 ┆ scholaramalgamalg #11  ┆ 10205.76           │
+│ 6005003  ┆ scholarcorp #3         ┆ 9854.429999999998  │
+│ 4002001  ┆ importoedu pack #1     ┆ 8779.05            │
+└──────────┴────────────────────────┴────────────────────┘
+actual_sample
+shape: (20, 3)
+┌──────────┬────────────────────────┬────────────────────┐
+│ brand_id ┆ brand                  ┆ ext_price          │
+│ ---      ┆ ---                    ┆ ---                │
+│ i64      ┆ str                    ┆ f64                │
+╞══════════╪════════════════════════╪════════════════════╡
+│ 9016003  ┆ corpunivamalg #3       ┆ 46123.990000000005 │
+│ 2001001  ┆ amalgimporto #1        ┆ 40059.799999999996 │
+│ 6015001  ┆ scholarbrand #1        ┆ 32295.099999999995 │
+│ 1001001  ┆ amalgamalg #1          ┆ 31858.129999999997 │
+│ 3003001  ┆ exportiexporti #1      ┆ 30335.319999999996 │
+│ 5001001  ┆ amalgscholar #1        ┆ 28664.199999999997 │
+│ 3004001  ┆ edu packexporti #1     ┆ 24372.559999999998 │
+│ 1002001  ┆ importoamalg #1        ┆ 22671.78           │
+│ 1001002  ┆ amalgamalg #2          ┆ 22143.98           │
+│ 8006005  ┆ corpnameless #5        ┆ 21510.96           │
+│ 3002001  ┆ importoexporti #1      ┆ 20523.44           │
+│ 4001001  ┆ amalgedu pack #1       ┆ 20354.12           │
+│ 10014016 ┆ edu packamalgamalg #16 ┆ 19367.66           │
+│ 5002001  ┆ importoscholar #1      ┆ 18155.879999999997 │
+│ 4003001  ┆ exportiedu pack #1     ┆ 17913.61           │
+│ 2001002  ┆ amalgimporto #2        ┆ 14692.650000000001 │
+│ 5004001  ┆ edu packscholar #1     ┆ 13321.560000000001 │
+│ 10015011 ┆ scholaramalgamalg #11  ┆ 10205.76           │
+│ 6005003  ┆ scholarcorp #3         ┆ 9854.43            │
+│ 4002001  ┆ importoedu pack #1     ┆ 8779.050000000001  │
+└──────────┴────────────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	brand_id	True
+column_bag	cpu_metal	brand	True
+column_bag	cpu_metal	ext_price	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q55-fi05jeka/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	brand_id	True
+column_bag	cpu_repeat	brand	True
+column_bag	cpu_repeat	ext_price	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (20, 3)
+┌──────────┬────────────────────────┬────────────────────┐
+│ brand_id ┆ brand                  ┆ ext_price          │
+│ ---      ┆ ---                    ┆ ---                │
+│ i64      ┆ str                    ┆ f64                │
+╞══════════╪════════════════════════╪════════════════════╡
+│ 9016003  ┆ corpunivamalg #3       ┆ 46123.99           │
+│ 2001001  ┆ amalgimporto #1        ┆ 40059.799999999996 │
+│ 6015001  ┆ scholarbrand #1        ┆ 32295.100000000006 │
+│ 1001001  ┆ amalgamalg #1          ┆ 31858.13           │
+│ 3003001  ┆ exportiexporti #1      ┆ 30335.32           │
+│ 5001001  ┆ amalgscholar #1        ┆ 28664.199999999997 │
+│ 3004001  ┆ edu packexporti #1     ┆ 24372.56           │
+│ 1002001  ┆ importoamalg #1        ┆ 22671.78           │
+│ 1001002  ┆ amalgamalg #2          ┆ 22143.980000000003 │
+│ 8006005  ┆ corpnameless #5        ┆ 21510.96           │
+│ 3002001  ┆ importoexporti #1      ┆ 20523.44           │
+│ 4001001  ┆ amalgedu pack #1       ┆ 20354.12           │
+│ 10014016 ┆ edu packamalgamalg #16 ┆ 19367.66           │
+│ 5002001  ┆ importoscholar #1      ┆ 18155.88           │
+│ 4003001  ┆ exportiedu pack #1     ┆ 17913.61           │
+│ 2001002  ┆ amalgimporto #2        ┆ 14692.65           │
+│ 5004001  ┆ edu packscholar #1     ┆ 13321.56           │
+│ 10015011 ┆ scholaramalgamalg #11  ┆ 10205.76           │
+│ 6005003  ┆ scholarcorp #3         ┆ 9854.429999999998  │
+│ 4002001  ┆ importoedu pack #1     ┆ 8779.05            │
+└──────────┴────────────────────────┴────────────────────┘
