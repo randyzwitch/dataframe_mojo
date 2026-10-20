@@ -39,6 +39,7 @@ def fixture():
         )
         for variant in ("k100", "k10")
     ]
+    wrapper_path = "benchmarks/metal_coverage_audit.mojo"
     strict = dict(
         receipt_sha256="strict",
         format="dataframe-metal-suite-coverage-v1",
@@ -50,13 +51,31 @@ def fixture():
             threads=8,
             scale="default",
             repetitions=3,
-            driver_sha256="synthetic driver",
+            driver_sha256=report.collector.sha(report.collector.metal.__file__),
             comparison="exact",
-            original_source_sha256=sources,
+            original_source_sha256={
+                **sources,
+                wrapper_path: report.collector.sha(ROOT / wrapper_path),
+            },
             derived_source_sha256={"worker.mojo": "SYNTHETIC"},
         ),
         cases=[
-            dict(c, status="ok", ordered_equal=True, collections=3, output_rows=2)
+            dict(
+                c,
+                status="ok",
+                ordered_equal=True,
+                collections=3,
+                output_rows=2,
+                runtime_adjudication=dict(
+                    status="complete",
+                    observed_calls=3,
+                    cpu_adjudicated_calls=0,
+                    no_cpu_adjudication_marker_calls=3,
+                    unknown_calls=0,
+                    failed_calls=0,
+                    events=["no_marker", "no_marker", "no_marker"],
+                ),
+            )
             for c in cases
         ],
     )
@@ -129,6 +148,12 @@ class ApplePerformanceHTML(unittest.TestCase):
         self.assertEqual(
             (result["admitted_cases"], result["admitted_query_ids"]), (2, 1)
         )
+        proof = result["rows"][0]["confirmed_strict_basis"][
+            "runtime_adjudication"
+        ]
+        self.assertEqual(proof["status"], "complete")
+        self.assertEqual(proof["cpu_adjudicated_calls"], 0)
+        self.assertEqual(proof["no_cpu_adjudication_marker_calls"], 3)
         self.assertAlmostEqual(result["geometric_mean"], math.sqrt(120 / 65))
         self.assertAlmostEqual(result["policy_geometric_mean"], math.sqrt(2))
         row = result["rows"][0]
@@ -161,6 +186,23 @@ class ApplePerformanceHTML(unittest.TestCase):
                 original_source_sha256={"benchmarks/suites/h2o.mojo": "different"}
             ),
             lambda d, s: d["cases"][0]["strict_basis"].update(receipt_sha256="other"),
+            lambda d, s: s["cases"][0].pop("runtime_adjudication"),
+            lambda d, s: s["cases"][0]["runtime_adjudication"].update(
+                status="incomplete"
+            ),
+            lambda d, s: s["cases"][0]["runtime_adjudication"].update(
+                observed_calls=2
+            ),
+            lambda d, s: s["cases"][0]["runtime_adjudication"].update(
+                cpu_adjudicated_calls=1
+            ),
+            lambda d, s: s["cases"][0]["runtime_adjudication"].update(
+                unknown_calls=1
+            ),
+            lambda d, s: s["provenance"]["original_source_sha256"].update(
+                {"benchmarks/metal_coverage_audit.mojo": "different"}
+            ),
+            lambda d, s: s["provenance"].update(driver_sha256="different"),
         ):
             data, strict = fixture()
             strict = copy.deepcopy(strict)

@@ -6,7 +6,8 @@
       "execution_boundary": "hybrid",
       "audit_reason": "After the explicit ssales collect, DataFrame.select(mean).item executes an eager CPU aggregate before the final LazyFrame collect. Applies to both data variants, including empty outputs.",
       "source_path": "benchmarks/suites/tpcds.mojo",
-      "source_sha256": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68"
+      "source_sha256": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68",
+      "metal_derived_source_sha256": "be5a3dedce582790ffdf7160875d060b014ad6ec96a3ea4e0df44defdbb3d5cc"
     },
     "h2o_groupby/q1": {
       "workload_kind": "canonical",
@@ -16,7 +17,8 @@
       "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id1"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q2": {
       "workload_kind": "canonical",
@@ -27,7 +29,8 @@
       "alignment_keys": [
         "id1",
         "id2"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q3": {
       "workload_kind": "canonical",
@@ -37,7 +40,8 @@
       "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id3"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q4": {
       "workload_kind": "canonical",
@@ -47,7 +51,8 @@
       "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id4"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q5": {
       "workload_kind": "canonical",
@@ -57,7 +62,8 @@
       "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id6"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q6": {
       "workload_kind": "canonical",
@@ -68,7 +74,8 @@
       "alignment_keys": [
         "id4",
         "id5"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q7": {
       "workload_kind": "canonical",
@@ -78,7 +85,8 @@
       "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
       "alignment_keys": [
         "id3"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q9": {
       "workload_kind": "canonical",
@@ -89,7 +97,8 @@
       "alignment_keys": [
         "id2",
         "id4"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "h2o_groupby/q10": {
       "workload_kind": "canonical",
@@ -104,7 +113,8 @@
         "id4",
         "id5",
         "id6"
-      ]
+      ],
+      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
     },
     "pdsh/q1": {
       "workload_kind": "canonical",
@@ -115,7 +125,8 @@
       "alignment_keys": [
         "l_returnflag",
         "l_linestatus"
-      ]
+      ],
+      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
     },
     "pdsh/q5": {
       "workload_kind": "canonical",
@@ -125,7 +136,8 @@
       "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
       "alignment_keys": [
         "n_name"
-      ]
+      ],
+      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
     },
     "pdsh/q7": {
       "workload_kind": "canonical",
@@ -137,7 +149,8 @@
         "supp_nation",
         "cust_nation",
         "l_year"
-      ]
+      ],
+      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
     },
     "pdsh/q9": {
       "workload_kind": "canonical",
@@ -148,7 +161,8 @@
       "alignment_keys": [
         "nation",
         "o_year"
-      ]
+      ],
+      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
     },
     "pdsh/q15": {
       "workload_kind": "canonical",
@@ -158,7 +172,8 @@
       "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
       "alignment_keys": [
         "s_suppkey"
-      ]
+      ],
+      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
     }
   }
 }

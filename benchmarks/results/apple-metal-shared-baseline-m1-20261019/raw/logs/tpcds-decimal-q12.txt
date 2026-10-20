@@ -1,0 +1,123 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-metal-0.schema.json","status":"written"}
+coverage	q12	wrong_answer	full result differs
+expected_rows	100
+actual_rows	100
+expected_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class        ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---            ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str            ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts           ┆ 3527            ┆ 0.00          ┆ 0.0                │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts           ┆ 410             ┆ 4278.12       ┆ 72.15048975957258  │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts           ┆ 822             ┆ 1651.32       ┆ 27.849510240427428 │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business       ┆ 7825            ┆ 4458.55       ┆ 45.00749022838131  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business       ┆ 242             ┆ 5161.11       ┆ 52.099585715670116 │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business       ┆ 19              ┆ 286.58        ┆ 2.892924055948574  │
+│ AAAAAAAAGMCAAAAA ┆ Now old phenomena will suppress… ┆ Books      ┆ computers      ┆ 923             ┆ 6536.02       ┆ 74.19024927892882  │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers      ┆ 434             ┆ 1968.38       ┆ 22.34304712587445  │
+│ AAAAAAAAMJEAAAAA ┆ Advantages w                     ┆ Books      ┆ computers      ┆ 104             ┆ 305.41        ┆ 3.466703595196718  │
+│ AAAAAAAAGOCAAAAA ┆ Frantically necess               ┆ Books      ┆ cooking        ┆ 437             ┆ 1065.24       ┆ 6.355847255369929  │
+│ …                ┆ …                                ┆ …          ┆ …              ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAKEFAAAAA ┆ Important, awful changes shall … ┆ Home       ┆ wallpaper      ┆ 75              ┆ 3796.80       ┆ 17.692327406844782 │
+│ AAAAAAAAKPBAAAAA ┆ "For example flat users lower v… ┆ Home       ┆ wallpaper      ┆ 627             ┆ 2997.00       ┆ 13.965419626610254 │
+│ AAAAAAAAMNDAAAAA ┆ Compatible kids go at the acts.… ┆ Home       ┆ wallpaper      ┆ 416             ┆ 1982.88       ┆ 9.239823579984298  │
+│ AAAAAAAADCFAAAAA ┆ Police might not generate compl… ┆ Sports     ┆ archery        ┆ 679             ┆ 7340.00       ┆ 34.90198912807794  │
+│ AAAAAAAAEFCAAAAA ┆ "Statistical, "                  ┆ Sports     ┆ archery        ┆ 35              ┆ 669.64        ┆ 3.1841645776193617 │
+│ AAAAAAAAEKFAAAAA ┆ "Sure schools might fit as esse… ┆ Sports     ┆ archery        ┆ 14              ┆ 1629.12       ┆ 7.746529772252635  │
+│ AAAAAAAAMNGAAAAA ┆ Conscious, c                     ┆ Sports     ┆ archery        ┆ 480             ┆ 11391.56      ┆ 54.16731652205008  │
+│ AAAAAAAACPAAAAAA ┆ At all lengthy sales must not r… ┆ Sports     ┆ athletic shoes ┆ 176             ┆ 3897.85       ┆ 66.95300570101533  │
+│ AAAAAAAAGAEAAAAA ┆ Equations may not lea            ┆ Sports     ┆ athletic shoes ┆ 616             ┆ 494.12        ┆ 8.487453128515897  │
+│ AAAAAAAAPDBAAAAA ┆ Poor, serious years help bare, … ┆ Sports     ┆ athletic shoes ┆ 45              ┆ 1429.80       ┆ 24.559541170468773 │
+└──────────────────┴──────────────────────────────────┴────────────┴────────────────┴─────────────────┴───────────────┴────────────────────┘
+actual_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class        ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---            ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str            ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts           ┆ 3527            ┆ 0.00          ┆ 0.0                │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts           ┆ 410             ┆ 4278.12       ┆ 72.15048975957258  │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts           ┆ 822             ┆ 1651.32       ┆ 27.849510240427428 │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business       ┆ 7825            ┆ 4458.55       ┆ 45.00749022838131  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business       ┆ 242             ┆ 5161.11       ┆ 52.099585715670116 │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business       ┆ 19              ┆ 286.58        ┆ 2.892924055948574  │
+│ AAAAAAAAGMCAAAAA ┆ Now old phenomena will suppress… ┆ Books      ┆ computers      ┆ 923             ┆ 6536.02       ┆ 74.19024927892882  │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers      ┆ 434             ┆ 1968.38       ┆ 22.34304712587445  │
+│ AAAAAAAAMJEAAAAA ┆ Advantages w                     ┆ Books      ┆ computers      ┆ 104             ┆ 305.41        ┆ 3.466703595196718  │
+│ AAAAAAAAGOCAAAAA ┆ Frantically necess               ┆ Books      ┆ cooking        ┆ 437             ┆ 1065.24       ┆ 6.355847255369929  │
+│ …                ┆ …                                ┆ …          ┆ …              ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAKEFAAAAA ┆ Important, awful changes shall … ┆ Home       ┆ wallpaper      ┆ 75              ┆ 3796.80       ┆ 17.69232740684478  │
+│ AAAAAAAAKPBAAAAA ┆ "For example flat users lower v… ┆ Home       ┆ wallpaper      ┆ 627             ┆ 2997.00       ┆ 13.96541962661025  │
+│ AAAAAAAAMNDAAAAA ┆ Compatible kids go at the acts.… ┆ Home       ┆ wallpaper      ┆ 416             ┆ 1982.88       ┆ 9.239823579984296  │
+│ AAAAAAAADCFAAAAA ┆ Police might not generate compl… ┆ Sports     ┆ archery        ┆ 679             ┆ 7340.00       ┆ 34.901989128077936 │
+│ AAAAAAAAEFCAAAAA ┆ "Statistical, "                  ┆ Sports     ┆ archery        ┆ 35              ┆ 669.64        ┆ 3.1841645776193612 │
+│ AAAAAAAAEKFAAAAA ┆ "Sure schools might fit as esse… ┆ Sports     ┆ archery        ┆ 14              ┆ 1629.12       ┆ 7.746529772252633  │
+│ AAAAAAAAMNGAAAAA ┆ Conscious, c                     ┆ Sports     ┆ archery        ┆ 480             ┆ 11391.56      ┆ 54.16731652205007  │
+│ AAAAAAAACPAAAAAA ┆ At all lengthy sales must not r… ┆ Sports     ┆ athletic shoes ┆ 176             ┆ 3897.85       ┆ 66.95300570101533  │
+│ AAAAAAAAGAEAAAAA ┆ Equations may not lea            ┆ Sports     ┆ athletic shoes ┆ 616             ┆ 494.12        ┆ 8.487453128515897  │
+│ AAAAAAAAPDBAAAAA ┆ Poor, serious years help bare, … ┆ Sports     ┆ athletic shoes ┆ 45              ┆ 1429.80       ┆ 24.559541170468773 │
+└──────────────────┴──────────────────────────────────┴────────────┴────────────────┴─────────────────┴───────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	i_item_id	True
+column_bag	cpu_metal	i_item_desc	True
+column_bag	cpu_metal	i_category	True
+column_bag	cpu_metal	i_class	True
+column_bag	cpu_metal	i_current_price	True
+column_bag	cpu_metal	itemrevenue	True
+column_bag	cpu_metal	revenueratio	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	i_item_id	True
+column_bag	cpu_repeat	i_item_desc	True
+column_bag	cpu_repeat	i_category	True
+column_bag	cpu_repeat	i_class	True
+column_bag	cpu_repeat	i_current_price	True
+column_bag	cpu_repeat	itemrevenue	True
+column_bag	cpu_repeat	revenueratio	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class        ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---            ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str            ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts           ┆ 3527            ┆ 0.00          ┆ 0.0                │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts           ┆ 410             ┆ 4278.12       ┆ 72.15048975957258  │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts           ┆ 822             ┆ 1651.32       ┆ 27.849510240427428 │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business       ┆ 7825            ┆ 4458.55       ┆ 45.00749022838131  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business       ┆ 242             ┆ 5161.11       ┆ 52.099585715670116 │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business       ┆ 19              ┆ 286.58        ┆ 2.892924055948574  │
+│ AAAAAAAAGMCAAAAA ┆ Now old phenomena will suppress… ┆ Books      ┆ computers      ┆ 923             ┆ 6536.02       ┆ 74.19024927892882  │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers      ┆ 434             ┆ 1968.38       ┆ 22.34304712587445  │
+│ AAAAAAAAMJEAAAAA ┆ Advantages w                     ┆ Books      ┆ computers      ┆ 104             ┆ 305.41        ┆ 3.466703595196718  │
+│ AAAAAAAAGOCAAAAA ┆ Frantically necess               ┆ Books      ┆ cooking        ┆ 437             ┆ 1065.24       ┆ 6.355847255369929  │
+│ …                ┆ …                                ┆ …          ┆ …              ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAKEFAAAAA ┆ Important, awful changes shall … ┆ Home       ┆ wallpaper      ┆ 75              ┆ 3796.80       ┆ 17.692327406844782 │
+│ AAAAAAAAKPBAAAAA ┆ "For example flat users lower v… ┆ Home       ┆ wallpaper      ┆ 627             ┆ 2997.00       ┆ 13.965419626610254 │
+│ AAAAAAAAMNDAAAAA ┆ Compatible kids go at the acts.… ┆ Home       ┆ wallpaper      ┆ 416             ┆ 1982.88       ┆ 9.239823579984298  │
+│ AAAAAAAADCFAAAAA ┆ Police might not generate compl… ┆ Sports     ┆ archery        ┆ 679             ┆ 7340.00       ┆ 34.90198912807794  │
+│ AAAAAAAAEFCAAAAA ┆ "Statistical, "                  ┆ Sports     ┆ archery        ┆ 35              ┆ 669.64        ┆ 3.1841645776193617 │
+│ AAAAAAAAEKFAAAAA ┆ "Sure schools might fit as esse… ┆ Sports     ┆ archery        ┆ 14              ┆ 1629.12       ┆ 7.746529772252635  │
+│ AAAAAAAAMNGAAAAA ┆ Conscious, c                     ┆ Sports     ┆ archery        ┆ 480             ┆ 11391.56      ┆ 54.16731652205008  │
+│ AAAAAAAACPAAAAAA ┆ At all lengthy sales must not r… ┆ Sports     ┆ athletic shoes ┆ 176             ┆ 3897.85       ┆ 66.95300570101533  │
+│ AAAAAAAAGAEAAAAA ┆ Equations may not lea            ┆ Sports     ┆ athletic shoes ┆ 616             ┆ 494.12        ┆ 8.487453128515897  │
+│ AAAAAAAAPDBAAAAA ┆ Poor, serious years help bare, … ┆ Sports     ┆ athletic shoes ┆ 45              ┆ 1429.80       ┆ 24.559541170468773 │
+└──────────────────┴──────────────────────────────────┴────────────┴────────────────┴─────────────────┴───────────────┴────────────────────┘

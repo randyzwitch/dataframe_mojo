@@ -1,0 +1,92 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-metal-0.schema.json","status":"written"}
+coverage	q4	wrong_answer	full result differs
+expected_rows	10
+actual_rows	10
+expected_sample
+shape: (10, 4)
+┌─────┬────────────────────┬───────────────────┬────────────────────┐
+│ id4 ┆ v1                 ┆ v2                ┆ v3                 │
+│ --- ┆ ---                ┆ ---               ┆ ---                │
+│ i64 ┆ f64                ┆ f64               ┆ f64                │
+╞═════╪════════════════════╪═══════════════════╪════════════════════╡
+│ 3   ┆ 2.9951964760870213 ┆ 8.007504260386874 ┆ 50.09827921168392  │
+│ 9   ┆ 3.0009689438512024 ┆ 8.001378497437793 ┆ 49.97500389218746  │
+│ 4   ┆ 3.0050530874966164 ┆ 8.002787218896943 ┆ 49.95185982128715  │
+│ 10  ┆ 2.985068813295248  ┆ 7.991280985957693 ┆ 49.93449479183235  │
+│ 2   ┆ 3.0060025940858863 ┆ 7.991121791326905 ┆ 50.08562941361597  │
+│ 8   ┆ 3.004564281980134  ┆ 8.013632525033177 ┆ 49.84565894295648  │
+│ 1   ┆ 2.9916635051217026 ┆ 8.010013777680157 ┆ 50.004852470248345 │
+│ 6   ┆ 2.9905409311551225 ┆ 8.02606476820796  ┆ 49.88641519442426  │
+│ 5   ┆ 3.00204721578653   ┆ 8.006640968283135 ┆ 50.05551746479788  │
+│ 7   ┆ 3.0064116008029482 ┆ 7.975002746402213 ┆ 49.94694732062     │
+└─────┴────────────────────┴───────────────────┴────────────────────┘
+actual_sample
+shape: (10, 4)
+┌─────┬────────────────────┬───────────────────┬────────────────────┐
+│ id4 ┆ v1                 ┆ v2                ┆ v3                 │
+│ --- ┆ ---                ┆ ---               ┆ ---                │
+│ i64 ┆ f64                ┆ f64               ┆ f64                │
+╞═════╪════════════════════╪═══════════════════╪════════════════════╡
+│ 1   ┆ 2.9916635051217026 ┆ 8.010013777680157 ┆ 50.00485247024827  │
+│ 2   ┆ 3.0060025940858863 ┆ 7.991121791326905 ┆ 50.08562941361604  │
+│ 3   ┆ 2.9951964760870213 ┆ 8.007504260386874 ┆ 50.09827921168398  │
+│ 4   ┆ 3.0050530874966164 ┆ 8.002787218896943 ┆ 49.951859821288295 │
+│ 5   ┆ 3.00204721578653   ┆ 8.006640968283135 ┆ 50.05551746479756  │
+│ 6   ┆ 2.9905409311551225 ┆ 8.02606476820796  ┆ 49.88641519442411  │
+│ 7   ┆ 3.0064116008029482 ┆ 7.975002746402213 ┆ 49.946947320620154 │
+│ 8   ┆ 3.004564281980134  ┆ 8.013632525033177 ┆ 49.84565894295635  │
+│ 9   ┆ 3.0009689438512024 ┆ 8.001378497437793 ┆ 49.97500389218743  │
+│ 10  ┆ 2.985068813295248  ┆ 7.991280985957693 ┆ 49.934494791832876 │
+└─────┴────────────────────┴───────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	id4	True
+column_bag	cpu_metal	v1	True
+column_bag	cpu_metal	v2	True
+column_bag	cpu_metal	v3	False
+diagnostic	cpu_metal.alignment	verified_unique_keys
+column_diagnostic	cpu_metal	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	v1	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	v2	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	v3	float64	10	0	10	0	161	1.1439738045737613e-12	2.2901525762334617e-14
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k10-q4-yqy26kb9/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	id4	True
+column_bag	cpu_repeat	v1	True
+column_bag	cpu_repeat	v2	True
+column_bag	cpu_repeat	v3	True
+diagnostic	cpu_repeat.alignment	verified_unique_keys
+column_diagnostic	cpu_repeat	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	v1	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	v2	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	v3	float64	0	0	0	0	unavailable	unavailable	unavailable
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (10, 4)
+┌─────┬────────────────────┬───────────────────┬────────────────────┐
+│ id4 ┆ v1                 ┆ v2                ┆ v3                 │
+│ --- ┆ ---                ┆ ---               ┆ ---                │
+│ i64 ┆ f64                ┆ f64               ┆ f64                │
+╞═════╪════════════════════╪═══════════════════╪════════════════════╡
+│ 3   ┆ 2.9951964760870213 ┆ 8.007504260386874 ┆ 50.09827921168392  │
+│ 9   ┆ 3.0009689438512024 ┆ 8.001378497437793 ┆ 49.97500389218746  │
+│ 4   ┆ 3.0050530874966164 ┆ 8.002787218896943 ┆ 49.95185982128715  │
+│ 10  ┆ 2.985068813295248  ┆ 7.991280985957693 ┆ 49.93449479183235  │
+│ 2   ┆ 3.0060025940858863 ┆ 7.991121791326905 ┆ 50.08562941361597  │
+│ 8   ┆ 3.004564281980134  ┆ 8.013632525033177 ┆ 49.84565894295648  │
+│ 1   ┆ 2.9916635051217026 ┆ 8.010013777680157 ┆ 50.004852470248345 │
+│ 6   ┆ 2.9905409311551225 ┆ 8.02606476820796  ┆ 49.88641519442426  │
+│ 5   ┆ 3.00204721578653   ┆ 8.006640968283135 ┆ 50.05551746479788  │
+│ 7   ┆ 3.0064116008029482 ┆ 7.975002746402213 ┆ 49.94694732062     │
+└─────┴────────────────────┴───────────────────┴────────────────────┘

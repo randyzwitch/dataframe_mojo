@@ -1,7 +1,10 @@
 """Measured Mojo benchmark profiles accept operation-dependent synchronization."""
 import importlib.util
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -60,6 +63,188 @@ class MetalBenchmarkDriver(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 driver.parse_run(text, 1)
+
+    def test_profile_timing_fields_are_retained(self):
+        parsed = driver.parse_run(
+            output()
+            + "PROFILE_F region_0_gpu_ms 2.5\n"
+            + "PROFILE_F region_0_staging_copy_ms 1.25\n"
+            + "PROFILE_F query_wall_ms 4.75\n",
+            1,
+        )
+        self.assertEqual(parsed["profile"]["region_0_gpu_ms"], 2.5)
+        self.assertEqual(parsed["profile"]["region_0_staging_copy_ms"], 1.25)
+        self.assertEqual(parsed["profile"]["query_wall_ms"], 4.75)
+
+    def test_query_preflight_timing_is_retained(self):
+        parsed = driver.parse_run(
+            output() + "PROFILE_F query_preflight_ms 0.8\n", 1
+        )
+        self.assertEqual(parsed["profile"]["query_preflight_ms"], 0.8)
+
+    def test_optional_pipeline_and_gpu_timing_fields_are_retained(self):
+        parsed = driver.parse_run(
+            output()
+            + "PROFILE_F region_0_pipeline_compile_ms 0.75\n"
+            + "PROFILE_F region_0_gpu_ms 1.5\n",
+            1,
+        )
+        self.assertEqual(parsed["profile"]["region_0_pipeline_compile_ms"], 0.75)
+        self.assertEqual(parsed["profile"]["region_0_gpu_ms"], 1.5)
+
+    def test_build_receipt_is_verified_and_stale_binary_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "bench"
+            binary.write_bytes(b"first executable")
+            identity = {
+                "git_commit": "abc123",
+                "engine_content_sha256": "a" * 64,
+                "compiler_identity": "Mojo 0.0",
+                "pixi_lock_sha256": "b" * 64,
+                "benchmark_source_sha256": "c" * 64,
+                "driver_source_sha256": "d" * 64,
+                "compile_flags": ["-O3", "-I", "."],
+            }
+            with patch.object(
+                driver, "capture_build_identity", return_value=identity
+            ):
+                driver.write_build_receipt(binary, identity["compile_flags"])
+            receipt = driver.load_build_receipt(binary)
+            self.assertEqual(receipt["status"], "verified")
+            self.assertEqual(receipt["git_commit"], "abc123")
+            self.assertEqual(receipt["binary_sha256"], driver.sha(binary))
+            self.assertEqual(
+                receipt["build_command"],
+                [
+                    "mojo",
+                    "build",
+                    "-O3",
+                    "-I",
+                    ".",
+                    "benchmarks/bench_metal.mojo",
+                    "-o",
+                    str(binary.resolve()),
+                ],
+            )
+            binary.write_bytes(b"replacement executable")
+            with self.assertRaisesRegex(ValueError, "Stale build receipt"):
+                driver.load_build_receipt(binary)
+
+    def test_legacy_binary_has_unknown_source_attribution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "legacy-bench"
+            binary.write_bytes(b"legacy")
+            receipt = driver.load_build_receipt(binary)
+        self.assertEqual(receipt["status"], "unknown")
+        self.assertNotIn("git_commit", receipt)
+        self.assertNotIn("engine_content_sha256", receipt)
+
+    def test_invocation_records_effective_timeout_and_paths(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "timeout_seconds": 90,
+                "binary": Path("build/current"),
+                "baseline_binary": Path("build/baseline"),
+                "output": Path("build/run.json"),
+                "skip_build": True,
+            },
+        )()
+        record = driver.invocation_metadata(args, ["bench_metal.py", "--skip-build"])
+        self.assertEqual(record["argv"], ["bench_metal.py", "--skip-build"])
+        self.assertEqual(record["timeout_seconds"], 90)
+        self.assertTrue(record["skip_build"])
+        self.assertEqual(record["binary"], str(args.binary.resolve()))
+        self.assertEqual(
+            record["baseline_binary"], str(args.baseline_binary.resolve())
+        )
+        self.assertEqual(record["output"], str(args.output.resolve()))
+
+    def test_new_mechanism_cases_are_selectable(self):
+        for workload in (
+            "float64_arithmetic",
+            "decimal_sum",
+            "wide_float32",
+            "join_fanout",
+        ):
+            self.assertIn(workload, driver.WORKLOADS)
+
+    def test_powerconditions_preserves_unavailable_commands(self):
+        with patch.object(
+            driver.subprocess,
+            "run",
+            side_effect=FileNotFoundError("pmset missing"),
+        ):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertIn("pmset missing", snapshot["battery"]["error"])
+        self.assertEqual(snapshot["thermal"]["status"], "unavailable")
+
+    def test_powerconditions_timeout_is_unavailable_with_partial_output(self):
+        error = subprocess.TimeoutExpired(["pmset"], 5, output=b"partial")
+        with patch.object(driver.subprocess, "run", side_effect=error):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertEqual(snapshot["battery"]["output"], "partial")
+        self.assertIn("timed out", snapshot["battery"]["error"])
+
+    def test_powerconditions_retains_stdout_and_returncode(self):
+        with patch.object(
+            driver.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["pmset"], 1, stdout="unsupported"
+            ),
+        ):
+            snapshot = driver.powerconditions()
+        self.assertEqual(snapshot["battery"]["status"], "unavailable")
+        self.assertEqual(snapshot["battery"]["returncode"], 1)
+        self.assertEqual(snapshot["battery"]["output"], "unsupported")
+
+    def test_source_fingerprint_includes_untracked_mojo_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source_root = Path(folder) / "dataframe"
+            source_root.mkdir()
+            source = source_root / "new_untracked_module.mojo"
+            source.write_text("fn first(): pass\n")
+            before = driver.source_fingerprint(source_root)
+            source.write_text("fn second(): pass\n")
+            after = driver.source_fingerprint(source_root)
+        self.assertNotEqual(before, after)
+
+    def test_timeout_keeps_partial_output_in_log_and_result(self):
+        error = subprocess.TimeoutExpired(["bench"], 3, output=b"partial\xff")
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / "worker.txt"
+            result = driver.retain_timeout(error, 3, log)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["timeout_seconds"], 3)
+            self.assertIn("Timed out", result["error"])
+            self.assertEqual(result["captured_output"], "partial\ufffd")
+            self.assertEqual(log.read_text(), result["captured_output"])
+
+    def test_report_lists_cases_where_metal_is_slower(self):
+        data = {
+            "metadata": {"scope": "Development mechanisms only."},
+            "runs": [
+                {
+                    "runtime": "mojo",
+                    "rows": 64,
+                    "workload": "projection",
+                    "variant": "base",
+                    "status": "ok",
+                    "samples": [{"cpu_ns": 100, "metal_ns": 200}],
+                    "profile": {"kernel_launches": 1, "peak_requested_bytes": 4},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "report.md"
+            driver.render(data, target)
+            report = target.read_text()
+        self.assertIn("## Measured Metal slowdowns", report)
+        self.assertIn("| mojo | 64 | projection | base | 0.50 | 2.00x |", report)
 
 
 if __name__ == "__main__":
