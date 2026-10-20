@@ -5484,12 +5484,22 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         plan._unique_as_aggregate()
         plan._split_filters()
         plan._filter_shared_subplans()
-        plan._push_predicates()
-        plan._merge_filters()
-        plan._push_slices()
-        plan._fuse_top_k()
-        plan._eliminate_common_subexpressions()
-        plan._push_projections()
+        # From predicate to projection pushdown, a node keeps the schema it
+        # derived across renumbering and the passes between, as Polars' IR
+        # nodes keep theirs: those passes change no node's output, and
+        # forget the nodes they rewrite.
+        plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        try:
+            plan._push_predicates()
+            plan._merge_filters()
+            plan._push_slices()
+            plan._fuse_top_k()
+            plan._eliminate_common_subexpressions()
+            plan._push_projections()
+        except e:
+            plan._schema_memo = None
+            raise e^
+        plan._schema_memo = None
         return plan^
 
     def _eliminate_common_subexpressions(mut self) raises:
@@ -5552,6 +5562,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 _plan_node(WITH_COLUMNS, self._nodes[i].left, exprs=shared)
             )
             self._nodes[i].left = len(self._nodes) - 1
+            self._forget_schema(i)
             changed = True
         if changed:
             self._reorder()
@@ -5799,7 +5810,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         dropped again."""
         var count = len(self._nodes)
         var changed = False
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         for i in range(count):
             ref node = self._nodes[i]
             if node.kind != UNIQUE or node.left < 0:
@@ -5838,7 +5849,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 SELECT, len(self._nodes) - 1, exprs=shown
             )
             changed = True
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
         if changed:
             self._reorder()
 
@@ -6152,6 +6164,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 var child = below.left
                 self._nodes[i].exprs = [merged^]
                 self._nodes[i].left = child
+                self._forget_schema(i)
                 self._reorder()
                 changed = True
                 break
@@ -7831,24 +7844,36 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return False
         return True
 
-    def _remember_schemas(mut self):
-        """Keep each node's schema once derived, until the next rewrite."""
-        self._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
-
-    def _forget_schemas(mut self):
+    def _remember_schemas(mut self) -> Bool:
+        """Keep each node's schema once derived, until the pass ends. True
+        when this pass started remembering, and so ends it; False inside
+        passes that already remember (`_optimized`)."""
         if self._schema_memo:
-            self._schema_memo.value()[].clear()
+            return False
+        self._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        return True
+
+    def _forget_schema(mut self, index: Int):
+        """Forget one node's schema, after a rewrite of that node that
+        leaves its output as it was (the nodes above keep theirs)."""
+        if self._schema_memo:
+            try:
+                _ = self._schema_memo.value()[].pop(index)
+            except:
+                pass
 
     def _push_predicates(mut self) raises:
         """Swap each filter below operators that cannot change its result."""
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         try:
             self._push_predicates_now()
             self._drop_constant_filters()
         except e:
-            self._schema_memo = None
+            if owned:
+                self._schema_memo = None
             raise e^
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
 
     def _drop_constant_filters(mut self) raises:
         """A filter folded to true (`_fold_constants`) keeps every row
@@ -8160,21 +8185,36 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     pass
 
     def _reorder(mut self, root: Int = -1):
-        """Restore children-before-parents order after rewiring."""
-        self._forget_schemas()
+        """Restore children-before-parents order after rewiring. Nodes
+        move to their new places rather than being copied, and remembered
+        schemas move with them: renumbering changes no node's output, as
+        Polars' IR nodes keep their schemas wherever the arena holds them.
+        Unreachable nodes and their schemas are dropped."""
         var order = self._topological(root)
         var position = List[Int](length=len(self._nodes), fill=-1)
         for k in range(len(order)):
             position[order[k]] = k
-        var nodes = List[PlanNode]()
+        var nodes = List[PlanNode](capacity=len(order))
         for k in range(len(order)):
-            var node = self._nodes[order[k]].copy()
+            # Each node is reached once, so it is taken, not copied.
+            var node = _plan_node(SCAN_FRAME)
+            swap(node, self._nodes[order[k]])
             if node.left >= 0:
                 node.left = position[node.left]
             if node.right >= 0:
                 node.right = position[node.right]
             nodes.append(node^)
         self._nodes = nodes^
+        if self._schema_memo:
+            ref memo = self._schema_memo.value()[]
+            var moved = Dict[Int, DataFrame]()
+            for k in range(len(order)):
+                if order[k] in memo:
+                    try:
+                        moved[k] = memo.pop(order[k])
+                    except:
+                        pass
+            memo = moved^
 
     def _topological(self, root: Int = -1) -> List[Int]:
         """The nodes reachable from `root` (by default the last node no
@@ -8273,7 +8313,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         var all_needed = List[Bool](length=len(self._nodes), fill=False)
         all_needed[len(self._nodes) - 1] = True
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         # (join index, right side?, columns) for join inputs to narrow.
         var narrow_joins = List[Int]()
         var narrow_sides = List[Bool]()
@@ -8395,7 +8435,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
         if aligned:
             self._reorder()
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
 
     def _align_union_inputs(
         mut self, unions: List[Int], columns: List[List[String]]
