@@ -745,6 +745,16 @@ def allocate_native_column[
 def upload_native[
     dtype: DType
 ](scope: Scope, series: Series) raises -> NativeColumn[dtype]:
+    """Upload supported primitive storage without instantiating packed Bool access."""
+    comptime if dtype == DType.bool:
+        raise Error("Native Bool upload is not implemented")
+    else:
+        return _upload_native_unpacked[dtype](scope, series)
+
+
+def _upload_native_unpacked[
+    dtype: DType
+](scope: Scope, series: Series) raises -> NativeColumn[dtype]:
     """Bulk-upload a native-width primitive Series, preserving slices and packed validity.
 
     Values always move at their physical width. A single nullable chunk retains the
