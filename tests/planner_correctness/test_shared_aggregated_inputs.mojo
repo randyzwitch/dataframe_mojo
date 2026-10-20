@@ -280,3 +280,58 @@ def test_a_subquery_two_joins_build_on_runs_once() raises:
             assert_true(chosen(item))
         assert_equal(seen, total)
     _ = trace^
+
+
+def test_copies_read_differently_keep_the_union_and_run_once() raises:
+    """A CTE read in two places, each reader using other columns of it, is
+    pruned in both copies to the columns some reader uses, as Polars merges
+    a cache's readers' projections: the copies stay alike and run once,
+    and a column neither reads is not computed."""
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var frame = sales()
+    var per_item = (
+        frame.lazy()
+        .group_by(["ss_item"])
+        .agg(
+            [
+                col("qty").sum().alias("total"),
+                col("qty").count().alias("rows"),
+                col("qty").max().alias("most"),
+            ]
+        )
+        .select_exprs(
+            [
+                col("ss_item"),
+                col("total").alias("t"),
+                col("rows").alias("n"),
+                (col("most") * lit(Int64(2))).alias("m"),
+            ]
+        )
+    )
+    var query = per_item.select(["ss_item", "t"]).join(
+        per_item.select(["ss_item", "n"]), on=["ss_item"]
+    )
+    var plan = query.explain(streaming=False)
+    assert_equal(plan.count("SELECT ss_item, t, n\n"), 2, plan)
+    for optimize in [True, False]:
+        var observed = StrategyTrace()
+        var actual = query.collect(optimize=optimize)
+        if optimize:
+            assert_true(
+                "dataframe-path: lazy.shared_subplan\n" in observed.text(),
+                "the copies were not shared",
+            )
+        _ = observed^
+        var totals = Dict[Int, Int128]()
+        var counts = Dict[Int, Int128]()
+        for row in range(ROWS):
+            var item = item_of(row)
+            totals[item] = totals.get(item, Int128(0)) + Int128(quantity(row))
+            counts[item] = counts.get(item, Int128(0)) + 1
+        assert_equal(actual.height(), len(totals))
+        assert_equal(actual.columns(), List[String](["ss_item", "t", "n"]))
+        for r in range(actual.height()):
+            var item = Int(integer(actual.item(r, "ss_item")))
+            assert_equal(integer(actual.item(r, "t")), totals[item])
+            assert_equal(integer(actual.item(r, "n")), counts[item])
+    _ = trace^

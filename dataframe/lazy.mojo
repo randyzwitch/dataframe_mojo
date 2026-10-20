@@ -5842,6 +5842,99 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if changed:
             self._reorder()
 
+    def _repeats_a_scan(self) -> Bool:
+        """Whether two scan nodes read the same source: the same file, or
+        frames holding the same buffers (plans joined carry their own copies
+        of a frame they both scan, in separate slots). Without one no subtree
+        can be written twice."""
+        var seen = List[Int]()
+        var files = List[String]()
+        for node in self._nodes:
+            if node.kind == SCAN_FRAME:
+                for f in seen:
+                    if f == node.offset or self._frames[f]._shares_buffers_with(
+                        self._frames[node.offset]
+                    ):
+                        return True
+                seen.append(node.offset)
+            elif node.kind == SCAN_CSV or node.kind == SCAN_PARQUET:
+                if node.text in files:
+                    return True
+                files.append(node.text)
+        return False
+
+    def _projection_visits(self) -> Tuple[List[Int], List[Int]]:
+        """The order projection pushdown visits nodes in, and for each node
+        the first node of the repeated subplan it is a copy of (-1 if
+        none). A subtree written in several places (a CTE read twice) is
+        one cached subplan to Polars (`comm_subplan_elim` puts an
+        `IR::Cache` on the topmost repeated node), and its projection
+        pushdown merges what every reader of the cache needs before
+        pushing down into it once. Here each copy is pruned to that union,
+        so the copies stay alike and `_share_subplans` still runs them
+        once: a node comes after every node above it, by height, and the
+        copies of one subplan, all of one height, come after all their
+        readers. Pruned per reader, TPC-DS q4's year totals ran six
+        times."""
+        var count = len(self._nodes)
+        var order = List[Int](capacity=count)
+        var copy_of = List[Int](length=count, fill=-1)
+        if not self._repeats_a_scan():
+            for reverse in range(count):
+                order.append(count - 1 - reverse)
+            return (order^, copy_of^)
+        var signatures = self._subtree_signatures()[0].copy()
+        var hits = Dict[String, Int]()
+        for s in signatures:
+            hits[s] = hits.get(s, 0) + 1
+        var parents = self._parents()
+        # The topmost repeated nodes: more copies than the node above
+        # them, and under no other such node (Polars caches the topmost
+        # and leaves the subplan below it whole).
+        var under = List[Bool](length=count, fill=False)
+        var first = Dict[String, Int]()
+        var members = List[Int](length=count, fill=0)
+        for reverse in range(count):
+            var i = count - 1 - reverse
+            var parent = parents[i]
+            if parent >= 0:
+                under[i] = under[parent] or copy_of[parent] >= 0
+            var repeats = hits.get(signatures[i], 0)
+            # A source read in two places is not run twice: each read
+            # keeps only its own columns.
+            if under[i] or repeats < 2 or _is_scan(self._nodes[i].kind):
+                continue
+            if parent >= 0 and hits.get(signatures[parent], 0) >= repeats:
+                continue
+            var head = first.get(signatures[i], i)
+            first[signatures[i]] = head
+            copy_of[i] = head
+            members[head] += 1
+        for i in range(count):
+            if copy_of[i] >= 0 and members[copy_of[i]] < 2:
+                copy_of[i] = -1
+        # By height, highest first; within a height, by descending index
+        # as children precede their parents.
+        var heights = List[Int](capacity=count)
+        var tallest = 0
+        for i in range(count):
+            ref node = self._nodes[i]
+            var height = 0
+            if node.left >= 0:
+                height = heights[node.left] + 1
+            if node.right >= 0:
+                height = max(height, heights[node.right] + 1)
+            heights.append(height)
+            tallest = max(tallest, height)
+        var levels = List[List[Int]](length=tallest + 1, fill=List[Int]())
+        for reverse in range(count):
+            var i = count - 1 - reverse
+            levels[heights[i]].append(i)
+        for reverse in range(tallest + 1):
+            for i in levels[tallest - reverse]:
+                order.append(i)
+        return (order^, copy_of^)
+
     def _subtree_signatures(
         self,
     ) -> Tuple[List[String], List[Int], List[Bool]]:
@@ -7746,21 +7839,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if self._schema_memo:
             self._schema_memo.value()[].clear()
 
-    def _forget_schemas_from(mut self, first: Int):
-        """Forget the schemas of nodes numbered `first` and after."""
-        if not self._schema_memo:
-            return
-        ref memo = self._schema_memo.value()[]
-        var stale = List[Int]()
-        for index in memo.keys():
-            if index >= first:
-                stale.append(index)
-        for index in stale:
-            try:
-                _ = memo.pop(index)
-            except:
-                pass
-
     def _push_predicates(mut self) raises:
         """Swap each filter below operators that cannot change its result."""
         self._remember_schemas()
@@ -8203,22 +8281,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # Unions whose inputs must each supply exactly the wanted columns.
         var unions = List[Int]()
         var union_columns = List[List[String]]()
-        # A subtree written in several places (a CTE read twice) keeps
-        # every output of its projections in each copy, so the copies stay
-        # identical and `_share_subplans` still computes it once; Polars
-        # likewise prunes a cached subplan to what all its readers need.
-        # Pruned per reader, TPC-DS q4's year totals ran six times.
-        var signatures = self._subtree_signatures()[0].copy()
-        var copies = Dict[String, Int]()
-        for s in signatures:
-            copies[s] = copies.get(s, 0) + 1
-        for reverse in range(len(self._nodes)):
-            var i = len(self._nodes) - 1 - reverse
-            if (
-                not all_needed[i]
-                and needed[i]
-                and copies.get(signatures[i], 0) < 2
-            ):
+        # The copies of a repeated subplan are each pruned to what all
+        # their readers need (`_projection_visits`).
+        var visits = self._projection_visits()
+        ref copy_of = visits[1]
+        var merged_copies = Dict[Int, Bool]()
+        for i in visits[0]:
+            if copy_of[i] >= 0 and copy_of[i] not in merged_copies:
+                merged_copies[copy_of[i]] = True
+                self._share_copy_schemas(copy_of, copy_of[i])
+                _merge_copy_needs(copy_of, copy_of[i], needed, all_needed)
+            if not all_needed[i] and needed[i]:
                 self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
@@ -8338,6 +8411,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         has a schema to read. True when a node was added; the caller
         renumbers the plan."""
         var added = False
+        var parents = self._parents()
         for r in range(len(unions)):
             var k = len(unions) - 1 - r
             var union = unions[k]
@@ -8366,9 +8440,66 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     self._nodes[union].right = len(self._nodes) - 1
                 else:
                     self._nodes[union].left = len(self._nodes) - 1
-                self._forget_schemas_from(union)
+                self._forget_schemas_above(union, parents)
                 added = True
         return added
+
+    def _forget_schemas_above(mut self, index: Int, parents: List[Int]):
+        """Forget the schemas of a node whose output changed and of the
+        nodes above it, derived from it. Only these: forgetting by node
+        number would leave the schemas of one copy of a repeated subplan
+        and drop another's, and the copies would then be narrowed
+        differently and no longer shared."""
+        if not self._schema_memo:
+            return
+        ref memo = self._schema_memo.value()[]
+        var at = index
+        while at >= 0:
+            try:
+                _ = memo.pop(at)
+            except:
+                pass
+            at = parents[at]
+
+    def _share_copy_schemas(mut self, copy_of: List[Int], head: Int):
+        """Give every copy of the repeated subplan `head` the schemas any
+        copy already derived, node for node. The copies are alike and none
+        of their nodes is pruned yet, so the schemas agree; a schema kept
+        above a node pruned later goes stale alike in every copy, and the
+        selections added after pruning (`_narrow_join_inputs`) agree, so
+        the copies stay alike and are still shared."""
+        if not self._schema_memo:
+            return
+        ref memo = self._schema_memo.value()[]
+        var stack = List[List[Int]]()
+        var copies = List[Int]()
+        for i in range(len(copy_of)):
+            if copy_of[i] == head:
+                copies.append(i)
+        stack.append(copies^)
+        while len(stack) > 0:
+            var nodes = stack.pop()
+            var known = -1
+            for n in nodes:
+                if n in memo:
+                    known = n
+                    break
+            if known >= 0:
+                for n in nodes:
+                    if n not in memo:
+                        try:
+                            memo[n] = memo[known].copy()
+                        except:
+                            pass
+            var left = List[Int]()
+            var right = List[Int]()
+            for n in nodes:
+                left.append(self._nodes[n].left)
+                right.append(self._nodes[n].right)
+            if left[0] >= 0:
+                stack.append(left^)
+            if right[0] >= 0:
+                stack.append(right^)
 
     def _prune_outputs(mut self, index: Int, wanted: List[String]):
         """Drop the expressions of a select or with_columns whose outputs
@@ -8473,6 +8604,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         produce. The selection is only added when it drops a column.
         """
         var added = False
+        var parents = self._parents()
         for k in range(len(joins)):
             var join = joins[k]
             var child = self._nodes[join].left
@@ -8487,10 +8619,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for name in columns[k]:
                 exprs.append(col(name))
             self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
-            # The join and the nodes above it (all numbered after it) may
-            # now produce fewer columns; the joins still to narrow come
-            # before it.
-            self._forget_schemas_from(join)
+            # The join and the nodes above it may now produce fewer
+            # columns.
+            self._forget_schemas_above(join, parents)
             if right_sides[k]:
                 self._nodes[join].right = len(self._nodes) - 1
             else:
@@ -8988,6 +9119,36 @@ def _row_order_step(kind: Int) -> Bool:
     """Whether `kind` is a row-order operator (tail, reverse, shift,
     with_row_index): run whole, in input order, by its eager method."""
     return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
+
+
+def _merge_copy_needs(
+    copy_of: List[Int],
+    head: Int,
+    mut needed: List[Optional[List[String]]],
+    mut all_needed: List[Bool],
+):
+    """Give every copy of the repeated subplan `head` the union of what
+    its copies' readers need, as Polars' projection pushdown merges the
+    projections of every parent of a cache."""
+    var whole = False
+    var read = False
+    var union = List[String]()
+    for i in range(len(copy_of)):
+        if copy_of[i] != head:
+            continue
+        whole |= all_needed[i]
+        if needed[i]:
+            read = True
+            for name in needed[i].value():
+                if name not in union:
+                    union.append(name)
+    if not whole and not read:
+        return
+    for i in range(len(copy_of)):
+        if copy_of[i] != head:
+            continue
+        all_needed[i] = whole
+        needed[i] = union.copy()
 
 
 def _is_scan(kind: Int) -> Bool:
