@@ -12,6 +12,7 @@ from tests.execution_modes.test_gpu_heterogeneous_native_table import (
     test_native_bool_descriptor_is_tagged_without_admitting_host_transport,
     test_native_any_view_preserves_temporal_logical_dtype_and_bitmap,
     test_native_table_mixed_gather_reuses_one_index_map_and_materializes,
+    test_native_float64_gather_and_matrix_bridge_preserve_bits,
     test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer,
     test_native_gather_carries_deferred_error_sidecars,
 )
@@ -43,6 +44,7 @@ def main() raises:
     test_native_bool_descriptor_is_tagged_without_admitting_host_transport()
     test_native_any_view_preserves_temporal_logical_dtype_and_bitmap()
     test_native_table_mixed_gather_reuses_one_index_map_and_materializes()
+    test_native_float64_gather_and_matrix_bridge_preserve_bits()
     test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer()
     test_native_gather_carries_deferred_error_sidecars()
     print("PASS native storage slices, chunks, nulls, lifetimes and budgets")
