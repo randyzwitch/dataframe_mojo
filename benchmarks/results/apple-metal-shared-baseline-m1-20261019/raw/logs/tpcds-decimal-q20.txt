@@ -1,0 +1,123 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-metal-0.schema.json","status":"written"}
+coverage	q20	wrong_answer	full result differs
+expected_rows	100
+actual_rows	100
+expected_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬─────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class         ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---             ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str             ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪═════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null            ┆ null            ┆ 227.76        ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts            ┆ 3527            ┆ 5748.96       ┆ 44.10463665781346  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts            ┆ 560             ┆ 4084.33       ┆ 31.333996173326522 │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts            ┆ 822             ┆ 2374.63       ┆ 18.21758950257848  │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts            ┆ 272             ┆ 826.90        ┆ 6.343777666281545  │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business        ┆ 7825            ┆ 8435.35       ┆ 45.30131779207262  │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business        ┆ 19              ┆ 729.30        ┆ 3.916642589312662  │
+│ AAAAAAAALDFAAAAA ┆ Dramatically particular charts … ┆ Books      ┆ business        ┆ 368             ┆ 9455.89       ┆ 50.78203961861471  │
+│ AAAAAAAAFEEAAAAA ┆ Directly good effects could not… ┆ Books      ┆ computers       ┆ 383             ┆ 1188.60       ┆ 12.014458591257725 │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers       ┆ 434             ┆ 1478.20       ┆ 14.94175726871712  │
+│ …                ┆ …                                ┆ …          ┆ …               ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAFOAAAAAA ┆ Inevitably general children mus… ┆ Home       ┆ blinds/shades   ┆ 320             ┆ 546.98        ┆ 1.7964433718668653 │
+│ AAAAAAAAGHDAAAAA ┆ "Low men ought to try really. J… ┆ Home       ┆ blinds/shades   ┆ 697             ┆ 4643.94       ┆ 15.252066313845862 │
+│ AAAAAAAAPOCAAAAA ┆ Top options care tomorrow dange… ┆ Home       ┆ blinds/shades   ┆ 371             ┆ 19365.91      ┆ 63.60335050581419  │
+│ AAAAAAAAACAAAAAA ┆ Ce                               ┆ Home       ┆ curtains/drapes ┆ 177             ┆ 4527.71       ┆ 16.055350536495105 │
+│ AAAAAAAAAIAAAAAA ┆ "Great, tiny animals adopt then… ┆ Home       ┆ curtains/drapes ┆ 406             ┆ 378.72        ┆ 1.3429487213583526 │
+│ AAAAAAAACMFAAAAA ┆ Literally available ages stand … ┆ Home       ┆ curtains/drapes ┆ 4298            ┆ 3180.77       ┆ 11.279074261816136 │
+│ AAAAAAAAGKDAAAAA ┆ Once again real differences can… ┆ Home       ┆ curtains/drapes ┆ 46              ┆ 8349.87       ┆ 29.608806611767186 │
+│ AAAAAAAAIAGAAAAA ┆ Full, japanese pages must admit… ┆ Home       ┆ curtains/drapes ┆ 79              ┆ 8336.28       ┆ 29.560616198999814 │
+│ AAAAAAAAINFAAAAA ┆ "Happy products provide mediter… ┆ Home       ┆ curtains/drapes ┆ 548             ┆ 1911.68       ┆ 6.778855649678748  │
+│ AAAAAAAAMMBAAAAA ┆ Recent flowers should trace ali… ┆ Home       ┆ curtains/drapes ┆ 888             ┆ 1244.88       ┆ 4.414369466214053  │
+└──────────────────┴──────────────────────────────────┴────────────┴─────────────────┴─────────────────┴───────────────┴────────────────────┘
+actual_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬─────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class         ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---             ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str             ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪═════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null            ┆ null            ┆ 227.76        ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts            ┆ 3527            ┆ 5748.96       ┆ 44.10463665781345  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts            ┆ 560             ┆ 4084.33       ┆ 31.33399617332652  │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts            ┆ 822             ┆ 2374.63       ┆ 18.217589502578477 │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts            ┆ 272             ┆ 826.90        ┆ 6.343777666281544  │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business        ┆ 7825            ┆ 8435.35       ┆ 45.30131779207262  │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business        ┆ 19              ┆ 729.30        ┆ 3.916642589312662  │
+│ AAAAAAAALDFAAAAA ┆ Dramatically particular charts … ┆ Books      ┆ business        ┆ 368             ┆ 9455.89       ┆ 50.78203961861471  │
+│ AAAAAAAAFEEAAAAA ┆ Directly good effects could not… ┆ Books      ┆ computers       ┆ 383             ┆ 1188.60       ┆ 12.014458591257727 │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers       ┆ 434             ┆ 1478.20       ┆ 14.941757268717124 │
+│ …                ┆ …                                ┆ …          ┆ …               ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAFOAAAAAA ┆ Inevitably general children mus… ┆ Home       ┆ blinds/shades   ┆ 320             ┆ 546.98        ┆ 1.7964433718668653 │
+│ AAAAAAAAGHDAAAAA ┆ "Low men ought to try really. J… ┆ Home       ┆ blinds/shades   ┆ 697             ┆ 4643.94       ┆ 15.252066313845862 │
+│ AAAAAAAAPOCAAAAA ┆ Top options care tomorrow dange… ┆ Home       ┆ blinds/shades   ┆ 371             ┆ 19365.91      ┆ 63.60335050581419  │
+│ AAAAAAAAACAAAAAA ┆ Ce                               ┆ Home       ┆ curtains/drapes ┆ 177             ┆ 4527.71       ┆ 16.055350536495105 │
+│ AAAAAAAAAIAAAAAA ┆ "Great, tiny animals adopt then… ┆ Home       ┆ curtains/drapes ┆ 406             ┆ 378.72        ┆ 1.3429487213583526 │
+│ AAAAAAAACMFAAAAA ┆ Literally available ages stand … ┆ Home       ┆ curtains/drapes ┆ 4298            ┆ 3180.77       ┆ 11.279074261816136 │
+│ AAAAAAAAGKDAAAAA ┆ Once again real differences can… ┆ Home       ┆ curtains/drapes ┆ 46              ┆ 8349.87       ┆ 29.608806611767186 │
+│ AAAAAAAAIAGAAAAA ┆ Full, japanese pages must admit… ┆ Home       ┆ curtains/drapes ┆ 79              ┆ 8336.28       ┆ 29.560616198999814 │
+│ AAAAAAAAINFAAAAA ┆ "Happy products provide mediter… ┆ Home       ┆ curtains/drapes ┆ 548             ┆ 1911.68       ┆ 6.778855649678748  │
+│ AAAAAAAAMMBAAAAA ┆ Recent flowers should trace ali… ┆ Home       ┆ curtains/drapes ┆ 888             ┆ 1244.88       ┆ 4.414369466214053  │
+└──────────────────┴──────────────────────────────────┴────────────┴─────────────────┴─────────────────┴───────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	i_item_id	True
+column_bag	cpu_metal	i_item_desc	True
+column_bag	cpu_metal	i_category	True
+column_bag	cpu_metal	i_class	True
+column_bag	cpu_metal	i_current_price	True
+column_bag	cpu_metal	itemrevenue	True
+column_bag	cpu_metal	revenueratio	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	i_item_id	True
+column_bag	cpu_repeat	i_item_desc	True
+column_bag	cpu_repeat	i_category	True
+column_bag	cpu_repeat	i_class	True
+column_bag	cpu_repeat	i_current_price	True
+column_bag	cpu_repeat	itemrevenue	True
+column_bag	cpu_repeat	revenueratio	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (100, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬─────────────────┬─────────────────┬───────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class         ┆ i_current_price ┆ itemrevenue   ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---             ┆ ---             ┆ ---           ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str             ┆ decimal32[7,2]  ┆ decimal[38,2] ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪═════════════════╪═════════════════╪═══════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null            ┆ null            ┆ 227.76        ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts            ┆ 3527            ┆ 5748.96       ┆ 44.10463665781346  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts            ┆ 560             ┆ 4084.33       ┆ 31.333996173326522 │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts            ┆ 822             ┆ 2374.63       ┆ 18.21758950257848  │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts            ┆ 272             ┆ 826.90        ┆ 6.343777666281545  │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business        ┆ 7825            ┆ 8435.35       ┆ 45.30131779207262  │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business        ┆ 19              ┆ 729.30        ┆ 3.916642589312662  │
+│ AAAAAAAALDFAAAAA ┆ Dramatically particular charts … ┆ Books      ┆ business        ┆ 368             ┆ 9455.89       ┆ 50.78203961861471  │
+│ AAAAAAAAFEEAAAAA ┆ Directly good effects could not… ┆ Books      ┆ computers       ┆ 383             ┆ 1188.60       ┆ 12.014458591257725 │
+│ AAAAAAAALCDAAAAA ┆ Groups see legs. Systems lead h… ┆ Books      ┆ computers       ┆ 434             ┆ 1478.20       ┆ 14.94175726871712  │
+│ …                ┆ …                                ┆ …          ┆ …               ┆ …               ┆ …             ┆ …                  │
+│ AAAAAAAAFOAAAAAA ┆ Inevitably general children mus… ┆ Home       ┆ blinds/shades   ┆ 320             ┆ 546.98        ┆ 1.7964433718668653 │
+│ AAAAAAAAGHDAAAAA ┆ "Low men ought to try really. J… ┆ Home       ┆ blinds/shades   ┆ 697             ┆ 4643.94       ┆ 15.252066313845862 │
+│ AAAAAAAAPOCAAAAA ┆ Top options care tomorrow dange… ┆ Home       ┆ blinds/shades   ┆ 371             ┆ 19365.91      ┆ 63.60335050581419  │
+│ AAAAAAAAACAAAAAA ┆ Ce                               ┆ Home       ┆ curtains/drapes ┆ 177             ┆ 4527.71       ┆ 16.055350536495105 │
+│ AAAAAAAAAIAAAAAA ┆ "Great, tiny animals adopt then… ┆ Home       ┆ curtains/drapes ┆ 406             ┆ 378.72        ┆ 1.3429487213583526 │
+│ AAAAAAAACMFAAAAA ┆ Literally available ages stand … ┆ Home       ┆ curtains/drapes ┆ 4298            ┆ 3180.77       ┆ 11.279074261816136 │
+│ AAAAAAAAGKDAAAAA ┆ Once again real differences can… ┆ Home       ┆ curtains/drapes ┆ 46              ┆ 8349.87       ┆ 29.608806611767186 │
+│ AAAAAAAAIAGAAAAA ┆ Full, japanese pages must admit… ┆ Home       ┆ curtains/drapes ┆ 79              ┆ 8336.28       ┆ 29.560616198999814 │
+│ AAAAAAAAINFAAAAA ┆ "Happy products provide mediter… ┆ Home       ┆ curtains/drapes ┆ 548             ┆ 1911.68       ┆ 6.778855649678748  │
+│ AAAAAAAAMMBAAAAA ┆ Recent flowers should trace ali… ┆ Home       ┆ curtains/drapes ┆ 888             ┆ 1244.88       ┆ 4.414369466214053  │
+└──────────────────┴──────────────────────────────────┴────────────┴─────────────────┴─────────────────┴───────────────┴────────────────────┘

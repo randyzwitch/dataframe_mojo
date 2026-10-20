@@ -495,6 +495,7 @@ def group_reduce(
     rows: UInt32,
     stride: UInt32,
     slots: UInt32 = 0,
+    unordered: UInt32 = 0,
 ):
     var work = global_idx.x
     if work >= Int(groups) * Int(nodes):
@@ -509,6 +510,12 @@ def group_reduce(
     ) else Int(rows)
     var last = code[unsafe_offset=header] == ROW_GROUP_HEADER_LAST
     var representative = Int(index[unsafe_offset=end - 1 if last else begin])
+    if unordered and column <= keys:
+        for at in range(begin + 1, end):
+            var source = Int(index[unsafe_offset=at])
+            representative = max(representative, source) if last else min(
+                representative, source
+            )
     if column == 0:
         var target = Int(code[unsafe_offset=header + 3]) * Int(stride) + group
         output_words[unsafe_offset=target] = UInt64(representative)

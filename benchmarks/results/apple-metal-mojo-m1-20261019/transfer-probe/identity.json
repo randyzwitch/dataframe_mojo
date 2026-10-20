@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "artifact": "primitive GPU transfer probe",
+  "source_commit": "b2c77a725db56e279fba07bfef67ed00d088aca5",
+  "source_branch": "codex/gpu-transfer-probe",
+  "source_tree_status": "",
+  "source_file": "benchmarks/bench_gpu_transfers.mojo",
+  "source_sha256": "35881c3227dabc72410ddc745689c0d8afcc83edda11668376afcbc60131bca5",
+  "compiled_binary_sha256": "2bc4677e3b24f1ada50368a3969443fdf6a9fda94231aa51bf57ece2d8e9c34b",
+  "compiled_binary_bytes": 93704,
+  "compiler_identity": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+  "compiler_executable": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868/.pixi/envs/gpu/bin/mojo",
+  "compiler_executable_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+  "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+  "compile_command": [
+    "mojo",
+    "build",
+    "-O3",
+    "-I",
+    ".",
+    "benchmarks/bench_gpu_transfers.mojo",
+    "-o",
+    "build/transfer-probe/probe"
+  ],
+  "build_log": "build.log (empty; compiler emitted no stdout/stderr)",
+  "build_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "invocation": "build/transfer-probe/probe (default rows and repetitions)",
+  "sample_file": "samples.txt",
+  "sample_sha256": "1e3b984d82d714e1120bfd60c74c006761bcfff32f187eb11a11d08216a30693",
+  "sample_count": 30,
+  "validated_sample_count": 30,
+  "rows": [
+    4097,
+    1048576
+  ],
+  "layouts": [
+    "float32_4B",
+    "float32_packed_validity",
+    "generic_21B_nullable"
+  ],
+  "repetitions_per_layout_and_size": 5,
+  "context_line": {
+    "api": "metal",
+    "device": "Apple M1",
+    "init_ns": 37345000,
+    "repetitions": 5,
+    "timed_synchronizations": "separate_upload_and_download_waits"
+  },
+  "platform": "macOS-26.5.2-arm64-arm-64bit",
+  "architecture": "arm64",
+  "cpu": "Apple M1",
+  "physical_cores": "8",
+  "memory_bytes": 17179869184,
+  "macos": "26.5.2",
+  "recorded_at_utc": "2026-10-19T21:00:04.843989+00:00"
+}
