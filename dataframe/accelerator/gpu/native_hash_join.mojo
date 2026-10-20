@@ -258,6 +258,7 @@ def probe_hash(
     build_rows: UInt32,
     capacity: UInt32,
     dtype: Int64,
+    nulls_equal: UInt8,
     how: UInt32,
 ):
     var row = global_idx.x
@@ -266,7 +267,7 @@ def probe_hash(
     var present = probe_valid[unsafe_offset=row] != 0
     var found = UInt32.MAX
     var stopped_at_empty = False
-    if present or how == 7:
+    if present or nulls_equal != 0 or how == 7:
         var key = probe_words[unsafe_offset=row]
         var bucket = UInt32(_hash_key(key, present, dtype)) & (capacity - 1)
         for _ in range(128):
