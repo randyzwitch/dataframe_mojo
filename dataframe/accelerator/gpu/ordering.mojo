@@ -418,9 +418,7 @@ def _radix_digit(
         return 0
     var dtype = types[unsafe_offset=node]
     var width = integer_width(dtype)
-    var mask = (
-        UInt64.MAX if width == 64 else (UInt64(1) << UInt64(width)) - 1
-    )
+    var mask = UInt64.MAX if width == 64 else (UInt64(1) << UInt64(width)) - 1
     var value = words[unsafe_offset=source] & mask
     if not unsigned_type(dtype):
         value ^= UInt64(1) << UInt64(width - 1)
@@ -464,7 +462,9 @@ def radix_histogram(
             UInt32(position < Int(rows) and digit == UInt32(bucket))
         )
         if lane == 255:
-            counts[unsafe_offset=Int(bucket) * Int(bucket_span) + Int(block_idx.x)] = prefix
+            counts[
+                unsafe_offset=Int(bucket) * Int(bucket_span) + Int(block_idx.x)
+            ] = prefix
 
 
 def radix_scan_level(
@@ -487,7 +487,9 @@ def radix_scan_level(
     if position < Int(count):
         counts[unsafe_offset=source] = prefix
     if thread_idx.x == 255:
-        counts[unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk] = prefix
+        counts[
+            unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk
+        ] = prefix
 
 
 def radix_apply_carries(

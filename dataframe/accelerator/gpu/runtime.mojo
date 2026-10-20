@@ -148,7 +148,12 @@ from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
-from .rows import integer_width, row_program, row_program_ordered, row_program_iana
+from .rows import (
+    integer_width,
+    row_program,
+    row_program_ordered,
+    row_program_iana,
+)
 from . import iana_scalar_scopes
 from dataframe.accelerator import iana_certificate, checked_rank
 from dataframe.accelerator.iana_mutations import (
@@ -909,8 +914,7 @@ def _iana_scalar_slots(plan: RowPlan) raises -> Int:
 
 
 def _source_high_words(plan: RowPlan) -> Bool:
-    """Only wide decimals and original category codes carry source high words.
-    """
+    """Only wide decimals and original category codes carry source high words."""
     for column in plan.source._columns:
         var dtype = column.dtype()
         if dtype.is_decimal() and dtype.decimal_width() == 128:
@@ -1010,9 +1014,7 @@ def estimate_resources(
                 level_count = (level_count + 255) // 256
             shared = _checked_add(
                 shared,
-                _checked_add(
-                    _checked_mul(summary_count, 16 * 4), 16 * 4
-                ),
+                _checked_add(_checked_mul(summary_count, 16 * 4), 16 * 4),
             )
         if ranking:
             # The idle sort-index owner supplies dense prefixes. Only the
@@ -1200,9 +1202,7 @@ def estimate_resources(
                         if level_count > 256:
                             down_carries += 1
                         level_count = (level_count + 255) // 256
-                    var per_digit_launches = (
-                        3 + level_total - 1 + down_carries
-                    )
+                    var per_digit_launches = 3 + level_total - 1 + down_carries
                     order_launch_bound = max(
                         order_launch_bound,
                         2
@@ -3008,7 +3008,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=merge_grid(current_rows, run_width),
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                                 # Swapping owners keeps both buffers alive across queued passes.
