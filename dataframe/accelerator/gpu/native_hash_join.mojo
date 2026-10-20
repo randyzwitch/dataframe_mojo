@@ -6,6 +6,7 @@ from max.gpu.primitives.block import prefix_sum
 from std.atomic import Atomic
 from std.memory import Pointer, bitcast
 from std.sys import size_of
+from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.partition import _mix, _combine
@@ -60,7 +61,9 @@ def _keys_equal(
     return not a_valid or key_equal(a, b, dtype)
 
 
-def pack_key[dtype: DType](
+def pack_key[
+    dtype: DType
+](
     values: Pointer[Scalar[dtype], ImmutAnyOrigin],
     validity: Pointer[UInt8, ImmutAnyOrigin],
     words: Pointer[UInt64, MutAnyOrigin],
@@ -74,8 +77,10 @@ def pack_key[dtype: DType](
     if row >= Int(rows):
         return
     var present = has_validity == 0 or (
-        (validity[unsafe_offset=(Int(validity_offset) + row) // 8]
-        & (UInt8(1) << UInt8((Int(validity_offset) + row) % 8)))
+        (
+            validity[unsafe_offset=(Int(validity_offset) + row) // 8]
+            & (UInt8(1) << UInt8((Int(validity_offset) + row) % 8))
+        )
         != 0
     )
     var value = values[unsafe_offset=Int(value_offset) + row]
@@ -282,10 +287,9 @@ def probe_hash(
             bucket = (bucket + 1) & (capacity - 1)
         if found == UInt32.MAX and not stopped_at_empty and build_rows > 0:
             Atomic[UInt32].max(status.unsafe_offset(0), UInt32(1))
-    var matches = (
-        bucket_counts[unsafe_offset=Int(found)]
-        if found != UInt32.MAX else UInt32(0)
-    )
+    var matches = bucket_counts[
+        unsafe_offset=Int(found)
+    ] if found != UInt32.MAX else UInt32(0)
     probe_ranges[unsafe_offset=row] = found
     probe_matches[unsafe_offset=row] = matches
     var count = UInt64(matches)
@@ -344,21 +348,27 @@ def emit_pair_maps(
         var hi = probe_rows
         while lo < hi:
             var mid = lo + (hi - lo) // 2
-            var start = probe_prefix[unsafe_offset=Int(mid)] + probe_blocks[
-                unsafe_offset=Int(mid) // 256
-            ]
+            var start = (
+                probe_prefix[unsafe_offset=Int(mid)]
+                + probe_blocks[unsafe_offset=Int(mid) // 256]
+            )
             if start <= UInt64(row):
                 lo = mid + 1
             else:
                 hi = mid
         var probe = lo - 1
-        var start = probe_prefix[unsafe_offset=Int(probe)] + probe_blocks[
-            unsafe_offset=Int(probe) // 256
-        ]
+        var start = (
+            probe_prefix[unsafe_offset=Int(probe)]
+            + probe_blocks[unsafe_offset=Int(probe) // 256]
+        )
         var within = UInt32(UInt64(row) - start)
         var bucket = probe_ranges[unsafe_offset=Int(probe)]
         var build = UInt32.MAX
-        if how != 4 and how != 5 and probe_matches[unsafe_offset=Int(probe)] > 0:
+        if (
+            how != 4
+            and how != 5
+            and probe_matches[unsafe_offset=Int(probe)] > 0
+        ):
             build = members[
                 unsafe_offset=Int(bucket_offsets[unsafe_offset=Int(bucket)])
                 + Int(within)
@@ -438,14 +448,16 @@ def _key_column(frame: DataFrame, index: Int) -> Bool:
     if index < 0 or index >= frame.width():
         return False
     var dtype = frame._columns[index].dtype()
-    return dtype == DataType.INT32 or dtype == DataType.UINT32 or dtype == DataType.FLOAT32
+    return (
+        dtype == DataType.INT32
+        or dtype == DataType.UINT32
+        or dtype == DataType.FLOAT32
+    )
 
 
-def _pack_typed_key[dtype: DType](
-    scope: Scope,
-    column: NativeColumn[dtype],
-    rows: Int,
-) raises -> PackedKey:
+def _pack_typed_key[
+    dtype: DType
+](scope: Scope, column: NativeColumn[dtype], rows: Int,) raises -> PackedKey:
     var ctx = scope.context()
     var words = ctx.enqueue_create_buffer[DType.uint64](max(1, rows))
     var valid = ctx.enqueue_create_buffer[DType.uint8](max(1, rows))
@@ -455,7 +467,9 @@ def _pack_typed_key[dtype: DType](
     var values = column.values()
     var bitmap = column.validity()
     var bitmap_buffer = (
-        bitmap.value().copy() if bitmap else ctx.enqueue_create_buffer[DType.uint8](1)
+        bitmap.value().copy() if bitmap else ctx.enqueue_create_buffer[
+            DType.uint8
+        ](1)
     )
     if rows:
         try:
@@ -475,22 +489,6 @@ def _pack_typed_key[dtype: DType](
             scope.synchronize()
             raise error^
     return PackedKey(words^, valid^, bitmap_buffer^)
-
-
-def _pack_key_column(
-    scope: Scope,
-    column: NativeColumnAny,
-    rows: Int,
-) raises -> PackedKey:
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if (
-            column.logical.physical() == DataType.of(D)
-            and column._storage.isa[NativeColumn[D]]()
-        ):
-            var typed = column._storage[NativeColumn[D]].copy()
-            return _pack_typed_key[D](scope, typed, rows)
-    raise Error("Mojo GPU native hash join key owner differs from its schema")
 
 
 def _raw_upload_bytes(frame: DataFrame) raises -> Int:
@@ -515,7 +513,9 @@ def _raw_upload_bytes(frame: DataFrame) raises -> Int:
     return bytes
 
 
-def _scratch_bytes(probe: Int, build: Int, capacity: Int, full: Bool) raises -> Int:
+def _scratch_bytes(
+    probe: Int, build: Int, capacity: Int, full: Bool
+) raises -> Int:
     var pb = max(1, (probe + 255) // 256)
     var bb = max(1, (build + 255) // 256)
     var cb = max(1, (capacity + 255) // 256)
@@ -528,9 +528,7 @@ def _scratch_bytes(probe: Int, build: Int, capacity: Int, full: Bool) raises -> 
     bytes = _checked_add(bytes, _checked_mul(pb, 8))
     bytes = _checked_add(bytes, _checked_mul(max(1, build), 4 + 8 + 4 + 4))
     bytes = _checked_add(bytes, _checked_mul(bb, 8))
-    return _checked_add(
-        bytes, 2 * (j.METADATA_WORDS * 8 + 4) + 4 + 2
-    )
+    return _checked_add(bytes, 2 * (j.METADATA_WORDS * 8 + 4) + 4 + 2)
 
 
 def _upper_rows(task: DagTask, probe: Int, build: Int) raises -> Int:
@@ -562,13 +560,16 @@ def _output_bytes_upper(task: DagTask, rows: Int) raises -> Int:
     return bytes
 
 
-def _native_column_index(table: Table, frame: DataFrame, field: Int) raises -> Int:
+def _native_column_index(
+    table: Table, frame: DataFrame, field: Int
+) raises -> Int:
     if field < 0 or field >= frame.width():
         raise Error("Mojo GPU native hash join key is outside its schema")
     for i in range(table.schema.width()):
         if (
             table.schema._columns[i].name() == frame._columns[field].name()
-            and table.schema._columns[i].dtype() == frame._columns[field].dtype()
+            and table.schema._columns[i].dtype()
+            == frame._columns[field].dtype()
         ):
             return Int(table.columns[i])
     raise Error("Mojo GPU native hash join key owner differs from its schema")
@@ -581,8 +582,8 @@ def _pack_key_column(
     rows: Int,
 ) raises -> PackedKey:
     var view = column.view(table_offset, rows)
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
+    comptime for k in range(3):
+        comptime D = (DType.int32, DType.uint32, DType.float32)[k]
         if (
             view.logical.physical() == DataType.of(D)
             and view._storage.isa[NativeColumn[D]]()
@@ -621,9 +622,7 @@ def try_execute(
         raw_bytes = _checked_add(raw_bytes, _raw_upload_bytes(right))
     var capacity = hash_grouping.capacity(build_rows)
     var full = task.how == 3
-    var scratch_bytes = _scratch_bytes(
-        probe_rows, build_rows, capacity, full
-    )
+    var scratch_bytes = _scratch_bytes(probe_rows, build_rows, capacity, full)
     var upper_rows = _upper_rows(task, probe_rows, build_rows)
     var upper_maps = _checked_mul(max(1, upper_rows), 2 * size_of[UInt32]())
     var upper_output = _output_bytes_upper(task, upper_rows)
@@ -647,10 +646,14 @@ def try_execute(
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
     var left_table = (
-        left_resident.value().copy() if left_resident else _upload_table(scope, left)
+        left_resident.value().copy() if left_resident else _upload_table(
+            scope, left
+        )
     )
     var right_table = (
-        right_resident.value().copy() if right_resident else _upload_table(scope, right)
+        right_resident.value().copy() if right_resident else _upload_table(
+            scope, right
+        )
     )
     left_table.observe_errors()
     right_table.observe_errors()
@@ -677,10 +680,14 @@ def try_execute(
     var probe_ranges = ctx.enqueue_create_buffer[DType.uint32](max(1, p_rows))
     var probe_matches = ctx.enqueue_create_buffer[DType.uint32](max(1, p_rows))
     var output_counts = ctx.enqueue_create_buffer[DType.uint64](max(1, p_rows))
-    var probe_blocks_buffer = ctx.enqueue_create_buffer[DType.uint64](probe_blocks)
+    var probe_blocks_buffer = ctx.enqueue_create_buffer[DType.uint64](
+        probe_blocks
+    )
     var matched_build = ctx.enqueue_create_buffer[DType.uint32](max(1, rows))
     var build_prefix = ctx.enqueue_create_buffer[DType.uint64](max(1, rows))
-    var build_blocks_buffer = ctx.enqueue_create_buffer[DType.uint64](build_blocks)
+    var build_blocks_buffer = ctx.enqueue_create_buffer[DType.uint64](
+        build_blocks
+    )
     var build_flags = ctx.enqueue_create_buffer[DType.uint32](max(1, rows))
     var unmatched = ctx.enqueue_create_buffer[DType.uint32](max(1, rows))
     var metadata = ctx.enqueue_create_buffer[DType.uint64](j.METADATA_WORDS)
@@ -703,21 +710,34 @@ def try_execute(
                 right_table.native_columns[right_column],
                 right_table.offset,
                 right_table.rows,
-            )^
+            )
+            ^
         )
     except error:
         scope.synchronize()
         _ = left_key^
         raise error^
     var right_key = right_key_optional.take()
-    var build_words = left_key.words.copy() if side != 0 else right_key.words.copy()
-    var build_valid = left_key.valid.copy() if side != 0 else right_key.valid.copy()
-    var probe_words = right_key.words.copy() if side != 0 else left_key.words.copy()
-    var probe_valid = right_key.valid.copy() if side != 0 else left_key.valid.copy()
+    var build_words = (
+        left_key.words.copy() if side != 0 else right_key.words.copy()
+    )
+    var build_valid = (
+        left_key.valid.copy() if side != 0 else right_key.valid.copy()
+    )
+    var probe_words = (
+        right_key.words.copy() if side != 0 else left_key.words.copy()
+    )
+    var probe_valid = (
+        right_key.valid.copy() if side != 0 else left_key.valid.copy()
+    )
     # Keep pair-map buffers and reservations in the function scope so the
     # exception path can drain queued map emission before releasing them.
     var left_map_keepalive = Optional[NativeRowMap]()
     var right_map_keepalive = Optional[NativeRowMap]()
+    # Copy destinations remain live until all asynchronous copies that hold
+    # their raw pointers have drained, including the exception path below.
+    var host_metadata = List[UInt64](length=j.METADATA_WORDS, fill=0)
+    var host_status = List[UInt32](length=1, fill=0)
     var launches = 0
     try:
         ctx.enqueue_memset(metadata, UInt64(0))
@@ -852,7 +872,7 @@ def try_execute(
             grid_dim=1,
             block_dim=1,
         )
-        launches += 2
+        launches += 1 + Int(p_rows > 0)
         if full:
             if rows:
                 ctx.enqueue_function[unmatched_flags](
@@ -891,9 +911,7 @@ def try_execute(
                     grid_dim=build_blocks,
                     block_dim=256,
                 )
-            launches += 3
-        var host_metadata = List[UInt64](length=j.METADATA_WORDS, fill=0)
-        var host_status = List[UInt32](length=1, fill=0)
+            launches += 2 + 2 * Int(rows > 0)
         ctx.enqueue_copy(host_metadata.unsafe_ptr(), metadata)
         ctx.enqueue_copy(host_status.unsafe_ptr(), status)
         scope.record_download(j.METADATA_WORDS * 8 + 4)
@@ -902,10 +920,10 @@ def try_execute(
             # Probe exhaustion is the only runtime condition that may switch
             # to the established sorted join. All hash commands have drained.
             scope.record_launches(
-                launches
-                + Int(left_table.rows > 0)
-                + Int(right_table.rows > 0)
+                launches + Int(left_table.rows > 0) + Int(right_table.rows > 0)
             )
+            _ = host_metadata^
+            _ = host_status^
             return Attempt(False, None, None)
         var output_rows = Int(host_metadata[0])
         if output_rows > Int(Int32.MAX):
@@ -917,8 +935,12 @@ def try_execute(
         _ = scope.check(_checked_mul(map_bytes, 2))
         var left_map_reservation = _NativeReservation(scope, map_bytes)
         var right_map_reservation = _NativeReservation(scope, map_bytes)
-        var left_map_buffer = ctx.enqueue_create_buffer[DType.uint32](map_capacity)
-        var right_map_buffer = ctx.enqueue_create_buffer[DType.uint32](map_capacity)
+        var left_map_buffer = ctx.enqueue_create_buffer[DType.uint32](
+            map_capacity
+        )
+        var right_map_buffer = ctx.enqueue_create_buffer[DType.uint32](
+            map_capacity
+        )
         var left_map = NativeRowMap(
             scope,
             left_map_buffer^,
@@ -1027,17 +1049,27 @@ def try_execute(
         report = report.with_column(
             Series(
                 "query_wall_ms",
-                Column[Float64]([Float64(Int(perf_counter_ns()) - started) / 1e6]),
+                Column[Float64](
+                    [Float64(Int(perf_counter_ns()) - started) / 1e6]
+                ),
             )
         )
         _ = scratch_owner^
         _ = left_key^
         _ = right_key^
-        return Attempt(True, Optional[Table](result^), Optional[DataFrame](report^))
+        _ = host_metadata^
+        _ = host_status^
+        return Attempt(
+            True, Optional[Table](result^), Optional[DataFrame](report^)
+        )
     except error:
         scope.synchronize()
+        _ = host_metadata^
+        _ = host_status^
         _ = left_map_keepalive^
         _ = right_map_keepalive^
+        _ = left_table^
+        _ = right_table^
         _ = scratch_owner^
         _ = left_key^
         _ = right_key^
@@ -1065,17 +1097,23 @@ def eligible(
         or not _key_column(right, Int(task.keys[1]) - left.width())
     ):
         return False
-    if left._columns[Int(task.keys[0])].dtype() != right._columns[
-        Int(task.keys[1]) - left.width()
-    ].dtype():
+    if (
+        left._columns[Int(task.keys[0])].dtype()
+        != right._columns[Int(task.keys[1]) - left.width()].dtype()
+    ):
         return False
-    if left_resident and not _table_supported(left_resident.value(), left, scope):
+    if left_resident and not _table_supported(
+        left_resident.value(), left, scope
+    ):
         return False
-    if right_resident and not _table_supported(right_resident.value(), right, scope):
+    if right_resident and not _table_supported(
+        right_resident.value(), right, scope
+    ):
         return False
     for field in task.fields:
         if (
-            field.left < 0 and field.right < 0
+            field.left < 0
+            and field.right < 0
             or field.dtype == DataType.BOOL
             or field.dtype.is_decimal()
             or field.dtype.is_categorical()

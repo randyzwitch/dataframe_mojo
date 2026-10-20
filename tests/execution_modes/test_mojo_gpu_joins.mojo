@@ -15,9 +15,9 @@ from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
-def _null_join_pairs(how: String, nulls_equal: Bool) -> Tuple[
-    List[Int], List[Int]
-]:
+def _null_join_pairs(
+    how: String, nulls_equal: Bool
+) -> Tuple[List[Int], List[Int]]:
     var left_valid: List[Bool] = [False, False, True]
     var right_valid: List[Bool] = [False, True, False]
     var left_key: List[Int] = [0, 0, 1]
@@ -29,7 +29,7 @@ def _null_join_pairs(how: String, nulls_equal: Bool) -> Tuple[
         for r in range(3):
             var found = False
             for l in range(3):
-                var equal = (left_valid[l] and right_valid[r])
+                var equal = left_valid[l] and right_valid[r]
                 if nulls_equal:
                     equal = (left_valid[l] == right_valid[r]) and (
                         not left_valid[l] or left_key[l] == right_key[r]
@@ -87,9 +87,7 @@ def _assert_native_null_join(
             Series("ri", Column[Int32]([20, 21, 22])),
         ]
     )
-    var query = left.lazy().join(
-        right.lazy(), on="k", how=how, coalesce=False
-    )
+    var query = left.lazy().join(right.lazy(), on="k", how=how, coalesce=False)
     # The execution plan carries this existing low-level keyed-join option
     # independently from the join style. Public joins currently leave it at
     # the default (false); setting the plan bit exercises both supported
@@ -110,9 +108,7 @@ def _assert_native_null_join(
         var left_row = expected[0][row]
         assert_equal(actual.item(row, "li").is_null(), left_row < 0)
         if left_row >= 0:
-            assert_equal(
-                actual.item(row, "li").int32(), Int32(10 + left_row)
-            )
+            assert_equal(actual.item(row, "li").int32(), Int32(10 + left_row))
         if how != "semi" and how != "anti":
             var right_row = expected[1][row]
             assert_equal(actual.item(row, "ri").is_null(), right_row < 0)
@@ -333,9 +329,7 @@ def _collision_fallback_query(how: String) raises -> LazyFrame:
     var candidate = 0
     var outsider = Int32(-1)
     while len(keys) < 128 or outsider < 0:
-        var hash_value = _mix(
-            _combine(UInt64(1), UInt64(candidate))
-        )
+        var hash_value = _mix(_combine(UInt64(1), UInt64(candidate)))
         if UInt32(hash_value) & UInt32(1023) == 0:
             if len(keys) < 128:
                 keys.append(Int32(candidate))
@@ -364,9 +358,7 @@ def _collision_fallback_query(how: String) raises -> LazyFrame:
             Series("ri", Column[Int32](build_ids^)),
         ]
     )
-    var query = left.lazy().join(
-        right.lazy(), on="k", how=how, coalesce=False
-    )
+    var query = left.lazy().join(right.lazy(), on="k", how=how, coalesce=False)
     query._nodes[len(query._nodes) - 1].flags = [True]
     return query^
 
@@ -399,6 +391,112 @@ def test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal() rai
     print(
         "PASS Mojo GPU native hash join: probe exhaustion falls back with null-equal semantics"
     )
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts() raises:
+    var runtime = MetalRuntime()
+    var empty = DataFrame(
+        [Series("k", Column[Int32]()), Series("x", Column[Float64]())]
+    )
+    var nonempty = DataFrame(
+        [Series("k", Column[Int32]([1])), Series("x", Column[Float64]([2]))]
+    )
+    var inner_profile = (
+        empty.lazy()
+        .join(empty.lazy(), on="k", how="inner", coalesce=False)
+        .profile(accelerator=runtime, engine="accel")
+    )
+    assert_equal(inner_profile[0].height(), 0)
+    assert_equal(
+        inner_profile[1].item(0, "algorithm").string(),
+        "mojo_gpu_native_hash_join",
+    )
+    assert_equal(inner_profile[1].item(0, "kernel_launches").int64(), Int64(5))
+
+    var empty_full = (
+        empty.lazy()
+        .join(empty.lazy(), on="k", how="full", coalesce=False)
+        .profile(accelerator=runtime, engine="accel")
+    )
+    assert_equal(empty_full[0].height(), 0)
+    assert_equal(
+        empty_full[1].item(0, "algorithm").string(),
+        "mojo_gpu_native_hash_join",
+    )
+    assert_equal(empty_full[1].item(0, "kernel_launches").int64(), Int64(7))
+
+    var full_profile = (
+        nonempty.lazy()
+        .join(nonempty.lazy(), on="k", how="full", coalesce=False)
+        .profile(accelerator=runtime, engine="accel")
+    )
+    assert_equal(full_profile[0].height(), 1)
+    assert_equal(
+        full_profile[1].item(0, "algorithm").string(),
+        "mojo_gpu_native_hash_join",
+    )
+    assert_equal(full_profile[1].item(0, "kernel_launches").int64(), Int64(21))
+    print("PASS native hash join empty and full profile launch counts")
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Float32]([1.0, 1.0, 2.0])),
+            Series("amount", Column[Float64]([10.5, 11.5, 12.5])),
+            Series("day", Column[Int64]([100, 101, 102])).with_dtype(
+                DataType.DATE
+            ),
+            Series("small", Column[Int8]([1, 2, 3])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Float32]([1.0, 2.0, 2.0])),
+            Series("amount_r", Column[Float32]([20.5, 21.5, 22.5])),
+            Series("day_r", Column[Int64]([200, 201, 202])).with_dtype(
+                DataType.DATE
+            ),
+            Series("small_r", Column[Int8]([4, 5, 6])),
+        ]
+    )
+    var query = left.lazy().join(
+        right.lazy(), on="k", how="full", coalesce=False
+    )
+    var measured = query.profile(accelerator=MetalRuntime(), engine="accel")
+    assert_equal(measured[0].height(), 4)
+    var native = False
+    var peak = 0
+    for row in range(measured[1].height()):
+        native |= (
+            measured[1].item(row, "algorithm").string()
+            == "mojo_gpu_native_hash_join"
+        )
+        peak = max(
+            peak,
+            Int(measured[1].item(row, "peak_requested_bytes").int64()),
+        )
+    assert_true(native and peak > 0)
+    var bounded = query.profile(
+        accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
+    )
+    assert_equal(bounded[0].height(), 4)
+    var bounded_peak = 0
+    for row in range(bounded[1].height()):
+        bounded_peak = max(
+            bounded_peak,
+            Int(bounded[1].item(row, "peak_requested_bytes").int64()),
+        )
+    assert_true(bounded_peak <= peak)
+    with assert_raises(contains="memory budget"):
+        _ = query.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=1), engine="accel"
+        )
+    var recovered = query.collect(accelerator=MetalRuntime(), engine="accel")
+    same(measured[0], recovered)
+    print("PASS native hash join mixed payload budgets and recovery")
 
 
 # requires: mojo_gpu
