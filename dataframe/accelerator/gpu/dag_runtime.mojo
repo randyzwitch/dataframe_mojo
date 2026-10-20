@@ -183,6 +183,7 @@ def _grouped_integer_profile_fields(report: DataFrame) raises -> DataFrame:
             "grouped_int_max_partial_states",
             "grouped_int_max_partials_per_group",
             "grouped_int_max_group_batch",
+            "grouped_int_max_qualifying_hash_group_rows",
             "grouped_int_partial_tiles",
             "grouped_int_scratch_bytes",
         ]
