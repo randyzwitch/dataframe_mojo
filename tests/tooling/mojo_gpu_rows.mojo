@@ -30,6 +30,7 @@ from tests.execution_modes.test_mojo_gpu_statistics import (
 )
 
 from tests.execution_modes.test_mojo_gpu_grouping import (
+    test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg,
     test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts,
     test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions,
     test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow,
@@ -187,6 +188,8 @@ def main() raises:
     print(
         "RUN test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts"
     )
+    print("RUN test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg")
+    test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg()
     test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts()
     print(
         "RUN test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions"

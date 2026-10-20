@@ -850,7 +850,7 @@ def _grouped_integer_partial_nodes(
     """Metadata-only output certificate shared by sizing and dispatch."""
     var result = List[UInt32]()
     var header = plan.code[4 * start]
-    if header != ROW_GROUP_HEADER_LAST:
+    if header != ROW_GROUP_HEADER and header != ROW_GROUP_HEADER_LAST:
         return result^
     var keys = Int(plan.code[4 * start + 1])
     var unsupported_physical_candidate = False

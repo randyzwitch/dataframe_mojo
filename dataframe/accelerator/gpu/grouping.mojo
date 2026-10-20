@@ -10,6 +10,7 @@ from max.gpu import global_idx, thread_idx, block_idx, barrier
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer, unsafe_stack_allocation
 from dataframe.accelerator.rows import (
+    ROW_GROUP_HEADER,
     ROW_GROUP_HEADER_LAST,
     ROW_GROUP_HEADER_WINDOW,
 )
@@ -51,7 +52,7 @@ def integer_partial_supported(
         or target_dtype == 10
     )
     return (
-        header == ROW_GROUP_HEADER_LAST
+        (header == ROW_GROUP_HEADER or header == ROW_GROUP_HEADER_LAST)
         and integer
         and target_integer
         and (op == SUM or op == COUNT or op == MIN or op == MAX)
@@ -825,10 +826,11 @@ def group_integer_partials(
         )
         at += 256
     var shared = unsafe_stack_allocation[
-        256 * 8, UInt64, address_space=AddressSpace.SHARED
+        256 * 8, DType.uint64, address_space=AddressSpace.SHARED
     ]()
+    var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
     var shared_read = shared.unsafe_origin_cast[ImmutAnyOrigin]()
-    state.store(shared, Int(thread_idx.x) * 8)
+    state.store(shared_write, Int(thread_idx.x) * 8)
     barrier()
     var width = 128
     while width > 0:
@@ -838,7 +840,7 @@ def group_integer_partials(
                 shared_read, (Int(thread_idx.x) + width) * 8
             )
             left.merge(right, op, dtype, minimum)
-            left.store(shared, Int(thread_idx.x) * 8)
+            left.store(shared_write, Int(thread_idx.x) * 8)
         barrier()
         width //= 2
     if thread_idx.x == 0:
@@ -890,10 +892,11 @@ def group_integer_finish(
         state.merge(partial, op, dtype, minimum)
         partition += 256
     var shared = unsafe_stack_allocation[
-        256 * 8, UInt64, address_space=AddressSpace.SHARED
+        256 * 8, DType.uint64, address_space=AddressSpace.SHARED
     ]()
+    var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
     var shared_read = shared.unsafe_origin_cast[ImmutAnyOrigin]()
-    state.store(shared, Int(thread_idx.x) * 8)
+    state.store(shared_write, Int(thread_idx.x) * 8)
     barrier()
     var width = 128
     while width > 0:
@@ -903,7 +906,7 @@ def group_integer_finish(
                 shared_read, (Int(thread_idx.x) + width) * 8
             )
             left.merge(right, op, dtype, minimum)
-            left.store(shared, Int(thread_idx.x) * 8)
+            left.store(shared_write, Int(thread_idx.x) * 8)
         barrier()
         width //= 2
     if thread_idx.x == 0:

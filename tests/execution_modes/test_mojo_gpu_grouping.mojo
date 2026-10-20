@@ -15,6 +15,11 @@ from dataframe import (
     lit,
 )
 from dataframe.metal import MetalRuntime
+from dataframe.accelerator.rows import ROW_GROUP_HEADER
+from dataframe.accelerator.gpu.runtime import (
+    _grouped_integer_partial_nodes,
+    _preflight,
+)
 from tests.execution_modes.test_backend_metal_moments import near
 
 
@@ -46,6 +51,30 @@ def _check(query: LazyFrame) raises -> DataFrame:
     var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
     near(actual, query.collect(engine="cpu", streaming=False))
     return actual^
+
+
+def test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg() raises:
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([0, 0, 1, 1])),
+            Series("x", Column[Int64]([1, 2, 3, 4])),
+        ]
+    )
+    var plan = _preflight(
+        frame.lazy().group_by("k").agg(
+            [col("x").sum().alias("sum"), col("x").count().alias("count")]
+        )
+    )
+    var found = False
+    for step in plan.steps:
+        if step.grouped:
+            assert_equal(plan.code[4 * step.start], Int64(ROW_GROUP_HEADER))
+            var candidates = _grouped_integer_partial_nodes(
+                plan, step.start, step.nodes
+            )
+            assert_equal(len(candidates), 2)
+            found = True
+    assert_true(found)
 
 
 def _layout_case[D: DType](n: Int, chunked: Bool) raises:
