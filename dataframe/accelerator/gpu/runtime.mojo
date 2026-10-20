@@ -1243,6 +1243,11 @@ def estimate_resources(
 def materialize(table: Table) raises -> DataFrame:
     """Export one compact resident result through the existing typed builder."""
     var host = table.readback()
+    return _materialize_host(table, host)
+
+
+def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
+    """Construct typed columns from an already completed host readback."""
     var additional = 0
     for category in table.categories:
         if category and category.value().string_codes:
@@ -1344,7 +1349,8 @@ def execute(
         terminal_boundary=terminal_boundary,
         ordered_source=ordered_source,
     )
-    var scope = Scope(device_id, budget)
+    var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
+    var scope = Scope(device_id, budget, profiling=profiling)
     var executed = execute_plan(
         plan,
         scope,
@@ -1354,14 +1360,34 @@ def execute(
         export_values=not observation_only,
     )
     var result: DataFrame
+    var readback_ns = 0
+    var result_copy_ns = 0
     if observation_only:
         if terminal_boundary:
             executed[0].observe_errors()
         result = executed[0].schema.copy()
+    elif profiling:
+        var readback_started = Int(perf_counter_ns())
+        var host = executed[0].readback()
+        readback_ns = Int(perf_counter_ns()) - readback_started
+        var result_started = Int(perf_counter_ns())
+        result = _materialize_host(executed[0], host)
+        result_copy_ns = Int(perf_counter_ns()) - result_started
     else:
         result = materialize(executed[0])
     var traffic = scope.transfers()
     var report = executed[1].copy()
+    if profiling:
+        for field in List[Tuple[String, Int]](
+            [
+                ("preflight_ms", preflight_ns),
+                ("readback_ms", readback_ns),
+                ("result_copy_ms", result_copy_ns),
+            ]
+        ):
+            report = report.with_column(
+                Series(field[0], Column[Float64]([Float64(field[1]) / 1e6]))
+            )
     report = report.with_column(
         Series("kernel_launches", Column[Int64]([Int64(traffic[2])]))
     )
@@ -1418,6 +1444,7 @@ def execute_plan(
         raise Error(plan.source_failure)
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
+    var timing_before = scope.timing_ns()
     var rows = (
         resident_input.value().rows if resident_input else plan.source.height()
     )
@@ -1713,10 +1740,15 @@ def execute_plan(
     if grouping:
         for dtype in plan.slot_dtypes:
             slot_types.append(_kind(dtype))
+    var staging_started = Int(perf_counter_ns()) if profiling else 0
+    var host_prepare_ns = staging_started - started if profiling else 0
     if not resident_input:
         for slot in range(plan.source.width()):
             _stage(plan.source._columns[slot], rows, slot, 0, words, validity)
         _stage_categories(plan.source_text, plan.source, rows, words)
+    var staging_ns = (
+        Int(perf_counter_ns()) - staging_started if profiling else 0
+    )
     var submissions = 0
     var waits = 0
     var uploaded = 0
@@ -1744,6 +1776,7 @@ def execute_plan(
     # Certificate regions observe their own faults in CPU order; plain
     # regions flag every written fault (accelerator/faults.mojo).
     var plain = plan.ordered_mode == 0
+    var submit_started = Int(perf_counter_ns()) if profiling else 0
     if rows and cells and not projection_view:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
@@ -3314,6 +3347,12 @@ def execute_plan(
             reduced_words[i] = empty[0]
             reduced_validity[i] = empty[1]
             reduced_errors[i] = empty[2]
+    var initialization_ns = scope.timing_ns()[0] - timing_before[0]
+    var submit_wait_ns = (
+        Int(perf_counter_ns())
+        - submit_started
+        - initialization_ns if profiling else 0
+    )
     # Mojo destroys owners after their last use. Explicitly consume every
     # asynchronous upload owner only after the completed submission phase.
     _ = words^
@@ -3422,6 +3461,22 @@ def execute_plan(
         wall_ns=Int(perf_counter_ns()) - started,
     )
     var fields = report.frame()._columns.copy()
+    if profiling:
+        for field in List[Tuple[String, Int]](
+            [
+                ("host_prepare_ms", host_prepare_ns),
+                ("staging_copy_ms", staging_ns),
+                ("initialization_ms", initialization_ns),
+                ("submit_wait_ms", submit_wait_ns),
+                (
+                    "synchronization_ms",
+                    scope.timing_ns()[1] - timing_before[1],
+                ),
+            ]
+        ):
+            fields.append(
+                Series(field[0], Column[Float64]([Float64(field[1]) / 1e6]))
+            )
     fields.append(
         Series("kernel_launches", Column[Int64]([Int64(submissions)]))
     )

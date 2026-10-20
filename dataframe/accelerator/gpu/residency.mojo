@@ -11,6 +11,7 @@ from max.gpu.host import DeviceContext, DeviceBuffer
 from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
+from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from .target import METAL_TARGET
@@ -76,8 +77,11 @@ struct _ScopeState(Movable):
     var waits: Atomic[Int64]
     var context_lock: Atomic[Int64]
     var context_ready: Atomic[Int64]
+    var profiling: Bool
+    var context_ns: Atomic[Int64]
+    var synchronization_ns: Atomic[Int64]
 
-    def __init__(out self, device: Int, budget: Int):
+    def __init__(out self, device: Int, budget: Int, profiling: Bool):
         self.context = None
         self.device = device
         self.budget = budget
@@ -89,15 +93,24 @@ struct _ScopeState(Movable):
         self.waits = Atomic[Int64](0)
         self.context_lock = Atomic[Int64](0)
         self.context_ready = Atomic[Int64](0)
+        self.profiling = profiling
+        self.context_ns = Atomic[Int64](0)
+        self.synchronization_ns = Atomic[Int64](0)
 
 
 struct Scope(Copyable):
     var _state: ArcPointer[_ScopeState]
 
-    def __init__(out self, device_id: Int = 0, budget: Int = -1) raises:
+    def __init__(
+        out self,
+        device_id: Int = 0,
+        budget: Int = -1,
+        *,
+        profiling: Bool = False,
+    ) raises:
         if device_id < 0 or budget < -1:
             raise Error("Mojo GPU resident device or budget is invalid")
-        self._state = ArcPointer(_ScopeState(device_id, budget))
+        self._state = ArcPointer(_ScopeState(device_id, budget, profiling))
 
     @staticmethod
     def device_count() raises -> Int:
@@ -122,11 +135,18 @@ struct Scope(Copyable):
             ]()
             try:
                 if not state[].context:
+                    var started = Int(
+                        perf_counter_ns()
+                    ) if state[].profiling else 0
                     state[].context = _ContextCell(
                         rebind[DeviceContext if METAL_TARGET else Int](
                             DeviceContext(state[].device, api="metal")
                         )
                     )
+                    if state[].profiling:
+                        _ = state[].context_ns.fetch_add(
+                            Int64(Int(perf_counter_ns()) - started)
+                        )
                     state[].context_ready.store(1)
                 var result = rebind[DeviceContext](
                     state[].context.value()
@@ -196,8 +216,22 @@ struct Scope(Copyable):
 
     def synchronize(self) raises:
         if self.initialized():
+            var started = Int(
+                perf_counter_ns()
+            ) if self._state[].profiling else 0
             self.context().synchronize()
+            if self._state[].profiling:
+                _ = self._state[].synchronization_ns.fetch_add(
+                    Int64(Int(perf_counter_ns()) - started)
+                )
             _ = self._state[].waits.fetch_add(1)
+
+    def timing_ns(self) -> Tuple[Int, Int]:
+        """Host context construction and waits; neither is GPU-only time."""
+        return (
+            Int(self._state[].context_ns.load()),
+            Int(self._state[].synchronization_ns.load()),
+        )
 
     def read_control_into[
         dtype: DType
