@@ -1327,8 +1327,12 @@ def _gather_native_typed[
         output_errors = output_errors_buffer.value().copy()
     var ctx = scope.context()
     try:
-        ctx.enqueue_function[gather_native_column[dtype]](
-            source_values,
+        # Float64 payloads move as bits; Metal cannot load native doubles.
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_function[gather_native_column[transport_dtype]](
+            source_values.create_sub_buffer[transport_dtype](
+                0, len(source_values)
+            ),
             source_validity,
             source_errors,
             indices,
@@ -1339,7 +1343,9 @@ def _gather_native_typed[
             UInt8(input.has_errors()),
             UInt8(Bool(output_validity_buffer)),
             UInt32(rows),
-            output_values,
+            output_values.create_sub_buffer[transport_dtype](
+                0, len(output_values)
+            ),
             output_validity,
             output_errors,
             grid_dim=((rows + 7) // 8 + 127) // 128,
