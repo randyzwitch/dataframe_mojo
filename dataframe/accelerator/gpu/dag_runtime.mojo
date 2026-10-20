@@ -34,6 +34,8 @@ from dataframe.accelerator.joins import (
 )
 from . import runtime as rows
 from . import qcut_runtime as qcuts
+from . import observed_concat_runtime as observed_concats
+from dataframe.accelerator import observed_concat
 from dataframe.accelerator.qcuts import is_qcut_marker
 from dataframe.accelerator.partition_cuts import (
     is_marker as is_partition_cut_marker,
@@ -90,6 +92,9 @@ def preflight(
                 semantic,
             )
         elif task.kind == DAG_ROWS:
+            if observed_concat.is_marker(task.query):
+                _ = observed_concats.preflight(task.query)
+                continue
             if is_partition_cut_marker(task.query):
                 _ = partition_cuts.preflight(task.query)
                 continue
@@ -568,7 +573,17 @@ def execute(
                 task.query._frames[0] = _frame(dag, values, task.source)
                 resident = values[task.source].copy()
             var source_rows = resident.value().rows if resident else -1
-            if is_partition_cut_marker(task.query):
+            if observed_concat.is_marker(task.query):
+                if not resident:
+                    raise Error("Observed concat resident producer is missing")
+                executed = observed_concats.execute_plan(
+                    task.query,
+                    resident.value(),
+                    scope,
+                    export_values=not (observation_only and index == dag.root),
+                    text_domain=target_domain,
+                )
+            elif is_partition_cut_marker(task.query):
                 if not resident:
                     raise Error(
                         "Partition CUT original resident producer is missing"
