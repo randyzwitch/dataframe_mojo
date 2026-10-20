@@ -902,6 +902,8 @@ def estimate_resources(
     charged. Filters and
     groups use the source-row upper bound, without reading selectivity/nulls.
     """
+    from . import typed_rows
+
     if rows_override < -1:
         raise Error("Mojo GPU resource row override must be >= -1")
     var rows = plan.source.height() if rows_override < 0 else rows_override
@@ -1236,8 +1238,6 @@ def estimate_resources(
         waits = _checked_add(waits, 1)
         # Native computation drains before its temporary owners leave scope;
         # terminal readback is a separate phase from that ownership boundary.
-        from . import typed_rows
-
         if (
             terminal_boundary
             and export_values
