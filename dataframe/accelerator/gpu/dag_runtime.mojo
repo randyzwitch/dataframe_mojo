@@ -59,7 +59,8 @@ def preflight(
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> JoinDag:
-    """Check every reachable task and operation without device initialization."""
+    """Check every reachable task and operation without device initialization.
+    """
     var semantic = capabilities.copy()
     semantic.scalar_regions = True
     var dag = lower_join_dag(
@@ -118,7 +119,8 @@ def preflight(
             if task.source >= 0:
                 if plan.ordered_mode == 2:
                     raise Error(
-                        "Metal unsupported [ordered rows]: resident producer provenance is not proved"
+                        "Metal unsupported [ordered rows]: resident producer"
+                        " provenance is not proved"
                     )
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
@@ -128,7 +130,8 @@ def preflight(
                         and not capabilities.adjudicated_faults
                     ):
                         raise Error(
-                            "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
+                            "Metal unsupported [temporal]: prototype requires a"
+                            " direct scan before DAG submission"
                         )
         else:
             raise Error("Mojo GPU unexpected execution DAG task")
@@ -561,7 +564,8 @@ def execute(
                 )
                 if left_rows != right_rows:
                     raise Error(
-                        "explode: columns have different element counts at row 0"
+                        "explode: columns have different element counts at"
+                        " row 0"
                     )
             executed = joins.execute_plan(
                 task,

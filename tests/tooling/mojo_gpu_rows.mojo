@@ -188,7 +188,9 @@ def main() raises:
     print(
         "RUN test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts"
     )
-    print("RUN test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg")
+    print(
+        "RUN test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg"
+    )
     test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg()
     test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts()
     print(

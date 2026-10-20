@@ -14,7 +14,17 @@ from dataframe.accelerator.rows import (
     ROW_GROUP_HEADER_LAST,
     ROW_GROUP_HEADER_WINDOW,
 )
-from dataframe.expr import ARG_MIN, ARG_MAX, COV, CORR, SUM, MEAN, MIN, MAX, COUNT
+from dataframe.expr import (
+    ARG_MIN,
+    ARG_MAX,
+    COV,
+    CORR,
+    SUM,
+    MEAN,
+    MIN,
+    MAX,
+    COUNT,
+)
 from dataframe.partition import _mix, _combine
 from . import floating as f
 from .decimal_descriptors import DECIMAL_SUM, DECIMAL_MEAN

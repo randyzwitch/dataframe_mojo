@@ -61,9 +61,9 @@ def test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg() raise
         ]
     )
     var plan = _preflight(
-        frame.lazy().group_by("k").agg(
-            [col("x").sum().alias("sum"), col("x").count().alias("count")]
-        )
+        frame.lazy()
+        .group_by("k")
+        .agg([col("x").sum().alias("sum"), col("x").count().alias("count")])
     )
     var found = False
     for step in plan.steps:
@@ -253,14 +253,18 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
             Series("x", Column[Int64](values^, valid^)),
         ]
     )
-    var query = frame.lazy().group_by("k").agg(
-        [
-            col("x").sum().alias("sum"),
-            col("x").count().alias("count"),
-            col("x").min().alias("min"),
-            col("x").max().alias("max"),
-            col("x").sum(min_count=10000).alias("minimum_count"),
-        ]
+    var query = (
+        frame.lazy()
+        .group_by("k")
+        .agg(
+            [
+                col("x").sum().alias("sum"),
+                col("x").count().alias("count"),
+                col("x").min().alias("min"),
+                col("x").max().alias("max"),
+                col("x").sum(min_count=10000).alias("minimum_count"),
+            ]
+        )
     )
     var runtime = MetalRuntime()
     var measured = query.profile(engine="accel", accelerator=runtime)
@@ -282,8 +286,7 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
         Int64(5),
     )
     assert_true(
-        measured[1].item(0, "grouped_int_max_partials_per_group").int64()
-        >= 2
+        measured[1].item(0, "grouped_int_max_partials_per_group").int64() >= 2
     )
     assert_true(
         measured[1].item(0, "grouped_int_max_partial_states").int64() <= 4096
@@ -305,12 +308,15 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
     for row in range(4097):
         distinct[row] = Int32(row)
     var high_cardinality = DataFrame(
-        [Series("k", Column[Int32](distinct^)), Series("x", Column[Int64](ones^))]
+        [
+            Series("k", Column[Int32](distinct^)),
+            Series("x", Column[Int64](ones^)),
+        ]
     )
-    var fallback = high_cardinality.lazy().group_by(
-        "k", maintain_order=True
-    ).agg(
-        col("x").sum()
+    var fallback = (
+        high_cardinality.lazy()
+        .group_by("k", maintain_order=True)
+        .agg(col("x").sum())
     )
     var fallback_profile = fallback.profile(
         engine="accel", accelerator=MetalRuntime()
@@ -342,13 +348,17 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
             Series("x", Column[UInt64](unsigned_values^)),
         ]
     )
-    var unsigned_query = unsigned_frame.lazy().group_by("k").agg(
-        [
-            col("x").sum(min_count=rows + 1).alias("sum"),
-            col("x").count().alias("count"),
-            col("x").min().alias("min"),
-            col("x").max().alias("max"),
-        ]
+    var unsigned_query = (
+        unsigned_frame.lazy()
+        .group_by("k")
+        .agg(
+            [
+                col("x").sum(min_count=rows + 1).alias("sum"),
+                col("x").count().alias("count"),
+                col("x").min().alias("min"),
+                col("x").max().alias("max"),
+            ]
+        )
     )
     var unsigned_profile = unsigned_query.profile(
         engine="accel", accelerator=MetalRuntime()
@@ -361,9 +371,7 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
     assert_true(unsigned_profile[0].item(0, "sum").is_null())
     assert_equal(unsigned_profile[0].item(0, "count").int64(), Int64(rows))
     assert_equal(unsigned_profile[0].item(0, "min").uint64(), UInt64(0))
-    assert_equal(
-        unsigned_profile[0].item(0, "max").uint64(), UInt64.MAX
-    )
+    assert_equal(unsigned_profile[0].item(0, "max").uint64(), UInt64.MAX)
     assert_equal(
         unsigned_profile[1].item(0, "grouped_int_algorithm").string(),
         "mojo_gpu_grouped_int_partials",
@@ -384,21 +392,23 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
             Series("x", Column[Int64](skew_values^)),
         ]
     )
-    var skew_query = skewed.lazy().group_by(
-        "k", maintain_order=True
-    ).agg(col("x").sum().alias("sum"))
+    var skew_query = (
+        skewed.lazy()
+        .group_by("k", maintain_order=True)
+        .agg(col("x").sum().alias("sum"))
+    )
     var skew_profile = skew_query.profile(
         engine="accel", accelerator=MetalRuntime()
     )
     assert_true(
-        skew_profile[0].equals(skew_query.collect(engine="cpu", streaming=False))
+        skew_profile[0].equals(
+            skew_query.collect(engine="cpu", streaming=False)
+        )
     )
     assert_equal(skew_profile[0].height(), 5)
     assert_equal(skew_profile[0].item(0, "sum").int64(), Int64(9000))
     for group in range(1, 5):
-        assert_equal(
-            skew_profile[0].item(group, "sum").int64(), Int64(250)
-        )
+        assert_equal(skew_profile[0].item(group, "sum").int64(), Int64(250))
     assert_true(
         skew_profile[1].item(0, "grouped_int_max_partials_per_group").int64()
         >= 2
@@ -412,18 +422,25 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
             Series("f", Column[Float64](floats^)),
         ]
     )
-    var mixed_query = mixed.lazy().group_by("k").agg(
-        [col("x").sum().alias("integer_sum"), col("f").sum().alias("float_sum")]
+    var mixed_query = (
+        mixed.lazy()
+        .group_by("k")
+        .agg(
+            [
+                col("x").sum().alias("integer_sum"),
+                col("f").sum().alias("float_sum"),
+            ]
+        )
     )
     var mixed_profile = mixed_query.profile(
         engine="accel", accelerator=MetalRuntime()
     )
     assert_true(
-        mixed_profile[0].equals(mixed_query.collect(engine="cpu", streaming=False))
+        mixed_profile[0].equals(
+            mixed_query.collect(engine="cpu", streaming=False)
+        )
     )
-    assert_equal(
-        mixed_profile[0].item(0, "integer_sum").int64(), Int64(rows)
-    )
+    assert_equal(mixed_profile[0].item(0, "integer_sum").int64(), Int64(rows))
     assert_equal(
         mixed_profile[1].item(0, "grouped_int_parallel_outputs").int64(),
         Int64(1),
@@ -439,11 +456,14 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
         ]
     )
     with assert_raises(contains="overflow"):
-        _ = overflowing.lazy().group_by("k").agg(col("x").sum()).collect(
-            engine="accel", accelerator=MetalRuntime()
+        _ = (
+            overflowing.lazy()
+            .group_by("k")
+            .agg(col("x").sum())
+            .collect(engine="accel", accelerator=MetalRuntime())
         )
-    var overflowing_group = overflowing.lazy().group_by("k").agg(
-        col("x").sum().alias("sum")
+    var overflowing_group = (
+        overflowing.lazy().group_by("k").agg(col("x").sum().alias("sum"))
     )
     with assert_raises(contains="overflow"):
         _ = overflowing_group.collect(engine="cpu", streaming=False)
@@ -491,9 +511,7 @@ def test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback() raises:
     var saw_grouped_partials = False
     for row in range(composed_profile[1].height()):
         saw_grouped_partials |= (
-            composed_profile[1]
-            .item(row, "grouped_int_algorithm")
-            .string()
+            composed_profile[1].item(row, "grouped_int_algorithm").string()
             == "mojo_gpu_grouped_int_partials"
         )
     assert_true(saw_grouped_partials)

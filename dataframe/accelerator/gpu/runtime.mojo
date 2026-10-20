@@ -2516,10 +2516,11 @@ def execute_plan(
                                             UInt32(partials_per_group),
                                             UInt32(current_rows),
                                             UInt32(rows),
-                                            grouped_integer_scratch.value()
-                                            .unsafe_ptr(),
-                                            grid_dim=(current_batch
-                                            * partials_per_group),
+                                            grouped_integer_scratch.value().unsafe_ptr(),
+                                            grid_dim=(
+                                                current_batch
+                                                * partials_per_group
+                                            ),
                                             block_dim=256,
                                         )
                                         ctx.enqueue_function[
@@ -3769,9 +3770,7 @@ def execute_plan(
             "grouped_int_algorithm",
             Column[String](
                 [
-                    "mojo_gpu_grouped_int_partials"
-                    if grouped_int_parallel_outputs
-                    else "legacy"
+                    "mojo_gpu_grouped_int_partials" if grouped_int_parallel_outputs else "legacy"
                 ]
             ),
         )
