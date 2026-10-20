@@ -553,6 +553,19 @@ mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo
 Timing programs are reviewed separately from engine changes, as required by
 the benchmark separation rule.
 
+```sh
+mojo run -I . benchmarks/bench_gpu_hash_partitions.mojo
+mojo run -I . benchmarks/bench_gpu_groupby_engine.mojo
+```
+
+The partition benchmark checks complete row membership and compares
+resident sorted/hash construction, excluding allocation, upload and readback.
+The engine benchmark covers small, low-cardinality and high-cardinality
+nullable inputs; it times complete `collect()` calls and verifies CPU results
+outside timing. Build its identical source against each engine revision for
+comparisons. Discard round zero; these development probes do not establish
+general query-suite performance or replace external-suite coverage.
+
 Every operator PR has two short gates before broader work:
 
 1. A focused correctness matrix covering supported physical and logical

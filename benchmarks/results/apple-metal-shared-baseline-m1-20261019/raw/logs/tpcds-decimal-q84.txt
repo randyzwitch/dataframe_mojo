@@ -1,0 +1,3 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q84-qiqgx8mh/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q84-qiqgx8mh/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	failed
+coverage	q84	unsupported	Metal unsupported [dictionary]: concat pair capacity

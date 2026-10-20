@@ -58,6 +58,19 @@ from tests.execution_modes.test_mojo_gpu_wide_integer_sum import (
 )
 
 
+from tests.execution_modes.test_mojo_gpu_calibration import (
+    test_mojo_gpu_calibration_metadata,
+    test_mojo_gpu_calibration_isolation,
+    test_mojo_gpu_calibration_measurements,
+)
+from tests.execution_modes.test_mojo_gpu_ordered_errors import (
+    test_mojo_gpu_ordered_rows_profile_budget_estimate_and_provenance,
+)
+from tests.execution_modes.test_backend_metal_cost import (
+    test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata,
+)
+
+
 def main() raises:
     test_mojo_gpu_device_service_metadata_copy_and_budget_are_context_free()
     print(
@@ -121,3 +134,10 @@ def main() raises:
     print("PASS final overflow, late row faults and distinct expressions")
     test_wide_integer_sum_bounded_state_budget_and_reuse()
     print("PASS bounded wide state, exact budgets and scratch reuse")
+
+    test_mojo_gpu_calibration_metadata()
+    test_mojo_gpu_calibration_isolation()
+    test_mojo_gpu_calibration_measurements()
+    test_mojo_gpu_ordered_rows_profile_budget_estimate_and_provenance()
+    test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata()
+    print("PASS calibration bounds, ordered profile and analytical metadata")

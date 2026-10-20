@@ -903,6 +903,8 @@ def estimate_resources(
     charged. Filters and
     groups use the source-row upper bound, without reading selectivity/nulls.
     """
+    from . import typed_rows
+
     if rows_override < -1:
         raise Error("Mojo GPU resource row override must be >= -1")
     var rows = plan.source.height() if rows_override < 0 else rows_override
@@ -1237,6 +1239,22 @@ def estimate_resources(
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
+    # A reusable standalone service drains its stream once more before the
+    # context can return to the idle pool. Shared-region and uncached calls
+    # may omit this drain; the metadata estimate remains an upper bound.
+    # Zero-column inputs carry row metadata without creating a device context.
+    if rows and cells:
+        waits = _checked_add(waits, 1)
+        # Native computation drains before its temporary owners leave scope;
+        # terminal readback is a separate phase from that ownership boundary.
+        if (
+            terminal_boundary
+            and export_values
+            and not resident_input
+            and len(plan.steps)
+            and typed_rows.supports(plan)
+        ):
+            waits = _checked_add(waits, 1)
     peak = max(peak, plan.iana_construction_peak_bytes)
     return ResourceFacts(
         peak,

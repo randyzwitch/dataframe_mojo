@@ -1,0 +1,3900 @@
+{
+  "analysis": {
+    "duplicate_handling": "exact full-row Counters preserve multiplicity; if no unique nonfloat signature, float columns are matched as per-column multisets within nonfloat signature groups",
+    "python_environment": "pixi --locked, -e oracle, manifest ~/GitHub/dataframe_mojo-metal-868/pixi.toml",
+    "scope": "completed tpcds-decimal logs classified wrong_answer only; no GPU/compiler/input",
+    "script_path": "/tmp/tpcds_decimal_a523_compare.py",
+    "script_sha256": "dcd2bedded38e3ecd889b1437413da53958bcdf08b50de0d702c376a750865bb"
+  },
+  "answer_root": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers",
+  "cases": {
+    "tpcds-decimal-q12": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 1.4210854715202004e-14,
+              "bit_differences": 19,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 19,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.543936218021707e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 5
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 10203,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu-0.parquet",
+          "parquet_sha256": "483b7309be2e4f14f2a06385cb602f79e6bd89c14faa6860308068a0033697bd",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 691,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu-0.schema.json",
+          "schema_sha256": "e779ea6bea568b09b929cdc448ae0110e2519518524274bb02b6f6cb7225d596"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 10203,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "483b7309be2e4f14f2a06385cb602f79e6bd89c14faa6860308068a0033697bd",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 698,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "965f34771fef7784ae1628b0c0dcc7d8385024ea70f4809960104180fe90d628"
+        },
+        "metal": {
+          "parquet_bytes": 10203,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-metal-0.parquet",
+          "parquet_sha256": "b425a7b8b98aaa03cceb98b160b3c0024bc0470f538d47e6d76546a88af7562b",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 693,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q12-ut6jg8fb/answer-metal-0.schema.json",
+          "schema_sha256": "170ec7105f0b659c5a1d3a73f718b09ac75475ba1ec7e800018201adad0a8d68"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q12.txt",
+      "log_sha256": "396429b9fd319b0ec6142aef8bd99adef0bf1303728acdf6980a357cde775776",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q20": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 7.105427357601002e-15,
+              "bit_differences": 31,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 31,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.3777080666667344e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 3
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 9949,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu-0.parquet",
+          "parquet_sha256": "36a7eba31785894cddaf9c952c6e3a560ade0948df6e1dbba687682300d8722f",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 691,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu-0.schema.json",
+          "schema_sha256": "e779ea6bea568b09b929cdc448ae0110e2519518524274bb02b6f6cb7225d596"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 9949,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "36a7eba31785894cddaf9c952c6e3a560ade0948df6e1dbba687682300d8722f",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 698,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "965f34771fef7784ae1628b0c0dcc7d8385024ea70f4809960104180fe90d628"
+        },
+        "metal": {
+          "parquet_bytes": 9949,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-metal-0.parquet",
+          "parquet_sha256": "67f53459174f18a933cce7684261b4b631a354833394519249497ed3489d1116",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 693,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q20-nm3d7aoy/answer-metal-0.schema.json",
+          "schema_sha256": "170ec7105f0b659c5a1d3a73f718b09ac75475ba1ec7e800018201adad0a8d68"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q20.txt",
+      "log_sha256": "4e67e49e7c7594d85ad30de8566526e6b621c731305c6594b0945b103d232d1b",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q47": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_year": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "nsum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "psum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_company_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_store_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_brand",
+            "s_store_name",
+            "s_company_name",
+            "d_year",
+            "d_moy",
+            "sum_sales",
+            "psum",
+            "nsum"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 9.094947017729282e-13,
+              "bit_differences": 36,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 36,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.6963370271130303e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 17
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_year": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "nsum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "psum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_company_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_store_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_brand",
+            "s_store_name",
+            "s_company_name",
+            "d_year",
+            "d_moy",
+            "sum_sales",
+            "psum",
+            "nsum"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 5699,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-cpu-0.parquet",
+          "parquet_sha256": "fd2965ff934de5394f2ea2342ac99f0e22fdeaefa4cd8cde4d7642cc2c7cb009",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 923,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-cpu-0.schema.json",
+          "schema_sha256": "8479d38a51afc43faa12951eb3d083e012f93a121f77cccaa08e59c24f819052"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 5699,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "fd2965ff934de5394f2ea2342ac99f0e22fdeaefa4cd8cde4d7642cc2c7cb009",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 930,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "1151216e46204789445dfd927373ec299eca99c2c316d7939d16753039da6c68"
+        },
+        "metal": {
+          "parquet_bytes": 5699,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-metal-0.parquet",
+          "parquet_sha256": "6e58af4616eb50fb11eea9e7a4e204e02664c53e605ef388aa4bf2f98b15a380",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 925,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q47-zaltxbh3/answer-metal-0.schema.json",
+          "schema_sha256": "0de171ee79ebad0a1326fb8a1f099ed687dc385d3c070ec154b39f7921cd6ef3"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q47.txt",
+      "log_sha256": "f74e43c71d15d6bb90e4a2f7c88563ea76d71192ae339f219aab97d5019c7d93",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q53": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "avg_quarterly_sales": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_manufact_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_quarterly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_manufact_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_manufact_id",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_manufact_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_quarterly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "avg_quarterly_sales": {
+              "absolute_error_max": 1.1368683772161603e-13,
+              "bit_differences": 31,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 31,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.1653089107276342e-16,
+              "ulp_max_finite": 1,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_manufact_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_quarterly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_manufact_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_manufact_id",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_manufact_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_quarterly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 2170,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-cpu-0.parquet",
+          "parquet_sha256": "94f80750f06d62e7188850cf8aff9aa1721d9f39a75cea8a2eccee7af5cca23e",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manufact_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_quarterly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 358,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-cpu-0.schema.json",
+          "schema_sha256": "e38bcf847fa1b43910f3dab553542fa66ad6a44909f01e3f184c761f98fe6c5d"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 2170,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "94f80750f06d62e7188850cf8aff9aa1721d9f39a75cea8a2eccee7af5cca23e",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manufact_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_quarterly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 365,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "d71bc84e9f95e66918f0152fbe0b5cb2248b522ba4789530866751f111bf64ea"
+        },
+        "metal": {
+          "parquet_bytes": 2174,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-metal-0.parquet",
+          "parquet_sha256": "91c87c14333cd0b38df99ccce4d27c10b2bb15a7ebd5985618c0f328b2006117",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manufact_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_quarterly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 360,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q53-cfu7irno/answer-metal-0.schema.json",
+          "schema_sha256": "1376f3aaf84af024f6ba9d4596269120032209b78702831bd8aa58e648d3e2cf"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q53.txt",
+      "log_sha256": "9f534be3b7943f8fa0c91a8fc356a0e89856fa86414f780df062e3e81abd53a0",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q57": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "cc_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "cc_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_year": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "nsum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "psum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_brand",
+            "cc_name",
+            "d_year",
+            "d_moy",
+            "sum_sales",
+            "psum",
+            "nsum"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "cc_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 4.547473508864641e-13,
+              "bit_differences": 36,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 36,
+              "physical_dtype": "Float64",
+              "relative_error_max": 3.279881360186547e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 1
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "cc_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "cc_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "d_year": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "nsum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "psum": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_brand",
+            "cc_name",
+            "d_year",
+            "d_moy",
+            "sum_sales",
+            "psum",
+            "nsum"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "cc_name",
+              "String"
+            ],
+            [
+              "d_year",
+              "Int64"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "psum",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "nsum",
+              "Decimal(precision=38, scale=2)"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 5382,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-cpu-0.parquet",
+          "parquet_sha256": "384400ead02d920f92454c8d24b62e3f9718da1f5f898fe602cd80d23a166caf",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "cc_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 834,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-cpu-0.schema.json",
+          "schema_sha256": "19ddb4ff5814fc3b054d552d804e59e71ab030338d4901581e489ca9f69e5999"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 5382,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "384400ead02d920f92454c8d24b62e3f9718da1f5f898fe602cd80d23a166caf",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "cc_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 841,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "0e4f780366711ea5a717eadd650b585096813405568c21bfb5006b98eea49e04"
+        },
+        "metal": {
+          "parquet_bytes": 5382,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-metal-0.parquet",
+          "parquet_sha256": "a3e4af3382facca4b93a038c199d59bd61d03c2e7ad4d95bcb5369d93bb814c0",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "cc_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_year"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "psum"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "nsum"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 836,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q57-pxpnudw5/answer-metal-0.schema.json",
+          "schema_sha256": "3886990c8b18ecc3031f2c97e28f94d118ded20945533ba3034a286931e9e435"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q57.txt",
+      "log_sha256": "0c551d029b768899ee269425b11c630d6bb3c6f36769224da06d7407f31d0689",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q63": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_manager_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_manager_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_manager_id",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_manager_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 1.1368683772161603e-13,
+              "bit_differences": 65,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 65,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.5460209667179737e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 12
+            }
+          },
+          "left_schema": [
+            [
+              "i_manager_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_manager_id": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_manager_id",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_manager_id",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 1848,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-cpu-0.parquet",
+          "parquet_sha256": "8fdca4204c1f08ac7a33e5b6babec8e6d8a81ef0ab80ceb27cc00377358e8272",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manager_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 355,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-cpu-0.schema.json",
+          "schema_sha256": "42dafd6b8e9ecf9d91da9e9ab1ef78735601a550861de87377a34dc547aebebe"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 1848,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "8fdca4204c1f08ac7a33e5b6babec8e6d8a81ef0ab80ceb27cc00377358e8272",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manager_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 362,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "10a992cb1af6755c65cb64293db5650b3b593d82d6850a67ca7109b0ad0b3a17"
+        },
+        "metal": {
+          "parquet_bytes": 1848,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-metal-0.parquet",
+          "parquet_sha256": "cb065c084ee64f310a1ff008048a87db736e51da7ed60964ae8347857b3d751c",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "i_manager_id"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 357,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q63-uvbu9z5z/answer-metal-0.schema.json",
+          "schema_sha256": "8f5ad59ad6120ffd0651c366bc88aaeca5cb726c553b59ffc6149bd08dc712f6"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q63.txt",
+      "log_sha256": "f74c52c5b44ee46129e1a3cfa986ee7e064f8222baf35a134e1125ba76088423",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q89": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 100,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_company_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_store_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_class",
+            "i_brand",
+            "s_store_name",
+            "s_company_name",
+            "d_moy",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "avg_monthly_sales": {
+              "absolute_error_max": 9.094947017729282e-13,
+              "bit_differences": 54,
+              "compared_rows": 100,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 54,
+              "physical_dtype": "Float64",
+              "relative_error_max": 3.775817543737549e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 12
+            }
+          },
+          "left_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "d_moy": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Int64",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_brand": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_company_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "s_store_name": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "String",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            },
+            "sum_sales": {
+              "column_multiset_equal": true,
+              "left_rows": 100,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 100,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_category",
+            "i_class",
+            "i_brand",
+            "s_store_name",
+            "s_company_name",
+            "d_moy",
+            "sum_sales"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_brand",
+              "String"
+            ],
+            [
+              "s_store_name",
+              "String"
+            ],
+            [
+              "s_company_name",
+              "String"
+            ],
+            [
+              "d_moy",
+              "Int64"
+            ],
+            [
+              "sum_sales",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "avg_monthly_sales",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 100,
+            "right": 100
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 4007,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-cpu-0.parquet",
+          "parquet_sha256": "07e650a461cfba102507e980777690a0e4317224ed1ba4e5d576c7c29e757984",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 748,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-cpu-0.schema.json",
+          "schema_sha256": "daace9f4a7e6ea84613fa6a432a0330aab910343b0c11d89bbc38bc2096fe327"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 4007,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "07e650a461cfba102507e980777690a0e4317224ed1ba4e5d576c7c29e757984",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 755,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "20dccd49d6c82df569d930e4fbb1f32860eb8709552413a7cc39001c86d3a5ae"
+        },
+        "metal": {
+          "parquet_bytes": 4007,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-metal-0.parquet",
+          "parquet_sha256": "ade72a740de3f0b5425297773268b0e7f01efb940d2a059e6c76c7ca5c5a15e7",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_brand"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_store_name"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "s_company_name"
+              },
+              {
+                "dtype": "int64",
+                "encoded": "P5:int64",
+                "name": "d_moy"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "sum_sales"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "avg_monthly_sales"
+              }
+            ],
+            "rows": 100
+          },
+          "schema_bytes": 750,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q89-7a66fa8x/answer-metal-0.schema.json",
+          "schema_sha256": "654ab3a9089854019f7d5dc1046994589c67a9c855f0396666c782bda0c78d8b"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q89.txt",
+      "log_sha256": "2e78679c4115c97e8d725d7688de1861a156049c749bec89514599eda66f57d1",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q9": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "bucket1": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 1,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            },
+            "bucket2": {
+              "absolute_error_max": 2.2737367544323206e-13,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.206587025552608e-16,
+              "ulp_max_finite": 1,
+              "ulp_over_1_finite": 0
+            },
+            "bucket3": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 1,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            },
+            "bucket4": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 1,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            },
+            "bucket5": {
+              "absolute_error_max": 9.094947017729282e-13,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.946002034868792e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 1
+            }
+          },
+          "left_schema": [
+            [
+              "bucket1",
+              "Float64"
+            ],
+            [
+              "bucket2",
+              "Float64"
+            ],
+            [
+              "bucket3",
+              "Float64"
+            ],
+            [
+              "bucket4",
+              "Float64"
+            ],
+            [
+              "bucket5",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {},
+          "nonfloat_columns": [],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": false,
+          "right_schema": [
+            [
+              "bucket1",
+              "Float64"
+            ],
+            [
+              "bucket2",
+              "Float64"
+            ],
+            [
+              "bucket3",
+              "Float64"
+            ],
+            [
+              "bucket4",
+              "Float64"
+            ],
+            [
+              "bucket5",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 1,
+            "right": 1
+          },
+          "schema_equal": true,
+          "value_alignment": "nonfloat_signature_multiset_per_float_column"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "bucket1": {
+              "absolute_error_max": 2.8421709430404007e-13,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 7.886978780358943e-16,
+              "ulp_max_finite": 5,
+              "ulp_over_1_finite": 1
+            },
+            "bucket2": {
+              "absolute_error_max": 2.2737367544323206e-13,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 2.206587025552608e-16,
+              "ulp_max_finite": 1,
+              "ulp_over_1_finite": 0
+            },
+            "bucket3": {
+              "absolute_error_max": 1.1368683772161603e-12,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 6.580312942630061e-16,
+              "ulp_max_finite": 5,
+              "ulp_over_1_finite": 1
+            },
+            "bucket4": {
+              "absolute_error_max": 5.115907697472721e-13,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 1.915146825124271e-15,
+              "ulp_max_finite": 9,
+              "ulp_over_1_finite": 1
+            },
+            "bucket5": {
+              "absolute_error_max": 5.9117155615240335e-12,
+              "bit_differences": 1,
+              "compared_rows": 1,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 0,
+                "right": 0
+              },
+              "numeric_differences": 1,
+              "physical_dtype": "Float64",
+              "relative_error_max": 1.9149013226647147e-15,
+              "ulp_max_finite": 13,
+              "ulp_over_1_finite": 1
+            }
+          },
+          "left_schema": [
+            [
+              "bucket1",
+              "Float64"
+            ],
+            [
+              "bucket2",
+              "Float64"
+            ],
+            [
+              "bucket3",
+              "Float64"
+            ],
+            [
+              "bucket4",
+              "Float64"
+            ],
+            [
+              "bucket5",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {},
+          "nonfloat_columns": [],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": false,
+          "right_schema": [
+            [
+              "bucket1",
+              "Float64"
+            ],
+            [
+              "bucket2",
+              "Float64"
+            ],
+            [
+              "bucket3",
+              "Float64"
+            ],
+            [
+              "bucket4",
+              "Float64"
+            ],
+            [
+              "bucket5",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 1,
+            "right": 1
+          },
+          "schema_equal": true,
+          "value_alignment": "nonfloat_signature_multiset_per_float_column"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 1758,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-cpu-0.parquet",
+          "parquet_sha256": "8e818bb3e43c654d5baca35ad7b2a884ecd81319630acdf09619bb877024b5b8",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket1"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket2"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket3"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket4"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket5"
+              }
+            ],
+            "rows": 1
+          },
+          "schema_bytes": 485,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-cpu-0.schema.json",
+          "schema_sha256": "728aa61ab3ccc91587011033bb986cb5d4feb07ec7d78696d702091d4f3924b5"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 1758,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "9fc704b8d1519c5e3450c12001781b53614892e892ca5ea97c559eaede42afbd",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket1"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket2"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket3"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket4"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket5"
+              }
+            ],
+            "rows": 1
+          },
+          "schema_bytes": 492,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "127c0354e22cc6b8cbe0fd0dc7382e05d7b9d918ac700b5f640cbbf240a15c24"
+        },
+        "metal": {
+          "parquet_bytes": 1758,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-metal-0.parquet",
+          "parquet_sha256": "5db4ea3c295157b6eb30b50fd27a318d0b26af85eeddd996d0df313cdee05a61",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket1"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket2"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket3"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket4"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "bucket5"
+              }
+            ],
+            "rows": 1
+          },
+          "schema_bytes": 487,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q9-bsau4hw1/answer-metal-0.schema.json",
+          "schema_sha256": "1dd310625510a5143aee089698ea2e0376d78e92df6910c1bddf98079fbac362"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q9.txt",
+      "log_sha256": "f0c55854d14500694d499d3a807cb813f0a23582c356385f5a7bac0cd7ece87c",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    },
+    "tpcds-decimal-q98": {
+      "comparisons": {
+        "cpu0_vs_cpu_repeat0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": true,
+          "exact_row_multiset_equal": true,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 0.0,
+              "bit_differences": 0,
+              "compared_rows": 250,
+              "exact": true,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 1,
+                "right": 1
+              },
+              "numeric_differences": 0,
+              "physical_dtype": "Float64",
+              "relative_error_max": 0.0,
+              "ulp_max_finite": 0,
+              "ulp_over_1_finite": 0
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 250,
+            "right": 250
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        },
+        "cpu0_vs_metal0": {
+          "duplicate_nonfloat_signature_groups": 0,
+          "encoded_schema_equal": true,
+          "exact_ordered_rows_equal": false,
+          "exact_row_multiset_equal": false,
+          "float_columns": {
+            "revenueratio": {
+              "absolute_error_max": 1.4210854715202004e-14,
+              "bit_differences": 59,
+              "compared_rows": 250,
+              "exact": false,
+              "nan_pairs": 0,
+              "nulls": {
+                "left": 1,
+                "right": 1
+              },
+              "numeric_differences": 59,
+              "physical_dtype": "Float64",
+              "relative_error_max": 3.9116281924917936e-16,
+              "ulp_max_finite": 2,
+              "ulp_over_1_finite": 9
+            }
+          },
+          "left_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "nonfloat_column_multiset": {
+            "i_category": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_class": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_current_price": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "Decimal(precision=7, scale=2)",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_item_desc": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "i_item_id": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "String",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            },
+            "itemrevenue": {
+              "column_multiset_equal": true,
+              "left_rows": 250,
+              "physical_dtype": "Decimal(precision=38, scale=2)",
+              "right_rows": 250,
+              "symmetric_count_delta": 0
+            }
+          },
+          "nonfloat_columns": [
+            "i_item_id",
+            "i_item_desc",
+            "i_category",
+            "i_class",
+            "i_current_price",
+            "itemrevenue"
+          ],
+          "nonfloat_signature_multiset_equal": true,
+          "nonfloat_signature_order_equal": true,
+          "nonfloat_signature_unique_both": true,
+          "right_schema": [
+            [
+              "i_item_id",
+              "String"
+            ],
+            [
+              "i_item_desc",
+              "String"
+            ],
+            [
+              "i_category",
+              "String"
+            ],
+            [
+              "i_class",
+              "String"
+            ],
+            [
+              "i_current_price",
+              "Decimal(precision=7, scale=2)"
+            ],
+            [
+              "itemrevenue",
+              "Decimal(precision=38, scale=2)"
+            ],
+            [
+              "revenueratio",
+              "Float64"
+            ]
+          ],
+          "row_count_equal": true,
+          "rows": {
+            "left": 250,
+            "right": 250
+          },
+          "schema_equal": true,
+          "value_alignment": "unique_nonfloat_signature"
+        }
+      },
+      "coverage_classification": "wrong_answer",
+      "exports": {
+        "cpu": {
+          "parquet_bytes": 20049,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-cpu-0.parquet",
+          "parquet_sha256": "64c063843f56181d6dafe7bb9761de1af6de1319b83e6c2fcd7f904e1fa6e7c6",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 250
+          },
+          "schema_bytes": 691,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-cpu-0.schema.json",
+          "schema_sha256": "5be19c3ecf75a48eea50bb8410ae433fc4294baf9b8c8f254494212aaaddb9c6"
+        },
+        "cpu_repeat": {
+          "parquet_bytes": 20049,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-cpu_repeat-0.parquet",
+          "parquet_sha256": "64c063843f56181d6dafe7bb9761de1af6de1319b83e6c2fcd7f904e1fa6e7c6",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 250
+          },
+          "schema_bytes": 698,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-cpu_repeat-0.schema.json",
+          "schema_sha256": "c7a1c5c8461c9185e759ffce97e826bae272c6a3ac80f1799a24e15c2b599995"
+        },
+        "metal": {
+          "parquet_bytes": 20050,
+          "parquet_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-metal-0.parquet",
+          "parquet_sha256": "8cc699b100324d380aea78510884b1922e4b10a6bdeea44ee3477b93ad5a0c7e",
+          "schema": {
+            "columns": [
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_id"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_item_desc"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_category"
+              },
+              {
+                "dtype": "string",
+                "encoded": "P6:string",
+                "name": "i_class"
+              },
+              {
+                "dtype": "decimal32[7,2]",
+                "encoded": "P14:decimal32[7,2]",
+                "name": "i_current_price"
+              },
+              {
+                "dtype": "decimal[38,2]",
+                "encoded": "P13:decimal[38,2]",
+                "name": "itemrevenue"
+              },
+              {
+                "dtype": "float64",
+                "encoded": "P7:float64",
+                "name": "revenueratio"
+              }
+            ],
+            "rows": 250
+          },
+          "schema_bytes": 693,
+          "schema_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-decimal-q98-6mm15lrp/answer-metal-0.schema.json",
+          "schema_sha256": "45d546d604b3a3155a7273aae0e18aa59148b670b05562ccc452df1101c9c47d"
+        }
+      },
+      "log_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs/tpcds-decimal-q98.txt",
+      "log_sha256": "0e72313c0309dc285aae15e52a44052e0c8d3f2c67fa56442486ddfaff902433",
+      "status": "compared exact available exports; exact mismatches remain failures"
+    }
+  },
+  "coverage_run": "metal-868-dev-coverage-a52334e7",
+  "log_root": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/logs"
+}

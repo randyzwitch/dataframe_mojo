@@ -100,8 +100,7 @@ struct DeviceService(Copyable):
             unlocked = 0
 
     def scratch_info(self) -> Tuple[Int, Int, Int, Int]:
-        """Idle bytes, idle entries, hits and misses; separate from query peak.
-        """
+        """Idle bytes, idle entries, hits and misses; separate from query peak."""
         self._lock_pool()
         var result = (
             self._state[].pool.idle_bytes,
@@ -543,8 +542,7 @@ struct Scope(Copyable):
         self.record_launches(1)
 
     def scratch[dtype: DType](self, length: Int) raises -> DeviceBuffer[dtype]:
-        """Obtain private scratch after its caller reserves the exact capacity.
-        """
+        """Obtain private scratch after its caller reserves the exact capacity."""
         if length <= 0:
             raise Error("Mojo GPU reusable scratch length must be positive")
         var context = self.context()
