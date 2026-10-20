@@ -3095,9 +3095,7 @@ def execute_plan(
                                 )
                                 var digits = Int(width // 4) + 1
                                 for pass_index in range(digits):
-                                    var null_marker = pass_index == Int(
-                                        width // 4
-                                    )
+                                    var null_marker = UInt32(pass_index == Int(width // 4))
                                     var shift = UInt32(pass_index * 4)
                                     ctx.enqueue_function[radix_histogram](
                                         device_words.unsafe_ptr(),

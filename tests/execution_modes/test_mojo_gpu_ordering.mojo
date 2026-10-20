@@ -81,10 +81,10 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
     # and stable null ties; the two-key cases above intentionally use merge.
     var direct_reference = List[List[KeyCell]]()
     for row in reference:
-        direct_reference.append([row[0]])
+        direct_reference.append([row[0].copy()])
     for reverse in [False, True]:
         var query = frame.lazy().sort(
-            "x", descending=reverse, nulls_last=not reverse
+            ["x"], descending=reverse, nulls_last=not reverse
         )
         var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
         same(actual, query.collect(engine="cpu"))
@@ -588,7 +588,7 @@ def test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings
     )
     for reverse in [False, True]:
         var query = radix_frame.lazy().sort(
-            "key", descending=reverse, nulls_last=not reverse
+            ["key"], descending=reverse, nulls_last=not reverse
         )
         same(
             query.collect(accelerator=MetalRuntime(), engine="accel"),
