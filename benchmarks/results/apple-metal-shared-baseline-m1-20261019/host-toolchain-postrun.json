@@ -1,0 +1,169 @@
+{
+  "capture_kind": "read-only post-run snapshot; captured after completion of coverage, not contemporaneous with execution",
+  "captured_at_utc": "2026-10-20T00:03:36.955754+00:00",
+  "coverage_receipt_sha256": "087e08b97d18ae2ef0490e3429ab300d1f37c67cf759bca51c47e493daabe874",
+  "coverage_run": "metal-868-dev-coverage-a52334e7",
+  "format": "metal-coverage-postrun-host-toolchain-snapshot-v1",
+  "harness_revision": "50137ecc2e27f76298559a25e0aa4ecca31d4e96",
+  "host": {
+    "logical_cpu_count": {
+      "argv": [
+        "/usr/sbin/sysctl",
+        "-n",
+        "hw.logicalcpu"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "8"
+    },
+    "macos_build": {
+      "argv": [
+        "/usr/bin/sw_vers",
+        "-buildVersion"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "25F84"
+    },
+    "macos_version": {
+      "argv": [
+        "/usr/bin/sw_vers",
+        "-productVersion"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "26.5.2"
+    },
+    "memory_bytes": {
+      "argv": [
+        "/usr/sbin/sysctl",
+        "-n",
+        "hw.memsize"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "17179869184"
+    },
+    "model": {
+      "argv": [
+        "/usr/sbin/sysctl",
+        "-n",
+        "hw.model"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "Macmini9,1"
+    },
+    "physical_cpu_count": {
+      "argv": [
+        "/usr/sbin/sysctl",
+        "-n",
+        "hw.physicalcpu"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "8"
+    },
+    "system_profiler_hardware": {
+      "argv": [
+        "/usr/sbin/system_profiler",
+        "SPHardwareDataType",
+        "-detailLevel",
+        "mini"
+      ],
+      "returncode": 0,
+      "stderr": "2026-10-19 20:03:36.814 system_profiler[45637:11756807] hw.cpufamily: 0x1b588bb3",
+      "stdout": "Hardware:\n\n    Hardware Overview:\n\n      Model Name: Mac mini\n      Model Identifier: Macmini9,1\n      Model Number: Z12P000KGLL/A\n      Chip: Apple M1\n      Total Number of Cores: 8 (4 Performance and 4 Efficiency)\n      Memory: 16 GB\n      System Firmware Version: 18000.121.3\n      OS Loader Version: 18000.121.3"
+    },
+    "uname": {
+      "argv": [
+        "/usr/bin/uname",
+        "-a"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "Darwin Macmini 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:26:46 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T8103 arm64"
+    }
+  },
+  "toolchain": {
+    "compiler_path_lookup": {
+      "argv": [
+        "/Users/randyzwitch/.pixi/bin/pixi",
+        "run",
+        "--locked",
+        "--manifest-path",
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868/pixi.toml",
+        "-e",
+        "oracle",
+        "python3",
+        "-c",
+        "import shutil; print(shutil.which('mojo') or '')"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/oracle/bin/mojo"
+    },
+    "developer_directory": {
+      "argv": [
+        "/usr/bin/xcode-select",
+        "-p"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "/Applications/Xcode.app/Contents/Developer"
+    },
+    "macos_sdk_path": {
+      "argv": [
+        "/usr/bin/xcrun",
+        "--sdk",
+        "macosx",
+        "--show-sdk-path"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
+    },
+    "macos_sdk_version": {
+      "argv": [
+        "/usr/bin/xcrun",
+        "--sdk",
+        "macosx",
+        "--show-sdk-version"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "26.5"
+    },
+    "max_core_sdk_version_from_lock": "26.7.0.dev2026100905",
+    "mojo_executable_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/oracle/bin/mojo",
+    "mojo_executable_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+    "mojo_version": {
+      "argv": [
+        "/Users/randyzwitch/.pixi/bin/pixi",
+        "run",
+        "--locked",
+        "--manifest-path",
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868/pixi.toml",
+        "-e",
+        "oracle",
+        "mojo",
+        "--version"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "Mojo 1.2.0.dev2026100905 (3b71af75)"
+    },
+    "pixi_lock_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868/pixi.lock",
+    "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+    "pixi_manifest_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-868/pixi.toml",
+    "xcode_version": {
+      "argv": [
+        "/usr/bin/xcodebuild",
+        "-version"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "Xcode 26.6\nBuild version 17F113"
+    }
+  }
+}

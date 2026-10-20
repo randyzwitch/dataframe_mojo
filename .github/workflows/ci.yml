@@ -29,7 +29,9 @@ jobs:
         env:
           # A stacked PR's base branch can be deleted while its run is queued.
           BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: bash scripts/check_benchmark_separation.sh "$BASE_REF"
+          # Check the PR changes, not unrelated main changes in the test merge.
+          HEAD_REF: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check_benchmark_separation.sh "$BASE_REF" "$HEAD_REF"
       - name: Check benchmark report provenance and coverage
         run: |
           pixi run -e oracle python3 tests/tooling/test_bench_reports.py

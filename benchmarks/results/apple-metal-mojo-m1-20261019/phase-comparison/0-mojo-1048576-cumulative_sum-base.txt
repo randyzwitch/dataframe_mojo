@@ -1,0 +1,42 @@
+FIRST 8948000 2291102000
+WORKERS 8
+OUTPUT_ROWS 1048576
+SAMPLE 0 19954000 2272396000
+SAMPLE 1 13846000 2301600000
+SAMPLE 2 8351000 2271475000
+SAMPLE 3 19896000 2267430000
+SAMPLE 4 9825000 2265651000
+PROFILE_I profile_regions 1
+PROFILE_I region_0_upload_bytes 9437280
+PROFILE_I upload_bytes 9437280
+PROFILE_S upload_bytes_basis single_region
+PROFILE_I region_0_download_bytes 22052864
+PROFILE_I download_bytes 22052864
+PROFILE_S download_bytes_basis single_region
+PROFILE_I region_0_host_result_bytes 4325376
+PROFILE_I host_result_bytes 4325376
+PROFILE_S host_result_bytes_basis single_region
+PROFILE_I region_0_peak_requested_bytes 215122128
+PROFILE_I peak_requested_bytes 215122128
+PROFILE_S peak_requested_bytes_basis single_region
+PROFILE_I region_0_kernel_launches 25
+PROFILE_I kernel_launches 25
+PROFILE_S kernel_launches_basis single_region
+PROFILE_I region_0_synchronizations 4
+PROFILE_I synchronizations 4
+PROFILE_S synchronizations_basis single_region
+PROFILE_F region_0_wall_ms 2216.053
+PROFILE_F region_0_host_prepare_ms 1.107
+PROFILE_F region_0_staging_copy_ms 6.709
+PROFILE_F region_0_submit_wait_ms 2207.472
+PROFILE_F region_0_synchronization_ms 0.921
+PROFILE_F region_0_readback_ms 40.121
+PROFILE_F region_0_result_copy_ms 7.804
+PROFILE_F region_0_initialization_ms 0.721
+PROFILE_F query_wall_ms 2269.82
+PROFILE_F preflight_ms 0.088
+PROFILE_S region_0_algorithm mojo_gpu_windows
+PROFILE_S runtime_implementation mojo
+PROFILE_S algorithm mojo_gpu_windows
+BUILD_ID development-source-no-calibration
+VALIDATED True
