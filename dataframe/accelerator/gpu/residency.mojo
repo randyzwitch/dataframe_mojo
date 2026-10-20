@@ -1724,23 +1724,25 @@ def native_join_gather_column[
     left_rows: UInt32,
     right_rows: UInt32,
     rows: UInt32,
-    has_left: UInt8,
-    has_right: UInt8,
-    left_possible: UInt8,
-    right_possible: UInt8,
-    left_has_validity: UInt8,
-    right_has_validity: UInt8,
-    left_has_errors: UInt8,
-    right_has_errors: UInt8,
-    prefer_right: UInt8,
-    output_has_validity: UInt8,
-    output_has_errors: UInt8,
-    output_nullable: UInt8,
+    flags: UInt32,
     output_values: Pointer[Scalar[dtype], MutAnyOrigin],
     output_validity: Pointer[UInt8, MutAnyOrigin],
     output_errors: Pointer[UInt32, MutAnyOrigin],
 ):
     """Coalesced typed gather; one lane packs one validity byte."""
+    # Pack mode bits to stay within Metal's buffer-argument limit.
+    var has_left = UInt8((flags >> 0) & 1)
+    var has_right = UInt8((flags >> 1) & 1)
+    var left_possible = UInt8((flags >> 2) & 1)
+    var right_possible = UInt8((flags >> 3) & 1)
+    var left_has_validity = UInt8((flags >> 4) & 1)
+    var right_has_validity = UInt8((flags >> 5) & 1)
+    var left_has_errors = UInt8((flags >> 6) & 1)
+    var right_has_errors = UInt8((flags >> 7) & 1)
+    var prefer_right = UInt8((flags >> 8) & 1)
+    var output_has_validity = UInt8((flags >> 9) & 1)
+    var output_has_errors = UInt8((flags >> 10) & 1)
+    var output_nullable = UInt8((flags >> 11) & 1)
     var byte = global_idx.x
     var bytes = (Int(rows) + 7) // 8
     if byte >= bytes:
@@ -1921,18 +1923,18 @@ def _native_join_gather_typed[
             UInt32(left_rows),
             UInt32(right_rows),
             UInt32(rows),
-            UInt8(has_left),
-            UInt8(has_right),
-            UInt8(left_possible),
-            UInt8(right_possible),
-            UInt8(left_view.has_validity()),
-            UInt8(right_view.has_validity()),
-            UInt8(left_view.has_errors()),
-            UInt8(right_view.has_errors()),
-            UInt8(prefer_right),
-            UInt8(Bool(output_validity_buffer)),
-            UInt8(Bool(output_errors_buffer)),
-            UInt8(nullable),
+            (UInt32(has_left) << 0)
+            | (UInt32(has_right) << 1)
+            | (UInt32(left_possible) << 2)
+            | (UInt32(right_possible) << 3)
+            | (UInt32(left_view.has_validity()) << 4)
+            | (UInt32(right_view.has_validity()) << 5)
+            | (UInt32(left_view.has_errors()) << 6)
+            | (UInt32(right_view.has_errors()) << 7)
+            | (UInt32(prefer_right) << 8)
+            | (UInt32(Bool(output_validity_buffer)) << 9)
+            | (UInt32(Bool(output_errors_buffer)) << 10)
+            | (UInt32(nullable) << 11),
             output_values.create_sub_buffer[transport_dtype](
                 0, len(output_values)
             ),
@@ -2326,12 +2328,18 @@ def _copy_native_to_matrix[
     var high = target_words.create_sub_buffer[DType.uint64](high_target, rows)
     var valid_out = target_validity.create_sub_buffer[DType.uint8](target, rows)
     var error_out = target_errors.create_sub_buffer[DType.uint32](target, rows)
+    comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+    var transport_values = source_values.create_sub_buffer[transport_dtype](
+        0, len(source_values)
+    )
     var ctx = scope.context()
     try:
         if native.has_validity():
             if native.has_errors():
-                ctx.enqueue_function[copy_native_column[dtype, True, True]](
-                    source_values,
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, True]
+                ](
+                    transport_values,
                     source_validity,
                     source_errors,
                     UInt32(native.value_offset),
@@ -2345,8 +2353,10 @@ def _copy_native_to_matrix[
                     block_dim=256,
                 )
             else:
-                ctx.enqueue_function[copy_native_column[dtype, True, False]](
-                    source_values,
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, False]
+                ](
+                    transport_values,
                     source_validity,
                     source_errors,
                     UInt32(native.value_offset),
@@ -2360,8 +2370,10 @@ def _copy_native_to_matrix[
                     block_dim=256,
                 )
         elif native.has_errors():
-            ctx.enqueue_function[copy_native_column[dtype, False, True]](
-                source_values,
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, True]
+            ](
+                transport_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
@@ -2375,8 +2387,10 @@ def _copy_native_to_matrix[
                 block_dim=256,
             )
         else:
-            ctx.enqueue_function[copy_native_column[dtype, False, False]](
-                source_values,
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, False]
+            ](
+                transport_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
