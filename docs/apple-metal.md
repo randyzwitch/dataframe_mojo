@@ -424,10 +424,12 @@ ordinary scalars broadcast, while differing distribution lengths raise.
 The CPU and Metal engines should select the same families of algorithms,
 with implementations appropriate to their hardware. The CPU already has
 bounded-domain aggregation, partitioned hash aggregation, bounded top-k,
-hash joins and fused expression batches. General Metal grouping currently
-sorts row indices, ranking materializes complete orderings, and row
-expressions interpret descriptors into a slot matrix. Narrow dictionary SUM
-paths avoid some of this work; they do not replace general operator dispatch.
+hash joins and fused expression batches. Metal grouping now has a bounded
+equality hash route for reducers that support unordered traversal. Other
+grouped states still sort row indices, ranking materializes complete
+orderings, and row expressions interpret descriptors into a slot matrix.
+Narrow dictionary SUM paths avoid some of this work; they do not replace
+general operator dispatch.
 
 The implementation sequence is by operator, with small dependent PRs:
 
@@ -456,6 +458,37 @@ may choose an algorithm but cannot prove that a domain or capacity fits:
 capacity exhaustion needs a bounded retry or an explicit existing fallback.
 First/last, argument positions, stable representatives, checked feed errors
 and floating update order must survive changes in partitioning.
+
+The first general dispatch admits integer SUM/MEAN/MIN/MAX, counts,
+first/last and Boolean reductions for inputs of at least 256 rows. It uses
+complete key equality and the existing reducer states. Key representatives
+come from the earliest input row; first/last select by source position,
+independently of scatter order. Floating numeric reductions, Decimal arithmetic,
+argument positions, ordered collections and window schedules retain sorted
+grouping. A bounded table/probe failure also selects sorted grouping. The
+preflight estimate includes both temporary hash arrays, at most 8 MiB.
+
+The focused physical-GPU gate runs in the pinned GPU environment:
+
+```sh
+mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo
+```
+
+Timing programs are reviewed separately from engine changes, as required by
+the benchmark separation rule.
+
+```sh
+mojo run -I . benchmarks/bench_gpu_hash_partitions.mojo
+mojo run -I . benchmarks/bench_gpu_groupby_engine.mojo
+```
+
+The partition benchmark checks complete row membership and compares
+resident sorted/hash construction, excluding allocation, upload and readback.
+The engine benchmark covers small, low-cardinality and high-cardinality
+nullable inputs; it times complete `collect()` calls and verifies CPU results
+outside timing. Build its identical source against each engine revision for
+comparisons. Discard round zero; these development probes do not establish
+general query-suite performance or replace external-suite coverage.
 
 Every operator PR has two short gates before broader work:
 

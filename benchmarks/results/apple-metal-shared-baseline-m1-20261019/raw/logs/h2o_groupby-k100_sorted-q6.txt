@@ -1,0 +1,125 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-metal-0.schema.json","status":"written"}
+coverage	q6	wrong_answer	full result differs
+expected_rows	10000
+actual_rows	10000
+expected_sample
+shape: (10000, 4)
+┌─────┬─────┬────────────────────┬────────────────────┐
+│ id4 ┆ id5 ┆ median_v3          ┆ sd_v3              │
+│ --- ┆ --- ┆ ---                ┆ ---                │
+│ i64 ┆ i64 ┆ f64                ┆ f64                │
+╞═════╪═════╪════════════════════╪════════════════════╡
+│ 59  ┆ 51  ┆ 53.312565          ┆ 28.074202070585653 │
+│ 26  ┆ 66  ┆ 56.918771          ┆ 28.889173033438656 │
+│ 35  ┆ 60  ┆ 51.349204          ┆ 29.625489251530528 │
+│ 36  ┆ 34  ┆ 49.091617          ┆ 28.300932909298606 │
+│ 57  ┆ 49  ┆ 49.318224          ┆ 27.189269533703392 │
+│ 5   ┆ 85  ┆ 45.490435999999995 ┆ 28.743736647934412 │
+│ 67  ┆ 8   ┆ 46.513259999999995 ┆ 31.953960618991783 │
+│ 77  ┆ 14  ┆ 43.692659          ┆ 27.646958342940298 │
+│ 92  ┆ 65  ┆ 50.9545415         ┆ 29.946106866943406 │
+│ 34  ┆ 61  ┆ 52.458462          ┆ 27.864950391105154 │
+│ …   ┆ …   ┆ …                  ┆ …                  │
+│ 58  ┆ 4   ┆ 43.921527999999995 ┆ 28.168786210914362 │
+│ 5   ┆ 41  ┆ 54.761089999999996 ┆ 29.95740933325945  │
+│ 80  ┆ 94  ┆ 57.100303999999994 ┆ 28.745516606409705 │
+│ 57  ┆ 20  ┆ 49.6610635         ┆ 29.418200793924804 │
+│ 51  ┆ 30  ┆ 46.647509          ┆ 30.435235196241667 │
+│ 79  ┆ 56  ┆ 42.837495          ┆ 27.948252056643884 │
+│ 6   ┆ 57  ┆ 50.636342          ┆ 32.21279511195245  │
+│ 15  ┆ 51  ┆ 53.1045155         ┆ 26.634137277779484 │
+│ 31  ┆ 41  ┆ 54.28282299999999  ┆ 28.37914702160517  │
+│ 27  ┆ 43  ┆ 52.1522135         ┆ 27.755128667764804 │
+└─────┴─────┴────────────────────┴────────────────────┘
+actual_sample
+shape: (10000, 4)
+┌─────┬─────┬────────────────────┬────────────────────┐
+│ id4 ┆ id5 ┆ median_v3          ┆ sd_v3              │
+│ --- ┆ --- ┆ ---                ┆ ---                │
+│ i64 ┆ i64 ┆ f64                ┆ f64                │
+╞═════╪═════╪════════════════════╪════════════════════╡
+│ 1   ┆ 1   ┆ 51.024688999999995 ┆ 31.765588107145877 │
+│ 1   ┆ 2   ┆ 49.4400045         ┆ 27.26970840594049  │
+│ 1   ┆ 3   ┆ 41.584389          ┆ 28.299447082762544 │
+│ 1   ┆ 4   ┆ 51.3725235         ┆ 31.727698814181128 │
+│ 1   ┆ 5   ┆ 42.31108449999999  ┆ 27.539789776108883 │
+│ 1   ┆ 6   ┆ 49.623205          ┆ 30.95606829852129  │
+│ 1   ┆ 7   ┆ 37.594747          ┆ 28.65470256326445  │
+│ 1   ┆ 8   ┆ 52.1825565         ┆ 28.03930173506767  │
+│ 1   ┆ 9   ┆ 43.063272999999995 ┆ 28.939522223165365 │
+│ 1   ┆ 10  ┆ 42.371196          ┆ 29.091936666690167 │
+│ …   ┆ …   ┆ …                  ┆ …                  │
+│ 100 ┆ 91  ┆ 54.7070085         ┆ 29.760883617950835 │
+│ 100 ┆ 92  ┆ 58.636953          ┆ 30.20766259275261  │
+│ 100 ┆ 93  ┆ 53.1882765         ┆ 28.35317836902206  │
+│ 100 ┆ 94  ┆ 53.443319          ┆ 27.57602920755027  │
+│ 100 ┆ 95  ┆ 57.203015          ┆ 29.650273465813736 │
+│ 100 ┆ 96  ┆ 38.47886799999999  ┆ 28.729876228680272 │
+│ 100 ┆ 97  ┆ 53.533288          ┆ 26.971241363956498 │
+│ 100 ┆ 98  ┆ 51.001542          ┆ 28.187269250508127 │
+│ 100 ┆ 99  ┆ 43.8213265         ┆ 27.598941102828977 │
+│ 100 ┆ 100 ┆ 51.953864499999995 ┆ 29.13500943590277  │
+└─────┴─────┴────────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	id4	True
+column_bag	cpu_metal	id5	True
+column_bag	cpu_metal	median_v3	True
+column_bag	cpu_metal	sd_v3	False
+diagnostic	cpu_metal.alignment	verified_unique_keys
+column_diagnostic	cpu_metal	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	id5	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	median_v3	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	sd_v3	float64	6472	0	6472	0	5	1.7763568394002505e-14	6.307712254478666e-16
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q6-40p4y9cv/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	id4	True
+column_bag	cpu_repeat	id5	True
+column_bag	cpu_repeat	median_v3	True
+column_bag	cpu_repeat	sd_v3	True
+diagnostic	cpu_repeat.alignment	verified_unique_keys
+column_diagnostic	cpu_repeat	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	id5	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	median_v3	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	sd_v3	float64	0	0	0	0	unavailable	unavailable	unavailable
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (10000, 4)
+┌─────┬─────┬────────────────────┬────────────────────┐
+│ id4 ┆ id5 ┆ median_v3          ┆ sd_v3              │
+│ --- ┆ --- ┆ ---                ┆ ---                │
+│ i64 ┆ i64 ┆ f64                ┆ f64                │
+╞═════╪═════╪════════════════════╪════════════════════╡
+│ 59  ┆ 51  ┆ 53.312565          ┆ 28.074202070585653 │
+│ 26  ┆ 66  ┆ 56.918771          ┆ 28.889173033438656 │
+│ 35  ┆ 60  ┆ 51.349204          ┆ 29.625489251530528 │
+│ 36  ┆ 34  ┆ 49.091617          ┆ 28.300932909298606 │
+│ 57  ┆ 49  ┆ 49.318224          ┆ 27.189269533703392 │
+│ 5   ┆ 85  ┆ 45.490435999999995 ┆ 28.743736647934412 │
+│ 67  ┆ 8   ┆ 46.513259999999995 ┆ 31.953960618991783 │
+│ 77  ┆ 14  ┆ 43.692659          ┆ 27.646958342940298 │
+│ 92  ┆ 65  ┆ 50.9545415         ┆ 29.946106866943406 │
+│ 34  ┆ 61  ┆ 52.458462          ┆ 27.864950391105154 │
+│ …   ┆ …   ┆ …                  ┆ …                  │
+│ 58  ┆ 4   ┆ 43.921527999999995 ┆ 28.168786210914362 │
+│ 5   ┆ 41  ┆ 54.761089999999996 ┆ 29.95740933325945  │
+│ 80  ┆ 94  ┆ 57.100303999999994 ┆ 28.745516606409705 │
+│ 57  ┆ 20  ┆ 49.6610635         ┆ 29.418200793924804 │
+│ 51  ┆ 30  ┆ 46.647509          ┆ 30.435235196241667 │
+│ 79  ┆ 56  ┆ 42.837495          ┆ 27.948252056643884 │
+│ 6   ┆ 57  ┆ 50.636342          ┆ 32.21279511195245  │
+│ 15  ┆ 51  ┆ 53.1045155         ┆ 26.634137277779484 │
+│ 31  ┆ 41  ┆ 54.28282299999999  ┆ 28.37914702160517  │
+│ 27  ┆ 43  ┆ 52.1522135         ┆ 27.755128667764804 │
+└─────┴─────┴────────────────────┴────────────────────┘
