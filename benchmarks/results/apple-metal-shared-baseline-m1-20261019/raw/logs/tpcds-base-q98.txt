@@ -1,0 +1,123 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-metal-0.schema.json","status":"written"}
+coverage	q98	wrong_answer	full result differs
+expected_rows	250
+actual_rows	250
+expected_sample
+shape: (250, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬──────────┬─────────────────┬────────────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class  ┆ i_current_price ┆ itemrevenue        ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---      ┆ ---             ┆ ---                ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str      ┆ f64             ┆ f64                ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪══════════╪═════════════════╪════════════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null     ┆ null            ┆ 3915.12            ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts     ┆ 35.27           ┆ 5719.26            ┆ 27.839185510847006 │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts     ┆ 4.1             ┆ 1910.06            ┆ 9.297446641147356  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts     ┆ 5.6             ┆ 6876.6             ┆ 33.472677074287674 │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts     ┆ 8.22            ┆ 4509.34            ┆ 21.949754477237065 │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts     ┆ 2.72            ┆ 1528.66            ┆ 7.440936296480906  │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business ┆ 78.25           ┆ 9384.78            ┆ 38.46744721003022  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business ┆ 2.42            ┆ 4439.48            ┆ 18.197066158182178 │
+│ AAAAAAAAIKEAAAAA ┆ "Complex, complete doubts say a… ┆ Books      ┆ business ┆ 9.44            ┆ 9034.119999999999  ┆ 37.03012049180462  │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business ┆ 0.19            ┆ 429.66             ┆ 1.7611412700416613 │
+│ …                ┆ …                                ┆ …          ┆ …        ┆ …               ┆ …                  ┆ …                  │
+│ AAAAAAAACLDAAAAA ┆ Voters should control provision… ┆ Sports     ┆ pools    ┆ 6.33            ┆ 5203.81            ┆ 10.939116674017137 │
+│ AAAAAAAAGLCAAAAA ┆ Regular,                         ┆ Sports     ┆ pools    ┆ 0.7             ┆ 2426.48            ┆ 5.10079111788653   │
+│ AAAAAAAAGMFAAAAA ┆ Present, individual substances … ┆ Sports     ┆ pools    ┆ 1.76            ┆ 10657.17           ┆ 22.402821402940386 │
+│ AAAAAAAAMEGAAAAA ┆ Short owners may become further… ┆ Sports     ┆ pools    ┆ 76.51           ┆ 10293.66           ┆ 21.638673922119224 │
+│ AAAAAAAAOFEAAAAA ┆ "Too concerned seats must judge… ┆ Sports     ┆ pools    ┆ 2.34            ┆ 18989.54           ┆ 39.918596883036734 │
+│ AAAAAAAAAKAAAAAA ┆ "Legs cannot make much across a… ┆ Sports     ┆ sailing  ┆ 1.17            ┆ 4953.59            ┆ 9.880384397513941  │
+│ AAAAAAAACJCAAAAA ┆ Ever informal books suffice as … ┆ Sports     ┆ sailing  ┆ 82.11           ┆ 30433.670000000002 ┆ 60.702714238983866 │
+│ AAAAAAAAEIFAAAAA ┆ Police could no                  ┆ Sports     ┆ sailing  ┆ 3.94            ┆ 4036.3             ┆ 8.050766321735452  │
+│ AAAAAAAAEKGAAAAA ┆ Minerals used to leave american… ┆ Sports     ┆ sailing  ┆ 1.58            ┆ 10712.039999999999 ┆ 21.366135041766725 │
+│ AAAAAAAAALCAAAAA ┆ Long managerial powers could ma… ┆ Sports     ┆ tennis   ┆ 2.87            ┆ 11158.53           ┆ 100.0              │
+└──────────────────┴──────────────────────────────────┴────────────┴──────────┴─────────────────┴────────────────────┴────────────────────┘
+actual_sample
+shape: (250, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬──────────┬─────────────────┬────────────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class  ┆ i_current_price ┆ itemrevenue        ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---      ┆ ---             ┆ ---                ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str      ┆ f64             ┆ f64                ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪══════════╪═════════════════╪════════════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null     ┆ null            ┆ 3915.12            ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts     ┆ 35.27           ┆ 5719.26            ┆ 27.839185510847003 │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts     ┆ 4.1             ┆ 1910.06            ┆ 9.297446641147356  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts     ┆ 5.6             ┆ 6876.6             ┆ 33.47267707428767  │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts     ┆ 8.22            ┆ 4509.34            ┆ 21.949754477237057 │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts     ┆ 2.72            ┆ 1528.66            ┆ 7.4409362964809045 │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business ┆ 78.25           ┆ 9384.78            ┆ 38.46744721003023  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business ┆ 2.42            ┆ 4439.48            ┆ 18.197066158182178 │
+│ AAAAAAAAIKEAAAAA ┆ "Complex, complete doubts say a… ┆ Books      ┆ business ┆ 9.44            ┆ 9034.119999999999  ┆ 37.030120491804624 │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business ┆ 0.19            ┆ 429.66             ┆ 1.7611412700416615 │
+│ …                ┆ …                                ┆ …          ┆ …        ┆ …               ┆ …                  ┆ …                  │
+│ AAAAAAAACLDAAAAA ┆ Voters should control provision… ┆ Sports     ┆ pools    ┆ 6.33            ┆ 5203.81            ┆ 10.939116674017137 │
+│ AAAAAAAAGLCAAAAA ┆ Regular,                         ┆ Sports     ┆ pools    ┆ 0.7             ┆ 2426.48            ┆ 5.10079111788653   │
+│ AAAAAAAAGMFAAAAA ┆ Present, individual substances … ┆ Sports     ┆ pools    ┆ 1.76            ┆ 10657.17           ┆ 22.402821402940386 │
+│ AAAAAAAAMEGAAAAA ┆ Short owners may become further… ┆ Sports     ┆ pools    ┆ 76.51           ┆ 10293.66           ┆ 21.638673922119224 │
+│ AAAAAAAAOFEAAAAA ┆ "Too concerned seats must judge… ┆ Sports     ┆ pools    ┆ 2.34            ┆ 18989.539999999997 ┆ 39.91859688303673  │
+│ AAAAAAAAAKAAAAAA ┆ "Legs cannot make much across a… ┆ Sports     ┆ sailing  ┆ 1.17            ┆ 4953.59            ┆ 9.880384397513941  │
+│ AAAAAAAACJCAAAAA ┆ Ever informal books suffice as … ┆ Sports     ┆ sailing  ┆ 82.11           ┆ 30433.670000000002 ┆ 60.702714238983866 │
+│ AAAAAAAAEIFAAAAA ┆ Police could no                  ┆ Sports     ┆ sailing  ┆ 3.94            ┆ 4036.3             ┆ 8.050766321735452  │
+│ AAAAAAAAEKGAAAAA ┆ Minerals used to leave american… ┆ Sports     ┆ sailing  ┆ 1.58            ┆ 10712.039999999999 ┆ 21.366135041766725 │
+│ AAAAAAAAALCAAAAA ┆ Long managerial powers could ma… ┆ Sports     ┆ tennis   ┆ 2.87            ┆ 11158.53           ┆ 100.0              │
+└──────────────────┴──────────────────────────────────┴────────────┴──────────┴─────────────────┴────────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	i_item_id	True
+column_bag	cpu_metal	i_item_desc	True
+column_bag	cpu_metal	i_category	True
+column_bag	cpu_metal	i_class	True
+column_bag	cpu_metal	i_current_price	True
+column_bag	cpu_metal	itemrevenue	False
+column_bag	cpu_metal	revenueratio	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q98-s4bs1pmv/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	i_item_id	True
+column_bag	cpu_repeat	i_item_desc	True
+column_bag	cpu_repeat	i_category	True
+column_bag	cpu_repeat	i_class	True
+column_bag	cpu_repeat	i_current_price	True
+column_bag	cpu_repeat	itemrevenue	True
+column_bag	cpu_repeat	revenueratio	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (250, 7)
+┌──────────────────┬──────────────────────────────────┬────────────┬──────────┬─────────────────┬────────────────────┬────────────────────┐
+│ i_item_id        ┆ i_item_desc                      ┆ i_category ┆ i_class  ┆ i_current_price ┆ itemrevenue        ┆ revenueratio       │
+│ ---              ┆ ---                              ┆ ---        ┆ ---      ┆ ---             ┆ ---                ┆ ---                │
+│ str              ┆ str                              ┆ str        ┆ str      ┆ f64             ┆ f64                ┆ f64                │
+╞══════════════════╪══════════════════════════════════╪════════════╪══════════╪═════════════════╪════════════════════╪════════════════════╡
+│ AAAAAAAAOJGAAAAA ┆ null                             ┆ Books      ┆ null     ┆ null            ┆ 3915.12            ┆ 100.0              │
+│ AAAAAAAACKEAAAAA ┆ Physical, local rates cannot ex… ┆ Books      ┆ arts     ┆ 35.27           ┆ 5719.26            ┆ 27.839185510847006 │
+│ AAAAAAAAIJGAAAAA ┆ Industrial figures shall not me… ┆ Books      ┆ arts     ┆ 4.1             ┆ 1910.06            ┆ 9.297446641147356  │
+│ AAAAAAAAKGBAAAAA ┆ Important, scientific words rep… ┆ Books      ┆ arts     ┆ 5.6             ┆ 6876.6             ┆ 33.472677074287674 │
+│ AAAAAAAAMFFAAAAA ┆ So tiny sales obtain as ill ton… ┆ Books      ┆ arts     ┆ 8.22            ┆ 4509.34            ┆ 21.949754477237065 │
+│ AAAAAAAANIBAAAAA ┆ Open, real terms should avoid d… ┆ Books      ┆ arts     ┆ 2.72            ┆ 1528.66            ┆ 7.440936296480906  │
+│ AAAAAAAAADFAAAAA ┆ Good groups steal respective ch… ┆ Books      ┆ business ┆ 78.25           ┆ 9384.78            ┆ 38.46744721003022  │
+│ AAAAAAAAEICAAAAA ┆ Contemporary, signific           ┆ Books      ┆ business ┆ 2.42            ┆ 4439.48            ┆ 18.197066158182178 │
+│ AAAAAAAAIKEAAAAA ┆ "Complex, complete doubts say a… ┆ Books      ┆ business ┆ 9.44            ┆ 9034.119999999999  ┆ 37.03012049180462  │
+│ AAAAAAAAKMAAAAAA ┆ Conservative women ought to bea… ┆ Books      ┆ business ┆ 0.19            ┆ 429.66             ┆ 1.7611412700416613 │
+│ …                ┆ …                                ┆ …          ┆ …        ┆ …               ┆ …                  ┆ …                  │
+│ AAAAAAAACLDAAAAA ┆ Voters should control provision… ┆ Sports     ┆ pools    ┆ 6.33            ┆ 5203.81            ┆ 10.939116674017137 │
+│ AAAAAAAAGLCAAAAA ┆ Regular,                         ┆ Sports     ┆ pools    ┆ 0.7             ┆ 2426.48            ┆ 5.10079111788653   │
+│ AAAAAAAAGMFAAAAA ┆ Present, individual substances … ┆ Sports     ┆ pools    ┆ 1.76            ┆ 10657.17           ┆ 22.402821402940386 │
+│ AAAAAAAAMEGAAAAA ┆ Short owners may become further… ┆ Sports     ┆ pools    ┆ 76.51           ┆ 10293.66           ┆ 21.638673922119224 │
+│ AAAAAAAAOFEAAAAA ┆ "Too concerned seats must judge… ┆ Sports     ┆ pools    ┆ 2.34            ┆ 18989.54           ┆ 39.918596883036734 │
+│ AAAAAAAAAKAAAAAA ┆ "Legs cannot make much across a… ┆ Sports     ┆ sailing  ┆ 1.17            ┆ 4953.59            ┆ 9.880384397513941  │
+│ AAAAAAAACJCAAAAA ┆ Ever informal books suffice as … ┆ Sports     ┆ sailing  ┆ 82.11           ┆ 30433.670000000002 ┆ 60.702714238983866 │
+│ AAAAAAAAEIFAAAAA ┆ Police could no                  ┆ Sports     ┆ sailing  ┆ 3.94            ┆ 4036.3             ┆ 8.050766321735452  │
+│ AAAAAAAAEKGAAAAA ┆ Minerals used to leave american… ┆ Sports     ┆ sailing  ┆ 1.58            ┆ 10712.039999999999 ┆ 21.366135041766725 │
+│ AAAAAAAAALCAAAAA ┆ Long managerial powers could ma… ┆ Sports     ┆ tennis   ┆ 2.87            ┆ 11158.53           ┆ 100.0              │
+└──────────────────┴──────────────────────────────────┴────────────┴──────────┴─────────────────┴────────────────────┴────────────────────┘

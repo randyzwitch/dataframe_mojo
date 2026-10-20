@@ -45,7 +45,16 @@ class MetalSuiteDriver(unittest.TestCase):
                     (ROOT / "benchmarks/suites" / (name + ".mojo")).read_text(),
                     text,
                 )
-            self.assertEqual(len(manifest["derived_source_sha256"]), 16)
+            self.assertEqual(len(manifest["derived_source_sha256"]), 17)
+            self.assertIn("metal_coverage_audit.mojo", manifest["derived_source_sha256"])
+            self.assertIn(
+                "benchmarks/metal_coverage_audit.mojo",
+                manifest["original_source_sha256"],
+            )
+            self.assertIn(
+                "from metal_coverage_audit import CoverageAuditRuntime as MetalRuntime",
+                (destination / "metal_h2o.mojo").read_text(),
+            )
             self.assertEqual(
                 sum(
                     len(p["adapted"])
@@ -97,12 +106,46 @@ class MetalSuiteDriver(unittest.TestCase):
             with self.assertRaises(ValueError):
                 driver.parse(output, "q1")
         result = driver.parse(
-            "coverage\tq1\tok\t\nordered_equal\tFalse\ncollections\t2\noutput_rows\t3\ncollection_ns\t17\n",
+            "coverage\tq1\tok\t\nordered_equal\tFalse\ncollections\t2\n"
+            "runtime_audit\tno_marker\nruntime_audit\tcpu\n"
+            "output_rows\t3\ncollection_ns\t17\n",
             "q1",
         )
         self.assertEqual(result["status"], "ok")
         self.assertFalse(result["ordered_equal"])
         self.assertEqual(result["collections"], 2)
+        self.assertEqual(result["runtime_adjudication"]["observed_calls"], 2)
+        self.assertEqual(result["runtime_adjudication"]["events"], ["no_marker", "cpu"])
+        self.assertEqual(result["runtime_adjudication"]["cpu_adjudicated_calls"], 1)
+        self.assertEqual(
+            result["runtime_adjudication"]["no_cpu_adjudication_marker_calls"], 1
+        )
+        self.assertIn(
+            "not a GPU-only certificate",
+            result["runtime_adjudication"]["interpretation"],
+        )
+
+    def test_runtime_audit_is_required_and_unknown_fails_closed(self):
+        success = (
+            "coverage\tq1\tok\t\nordered_equal\tTrue\ncollections\t2\n"
+            "runtime_audit\tno_marker\nruntime_audit\tcpu\n"
+        )
+        for output in (
+            success.replace("runtime_audit\tcpu\n", ""),
+            success.replace("runtime_audit\tno_marker\n", ""),
+            success.replace("runtime_audit\tcpu\n", "runtime_audit\tunknown\n"),
+            success.replace("runtime_audit\tcpu\n", "runtime_audit\tbogus\n"),
+            success.replace("runtime_audit\tcpu\n", "runtime_audit\tcpu\textra\n"),
+        ):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                driver.parse(output, "q1")
+        failed = driver.parse(
+            "coverage\tq1\tunsupported\tunsupported operator\n"
+            "runtime_audit\tfailed\n",
+            "q1",
+        )
+        self.assertEqual(failed["status"], "unsupported")
+        self.assertEqual(failed["runtime_adjudication"]["failed_calls"], 1)
 
     def test_every_failure_category_is_retained(self):
         for status in (

@@ -1,0 +1,34 @@
+# Current Mojo Metal baseline, Apple M1, 2026-10-19
+
+Initial development checkpoint for #869 and #868. This is not an external-suite score, a placement calibration, or a claim that every operator has been profiled.
+
+The unmodified engine and benchmark driver at `ce86f3dd03539cefb432b4309cfd4f77632ed142` were built with `mojo build -O3 -I . benchmarks/bench_metal.mojo` on the physical Apple M1 / 16 GiB Mac mini. The raw record contains compiler/SDK/OS, source and binary fingerprints, clean engine status, load samples, first-use times and every warm observation. These measurements use the original runner, before the new skew/window cases and additional host phase export fields in this PR.
+
+The selected grid has 4,097 / 65,536 / 1,048,576 rows, nine mechanisms, base and nullable variants, two rounds, five warm samples per engine/process, and two additional warmups. CPU and Metal sample order alternates; every timed collection fully materializes its result. All 108 processes passed exact CPU-reference checks. This is CPU parity, not an independent SQL oracle. The sorted variant and broader dtype/window/fanout matrix remain follow-up measurements; the selected subset is explicit in the raw record.
+
+`baseline.json` retains the samples and metadata; `baseline.md` is the original driver's report; `baseline/` contains every process stdout. No compilation or other benchmark was run concurrently on this Mac during the measurement. Normal desktop applications remained present. First use means the first collection in a fresh process, not a cold filesystem or machine.
+
+At 1,048,576 rows, base-variant warm medians pooled across rounds were about 101 ms for projection, 65 ms for half-selective filtering, 328 ms for sorting and 665 ms for the join. CPU medians were approximately 3.4 / 2.1 / 10.8 / 34.2 ms respectively. CPU timings varied across rounds; use the individual samples and repeated comparisons rather than treating these ratios as universal hardware rates.
+
+The current Mojo engine is materially slower on these mechanisms. The baseline does not identify how much of each time is staging, kernel work, synchronization or output construction. Host phase attribution and a broader workload matrix are separate next steps. Existing native-Metal measurements elsewhere in this directory tree describe a different implementation and are not directly comparable to this checkpoint.
+
+The expanded harness at `6deede471e912dc04acc9dd8ed7ad9e3fd3f15a0` was separately compiled on this Mac. `expanded-smoke.json`, its rendered report and raw stdout retain nine passing checks: skewed grouping, cumulative sum and rolling sum at 4,097 rows across base/sorted/null variants, with two samples per engine. These smoke observations validate the added cases; they are too small a sample for performance conclusions. The eight Python driver tests also pass on the Mac.
+
+## Before/after protocol
+
+Freeze workload definitions and input generation before implementing replacements. Build baseline and candidate with the same pinned environment, optimization flags and thread budget, recording source-content and binary hashes. Use isolated checkouts, retain first-use observations separately, and alternate engine order within samples and build order between rounds. Run all three input variants at every selected size, keep failures and raw stdout, and check complete results outside timing. Compare pooled complete-collection distributions and round medians; report regressions as well as improvements. Repeat close results before claiming a gain, retaining all rounds.
+
+Run one compilation or measurement at a time on the Mac. Record power/load conditions and any interruption. Profile separately from timed collections: host phase timings may overlap and must not be summed as independent GPU durations. Missing device timestamps, allocation counts, or specialized-operator phases remain unmeasured. A CPU parity check does not replace independent semantic contracts or the external-suite SQL oracle. Use the permitted development suites for optimization; reserve ClickBench for validation after the change is fixed. This checkpoint does not close #869.
+
+`expanded-results.json` and its accompanying report/stdout extend the same three mechanisms to 4,097 / 65,536 / 1,048,576 rows, all three variants, two rounds and five warm samples per engine. All 54 processes passed exact CPU comparisons. The executable was built from `6deede47`; the recorded checkout `aa00dc9f` adds only the original baseline artifacts, with identical engine and harness code. No compilation or other GPU workload overlapped this run. The JSON records source and executable hashes; it predates per-binary build receipts.
+
+The final harness at `d01d722` was built through the driver with a per-binary receipt, retained as `current-baseline.receipt.json`. All 24 checks in `current-smoke.json` passed: projection, skewed grouping, cumulative sum, rolling sum, Float64 arithmetic, Decimal multiplication/SUM, eight-column Float32 output and bounded join fanout, each at 4,097 rows across all three variants with two samples per engine. All 16 Python driver tests pass on the Mac. These smoke timings validate the runner and results; repeated large-input comparisons remain separate evidence.
+
+
+## Runtime phase comparison and transfer probe
+
+The [phase-comparison record](phase-comparison.json), [rendered report](phase-comparison.md), and [144 process logs](phase-comparison/) retain the expanded 144-process comparison (4,097 and 1,048,576 rows; nine workloads; base/null variants; two rounds; five warm samples). All 144 processes passed exact CPU-reference checks. The candidate runtime source is commit 3e701487c8f6aa10a9036f4aa9c349bb7d509122; the raw JSON retains binary/compiler/source fingerprints and power/load context.
+
+For the 1,048,576-row Float32 projection, the paired collection is about 101 ms. Separate phase attribution measured roughly 75 ms in readback, 4.3 ms staging, 16.7 ms submit/wait, 2.7 ms typed result construction, and 0.37 ms context setup. These phase observations explain where the collection spends time; they should not be read as device-only durations or summed as independent GPU work.
+
+The [primitive transfer probe report](transfer-probe/README.md), [identity manifest](transfer-probe/identity.json), [machine-readable phase summary](transfer-probe/summary.json), and [raw samples](transfer-probe/samples.txt) preserve 30 validated direct-copy samples on the Apple M1. At 1,048,576 rows, warm median download enqueue was 72.9 ms for generic 21-byte planes, 14.0 ms for raw Float32, and 14.9 ms for Float32 plus packed validity. Enqueue timings include host/API overhead; these are primitive-copy diagnostics, not GPU bandwidth or end-to-end results.
