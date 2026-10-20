@@ -290,13 +290,13 @@ def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
         )
     )
     var left = Table.native(
-        left_schema,
+        left_schema.copy(),
         List[NativeColumnAny](
             [NativeColumnAny(left_id), NativeColumnAny(left_value)]
         ),
     )
     var right = Table.native(
-        right_schema,
+        right_schema.copy(),
         List[NativeColumnAny](
             [NativeColumnAny(right_id), NativeColumnAny(right_value)]
         ),
@@ -310,12 +310,8 @@ def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
     var context = scope.context()
     var left_device = context.enqueue_create_buffer[DType.uint32](4)
     var right_device = context.enqueue_create_buffer[DType.uint32](4)
-    var left_host = List[UInt32](
-        [UInt32(0), UInt32(1), UInt32.MAX, UInt32(3)]
-    )
-    var right_host = List[UInt32](
-        [UInt32(0), UInt32.MAX, UInt32(1), UInt32(3)]
-    )
+    var left_host = List[UInt32]([UInt32(0), UInt32(1), UInt32.MAX, UInt32(3)])
+    var right_host = List[UInt32]([UInt32(0), UInt32.MAX, UInt32(1), UInt32(3)])
     context.enqueue_copy(left_device, left_host.unsafe_ptr())
     context.enqueue_copy(right_device, right_host.unsafe_ptr())
     scope.record_upload(4 * 4 * 2)
@@ -372,8 +368,7 @@ def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
 
 
 # requires: metal
-def test_native_join_gather_small_payloads_use_safe_unused_error_buffers(
-) raises:
+def test_native_join_gather_small_payloads_use_safe_unused_error_buffers() raises:
     _ = require_metal()
     var scope = Scope()
     var int8 = upload_native[DType.int8](
@@ -401,7 +396,7 @@ def test_native_join_gather_small_payloads_use_safe_unused_error_buffers(
         List[Series]([Series("r", Column[UInt8](List[UInt8]()))])
     )
     var left = Table.native(
-        left_schema,
+        left_schema.copy(),
         List[NativeColumnAny](
             [
                 NativeColumnAny(int8),
@@ -411,7 +406,7 @@ def test_native_join_gather_small_payloads_use_safe_unused_error_buffers(
         ),
     )
     var right = Table.native(
-        right_schema,
+        right_schema.copy(),
         List[NativeColumnAny]([NativeColumnAny(right_value)]),
     )
     var context = scope.context()
@@ -536,12 +531,12 @@ def test_native_join_gather_bounds_errors_budget_and_empty() raises:
     assert_equal(after_bad[0], before_bad[0])
     assert_equal(after_bad[3] - before_bad[3], 1)
 
-    var both_missing_left_device = context.enqueue_create_buffer[
-        DType.uint32
-    ](1)
-    var both_missing_right_device = context.enqueue_create_buffer[
-        DType.uint32
-    ](1)
+    var both_missing_left_device = context.enqueue_create_buffer[DType.uint32](
+        1
+    )
+    var both_missing_right_device = context.enqueue_create_buffer[DType.uint32](
+        1
+    )
     var both_missing_host = List[UInt32]([UInt32.MAX])
     context.enqueue_copy(
         both_missing_left_device, both_missing_host.unsafe_ptr()
@@ -567,9 +562,7 @@ def test_native_join_gather_bounds_errors_budget_and_empty() raises:
             both_missing_right,
         )
 
-    var bool_owner = allocate_native_column[DType.bool](
-        scope, DataType.BOOL, 2
-    )
+    var bool_owner = allocate_native_column[DType.bool](scope, DataType.BOOL, 2)
     var bool_field = Series("flag", Column[Bool](List[Bool]()))
     var bool_table = Table.native(
         DataFrame(List[Series]([bool_field.copy()])),
@@ -598,12 +591,12 @@ def test_native_join_gather_bounds_errors_budget_and_empty() raises:
         List[NativeColumnAny]([NativeColumnAny(limited_right)]),
     )
     var limited_context = limited.context()
-    var limited_left_map = limited_context.enqueue_create_buffer[
-        DType.uint32
-    ](2)
-    var limited_right_map = limited_context.enqueue_create_buffer[
-        DType.uint32
-    ](2)
+    var limited_left_map = limited_context.enqueue_create_buffer[DType.uint32](
+        2
+    )
+    var limited_right_map = limited_context.enqueue_create_buffer[DType.uint32](
+        2
+    )
     var limited_left_host = List[UInt32]([UInt32(0), UInt32(1)])
     var limited_right_host = List[UInt32]([UInt32(0), UInt32(1)])
     limited_context.enqueue_copy(
@@ -614,9 +607,7 @@ def test_native_join_gather_bounds_errors_budget_and_empty() raises:
     )
     limited.record_upload(16)
     limited.synchronize()
-    var limited_left_rows = NativeRowMap(
-        limited, limited_left_map, 2, 2, False
-    )
+    var limited_left_rows = NativeRowMap(limited, limited_left_map, 2, 2, False)
     var limited_right_rows = NativeRowMap(
         limited, limited_right_map, 2, 2, False
     )

@@ -8,6 +8,7 @@ The MAX context is created lazily and always selects the Metal device API.
 
 from max.gpu import global_idx
 from max.gpu.host import DeviceBuffer
+from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
@@ -897,16 +898,16 @@ struct Table(Copyable):
         if not left_map.rows:
             var empty = List[NativeColumnAny](capacity=len(fields))
             for output in range(len(fields)):
-                var field = fields[output]
+                ref field = fields[output]
                 var selected = (
                     self.native_columns[
                         Int(self.columns[field.left])
-                    ] if field.left
+                    ].copy() if field.left
                     >= 0 else right.native_columns[
                         Int(right.columns[field.right])
-                    ]
+                    ].copy()
                 )
-                empty.append(_empty_native_column(scope, selected)^)
+                empty.append(_empty_native_column(scope, selected))
             return Self.native(schema.copy(), empty^)
 
         # Four device bytes and four host control bytes live through the
@@ -933,7 +934,7 @@ struct Table(Copyable):
             )
             scope.record_launches()
             for output in range(len(fields)):
-                var field = fields[output]
+                ref field = fields[output]
                 var left_column = Optional[NativeColumnAny]()
                 var right_column = Optional[NativeColumnAny]()
                 if field.left >= 0:
@@ -1924,10 +1925,8 @@ def _native_join_gather_typed[
 def _native_join_typed_source[
     dtype: DType
 ](column: NativeColumnAny,) raises -> NativeColumn[dtype]:
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if dtype == D and column._storage.isa[NativeColumn[D]]():
-            return column._storage[NativeColumn[D]].copy()
+    if column._storage.isa[NativeColumn[dtype]]():
+        return column._storage[NativeColumn[dtype]].copy()
     raise Error("Mojo GPU native join physical dtype differs")
 
 
@@ -2000,7 +1999,7 @@ def _native_join_gather_column(
         comptime D = NUMERIC_DTYPES[k]
         if logical.physical() == DataType.of(D):
             var fallback = _native_join_typed_source[D](
-                left.value() if left else right.value()
+                left.value().copy() if left else right.value().copy()
             )
             var l = _native_join_typed_source[D](
                 left.value()
