@@ -89,7 +89,23 @@ def test_native_metal_observed_concat_sparse_pairs_and_consumers() raises:
     )
     var filtered = query.filter(col("joined") == lit("abc"))
     assert_equal(filtered.collect(accelerator=runtime).height(), 2)
-    print("PASS dynamic concat chains, sorting, grouping and literal filtering")
+    var lookup = DataFrame(
+        [
+            Series(
+                "key", StringColumn(List[String](["abc", "é🙂", "unmatched"]))
+            ),
+            Series("tag", Column[Int64]([11, 22, 33])),
+        ]
+    )
+    var joined = query.join(
+        lookup.lazy(), left_on=["joined"], right_on=["key"], how="left"
+    ).sort("id")
+    assert_true(
+        joined.collect(accelerator=runtime).equals(joined.collect(engine="cpu"))
+    )
+    print(
+        "PASS dynamic concat chains, sorting, grouping, joins and literal filtering"
+    )
     var empty = (
         frame.lazy()
         .filter(col("id") < lit(Int64(0)))
