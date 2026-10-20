@@ -70,6 +70,45 @@ def integer_partial_supported(
 
 
 @always_inline
+def _group_shared_state_store(
+    state: BasicState,
+    output: Pointer[
+        UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED
+    ],
+    at: Int,
+):
+    """Write the eight reducer words directly into CTA shared memory."""
+    output[unsafe_offset=at] = state.word
+    output[unsafe_offset=at + 1] = state.high
+    output[unsafe_offset=at + 2] = state.count
+    output[unsafe_offset=at + 3] = state.index
+    output[unsafe_offset=at + 4] = state.present
+    output[unsafe_offset=at + 5] = state.flags
+    output[unsafe_offset=at + 6] = state.error
+    output[unsafe_offset=at + 7] = state.nan_index
+
+
+@always_inline
+def _group_shared_state_load(
+    input: Pointer[
+        UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED
+    ],
+    at: Int,
+) -> BasicState:
+    """Load reducer state from CTA shared memory without address-space casts."""
+    var state = BasicState()
+    state.word = input[unsafe_offset=at]
+    state.high = input[unsafe_offset=at + 1]
+    state.count = input[unsafe_offset=at + 2]
+    state.index = input[unsafe_offset=at + 3]
+    state.present = input[unsafe_offset=at + 4]
+    state.flags = input[unsafe_offset=at + 5]
+    state.error = input[unsafe_offset=at + 6]
+    state.nan_index = input[unsafe_offset=at + 7]
+    return state^
+
+
+@always_inline
 def key_equal(a: UInt64, b: UInt64, dtype: Int64) -> Bool:
     if dtype == 11:
         return f.equal(a, b) or (f.is_nan(a) and f.is_nan(b))
@@ -846,23 +885,24 @@ def group_integer_partials(
         256 * 8, DType.uint64, address_space=AddressSpace.SHARED
     ]()
     var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
-    var shared_read = shared.unsafe_origin_cast[ImmutAnyOrigin]()
-    state.store(shared_write, Int(thread_idx.x) * 8)
+    _group_shared_state_store(state, shared_write, Int(thread_idx.x) * 8)
     barrier()
     var width = 128
     while width > 0:
         if Int(thread_idx.x) < width:
-            var left = BasicState.load(shared_read, Int(thread_idx.x) * 8)
-            var right = BasicState.load(
-                shared_read, (Int(thread_idx.x) + width) * 8
+            var left = _group_shared_state_load(
+                shared_write, Int(thread_idx.x) * 8
+            )
+            var right = _group_shared_state_load(
+                shared_write, (Int(thread_idx.x) + width) * 8
             )
             left.merge(right, op, dtype, minimum)
-            left.store(shared_write, Int(thread_idx.x) * 8)
+            _group_shared_state_store(left, shared_write, Int(thread_idx.x) * 8)
         barrier()
         width //= 2
     if thread_idx.x == 0:
         var base = (local_group * Int(partials_per_group) + partition) * 8
-        var total = BasicState.load(shared_read, 0)
+        var total = _group_shared_state_load(shared_write, 0)
         total.store(partial_states, base)
 
 
@@ -912,22 +952,23 @@ def group_integer_finish(
         256 * 8, DType.uint64, address_space=AddressSpace.SHARED
     ]()
     var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
-    var shared_read = shared.unsafe_origin_cast[ImmutAnyOrigin]()
-    state.store(shared_write, Int(thread_idx.x) * 8)
+    _group_shared_state_store(state, shared_write, Int(thread_idx.x) * 8)
     barrier()
     var width = 128
     while width > 0:
         if Int(thread_idx.x) < width:
-            var left = BasicState.load(shared_read, Int(thread_idx.x) * 8)
-            var right = BasicState.load(
-                shared_read, (Int(thread_idx.x) + width) * 8
+            var left = _group_shared_state_load(
+                shared_write, Int(thread_idx.x) * 8
+            )
+            var right = _group_shared_state_load(
+                shared_write, (Int(thread_idx.x) + width) * 8
             )
             left.merge(right, op, dtype, minimum)
-            left.store(shared_write, Int(thread_idx.x) * 8)
+            _group_shared_state_store(left, shared_write, Int(thread_idx.x) * 8)
         barrier()
         width //= 2
     if thread_idx.x == 0:
-        var total = BasicState.load(shared_read, 0)
+        var total = _group_shared_state_load(shared_write, 0)
         var result = total.finish(
             op,
             dtype,
@@ -940,7 +981,7 @@ def group_integer_finish(
         output_words[unsafe_offset=target] = result[0]
         if slots > 0:
             output_words[
-                unsafe_offset=Int(stride) * slots + target
+                unsafe_offset=Int(stride) * Int(slots) + target
             ] = result_high
         output_validity[unsafe_offset=target] = result[1]
         output_errors[unsafe_offset=target] = result[2]

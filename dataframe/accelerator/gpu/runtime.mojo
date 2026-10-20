@@ -2649,10 +2649,7 @@ def execute_plan(
                                             UInt32(rows),
                                             UInt32(plan.slots),
                                             grouped_integer_scratch.value()
-                                            .unsafe_ptr()
-                                            .unsafe_origin_cast[
-                                                ImmutAnyOrigin
-                                            ](),
+                                            .unsafe_ptr(),
                                             grid_dim=current_batch,
                                             block_dim=256,
                                         )
