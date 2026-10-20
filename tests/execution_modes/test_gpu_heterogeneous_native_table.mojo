@@ -372,6 +372,92 @@ def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
 
 
 # requires: metal
+def test_native_join_gather_small_payloads_use_safe_unused_error_buffers(
+) raises:
+    _ = require_metal()
+    var scope = Scope()
+    var int8 = upload_native[DType.int8](
+        scope, Series("i8", Column[Int8]([11, 12, 13]))
+    )
+    var uint8 = upload_native[DType.uint8](
+        scope, Series("u8", Column[UInt8]([21, 22, 23]))
+    )
+    var int16 = upload_native[DType.int16](
+        scope, Series("i16", Column[Int16]([31, 32, 33]))
+    )
+    var right_value = upload_native[DType.uint8](
+        scope, Series("r", Column[UInt8]([99]))
+    )
+    var left_schema = DataFrame(
+        List[Series](
+            [
+                Series("i8", Column[Int8](List[Int8]())),
+                Series("u8", Column[UInt8](List[UInt8]())),
+                Series("i16", Column[Int16](List[Int16]())),
+            ]
+        )
+    )
+    var right_schema = DataFrame(
+        List[Series]([Series("r", Column[UInt8](List[UInt8]()))])
+    )
+    var left = Table.native(
+        left_schema,
+        List[NativeColumnAny](
+            [
+                NativeColumnAny(int8),
+                NativeColumnAny(uint8),
+                NativeColumnAny(int16),
+            ]
+        ),
+    )
+    var right = Table.native(
+        right_schema,
+        List[NativeColumnAny]([NativeColumnAny(right_value)]),
+    )
+    var context = scope.context()
+    var left_device = context.enqueue_create_buffer[DType.uint32](3)
+    var right_device = context.enqueue_create_buffer[DType.uint32](3)
+    var left_host = List[UInt32]([UInt32(0), UInt32(1), UInt32(2)])
+    var right_host = List[UInt32]([UInt32.MAX, UInt32.MAX, UInt32.MAX])
+    context.enqueue_copy(left_device, left_host.unsafe_ptr())
+    context.enqueue_copy(right_device, right_host.unsafe_ptr())
+    scope.record_upload(24)
+    scope.synchronize()
+    var left_map = NativeRowMap(scope, left_device, 3, 3, False)
+    var right_map = NativeRowMap(scope, right_device, 3, 1, True)
+    var output_schema = DataFrame(
+        List[Series](
+            [
+                Series("i8", Column[Int8](List[Int8]())),
+                Series("u8", Column[UInt8](List[UInt8]())),
+                Series("i16", Column[Int16](List[Int16]())),
+            ]
+        )
+    )
+    var fields = List[NativeJoinField](
+        [
+            NativeJoinField(0, -1, False),
+            NativeJoinField(1, -1, False),
+            NativeJoinField(2, -1, False),
+        ]
+    )
+
+    var before = scope.transfers()
+    var gathered = left.gather_join(
+        scope, right, output_schema, fields, left_map, right_map
+    )
+    var after = scope.transfers()
+    assert_equal(after[0], before[0])
+    assert_equal(after[2] - before[2], 4)
+    assert_equal(after[3] - before[3], 1)
+    var result = materialize(gathered)
+    assert_equal(result.column("i8").int8()._get(0), Int8(11))
+    assert_equal(result.column("i8").int8()._get(2), Int8(13))
+    assert_equal(result.column("u8").uint8()._get(1), UInt8(22))
+    assert_equal(result.column("i16").int16()._get(2), Int16(33))
+
+
+# requires: metal
 def test_native_join_gather_bounds_errors_budget_and_empty() raises:
     _ = require_metal()
     var scope = Scope()

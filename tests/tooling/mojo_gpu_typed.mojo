@@ -15,6 +15,7 @@ from tests.execution_modes.test_gpu_heterogeneous_native_table import (
     test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer,
     test_native_gather_carries_deferred_error_sidecars,
     test_native_join_gather_coalesces_device_maps_with_one_drain,
+    test_native_join_gather_small_payloads_use_safe_unused_error_buffers,
     test_native_join_gather_bounds_errors_budget_and_empty,
 )
 from tests.execution_modes.test_mojo_gpu_typed_rows import (
@@ -48,6 +49,7 @@ def main() raises:
     test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer()
     test_native_gather_carries_deferred_error_sidecars()
     test_native_join_gather_coalesces_device_maps_with_one_drain()
+    test_native_join_gather_small_payloads_use_safe_unused_error_buffers()
     test_native_join_gather_bounds_errors_budget_and_empty()
     print("PASS native storage slices, chunks, nulls, lifetimes and budgets")
     test_mojo_gpu_typed_rows_float32_projection_and_arithmetic15()

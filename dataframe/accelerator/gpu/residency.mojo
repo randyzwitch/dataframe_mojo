@@ -909,10 +909,11 @@ struct Table(Copyable):
         var status_reservation = _NativeReservation(scope, 8)
         var ctx = scope.context()
         var status = ctx.enqueue_create_buffer[DType.uint32](1)
-        ctx.enqueue_memset(status, UInt32(0))
         var outputs = List[NativeColumnAny](capacity=len(fields))
+        var host_status = List[UInt32](length=1, fill=0)
         var queued = True
         try:
+            ctx.enqueue_memset(status, UInt32(0))
             ctx.enqueue_function[validate_native_join_maps](
                 left_map.values.unsafe_ptr(),
                 right_map.values.unsafe_ptr(),
@@ -985,7 +986,6 @@ struct Table(Copyable):
                         queued,
                     )^
                 )
-            var host_status = List[UInt32](length=1, fill=0)
             ctx.enqueue_copy(host_status.unsafe_ptr(), status)
             scope.record_download(4)
             scope.synchronize()
@@ -1834,12 +1834,12 @@ def _native_join_gather_typed[dtype: DType](
     if right_view.has_validity():
         right_validity_buffer = right_view.validity()
         right_validity = right_validity_buffer.value().copy()
-    var left_errors = left_values.create_sub_buffer[DType.uint32](0, 1)
+    var left_errors = status.create_sub_buffer[DType.uint32](0, 1)
     var left_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
     if left_view.has_errors():
         left_errors_buffer = left_view.errors()
         left_errors = left_errors_buffer.value().copy()
-    var right_errors = right_values.create_sub_buffer[DType.uint32](0, 1)
+    var right_errors = status.create_sub_buffer[DType.uint32](0, 1)
     var right_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
     if right_view.has_errors():
         right_errors_buffer = right_view.errors()
@@ -1849,7 +1849,7 @@ def _native_join_gather_typed[dtype: DType](
     var output_validity_buffer = output.validity()
     if output_validity_buffer:
         output_validity = output_validity_buffer.value().copy()
-    var output_errors = output_values.create_sub_buffer[DType.uint32](0, 1)
+    var output_errors = status.create_sub_buffer[DType.uint32](0, 1)
     var output_errors_buffer = output.errors()
     if output_errors_buffer:
         output_errors = output_errors_buffer.value().copy()
@@ -1915,7 +1915,7 @@ def _native_join_typed_source[dtype: DType](
 
 
 def _native_null_join_typed[dtype: DType](
-    scope: Scope, logical: DataType, rows: Int
+    scope: Scope, logical: DataType, rows: Int, mut queued: Bool
 ) raises -> NativeColumn[dtype]:
     var output = allocate_native_column[dtype](
         scope, logical, rows, with_validity=True
@@ -1923,19 +1923,27 @@ def _native_null_join_typed[dtype: DType](
     var values = output.values()
     var validity = output.validity().value()
     var ctx = scope.context()
-    ctx.enqueue_memset(values, Scalar[dtype](0))
-    ctx.enqueue_memset(validity, UInt8(0))
+    try:
+        ctx.enqueue_memset(values, Scalar[dtype](0))
+        ctx.enqueue_memset(validity, UInt8(0))
+    except error:
+        # A partially submitted clear needs its owner alive through the drain.
+        # Tell the enclosing gather that this path already performed that wait.
+        scope.synchronize()
+        queued = False
+        _ = output^
+        raise error^
     return output^
 
 
 def _native_null_join_column(
-    scope: Scope, logical: DataType, rows: Int
+    scope: Scope, logical: DataType, rows: Int, mut queued: Bool
 ) raises -> NativeColumnAny:
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if logical.physical() == DataType.of(D):
             return NativeColumnAny(
-                _native_null_join_typed[D](scope, logical, rows)^
+                _native_null_join_typed[D](scope, logical, rows, queued)^
             )
     raise Error("Mojo GPU native join payload dtype is unsupported")
 
@@ -1962,9 +1970,9 @@ def _native_join_gather_column(
     var has_left = Bool(left)
     var has_right = Bool(right)
     if has_left and left_rows == 0 and not has_right:
-        return _native_null_join_column(scope, logical, rows)
+        return _native_null_join_column(scope, logical, rows, queued)
     if has_right and right_rows == 0 and not has_left:
-        return _native_null_join_column(scope, logical, rows)
+        return _native_null_join_column(scope, logical, rows, queued)
     var left_view_offset = left_offset if has_left else right_offset
     var left_view_rows = left_rows if has_left else right_rows
     var right_view_offset = right_offset if has_right else left_offset
