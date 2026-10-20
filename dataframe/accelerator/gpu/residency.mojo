@@ -609,9 +609,7 @@ struct Table(Copyable):
         var device_indices = Optional[DeviceBuffer[DType.int32]]()
         if len(indices):
             device_indices = Optional[DeviceBuffer[DType.int32]](
-                scope.context().enqueue_create_buffer[DType.int32](
-                    len(indices)
-                )
+                scope.context().enqueue_create_buffer[DType.int32](len(indices))
             )
         var outputs = List[NativeColumnAny](capacity=self.schema.width())
         var queued = False
