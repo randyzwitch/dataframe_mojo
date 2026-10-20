@@ -1,15 +1,15 @@
 """Stable GPU row ordering over shared fixed-width dataframe words.
 
 Sort descriptors are the shared RowPlan code and aligned physical type array.
-Short merge passes rank each row against the opposite sorted run. Wider passes
-use bounded output tiles and the same comparator. Source row indices break
-ties, preserving NaN payloads, signed zeros and nullable values.
+Direct fixed-width integer keys use stable nibble radix passes; other keys use
+bounded merge tiles and the shared comparator. Source row indices break ties,
+preserving NaN payloads, signed zeros and nullable values.
 """
 from max.gpu import global_idx, thread_idx, block_idx, barrier
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer, unsafe_stack_allocation
 from . import floating, decimal
-from .rows import unsigned_type
+from .rows import integer_width, unsigned_type
 from dataframe.accelerator.rows import ROW_GROUP_KEY
 
 comptime MERGE_TILE_ROWS = 2048
@@ -394,6 +394,187 @@ def order_merge(
             a += 1
         else:
             b += 1
+
+
+@always_inline
+def _radix_digit(
+    row: UInt32,
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    key_node: UInt32,
+    stride: UInt32,
+    shift: UInt32,
+    null_marker: Bool,
+) -> UInt32:
+    var node = Int(key_node)
+    var source = Int(code[unsafe_offset=4 * node + 1]) * Int(stride) + Int(row)
+    var present = validity[unsafe_offset=source] != 0
+    var nulls_last = (code[unsafe_offset=4 * node + 3] & 1) != 0
+    if null_marker:
+        return UInt32(nulls_last != present)
+    if not present:
+        return 0
+    var dtype = types[unsafe_offset=node]
+    var width = integer_width(dtype)
+    var mask = (
+        UInt64.MAX if width == 64 else (UInt64(1) << UInt64(width)) - 1
+    )
+    var value = words[unsafe_offset=source] & mask
+    if not unsigned_type(dtype):
+        value ^= UInt64(1) << UInt64(width - 1)
+    if code[unsafe_offset=4 * node + 2] != 0:
+        value = (~value) & mask
+    return UInt32((value >> shift) & UInt64(15))
+
+
+def radix_histogram(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    counts: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    key_node: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    bucket_span: UInt32,
+    shift: UInt32,
+    null_marker: Bool,
+):
+    """Build one stable-scatter histogram for each 256-row tile."""
+    var position = Int(global_idx.x)
+    var lane = thread_idx.x
+    var digit = UInt32(0)
+    if position < Int(rows):
+        digit = _radix_digit(
+            index[unsafe_offset=position],
+            words,
+            validity,
+            code,
+            types,
+            key_node,
+            stride,
+            shift,
+            null_marker,
+        )
+    for bucket in range(16):
+        var prefix = prefix_sum[block_size=256](
+            UInt32(position < Int(rows) and digit == UInt32(bucket))
+        )
+        if lane == 255:
+            counts[unsafe_offset=Int(bucket) * Int(bucket_span) + Int(block_idx.x)] = prefix
+
+
+def radix_scan_level(
+    counts: Pointer[UInt32, MutAnyOrigin],
+    count: UInt32,
+    base: UInt32,
+    parent_base: UInt32,
+    bucket_span: UInt32,
+):
+    """Inclusive scan one bucket/summary level and emit parent summaries."""
+    var chunks = (Int(count) + 255) // 256
+    var bucket = Int(block_idx.x) // chunks
+    var chunk = Int(block_idx.x) % chunks
+    var position = chunk * 256 + Int(thread_idx.x)
+    var source = bucket * Int(bucket_span) + Int(base) + position
+    var value = UInt32(0)
+    if position < Int(count):
+        value = counts[unsafe_offset=source]
+    var prefix = prefix_sum[block_size=256](value)
+    if position < Int(count):
+        counts[unsafe_offset=source] = prefix
+    if thread_idx.x == 255:
+        counts[unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk] = prefix
+
+
+def radix_apply_carries(
+    counts: Pointer[UInt32, MutAnyOrigin],
+    count: UInt32,
+    base: UInt32,
+    parent_base: UInt32,
+    bucket_span: UInt32,
+):
+    """Carry scanned parent-block prefixes into a bucket summary level."""
+    var chunks = (Int(count) + 255) // 256
+    var bucket = Int(block_idx.x) // chunks
+    var chunk = Int(block_idx.x) % chunks
+    var position = chunk * 256 + Int(thread_idx.x)
+    if position >= Int(count) or chunk == 0:
+        return
+    var source = bucket * Int(bucket_span) + Int(base) + position
+    var carry = counts[
+        unsafe_offset=bucket * Int(bucket_span) + Int(parent_base) + chunk - 1
+    ]
+    counts[unsafe_offset=source] += carry
+
+
+def radix_bucket_offsets(
+    counts: Pointer[UInt32, ImmutAnyOrigin],
+    offsets: Pointer[UInt32, MutAnyOrigin],
+    tiles: UInt32,
+    bucket_span: UInt32,
+):
+    var lane = thread_idx.x
+    var total = UInt32(0)
+    if lane < 16:
+        total = counts[
+            unsafe_offset=Int(lane) * Int(bucket_span) + Int(tiles) - 1
+        ]
+    var prefix = prefix_sum[block_size=256](total)
+    if lane < 16:
+        offsets[unsafe_offset=lane] = prefix - total
+
+
+def radix_scatter(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    target: Pointer[UInt32, MutAnyOrigin],
+    counts: Pointer[UInt32, ImmutAnyOrigin],
+    offsets: Pointer[UInt32, ImmutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    key_node: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    bucket_span: UInt32,
+    shift: UInt32,
+    null_marker: Bool,
+):
+    """Stable tile scatter using predicate prefixes, never atomic ranks."""
+    var position = Int(global_idx.x)
+    var digit = UInt32(0)
+    if position < Int(rows):
+        digit = _radix_digit(
+            index[unsafe_offset=position],
+            words,
+            validity,
+            code,
+            types,
+            key_node,
+            stride,
+            shift,
+            null_marker,
+        )
+    var rank = UInt32(0)
+    for bucket in range(16):
+        var prefix = prefix_sum[block_size=256](
+            UInt32(position < Int(rows) and digit == UInt32(bucket))
+        )
+        if digit == UInt32(bucket):
+            rank = prefix - 1
+    if position >= Int(rows):
+        return
+    var tile_prefix = UInt32(0)
+    if block_idx.x:
+        tile_prefix = counts[
+            unsafe_offset=Int(digit) * Int(bucket_span) + Int(block_idx.x) - 1
+        ]
+    var destination = offsets[unsafe_offset=digit] + tile_prefix + rank
+    target[unsafe_offset=destination] = index[unsafe_offset=position]
 
 
 def order_key_errors(

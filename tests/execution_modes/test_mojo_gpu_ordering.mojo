@@ -76,6 +76,22 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
         var expected = expected_order(reference, directions, null_placement)
         for row in range(n):
             assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
+    # Exercise the integer radix certificate itself, including repeated keys
+    # and stable null ties; the two-key cases above intentionally use merge.
+    var direct_reference = List[List[KeyCell]]()
+    for row in reference:
+        direct_reference.append([row[0]])
+    for reverse in [False, True]:
+        var query = frame.lazy().sort(
+            "x", descending=reverse, nulls_last=not reverse
+        )
+        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+        same(actual, query.collect(engine="cpu"))
+        var expected = expected_order(
+            direct_reference, [reverse], [not reverse]
+        )
+        for row in range(n):
+            assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
 
 
 # requires: mojo_gpu
@@ -365,6 +381,31 @@ def test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings
         16385,
     ]:
         _tiled_integer_boundary(rows)
+
+    # More than 256 radix tiles forces the recursive histogram-summary carry
+    # path. The dominant key deliberately creates long, skewed stable runs.
+    var radix_rows = 65_537
+    var radix_keys = List[Int16](length=radix_rows, fill=0)
+    var radix_valid = List[Bool](length=radix_rows, fill=True)
+    var radix_ids = List[Int64](length=radix_rows, fill=0)
+    for row in range(radix_rows):
+        radix_keys[row] = Int16(0 if row % 101 else (row % 7) - 3)
+        radix_valid[row] = row % 509 != 0
+        radix_ids[row] = Int64(row)
+    var radix_frame = DataFrame(
+        [
+            Series("key", Column[Int16](radix_keys^, radix_valid^)),
+            Series("id", Column[Int64](radix_ids^)),
+        ]
+    )
+    for reverse in [False, True]:
+        var query = radix_frame.lazy().sort(
+            "key", descending=reverse, nulls_last=not reverse
+        )
+        same(
+            query.collect(accelerator=MetalRuntime(), engine="accel"),
+            query.collect(engine="cpu", streaming=False),
+        )
 
     var encodings: List[UInt64] = [
         0,
