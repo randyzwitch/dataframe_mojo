@@ -216,6 +216,17 @@ followed by focused resource-bound fixes whose tests passed. The full gate was
 not rerun as all-green. See `summary.md` for the paired table and `validation/`
 for qualification details.
 
+The grouped integer candidate comparison is archived at
+[`benchmarks/results/metal-group-integer/a52334e7-0a9297c3/`](../benchmarks/results/metal-group-integer/a52334e7-0a9297c3/).
+It retains 234 validated workers across frozen-baseline and #865-intermediate
+comparisons. The candidate improves all warm cases over the frozen baseline,
+but is about 7% slower than #865 on two large non-null uniform cases while
+improving large skewed cases by 4.75–4.89×. Reported peak allocation increases,
+and CPU remains faster throughout. These results require a scheduling revision;
+they do not establish universal improvement or grouping replacement completion.
+The archive preserves both comparisons, first-use regressions, raw logs,
+shared harness bytes, build receipts and the focused correctness gate.
+
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
 line per executed plan node with observed rows in and out, and for a join
