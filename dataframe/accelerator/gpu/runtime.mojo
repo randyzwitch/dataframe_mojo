@@ -911,7 +911,7 @@ def _topk_limit(
         or len(plan.outputs) != plan.source.width()
     ):
         return -1
-    var step = plan.steps[0]
+    var step = plan.steps[0].copy()
     if (
         not step.order
         or step.filter
@@ -921,7 +921,7 @@ def _topk_limit(
     ):
         return -1
     for column in range(step.gather_count):
-        if plan.gathers[step.gather_start + column] != column:
+        if plan.gathers[step.gather_start + column] != Int64(column):
             return -1
     for node in range(step.start, step.start + step.nodes):
         var slot = Int(plan.code[4 * node + 1])
