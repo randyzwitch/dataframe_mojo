@@ -1231,9 +1231,10 @@ def estimate_resources(
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
-    # A reusable standalone service drains its stream once more before the
-    # context can return to the idle pool. Shared-region and uncached calls
-    # may omit this drain; the metadata estimate remains an upper bound.
+    # A runtime-owned service drains once more before a direct context or
+    # resident DAG context can return to the idle pool. This conservative
+    # per-plan bound includes the DAG's terminal service drain; shared-region
+    # and uncached calls may omit it.
     if rows:
         waits = _checked_add(waits, 1)
         # Native computation drains before its temporary owners leave scope;
