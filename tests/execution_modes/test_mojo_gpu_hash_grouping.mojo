@@ -221,6 +221,10 @@ def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises
             uniform_query.collect(engine="cpu", streaming=False)
         )
     )
+    assert_equal(uniform_profile[0].height(), 4)
+    for group in range(4):
+        assert_equal(uniform_profile[0].item(group, "k").int32(), Int32(group))
+        assert_equal(uniform_profile[0].item(group, "sum").int64(), Int64(1024))
     assert_true(
         "dataframe-path: metal.hash_grouping\n" in uniform_observed.text()
     )
@@ -267,6 +271,8 @@ def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises
         assert_true(
             measured[0].equals(query.collect(engine="cpu", streaming=False))
         )
+        assert_equal(measured[0].height(), 1)
+        assert_equal(measured[0].item(0, "sum").int64(), Int64(rows))
         var expected_qualifying = Int64(0)
         if rows >= 4096:
             expected_qualifying = Int64(rows)
@@ -289,13 +295,13 @@ def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises
                 >= 2
             )
 
-    # One qualifying group must remain hash-routed even though thousands of
-    # singleton groups make the average far smaller than the threshold.
+    # One qualifying group must retain partials even though sixteen smaller
+    # groups make the average far smaller than the admission threshold.
     var skew_rows = 8192
     var skew_keys = List[Int32](length=skew_rows, fill=0)
     var skew_values = List[Int64](length=skew_rows, fill=1)
     for row in range(4096, skew_rows):
-        skew_keys[row] = Int32(row - 4095)
+        skew_keys[row] = Int32(1 + (row - 4096) // 256)
     var skewed = DataFrame(
         [
             Series("k", Column[Int32](skew_keys^)),
@@ -314,6 +320,15 @@ def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises
         skew_profile[0].equals(
             skew_query.collect(engine="cpu", streaming=False)
         )
+    )
+    assert_equal(skew_profile[0].height(), 17)
+    assert_equal(skew_profile[0].item(0, "sum").int64(), Int64(4096))
+    for group in range(1, 17):
+        assert_equal(skew_profile[0].item(group, "k").int32(), Int32(group))
+        assert_equal(skew_profile[0].item(group, "sum").int64(), Int64(256))
+    assert_true(
+        skew_profile[1].item(0, "grouped_int_max_partials_per_group").int64()
+        >= 2
     )
     assert_true("dataframe-path: metal.hash_grouping\n" in observed.text())
     assert_equal(
@@ -344,6 +359,8 @@ def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises
             null_query.collect(engine="cpu", streaming=False)
         )
     )
+    assert_equal(null_profile[0].height(), 1)
+    assert_equal(null_profile[0].item(0, "sum").int64(), Int64(4096))
     assert_equal(
         null_profile[1]
         .item(0, "grouped_int_max_qualifying_hash_group_rows")

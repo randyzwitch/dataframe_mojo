@@ -28,7 +28,7 @@ from .grouping import group_equal
 from . import floating
 
 
-MINIMUM_PARALLEL_GROUP_ROWS = 4096
+comptime MINIMUM_PARALLEL_GROUP_ROWS = 4096
 
 
 def capacity(rows: Int) -> Int:
