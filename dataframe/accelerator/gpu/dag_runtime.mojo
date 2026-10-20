@@ -16,7 +16,7 @@ from .residency import TextDomain, TextColumn
 from dataframe.accelerator.code_domains import TextField
 from .text_domains import union_domain, source_maps, MapPlan, ColumnMap
 from .text_programs import recode_region
-from dataframe import Column, DataFrame, DataType, Series
+from dataframe import Column, DataFrame, DataType, Series, concat
 from dataframe.lazy import LazyFrame
 from dataframe.execution_report import ExecutionReport
 from dataframe.accelerator.explodes import schema as explode_schema
@@ -231,6 +231,15 @@ def _profile_phases(report: DataFrame) raises -> DataFrame:
     return result^
 
 
+def _append_profile_region(
+    report: DataFrame, region: DataFrame
+) raises -> DataFrame:
+    """Append a region while null-padding metrics absent from either schema."""
+    if report.width() == 0:
+        return region.copy()
+    return concat([report.copy(), region.copy()], "diagonal")
+
+
 def _storage_report(
     root: Int,
     operator: String,
@@ -431,9 +440,7 @@ def execute(
             )
             if profiling:
                 region = _profile_phases(region)
-            report = region^ if report.width() == 0 else report.vstack(
-                region.select(report.columns())
-            )
+            report = _append_profile_region(report, region)
             values.append(None)
             nested.append(fields^)
             continue
@@ -811,9 +818,7 @@ def execute(
         )
         if profiling:
             region = _profile_phases(region)
-        report = region^ if report.width() == 0 else report.vstack(
-            region.select(report.columns())
-        )
+        report = _append_profile_region(report, region)
         values.append(executed[0].copy())
         nested.append(None)
         if task.source >= 0:
