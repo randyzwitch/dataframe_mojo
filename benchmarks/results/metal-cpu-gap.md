@@ -34,7 +34,24 @@ The measured small-query gap reaches 78.5×. Incremental Metal improvements leav
 
 Existing profile collections point to final readback/export as a major phase in the large native join cases (approximately 56–67% of profiled wall time). The phase includes more than device transfer, so its contents require source-level attribution before assigning a cause or forecasting gains. Even eliminating that entire phase would yield only an approximately 2.3–3× ceiling for those profiled cases. Those profile-derived ceilings are not achieved speedups and must not be extrapolated to the worst CPU gaps.
 
-Priority is to identify measured structural costs—submission/waits, repeated staging, generic storage, result export and redundant work across composed queries—and validate changes against absolute CPU and Metal query times. The existing ordering/top-k comparisons and an export-path audit are pending. Automatic CPU/Metal placement remains deferred under #583.
+Priority is to identify measured structural costs—submission/waits, repeated staging, generic storage, result export and redundant work across composed queries—and validate changes against absolute CPU and Metal query times. The ordering/top-k comparison is running; the source-level export audit is recorded below. Automatic CPU/Metal placement remains deferred under #583.
+
+## Native join export audit
+
+At engine `b426cc27f0d87df9dcd469c1843a0ef1e578ad45`, the root native export loops over output fields and reads each typed column separately. Each column reader allocates zero-filled host values and optional compact validity bytes, enqueues copies, and synchronizes before returning. These benchmark outputs have no deferred error planes or offset validity repacking. The final construction of the DataFrame shares the resulting column owners. See the pinned [root export](https://github.com/randyzwitch/dataframe_mojo/blob/b426cc27f0d87df9dcd469c1843a0ef1e578ad45/dataframe/accelerator/gpu/runtime.mojo#L1279) and [typed readback](https://github.com/randyzwitch/dataframe_mojo/blob/b426cc27f0d87df9dcd469c1843a0ef1e578ad45/dataframe/accelerator/gpu/typed_storage.mojo#L947).
+
+The following are medians of three separate profile collections for the 262,144-row base variant, from the [archived raw results](metal-native-join/a52334e7-b426cc27/paired/results.json). They are not the unprofiled warm timing samples used above. Phase medians need not sum to the query median.
+
+| Workload | Output rows | Profile query ms | Region wall ms | Readback ms | Result copy ms | Query download bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| join_hash | 524,288 | 67.103 | 29.588 | 37.499 | 0.002 | 10,551,344 |
+| join_fanout | 1,048,576 | 109.092 | 35.176 | 73.488 | 0.003 | 21,102,640 |
+
+The output fields contain 20 value bytes per row plus one packed validity bitmap. The query download counters equal that payload plus 48 control/status bytes. There are three per-column export drains; the reported nine synchronizations and 34 launches count the entire query, not just export. The negligible result-copy interval is consistent with shared column ownership rather than another full values copy.
+
+The effective payload/readback rates are only approximately 281 and 287 MB/s. These include allocation, zero initialization, transfer and waiting; they are **not measured device bandwidth**. Doubling the output roughly doubles the readback phase, but does not identify which component is responsible. Batching the three drains, reducing host initialization, or changing transfer staging are hypotheses requiring separate measurements and complete-query CPU comparisons.
+
+A join followed by a reducing consumer can test whether residency avoids a large intermediate export. That is a distinct composed workload and cannot substitute for closing the full-output CPU gap. Full-output queries must still return their requested values; their current export cost has not been shown to be unavoidable.
 
 ## Reproducibility
 
