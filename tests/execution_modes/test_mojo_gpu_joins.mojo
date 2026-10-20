@@ -634,11 +634,11 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
             expected_right_amount[right_index],
         )
         assert_equal(
-            measured[0].item(row, "day").int64(),
+            measured[0].item(row, "day").to_physical(),
             expected_left_day[left_index],
         )
         assert_equal(
-            measured[0].item(row, "day_r").int64(),
+            measured[0].item(row, "day_r").to_physical(),
             expected_right_day[right_index],
         )
         assert_equal(
