@@ -2024,6 +2024,7 @@ def execute_plan(
     var grouped_int_max_partial_states = 0
     var grouped_int_max_partials_per_group = 0
     var grouped_int_max_group_batch = 0
+    var grouped_int_max_qualifying_hash_group_rows = 0
     var grouped_int_partial_tiles = 0
     var grouped_int_scratch_bytes = 0
     var fault_groups = min(1024, max(1, (rows + 255) // 256))
@@ -2262,6 +2263,11 @@ def execute_plan(
                             device_slot_types, slot_types.unsafe_ptr()
                         )
                         uploaded += len(slot_types) * 8
+                        var integer_partial_nodes = (
+                            _grouped_integer_partial_nodes(
+                                plan, step.start, step.nodes
+                            )
+                        )
                         var hash_route = False
                         var shape = List[UInt32]()
                         if current_rows >= 256 and hash_grouping.eligible(
@@ -2310,6 +2316,11 @@ def execute_plan(
                                     next_index.unsafe_ptr(),
                                     metadata.unsafe_ptr(),
                                     UInt32(capacity),
+                                    UInt32(
+                                        hash_grouping.MINIMUM_PARALLEL_GROUP_ROWS
+                                    ) if len(integer_partial_nodes) else UInt32(
+                                        0
+                                    ),
                                     grid_dim=(capacity + 255) // 256,
                                     block_dim=256,
                                 )
@@ -2349,6 +2360,10 @@ def execute_plan(
                                 waits += 1
                                 hash_route = shape[2] == 0
                                 if hash_route:
+                                    grouped_int_max_qualifying_hash_group_rows = max(
+                                        grouped_int_max_qualifying_hash_group_rows,
+                                        Int(shape[3]),
+                                    )
                                     trace_path("metal.hash_grouping")
                                 else:
                                     trace_path(
@@ -2528,14 +2543,13 @@ def execute_plan(
                                 submissions += 2
                                 positions = group_order^
                                 next_index = next_group_order^
-                            var integer_partial_nodes = (
-                                _grouped_integer_partial_nodes(
-                                    plan, step.start, step.nodes
-                                )
-                            )
                             var partials_per_group = 1
                             var group_batch = 0
-                            if len(integer_partial_nodes) and shape[0] > 0:
+                            if (
+                                len(integer_partial_nodes)
+                                and shape[0] > 0
+                                and (not hash_route or shape[3] != 0)
+                            ):
                                 var average_group_rows = (
                                     Int(current_rows) + Int(shape[0]) - 1
                                 ) // Int(shape[0])
@@ -3916,6 +3930,12 @@ def execute_plan(
         Series(
             "grouped_int_max_group_batch",
             Column[Int64]([Int64(grouped_int_max_group_batch)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_qualifying_hash_group_rows",
+            Column[Int64]([Int64(grouped_int_max_qualifying_hash_group_rows)]),
         )
     )
     fields.append(

@@ -193,6 +193,172 @@ def test_mojo_gpu_hash_grouping_unordered_integer_reductions() raises:
 
 
 # requires: mojo_gpu
+def test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group() raises:
+    # Several uniformly sized groups should skip integer partials even when
+    # their average size would otherwise admit multiple partials per group.
+    var uniform_keys = List[Int32]()
+    var uniform_values = List[Int64]()
+    for group in range(4):
+        for row in range(1024):
+            uniform_keys.append(Int32(group))
+            uniform_values.append(Int64(1))
+    var uniform = DataFrame(
+        [
+            Series("k", Column[Int32](uniform_keys^)),
+            Series("v", Column[Int64](uniform_values^)),
+        ]
+    )
+    var uniform_query = (
+        uniform.lazy().group_by("k").agg(col("v").sum().alias("sum")).sort("k")
+    )
+    var uniform_trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var uniform_observed = StrategyTrace()
+    var uniform_profile = uniform_query.profile(
+        engine="accel", accelerator=MetalRuntime()
+    )
+    assert_true(
+        uniform_profile[0].equals(
+            uniform_query.collect(engine="cpu", streaming=False)
+        )
+    )
+    assert_true(
+        "dataframe-path: metal.hash_grouping\n" in uniform_observed.text()
+    )
+    assert_equal(
+        uniform_profile[1]
+        .item(0, "grouped_int_max_qualifying_hash_group_rows")
+        .int64(),
+        Int64(0),
+    )
+    assert_equal(
+        uniform_profile[1].item(0, "grouped_int_scratch_bytes").int64(),
+        Int64(0),
+    )
+    var uniform_peak = Int(
+        uniform_profile[1].item(0, "peak_requested_bytes").int64()
+    )
+    with assert_raises(contains="memory budget"):
+        _ = uniform_query.collect(
+            engine="accel",
+            accelerator=MetalRuntime(memory_limit_bytes=uniform_peak - 1),
+        )
+    assert_true(
+        uniform_query.collect(
+            engine="accel",
+            accelerator=MetalRuntime(memory_limit_bytes=uniform_peak),
+        ).equals(uniform_profile[0])
+    )
+    _ = uniform_observed^
+    _ = uniform_trace^
+
+    # The 2k/4k/8k cases validate the chosen data threshold, and 4095 checks
+    # that reaching 4096 is inclusive.
+    for rows in [2048, 4095, 4096, 8192]:
+        var keys = List[Int32](length=rows, fill=0)
+        var values = List[Int64](length=rows, fill=1)
+        var frame = DataFrame(
+            [
+                Series("k", Column[Int32](keys^)),
+                Series("v", Column[Int64](values^)),
+            ]
+        )
+        var query = frame.lazy().group_by("k").agg(col("v").sum().alias("sum"))
+        var measured = query.profile(engine="accel", accelerator=MetalRuntime())
+        assert_true(
+            measured[0].equals(query.collect(engine="cpu", streaming=False))
+        )
+        var expected_qualifying = Int64(0)
+        if rows >= 4096:
+            expected_qualifying = Int64(rows)
+        assert_equal(
+            measured[1]
+            .item(0, "grouped_int_max_qualifying_hash_group_rows")
+            .int64(),
+            expected_qualifying,
+        )
+        if rows < 4096:
+            assert_equal(
+                measured[1].item(0, "grouped_int_scratch_bytes").int64(),
+                Int64(0),
+            )
+        else:
+            assert_true(
+                measured[1]
+                .item(0, "grouped_int_max_partials_per_group")
+                .int64()
+                >= 2
+            )
+
+    # One qualifying group must remain hash-routed even though thousands of
+    # singleton groups make the average far smaller than the threshold.
+    var skew_rows = 8192
+    var skew_keys = List[Int32](length=skew_rows, fill=0)
+    var skew_values = List[Int64](length=skew_rows, fill=1)
+    for row in range(4096, skew_rows):
+        skew_keys[row] = Int32(row - 4095)
+    var skewed = DataFrame(
+        [
+            Series("k", Column[Int32](skew_keys^)),
+            Series("v", Column[Int64](skew_values^)),
+        ]
+    )
+    var skew_query = (
+        skewed.lazy().group_by("k").agg(col("v").sum().alias("sum")).sort("k")
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var skew_profile = skew_query.profile(
+        engine="accel", accelerator=MetalRuntime()
+    )
+    assert_true(
+        skew_profile[0].equals(
+            skew_query.collect(engine="cpu", streaming=False)
+        )
+    )
+    assert_true("dataframe-path: metal.hash_grouping\n" in observed.text())
+    assert_equal(
+        skew_profile[1]
+        .item(0, "grouped_int_max_qualifying_hash_group_rows")
+        .int64(),
+        Int64(4096),
+    )
+
+    # A null-key group is still a real, observed hash group for admission.
+    var null_keys = List[Int32](length=4096, fill=7)
+    var null_validity = List[Bool](length=4096, fill=False)
+    var null_values = List[Int64](length=4096, fill=1)
+    var null_group = DataFrame(
+        [
+            Series("k", Column[Int32](null_keys^, null_validity^)),
+            Series("v", Column[Int64](null_values^)),
+        ]
+    )
+    var null_query = (
+        null_group.lazy().group_by("k").agg(col("v").sum().alias("sum"))
+    )
+    var null_profile = null_query.profile(
+        engine="accel", accelerator=MetalRuntime()
+    )
+    assert_true(
+        null_profile[0].equals(
+            null_query.collect(engine="cpu", streaming=False)
+        )
+    )
+    assert_equal(
+        null_profile[1]
+        .item(0, "grouped_int_max_qualifying_hash_group_rows")
+        .int64(),
+        Int64(4096),
+    )
+    assert_true(
+        null_profile[1].item(0, "grouped_int_max_partials_per_group").int64()
+        >= 2
+    )
+    _ = observed^
+    _ = trace^
+
+
+# requires: mojo_gpu
 def test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum() raises:
     # Generate a long collision chain against the complete grouping hash.
     # 256 rows select 1024 slots; 129 distinct keys exhaust 128 probes.

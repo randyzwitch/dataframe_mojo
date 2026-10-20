@@ -28,6 +28,9 @@ from .grouping import group_equal
 from . import floating
 
 
+MINIMUM_PARALLEL_GROUP_ROWS = 4096
+
+
 def capacity(rows: Int) -> Int:
     var result = 1024
     while result < rows * 2 and result < 1 << 20:
@@ -177,8 +180,9 @@ def offsets_local(
     counts: Pointer[UInt32, MutAnyOrigin],
     group_ranks: Pointer[UInt32, MutAnyOrigin],
     blocks: Pointer[UInt32, MutAnyOrigin],
-    metadata: Pointer[UInt32, ImmutAnyOrigin],
+    metadata: Pointer[UInt32, MutAnyOrigin],
     capacity: UInt32,
+    minimum_parallel_group_rows: UInt32 = 0,
 ):
     if metadata[unsafe_offset=2]:
         return
@@ -186,6 +190,13 @@ def offsets_local(
     var count = counts[unsafe_offset=bucket] if bucket < Int(
         capacity
     ) else UInt32(0)
+    if (
+        minimum_parallel_group_rows != 0
+        and count >= minimum_parallel_group_rows
+    ):
+        # metadata[3] records the largest qualifying hash group, rather than
+        # the unrestricted maximum group size. Slot 3 is initialized to zero.
+        Atomic[UInt32].max(metadata.unsafe_offset(3), count)
     var present = UInt32(count != 0)
     var rows_before = prefix_sum[block_size=256](count) - count
     var groups_before = prefix_sum[block_size=256](present) - present
