@@ -1,0 +1,40 @@
+FIRST 314000 31948000
+WORKERS 8
+OUTPUT_ROWS 4097
+SAMPLE 0 198000 6691000
+SAMPLE 1 186000 6708000
+SAMPLE 2 168000 6642000
+PROFILE_I profile_regions 1
+PROFILE_I region_0_upload_bytes 73810
+PROFILE_I upload_bytes 73810
+PROFILE_S upload_bytes_basis single_region
+PROFILE_I region_0_download_bytes 172142
+PROFILE_I download_bytes 172142
+PROFILE_S download_bytes_basis single_region
+PROFILE_I region_0_host_result_bytes 50190
+PROFILE_I host_result_bytes 50190
+PROFILE_S host_result_bytes_basis single_region
+PROFILE_I region_0_peak_requested_bytes 617072
+PROFILE_I peak_requested_bytes 617072
+PROFILE_S peak_requested_bytes_basis single_region
+PROFILE_I region_0_kernel_launches 39
+PROFILE_I kernel_launches 39
+PROFILE_S kernel_launches_basis single_region
+PROFILE_I region_0_synchronizations 5
+PROFILE_I synchronizations 5
+PROFILE_S synchronizations_basis single_region
+PROFILE_F region_0_wall_ms 3.914
+PROFILE_F region_0_host_prepare_ms 0.008
+PROFILE_F region_0_staging_copy_ms 0.025
+PROFILE_F region_0_submit_wait_ms 3.88
+PROFILE_F region_0_synchronization_ms 1.107
+PROFILE_F region_0_readback_ms 2.537
+PROFILE_F region_0_result_copy_ms 0.024
+PROFILE_F region_0_initialization_ms 0.0
+PROFILE_F query_wall_ms 6.747
+PROFILE_F preflight_ms 0.004
+PROFILE_S region_0_algorithm mojo_gpu_ordered_rows
+PROFILE_S runtime_implementation mojo
+PROFILE_S algorithm mojo_gpu_ordered_rows
+BUILD_ID development-source-no-calibration
+VALIDATED True
