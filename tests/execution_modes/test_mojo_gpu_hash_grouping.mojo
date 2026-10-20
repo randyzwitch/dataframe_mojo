@@ -212,10 +212,7 @@ def test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum() raises:
         ]
     )
     var query = (
-        frame.lazy()
-        .group_by("k")
-        .agg([col("v").sum().alias("sum")])
-        .sort("k")
+        frame.lazy().group_by("k").agg([col("v").sum().alias("sum")]).sort("k")
     )
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var observed = StrategyTrace()
