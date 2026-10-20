@@ -1,6 +1,6 @@
 # Shared Apple Metal development baseline and correctness audit
 
-This bundle records the completed 302-case development coverage run on a Mac mini with Apple M1. It is correctness and provenance evidence only; it contains no benchmark timings and makes no speed claim.
+This bundle records the completed 302-case development coverage run. It is correctness and provenance evidence only; it contains no benchmark timings and makes no speed claim.
 
 The immutable receipt is `coverage.json` (SHA-256 `087e08b97d18ae2ef0490e3429ab300d1f37c67cf759bca51c47e493daabe874`). `integrity.json` records successful integrity verification: all 77 prepared input files and 2,108 written answer files were rehashed against the receipt, with no integrity failures. The strict exact correctness gate returned 1 because 68 cases remain `wrong_answer`; the receipt records 212 `ok`, 68 `wrong_answer`, 20 `reference_unsupported`, and 2 `unsupported`. Integrity passing does not mean correctness passing. The checker and its exact comparison policy were not relaxed, and the diagnostics below do not change any classification.
 
@@ -10,7 +10,9 @@ The coverage run used development scale, 8 threads, 3 repetitions, Mojo implemen
 
 The benchmark query and engine source files are identified by the receipt's per-file SHA-256 values. The eight original suite/runtime source files tracked at `a52334e758b7138c547883eb776d744442a1a0db` match that source tree byte for byte; `benchmarks/metal_coverage_audit.mojo` is the captured audit harness source at `50137ecc2e27f76298559a25e0aa4ecca31d4e96`. The `a52334e7` source commit is an ancestor of the PR #883 audit branch's `9ab3d20b6819a11d431903daa2780251c5df0b63` commit, and the run harness was based on the same `a52334e7` tree. The receipt preserves all original and derived source hashes. Every file in `raw/sources/` was rehashed against `derived_source_sha256`; no executable build binaries are included.
 
-The host was a Mac mini `Macmini9,1`, Apple M1, 8 CPU cores and 16 GiB RAM, as recorded in the receipt. The original benchmark outputs are retained on the authorized Mac at:
+`host-toolchain-postrun.json` records a read-only snapshot of the Mac mini host and toolchain, captured at `2026-10-20T00:03:36.955754+00:00` after the coverage run had completed. It reports a Mac mini `Macmini9,1` with Apple M1, 8 physical and logical CPU cores, and 16 GiB RAM; macOS 26.5.2 (build 25F84); Xcode 26.6 (build 17F113); and macOS SDK 26.5. It also records the Mojo executable version and hash and the `max-core` version from the locked environment. This post-run snapshot is not contemporaneous execution-time hardware or toolchain proof. Its collection used read-only system and version queries and did not build the compiler or invoke the GPU. `capture_postrun_snapshot.py` is the collector source.
+
+The original benchmark outputs are retained on the authorized Mac at:
 
 `/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers`
 
@@ -35,7 +37,7 @@ Each report includes source Mac paths and hashes for available logs, schemas, an
 
 ## Integrity verification
 
-`audit_coverage_integrity.py` is the standalone strict receipt validator used for the run; its source is retained unchanged. The integrity summary is retained in `integrity.json`, including its receipt SHA, 302-case grid, status counts, and rehashed artifact counts. The summary's `correctness_passed` is `false`, and `driver_returncode` is `1`, as expected for the 68 exact mismatches. The validator requires the original answer and input trees at their recorded Mac paths; the large answer files were not vendored here.
+`coverage-run-wrapper.sh` is the exact coverage-only wrapper used for the run. It invokes the strict coverage driver, whose original comparator classified cases using exact comparisons, then performs the run's full-grid, provenance, runtime-audit, typed-answer, and input-integrity validation. It deliberately exits unsuccessfully when the driver reports wrong answers. `audit_coverage_integrity.py` is a separate integrity validator derived from that strict wrapper's checks and retained as a convenient standalone artifact; it validates the receipt grid and recorded artifact hashes while preserving the strict statuses. It does not rerun or recompare CPU and Metal outputs. The integrity summary is retained in `integrity.json`, including its receipt SHA, 302-case grid, status counts, and rehashed artifact counts. The summary's `correctness_passed` is `false`, and `driver_returncode` is `1`, as expected for the 68 exact mismatches. The validator requires the original answer and input trees at their recorded Mac paths; the large answer files were not vendored here.
 
 The existing coverage, typed-answer-export, and materialization-adapter Python harness tests passed under the locked oracle environment: 23 tests passed. No benchmark run was repeated during this evidence packaging.
 
@@ -43,5 +45,5 @@ To verify the copied receipt and evidence hashes from this directory:
 
 ```sh
 sha256sum -c raw/SHA256SUMS
-sha256sum coverage.json integrity.json audit_coverage_integrity.py
+sha256sum coverage.json integrity.json audit_coverage_integrity.py coverage-run-wrapper.sh host-toolchain-postrun.json capture_postrun_snapshot.py
 ```
