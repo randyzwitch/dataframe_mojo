@@ -86,7 +86,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     assert_equal(estimate_feature(cold, "reduction_rows", False), Float64(0))
     assert_equal(estimate_feature(cold, "cast_node_rows", False), Float64(0))
     assert_true(estimate_feature(cold, "projection_node_rows", False) > 0)
-    assert_equal(estimate_feature(cold, "synchronizations", True), Float64(2))
+    assert_equal(estimate_feature(cold, "synchronizations", True), Float64(3))
     assert_equal(estimate_feature(cold, "cold", True), Float64(1))
     assert_equal(
         estimate_feature(cold, "allocation_bytes", True),

@@ -1,0 +1,121 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-metal-0.schema.json","status":"written"}
+coverage	q9	wrong_answer	full result differs
+expected_rows	10000
+actual_rows	10000
+expected_sample
+shape: (10000, 3)
+┌───────┬─────┬────────────────────────┐
+│ id2   ┆ id4 ┆ r2                     │
+│ ---   ┆ --- ┆ ---                    │
+│ str   ┆ i64 ┆ f64                    │
+╞═══════╪═════╪════════════════════════╡
+│ id001 ┆ 60  ┆ 0.011804253551448745   │
+│ id001 ┆ 59  ┆ 0.0008538182502201516  │
+│ id001 ┆ 24  ┆ 0.020346489727306086   │
+│ id001 ┆ 55  ┆ 0.0028433270254783535  │
+│ id001 ┆ 10  ┆ 0.007646315404394559   │
+│ id001 ┆ 93  ┆ 0.0004841790436580174  │
+│ id001 ┆ 26  ┆ 5.815910766033572e-05  │
+│ id001 ┆ 78  ┆ 0.0015983254163685076  │
+│ id001 ┆ 73  ┆ 0.0029050220342348534  │
+│ id001 ┆ 95  ┆ 0.0012873802590847067  │
+│ …     ┆ …   ┆ …                      │
+│ id074 ┆ 62  ┆ 3.309493209454197e-05  │
+│ id074 ┆ 55  ┆ 0.002302970608229112   │
+│ id079 ┆ 12  ┆ 0.0005834686000635108  │
+│ id087 ┆ 23  ┆ 0.000684950015319468   │
+│ id093 ┆ 22  ┆ 0.0007456008946638741  │
+│ id095 ┆ 82  ┆ 0.004465755379103163   │
+│ id010 ┆ 100 ┆ 0.01494152278878499    │
+│ id059 ┆ 76  ┆ 0.0039916074545067156  │
+│ id071 ┆ 44  ┆ 2.0054492757948514e-05 │
+│ id095 ┆ 100 ┆ 0.0778005278874494     │
+└───────┴─────┴────────────────────────┘
+actual_sample
+shape: (10000, 3)
+┌───────┬─────┬────────────────────────┐
+│ id2   ┆ id4 ┆ r2                     │
+│ ---   ┆ --- ┆ ---                    │
+│ str   ┆ i64 ┆ f64                    │
+╞═══════╪═════╪════════════════════════╡
+│ id001 ┆ 1   ┆ 0.012335005968089707   │
+│ id001 ┆ 2   ┆ 0.012417065312775841   │
+│ id001 ┆ 3   ┆ 0.022585149070172394   │
+│ id001 ┆ 4   ┆ 0.0015498481156786864  │
+│ id001 ┆ 5   ┆ 0.02633960100280239    │
+│ id001 ┆ 6   ┆ 0.0005044827517042858  │
+│ id001 ┆ 7   ┆ 0.005946271912740617   │
+│ id001 ┆ 8   ┆ 0.007336512262817106   │
+│ id001 ┆ 9   ┆ 0.00959885799495738    │
+│ id001 ┆ 10  ┆ 0.007646315404394559   │
+│ …     ┆ …   ┆ …                      │
+│ id100 ┆ 91  ┆ 0.0035321510419484723  │
+│ id100 ┆ 92  ┆ 0.030705600344419735   │
+│ id100 ┆ 93  ┆ 0.033530534677257265   │
+│ id100 ┆ 94  ┆ 0.06746104859239703    │
+│ id100 ┆ 95  ┆ 0.008421425096200634   │
+│ id100 ┆ 96  ┆ 0.017134897659878686   │
+│ id100 ┆ 97  ┆ 0.02711858446473799    │
+│ id100 ┆ 98  ┆ 0.00242970473944058    │
+│ id100 ┆ 99  ┆ 0.0006829826635321345  │
+│ id100 ┆ 100 ┆ 1.6914561481906228e-05 │
+└───────┴─────┴────────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	id2	True
+column_bag	cpu_metal	id4	True
+column_bag	cpu_metal	r2	False
+diagnostic	cpu_metal.alignment	verified_unique_keys
+column_diagnostic	cpu_metal	id2	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	r2	float64	16	0	16	0	1	6.938893903907228e-18	1.9315265425929265e-16
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/h2o_groupby-k100_sorted-q9-onshm9hf/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	id2	True
+column_bag	cpu_repeat	id4	True
+column_bag	cpu_repeat	r2	True
+diagnostic	cpu_repeat.alignment	verified_unique_keys
+column_diagnostic	cpu_repeat	id2	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	id4	int64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	r2	float64	0	0	0	0	unavailable	unavailable	unavailable
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (10000, 3)
+┌───────┬─────┬────────────────────────┐
+│ id2   ┆ id4 ┆ r2                     │
+│ ---   ┆ --- ┆ ---                    │
+│ str   ┆ i64 ┆ f64                    │
+╞═══════╪═════╪════════════════════════╡
+│ id001 ┆ 60  ┆ 0.011804253551448745   │
+│ id001 ┆ 59  ┆ 0.0008538182502201516  │
+│ id001 ┆ 24  ┆ 0.020346489727306086   │
+│ id001 ┆ 55  ┆ 0.0028433270254783535  │
+│ id001 ┆ 10  ┆ 0.007646315404394559   │
+│ id001 ┆ 93  ┆ 0.0004841790436580174  │
+│ id001 ┆ 26  ┆ 5.815910766033572e-05  │
+│ id001 ┆ 78  ┆ 0.0015983254163685076  │
+│ id001 ┆ 73  ┆ 0.0029050220342348534  │
+│ id001 ┆ 95  ┆ 0.0012873802590847067  │
+│ …     ┆ …   ┆ …                      │
+│ id074 ┆ 62  ┆ 3.309493209454197e-05  │
+│ id074 ┆ 55  ┆ 0.002302970608229112   │
+│ id079 ┆ 12  ┆ 0.0005834686000635108  │
+│ id087 ┆ 23  ┆ 0.000684950015319468   │
+│ id093 ┆ 22  ┆ 0.0007456008946638741  │
+│ id095 ┆ 82  ┆ 0.004465755379103163   │
+│ id010 ┆ 100 ┆ 0.01494152278878499    │
+│ id059 ┆ 76  ┆ 0.0039916074545067156  │
+│ id071 ┆ 44  ┆ 2.0054492757948514e-05 │
+│ id095 ┆ 100 ┆ 0.0778005278874494     │
+└───────┴─────┴────────────────────────┘

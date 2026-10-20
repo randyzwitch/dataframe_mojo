@@ -154,19 +154,58 @@ class ApplePerformanceCollector(unittest.TestCase):
         )
         engine = dict(revision="engine", status="")
         sources = {"benchmarks/suites/example.mojo": "source"}
-        row = dict(case, status="ok", ordered_equal=False, collections=2)
+        row = dict(
+            case,
+            status="ok",
+            ordered_equal=False,
+            collections=2,
+            runtime_adjudication=dict(
+                status="complete",
+                observed_calls=2,
+                cpu_adjudicated_calls=0,
+                no_cpu_adjudication_marker_calls=2,
+                unknown_calls=0,
+                failed_calls=0,
+                events=["no_marker", "no_marker"],
+            ),
+        )
+        wrapper_path = "benchmarks/metal_coverage_audit.mojo"
+        wrapper_sha = collector.sha(ROOT / wrapper_path)
+        built_driver_provenance = collector.metal.driver_provenance()
         receipt = dict(
             provenance=dict(
                 engine_revision="engine",
                 engine_status="",
                 mojo="sdk",
                 threads=8,
-                original_source_sha256=sources,
+                **built_driver_provenance,
+                original_source_sha256={**sources, wrapper_path: wrapper_sha},
+                derived_source_sha256={"metal_example.mojo": "derived"},
             ),
             cases=[row],
         )
-        result = collector.strict_basis(case, [receipt], engine, sources, "sdk", 8, {})
+        metadata = {
+            "format": "dataframe-metal-case-metadata-v1",
+            "cases": {
+                "example/base/q1": {
+                    "execution_boundary": "gpu_collects",
+                    "workload_kind": "canonical",
+                    "audit_reason": "Fixture with pinned derived worker.",
+                    "source_path": "benchmarks/suites/example.mojo",
+                    "source_sha256": "source",
+                    "metal_derived_source_sha256": "derived",
+                }
+            },
+        }
+        self.assertEqual(
+            built_driver_provenance["driver_sha256"],
+            collector.sha(collector.metal.__file__),
+        )
+        result = collector.strict_basis(
+            case, [receipt], engine, sources, "sdk", 8, metadata
+        )
         self.assertTrue(result["verified"])
+        self.assertTrue(result["runtime_audit_verified"])
         for field, value in (
             ("engine_revision", "old"),
             ("mojo", "old"),
@@ -176,9 +215,9 @@ class ApplePerformanceCollector(unittest.TestCase):
             changed = copy.deepcopy(receipt)
             changed["provenance"][field] = value
             self.assertFalse(
-                collector.strict_basis(case, [changed], engine, sources, "sdk", 8, {})[
-                    "verified"
-                ]
+                collector.strict_basis(
+                    case, [changed], engine, sources, "sdk", 8, metadata
+                )["verified"]
             )
         for field, value in (
             ("status", "wrong_answer"),
@@ -188,16 +227,21 @@ class ApplePerformanceCollector(unittest.TestCase):
             changed = copy.deepcopy(receipt)
             changed["cases"][0][field] = value
             self.assertFalse(
-                collector.strict_basis(case, [changed], engine, sources, "sdk", 8, {})[
-                    "verified"
-                ]
-            )
-        for changed in (dict(case, inputs={"x": {"sha256": "different"}}),):
-            self.assertFalse(
                 collector.strict_basis(
-                    changed, [receipt], engine, sources, "sdk", 8, {}
+                    case, [changed], engine, sources, "sdk", 8, metadata
                 )["verified"]
             )
+        self.assertFalse(
+            collector.strict_basis(
+                dict(case, inputs={"x": {"sha256": "different"}}),
+                [receipt],
+                engine,
+                sources,
+                "sdk",
+                8,
+                metadata,
+            )["verified"]
+        )
         self.assertFalse(
             collector.strict_basis(
                 case,
@@ -206,7 +250,49 @@ class ApplePerformanceCollector(unittest.TestCase):
                 {"benchmarks/suites/example.mojo": "new"},
                 "sdk",
                 8,
-                {},
+                metadata,
+            )["verified"]
+        )
+        stale_wrapper = copy.deepcopy(receipt)
+        stale_wrapper["provenance"]["original_source_sha256"][wrapper_path] = "old"
+        self.assertFalse(
+            collector.strict_basis(
+                case, [stale_wrapper], engine, sources, "sdk", 8, metadata
+            )["runtime_audit_verified"]
+        )
+        stale_driver = copy.deepcopy(receipt)
+        stale_driver["provenance"]["driver_sha256"] = collector.sha(
+            collector.coverage.__file__
+        )
+        self.assertFalse(
+            collector.strict_basis(
+                case, [stale_driver], engine, sources, "sdk", 8, metadata
+            )["runtime_audit_verified"]
+        )
+        stale_derived = copy.deepcopy(receipt)
+        stale_derived["provenance"]["derived_source_sha256"][
+            "metal_example.mojo"
+        ] = "old"
+        stale_result = collector.strict_basis(
+            case, [stale_derived], engine, sources, "sdk", 8, metadata
+        )
+        self.assertEqual(stale_result["execution_boundary"], "unknown")
+        self.assertFalse(stale_result["runtime_audit_verified"])
+        self.assertFalse(stale_result["verified"])
+        missing_derived = copy.deepcopy(receipt)
+        missing_derived["provenance"]["derived_source_sha256"].pop(
+            "metal_example.mojo"
+        )
+        missing_result = collector.strict_basis(
+            case, [missing_derived], engine, sources, "sdk", 8, metadata
+        )
+        self.assertEqual(missing_result["execution_boundary"], "unknown")
+        self.assertFalse(missing_result["runtime_audit_verified"])
+        old_receipt = copy.deepcopy(receipt)
+        old_receipt["cases"][0].pop("runtime_adjudication")
+        self.assertFalse(
+            collector.strict_basis(
+                case, [old_receipt], engine, sources, "sdk", 8, metadata
             )["verified"]
         )
 
@@ -229,7 +315,12 @@ class ApplePerformanceCollector(unittest.TestCase):
         self.assertEqual(run["status"], "ok")
 
     def test_ratio_admission_rejects_failed_hybrid_or_incomplete_evidence(self):
-        strict = dict(verified=True, execution_boundary="gpu_collects")
+        strict = dict(
+            verified=True,
+            execution_boundary="gpu_collects",
+            runtime_audit_verified=True,
+            runtime_adjudication=dict(cpu_adjudicated_calls=0),
+        )
         runs = [
             dict(
                 collector.parse(protocol(), 3, 1),
@@ -246,12 +337,25 @@ class ApplePerformanceCollector(unittest.TestCase):
         for basis in (
             dict(strict, verified=False),
             dict(strict, execution_boundary="hybrid"),
+            dict(strict, runtime_audit_verified=False),
         ):
             self.assertFalse(
                 collector.ratio_basis(runs, basis, 3, 3).startswith("eligible")
             )
         self.assertEqual(
             collector.ratio_basis(runs[:-1], strict, 3, 3), "incomplete_rounds"
+        )
+        self.assertEqual(
+            collector.ratio_basis(
+                runs,
+                dict(
+                    strict,
+                    runtime_adjudication=dict(cpu_adjudicated_calls=1),
+                ),
+                3,
+                3,
+            ),
+            "cpu_data_fault_adjudication_observed",
         )
         for field, value in (
             ("status", "process_failed"),
