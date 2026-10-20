@@ -36,9 +36,28 @@ retroactively change its validation scope.
   engine-source hashes match frozen baseline `a52334e7`. These are baseline
   measurements, not replacement coverage or a full-scale headline result.
 
-Neither follow-up establishes parity across all operation families or authorizes
-legacy-path retirement. Grouping, ordering, joins and windows still need their
-own implementation-specific correctness and performance evidence.
+- [PR #896](https://github.com/randyzwitch/dataframe_mojo/pull/896) adds stable
+  radix passes and tiled comparison merges. Its four-test ordering gate passed
+  on the M1 Mac mini at `a03f7edfb797e02a7446aecb663790dbd96419ee`, including
+  mixed keys, stable ties, floating encodings, errors and budgets. Bounded top-k
+  is a separate follow-up. The PR distinguishes its earlier algorithm timing
+  revision from this validated integration revision.
+- [PR #897](https://github.com/randyzwitch/dataframe_mojo/pull/897) adds
+  heterogeneous native column gathers and the one-column Float32 join-input
+  bridge. Its 24-call typed gate passed at
+  `3703624512d3a24a49d8215be45b5f8240f84327`, including exact Float64 bits,
+  deferred errors, ownership and budgets. The bridge still converts into the
+  generic join representation; packed Bool host transport remains unsupported.
+- [PR #898](https://github.com/randyzwitch/dataframe_mojo/pull/898) adds native
+  payload gathering from two device row maps. Its four-test focused gate passed
+  at `40c4e6c2eabb9ebd51c03a4057007541b8af3c06`, covering coalescing precedence,
+  exact Float64 bits, missing rows, bounds/errors and budgets with a shared
+  final drain. This is a join foundation, not public native hash-join dispatch.
+
+These follow-ups do not establish parity across all operation families or
+justify legacy-path retirement. Grouping, top-k, hash/merge joins and windows
+still need their own implementation-specific correctness and performance
+evidence. The typed-storage and join-gather PRs make no new timing claim.
 
 ## Retirement and validation gates
 
