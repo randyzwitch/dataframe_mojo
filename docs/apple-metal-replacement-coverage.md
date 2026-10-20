@@ -67,11 +67,41 @@ retroactively change its validation scope.
   and budget rejection/recovery, with bounded cross-join regression coverage.
   Composite, wide and dictionary keys and ordered merge joins remain follow-ups.
 
+- [PR #902](https://github.com/randyzwitch/dataframe_mojo/pull/902) adds bounded
+  partial states and parallel merges for eligible grouped integer reductions.
+  Its nine-call gate passed at `0a9297c3f15cae9984ddf5eb9f261df75ada161b`.
+  The PR remains a draft because the paired measurements below identified two
+  regressions against the intermediate implementation. A scheduling revision
+  under validation is not yet covered by those published results.
+
 These follow-ups do not establish parity across all operation families or
 justify legacy-path retirement. Broader family correctness and complete-query
-performance evidence remain required, including grouping and windows gates
-and top-k/hash-join measurements. The typed-storage, join-gather, top-k and
-hash-join PRs make no new timing claim.
+performance evidence remain required, including window gates and top-k
+measurements. Typed-storage, join-gather and top-k performance is not established
+by the narrow join measurements below.
+
+## Paired performance evidence recorded on 2026-10-20
+
+[PR #889](https://github.com/randyzwitch/dataframe_mojo/pull/889) retains the raw
+outputs, samples, source/compiler/SDK/binary receipts, qualification logs and
+replay validators for these comparisons. The links below pin evidence commit
+`2f9d29922c4ff913e664402df69259c7405c74a2`. All comparisons measure complete
+queries and retain CPU references, first-use measurements, warm samples and
+requested-allocation counters. First use means a fresh query process, not a
+cold machine; allocation counters do not measure device residency.
+
+| Family and engine revision | Validated measurement scope | Observed result and limitations |
+| --- | --- | --- |
+| [Grouped integer reductions, `0a9297c3`](https://github.com/randyzwitch/dataframe_mojo/blob/2f9d29922c4ff913e664402df69259c7405c74a2/benchmarks/results/metal-group-integer/a52334e7-0a9297c3/README.md) | 234 workers; 18 uniform/high-cardinality/skewed cases at two sizes and three input variants; comparisons against frozen `a52334e7` and intermediate #865 `158285f7`. | Every warm case improves against the frozen baseline. Two large non-null uniform cases regress about 7% against #865; large skewed cases improve 4.75–4.89× against #865. Requested peak allocation increases; small first-use regressions remain in the report. Hash fallback frequency is not measured. |
+| [Fused Float32 reductions, `004d73e7`](https://github.com/randyzwitch/dataframe_mojo/blob/2f9d29922c4ff913e664402df69259c7405c74a2/benchmarks/results/metal-float32/a52334e7-004d73e7/README.md) | 84 workers; affine SUM with/without filtering, two sizes and three variants against frozen `a52334e7`; correctness qualification logs retained. | Warm complete-query medians improve 3.610–6.517×; requested peak allocations fall approximately 95.0–97.9%. This is an unpublished engine candidate with narrow expression/type coverage, not a broad #872 replacement. |
+| [Native Int32 join, `b426cc27`](https://github.com/randyzwitch/dataframe_mojo/blob/2f9d29922c4ff913e664402df69259c7405c74a2/benchmarks/results/metal-native-join/a52334e7-b426cc27/README.md) | 74 workers; bounded self-left-joins, two sizes and three variants against frozen `a52334e7`. | Warm medians improve 1.056–1.383× at 4,097 rows and 2.352–2.672× at 262,144 rows. Requested peak allocations fall 54.8–69.4%, but launches increase by 11 per case. Other key types, join modes and compositions need their own performance evidence. |
+
+CPU is faster in every case in these three archives. The comparisons measure
+whole candidate stacks and do not isolate each preceding PR's contribution.
+They support measured improvements in the stated cases while preserving the
+grouping regression as an unresolved release gate. Primitive measurements,
+fallback-frequency reporting, remaining serial-state coverage and broader
+family/whole-query validation remain outstanding under #873 and #877.
 
 ## Retirement and validation gates
 
