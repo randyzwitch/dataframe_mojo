@@ -3,7 +3,16 @@
 Run with benchmarks/tools/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
 """
-from dataframe import Column, DataFrame, Series, LazyFrame, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    Series,
+    LazyFrame,
+    col,
+    lit,
+)
 from dataframe.metal import MetalRuntime
 from dataframe.parallel import configured_workers
 from std.os import getenv
@@ -18,20 +27,41 @@ def make_algorithm_frame(
     var values = List[Int32](length=n, fill=0)
     var valid = List[Bool](length=n, fill=True)
     var value_valid = List[Bool](length=n, fill=True)
-    var cardinality = min(n, 1024) if workload == "group_hash" else max(
+    var cardinality = min(
+        n, 1024
+    ) if workload == "group_hash" or workload == "group_skew" else max(
+        1, (n + 3) // 4
+    ) if workload == "join_fanout" else max(
         1, n // 2
     )
     for i in range(n):
-        keys[i] = Int32(
+        var key = (
             i * cardinality // n if variant
-            == "sorted" else (i * 37) % cardinality
+            == "sorted" else i % cardinality if workload
+            == "join_fanout" else (i * 37) % cardinality
         )
+        if workload == "group_skew":
+            if variant == "sorted":
+                var skew_start = (3 * n + 3) // 4
+                if i < skew_start:
+                    key = 0
+                else:
+                    key = 1 + (i - skew_start) * max(1, cardinality - 1) // max(
+                        1, n - skew_start
+                    )
+            elif i % 4 != 0:
+                key = 0
+        keys[i] = Int32(key)
         ids[i] = Int64(i)
         values[i] = Int32(i % 17 - 8)
         if variant == "nulls":
             valid[i] = i % 20 != 0
             value_valid[i] = i % 13 != 0
-    if workload == "group_hash" or workload == "group_high":
+    if (
+        workload == "group_hash"
+        or workload == "group_high"
+        or workload == "group_skew"
+    ):
         return DataFrame(
             [
                 Series("x", Column[Int32](keys^, valid^)),
@@ -87,6 +117,78 @@ def make_frame(
     return DataFrame([Series("x", Column[Float32](values^, validity^))])
 
 
+def make_float64_frame(n: Int, variant: String) raises -> DataFrame:
+    var values = List[Float64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    for i in range(n):
+        var key = i % 1024
+        if variant == "sorted":
+            key = i * 1024 // n
+        elif variant == "nulls":
+            key = Int(
+                (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                % UInt32(1024)
+            )
+            valid[i] = i % 20 != 0
+        values[i] = Float64(key) / 1024
+    return DataFrame([Series("x", Column[Float64](values^, valid^))])
+
+
+def make_decimal_frame(n: Int, variant: String) raises -> DataFrame:
+    var values = List[Int64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    for i in range(n):
+        var cents = i % 17 - 8
+        if variant == "sorted":
+            cents = i * 17 // n - 8
+        elif variant == "nulls":
+            valid[i] = i % 20 != 0
+        values[i] = Int64(cents)
+    return DataFrame(
+        [
+            Series("x", Column[Int64](values^, valid^)).with_dtype(
+                DataType.decimal(15, 2, 64)
+            )
+        ]
+    )
+
+
+def make_native64_frame(
+    n: Int, variant: String, unsigned: Bool
+) raises -> DataFrame:
+    var valid = List[Bool](length=n, fill=True)
+    if unsigned:
+        var uvalues = List[UInt64](length=n, fill=0)
+        for i in range(n):
+            var value = i % 17
+            if variant == "sorted":
+                value = i * 17 // n
+            elif variant == "nulls":
+                value = Int(
+                    (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                    % UInt32(17)
+                )
+                valid[i] = i % 20 != 0
+            uvalues[i] = UInt64(value)
+        return DataFrame([Series("x", Column[UInt64](uvalues^, valid^))])
+    var values = List[Int64](length=n, fill=0)
+    for i in range(n):
+        var value = i % 17 - 8
+        if variant == "sorted":
+            value = i * 17 // n - 8
+        elif variant == "nulls":
+            value = (
+                Int(
+                    (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
+                    % UInt32(17)
+                )
+                - 8
+            )
+            valid[i] = i % 20 != 0
+        values[i] = Int64(value)
+    return DataFrame([Series("x", Column[Int64](values^, valid^))])
+
+
 def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
     var query = frame.lazy()
     if workload == "chain32":
@@ -103,6 +205,30 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
                 Float32(0.0001)
             )
         query = query.select(expression.alias("x"))
+    elif workload == "cumulative_sum":
+        query = query.select(col("x").cum_sum().alias("sum"))
+    elif workload == "rolling_sum":
+        query = query.select(col("x").rolling_sum(32, 1).alias("sum"))
+    elif workload == "float64_arithmetic":
+        query = query.select(
+            (col("x") * lit(Float64(2)) + lit(Float64(0.25))).alias("y")
+        )
+    elif workload == "decimal_sum":
+        var multiplier = lit("1.25").cast(DataType.decimal(15, 2))
+        query = query.select((col("x") * multiplier).sum().alias("sum"))
+    elif workload == "wide_float32":
+        query = query.select_exprs(
+            [
+                col("x").alias("f0"),
+                (col("x") + lit(Float32(0.125))).alias("f1"),
+                (col("x") + lit(Float32(0.25))).alias("f2"),
+                (col("x") + lit(Float32(0.375))).alias("f3"),
+                (col("x") + lit(Float32(0.5))).alias("f4"),
+                (col("x") + lit(Float32(0.625))).alias("f5"),
+                (col("x") + lit(Float32(0.75))).alias("f6"),
+                (col("x") + lit(Float32(0.875))).alias("f7"),
+            ]
+        )
     elif workload == "projection":
         query = query.select(
             (col("x") * lit(Float32(1.0001)) + lit(Float32(0.0001))).alias("x")
@@ -128,13 +254,40 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         )
     elif workload == "int_sum":
         query = query.select(col("x").sum().alias("s"))
+    elif workload == "int64_sum" or workload == "uint64_sum":
+        query = query.select(col("x").sum().alias("s"))
+    elif workload == "int64_affine_sum":
+        query = query.select(
+            ((col("x") + lit(Int64(3))) * lit(Int64(2))).sum().alias("s")
+        )
+    elif workload == "int64_wide_sum16":
+        var outputs = List[Expr]()
+        for i in range(16):
+            outputs.append(col("x").sum().alias("s" + String(i)))
+        query = query.select_exprs(outputs)
+    elif (
+        workload == "int32_affine_sum"
+        or workload == "filtered_int32_affine_sum"
+    ):
+        if workload == "filtered_int32_affine_sum":
+            query = query.filter(col("x") > lit(Int32(0)))
+        query = query.select(
+            ((col("x") + lit(Int32(3))) * lit(Int32(2)))
+            .cast(DataType.INT64)
+            .sum()
+            .alias("s")
+        )
     elif workload == "sort_radix":
         query = query.sort(["x"], nulls_last=True)
     elif workload == "group_hash" or workload == "group_high":
         query = query.group_by("x", maintain_order=True).agg(
             [col("y").sum().alias("s"), col("y").count().alias("n")]
         )
-    elif workload == "join_hash":
+    elif workload == "group_skew":
+        query = query.group_by("x", maintain_order=True).agg(
+            [col("y").sum().alias("s"), col("y").count().alias("n")]
+        )
+    elif workload == "join_hash" or workload == "join_fanout":
         query = query.join(frame.lazy(), "x", how="left", suffix="_right")
     else:
         raise Error("Unknown Metal development workload")
@@ -147,7 +300,7 @@ def timed(
     var start = perf_counter_ns()
     var result: DataFrame
     if gpu:
-        result = query.collect(accelerator=runtime)
+        result = query.collect(engine="accel", accelerator=runtime)
     else:
         result = query.collect(engine="cpu")
     var elapsed = Int(perf_counter_ns() - start)
@@ -199,8 +352,11 @@ def report_profile(profile: DataFrame) raises:
     var floats: List[String] = [
         "wall_ms",
         "pipeline_compile_ms",
+        "host_prepare_ms",
         "staging_copy_ms",
         "submit_wait_ms",
+        "synchronization_ms",
+        "readback_ms",
         "result_copy_ms",
         "initialization_ms",
         "gpu_ms",
@@ -222,6 +378,18 @@ def report_profile(profile: DataFrame) raises:
             "query_wall_ms",
             profile.item(0, "query_wall_ms").float64(),
         )
+    if "query_preflight_ms" in profile.columns():
+        print(
+            "PROFILE_F",
+            "query_preflight_ms",
+            profile.item(0, "query_preflight_ms").float64(),
+        )
+    if "preflight_ms" in profile.columns():
+        print(
+            "PROFILE_F",
+            "preflight_ms",
+            profile.item(0, "preflight_ms").float64(),
+        )
     var algorithms = String()
     for row in range(profile.height()):
         if profile.item(row, "runtime_implementation").string() != "mojo":
@@ -236,24 +404,43 @@ def report_profile(profile: DataFrame) raises:
 def main() raises:
     var n = Int(getenv("BENCH_ROWS", "1048576"))
     var reps = Int(getenv("BENCH_REPS", "7"))
+    var warmups = Int(getenv("BENCH_WARMUPS", "2"))
     var workload = getenv("BENCH_WORKLOAD", "projection")
     var variant = getenv("BENCH_VARIANT", "base")
     var gpu_first = getenv("BENCH_GPU_FIRST", "0") == "1"
-    if n < 1 or reps < 1:
-        raise Error("Rows and repetitions must be positive")
+    if n < 1 or reps < 1 or warmups < 0:
+        raise Error(
+            "Rows and repetitions must be positive; warmups nonnegative"
+        )
     var algorithm = (
         workload == "sort_radix"
         or workload == "group_hash"
         or workload == "group_high"
+        or workload == "group_skew"
         or workload == "join_hash"
+        or workload == "join_fanout"
     )
-    var frame = make_algorithm_frame(
-        n, variant, workload
-    ) if algorithm else make_frame(
-        n,
-        variant,
-        workload == "int_sum" or workload == "filtered_int_sum",
-        extra_column=workload == "filter_unused",
+    var frame = (
+        make_float64_frame(n, variant) if workload
+        == "float64_arithmetic" else make_decimal_frame(n, variant) if workload
+        == "decimal_sum" else make_native64_frame(
+            n, variant, workload == "uint64_sum"
+        ) if workload
+        == "int64_sum"
+        or workload == "uint64_sum"
+        or workload == "int64_affine_sum"
+        or workload
+        == "int64_wide_sum16" else make_algorithm_frame(
+            n, variant, workload
+        ) if algorithm else make_frame(
+            n,
+            variant,
+            workload == "int_sum"
+            or workload == "filtered_int_sum"
+            or workload == "int32_affine_sum"
+            or workload == "filtered_int32_affine_sum",
+            extra_column=workload == "filter_unused",
+        )
     )
     var query = make_query(frame, workload)
     var runtime = MetalRuntime()
@@ -269,9 +456,9 @@ def main() raises:
     )
     print("WORKERS", configured_workers())
     print("OUTPUT_ROWS", expected.height())
-    for _ in range(2):
+    for _ in range(warmups):
         _ = query.collect(engine="cpu")
-        _ = query.collect(accelerator=runtime)
+        _ = query.collect(engine="accel", accelerator=runtime)
     for sample in range(reps):
         var gpu_leads = (sample % 2 == 0) == gpu_first
         var a = timed(query, runtime, gpu_leads)
@@ -284,7 +471,7 @@ def main() raises:
             b[1] if gpu_leads else a[1],
             a[1] if gpu_leads else b[1],
         )
-    var profile = query.profile(accelerator=runtime)
+    var profile = query.profile(engine="accel", accelerator=runtime)
     if not profile[0].equals(expected):
         raise Error("Profiled collection differs from CPU reference")
     report_profile(profile[1])

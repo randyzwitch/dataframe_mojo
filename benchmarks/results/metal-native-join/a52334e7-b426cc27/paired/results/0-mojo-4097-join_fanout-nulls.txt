@@ -1,0 +1,41 @@
+FIRST 522000 33137000
+WORKERS 8
+OUTPUT_ROWS 15149
+SAMPLE 0 381000 8437000
+SAMPLE 1 314000 8874000
+SAMPLE 2 363000 8402000
+PROFILE_I profile_regions 1
+PROFILE_I region_0_upload_bytes 99354
+PROFILE_I query_upload_bytes 99354
+PROFILE_I upload_bytes 99354
+PROFILE_S upload_bytes_basis query_counter
+PROFILE_I region_0_download_bytes 306816
+PROFILE_I query_download_bytes 306816
+PROFILE_I download_bytes 306816
+PROFILE_S download_bytes_basis query_counter
+PROFILE_I region_0_host_result_bytes 308662
+PROFILE_I query_host_result_bytes 308662
+PROFILE_I host_result_bytes 308662
+PROFILE_S host_result_bytes_basis query_counter
+PROFILE_I region_0_peak_requested_bytes 1093522
+PROFILE_I query_peak_requested_bytes 1093522
+PROFILE_I peak_requested_bytes 1093522
+PROFILE_S peak_requested_bytes_basis query_counter
+PROFILE_I region_0_kernel_launches 29
+PROFILE_I query_kernel_launches 29
+PROFILE_I kernel_launches 29
+PROFILE_S kernel_launches_basis query_counter
+PROFILE_I region_0_synchronizations 9
+PROFILE_I query_synchronizations 9
+PROFILE_I synchronizations 9
+PROFILE_S synchronizations_basis query_counter
+PROFILE_F region_0_wall_ms 5.386
+PROFILE_F region_0_readback_ms 2.751
+PROFILE_F region_0_result_copy_ms 0.002
+PROFILE_F query_wall_ms 8.41
+PROFILE_F query_preflight_ms 0.037
+PROFILE_S region_0_algorithm mojo_gpu_native_hash_join
+PROFILE_S runtime_implementation mojo
+PROFILE_S algorithm mojo_gpu_native_hash_join
+BUILD_ID development-source-no-calibration
+VALIDATED True

@@ -43,6 +43,7 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.source_projection import project_sources
+from .accelerator.gpu.query_scope import DeviceService
 from .accelerator.late_payload import (
     columns as late_payload_columns,
     prepare as prepare_late_payload,
@@ -174,6 +175,7 @@ struct MetalRuntime(AcceleratorBackend):
     var _device: Int
     var _budget: Int
     var _text_context: Optional[ArcPointer[TextQuery]]
+    var _device_service: DeviceService
     var _observation_only: Bool
     var _execution_settings: ExecutionSettings
 
@@ -190,6 +192,7 @@ struct MetalRuntime(AcceleratorBackend):
         self._observation_only = False
         self._execution_settings = ExecutionSettings(True, True, 65536)
         self._text_context = None
+        self._device_service = DeviceService(device_id)
 
     @staticmethod
     def device_count() raises -> Int:
@@ -385,6 +388,7 @@ struct MetalRuntime(AcceleratorBackend):
                 )
                 runtime._execution_settings = self._execution_settings.copy()
                 runtime._text_context = self._text_context.copy()
+                runtime._device_service = self._device_service.copy()
                 var executed = runtime._run(
                     payload.query, profiling, original_entry=False
                 )
@@ -494,6 +498,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             if staged.failure:
                 runtime._observation_only = True
                 for prefix in staged.prefixes:
@@ -619,6 +624,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -714,6 +720,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -791,6 +798,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             var executed = runtime._run(
                 lowered, profiling, original_entry=False
             )
@@ -986,6 +994,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -1103,6 +1112,7 @@ struct MetalRuntime(AcceleratorBackend):
             runtime._observation_only = self._observation_only
             runtime._execution_settings = self._execution_settings.copy()
             runtime._text_context = self._text_context.copy()
+            runtime._device_service = self._device_service.copy()
             if dynamic_text:
                 runtime._text_context = ArcPointer(TextQuery(dictionary.dtype))
             var staged_ns = Int(perf_counter_ns()) - start
@@ -1237,6 +1247,7 @@ struct MetalRuntime(AcceleratorBackend):
             profiling,
             observation_only=self._observation_only,
             ordered_source=original_entry,
+            device_service=self._device_service.copy(),
         )
 
     def describe(self, query: LazyFrame) -> String:

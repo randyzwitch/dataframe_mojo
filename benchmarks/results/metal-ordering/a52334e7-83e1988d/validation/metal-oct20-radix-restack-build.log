@@ -1,0 +1,51 @@
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:153:30: warning: assignment to 'value' was never used; assign to '_' instead?
+        var value = Scalar[D](0)
+                             ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/runtime.mojo:305:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/decimal_sum_receipts.mojo:54:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/dag_runtime.mojo:677:39: warning: assignment to 'readback_ns' was never used; assign to '_' instead?
+                    var readback_ns = 0
+                                      ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/dag_runtime.mojo:678:37: warning: assignment to 'result_ns' was never used; assign to '_' instead?
+                    var result_ns = 0
+                                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:332:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/runtime.mojo:3670:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/runtime.mojo:1713:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/typed_runtime.mojo:163:22: warning: assignment to 'staging_ns' was never used; assign to '_' instead?
+    var staging_ns = 0
+                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/runtime.mojo:1713:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/typed_runtime.mojo:164:21: warning: assignment to 'submit_ns' was never used; assign to '_' instead?
+    var submit_ns = 0
+                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/tooling/mojo_gpu_radix_ordering.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/tests/execution_modes/test_mojo_gpu_ordering.mojo:5:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/runtime.mojo:1499:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-radix-restack/dataframe/accelerator/gpu/wide_integer_runtime.mojo:258:22: warning: assignment to 'offset' was never used; assign to '_' instead?
+        var offset = 0
+                     ^
