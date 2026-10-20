@@ -1230,6 +1230,23 @@ def estimate_resources(
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
+    # A reusable standalone service drains its stream once more before the
+    # context can return to the idle pool. Shared-region and uncached calls
+    # may omit this drain; the metadata estimate remains an upper bound.
+    if rows:
+        waits = _checked_add(waits, 1)
+        # Native computation drains before its temporary owners leave scope;
+        # terminal readback is a separate phase from that ownership boundary.
+        from . import typed_rows
+
+        if (
+            terminal_boundary
+            and export_values
+            and not resident_input
+            and len(plan.steps)
+            and typed_rows.supports(plan)
+        ):
+            waits = _checked_add(waits, 1)
     peak = max(peak, plan.iana_construction_peak_bytes)
     return ResourceFacts(
         peak,
