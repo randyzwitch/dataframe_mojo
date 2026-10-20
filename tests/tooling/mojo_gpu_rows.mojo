@@ -235,9 +235,7 @@ def main() raises:
     test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides()
     print("RUN test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads")
     test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads()
-    print(
-        "RUN test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles"
-    )
+    print("RUN test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles")
     test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles()
     print(
         "RUN test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal"

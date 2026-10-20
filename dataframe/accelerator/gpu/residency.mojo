@@ -92,9 +92,8 @@ struct NativeRowMap(Copyable):
             raise Error("Mojo GPU native row map shape is invalid")
         var bytes = checked_mul(len(values), size_of[UInt32]())
         if reservation:
-            if (
-                reservation.value().bytes != bytes
-                or not scope.same_query(reservation.value().scope)
+            if reservation.value().bytes != bytes or not scope.same_query(
+                reservation.value().scope
             ):
                 raise Error("Mojo GPU native row map reservation mismatch")
         else:
