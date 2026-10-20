@@ -34,7 +34,7 @@ from std.os import getenv
 from std.time import perf_counter_ns
 from std.io import FileDescriptor
 from std.collections import Dict, Optional
-from std.memory import ArcPointer
+from std.memory import ArcPointer, bitcast
 from .io.csv_reader import _CsvBatches, _DecodeJob
 from .io.csv_types import _map_file
 from .io.parquet import _ParquetBatches
@@ -5649,8 +5649,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         on the 11.7M-row joins below their date filters, and holding
         those doubled the query; Polars likewise drops a cache whose
         consumers filter differently)."""
-        var computed = self._subtree_signatures()
-        ref signatures = computed[0]
+        var computed = self._subplan_classes()
+        ref classes = computed[0]
         ref sizes = computed[1]
         ref reducing = computed[2]
         # Which nodes hold a join, and each node's parent.
@@ -5680,17 +5680,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if covered[i] or _pinned(self._nodes[i]):
                     continue
                 if not reducing[i] and not self._read_whole(
-                    i, signatures, parents, joining, covered
+                    i, classes, parents, joining, covered
                 ):
                     continue
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
                 for j in range(len(self._nodes)):
-                    if (
-                        j != i
-                        and not covered[j]
-                        and signatures[j] == signatures[i]
-                    ):
+                    if j != i and not covered[j] and classes[j] == classes[i]:
                         best = i
                         break
             if best < 0:
@@ -5716,7 +5712,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if origin > 0:
                 self._origin_rows[slot] = origin
             for j in range(len(self._nodes)):
-                if not covered[j] and signatures[j] == signatures[best]:
+                if not covered[j] and classes[j] == classes[best]:
                     self._cover(j, covered)
                     self._nodes[j] = _plan_node(SCAN_FRAME, offset=slot)
             shared = True
@@ -5727,7 +5723,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _read_whole(
         self,
         index: Int,
-        signatures: List[String],
+        classes: List[Int],
         parents: List[Int],
         joining: List[Bool],
         covered: List[Bool],
@@ -5743,7 +5739,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return False
         var copies = 0
         for j in range(len(self._nodes)):
-            if covered[j] or signatures[j] != signatures[index]:
+            if covered[j] or classes[j] != classes[index]:
                 continue
             var parent = parents[j]
             if parent < 0:
@@ -5773,52 +5769,94 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if child >= 0:
                     stack.append(child)
 
-    def _signature(
-        self, index: Int, below: List[String], canonical: List[Int]
-    ) -> String:
-        """What a node computes, as text: its kind and every setting, its
-        expressions node by node, and its inputs' signatures (already in
-        `below`, since children come before parents). A frame scan names
-        its slot through `canonical`."""
+    def _node_hash(
+        self, index: Int, classes: List[Int], canonical: List[Int]
+    ) -> UInt64:
+        """A hash of what node `index` computes: its kind and every setting,
+        its expressions node by node, and its inputs' classes (already in
+        `classes`, since children come before parents). Nodes that
+        `_same_node` calls equal hash alike; a collision only costs a
+        comparison."""
         ref node = self._nodes[index]
-        var text = String(node.kind)
-        # Free text (names, labels) goes in with its length, so no name
-        # can read as a delimiter: columns "a, b" and "a", "b" differ.
-        text += "|" + _field_list(node.names) + "|" + _field_list(node.names2)
+        var h = _mix(UInt64(0xCBF29CE484222325), UInt64(node.kind))
+        h = _mix_list(h, node.names)
+        h = _mix_list(h, node.names2)
         for flag in node.flags:
-            text += "1" if flag else "0"
+            h = _mix(h, UInt64(2) if flag else UInt64(1))
+        h = _mix_text(h, node.text)
+        h = _mix(h, UInt64(self._canonical_slot(index, canonical)))
+        h = _mix(h, UInt64(node.length))
+        h = _mix(h, UInt64(1) if node.maintain_order else UInt64(0))
+        h = _mix(h, UInt64(node.how))
+        h = _mix_list(h, node.right_keys)
+        h = _mix(h, UInt64(1) if node.coalesce else UInt64(0))
+        h = _mix_text(h, node.source_failure)
+        h = _mix(h, UInt64(len(node.window_keys)))
+        for e in node.exprs:
+            h = _mix_expr(h, e)
+        h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
+        h = _mix(h, UInt64(classes[node.right] + 1) if node.right >= 0 else 0)
+        return h
+
+    def _canonical_slot(self, index: Int, canonical: List[Int]) -> Int:
+        """A node's `offset`, except that a frame scan names the first slot
+        holding the same buffers (`canonical`)."""
+        ref node = self._nodes[index]
         var slot = node.offset
         if node.kind == SCAN_FRAME and slot >= 0 and slot < len(canonical):
             slot = canonical[slot]
-        text += "|" + _field(node.text) + "|" + String(slot)
-        text += "|" + String(node.length)
-        text += "|" + ("o" if node.maintain_order else "u")
-        text += "|" + String(node.how) + "|" + _field_list(node.right_keys)
-        text += "|" + ("c" if node.coalesce else "n")
-        if node.source_failure:
-            text += "|source-error" + _field(node.source_failure)
-        if node.asof_tolerance:
-            text += "|" + String(node.asof_tolerance.value())
-        for key in node.window_keys:
-            text += "|wk" + _field(key.name) + _field(key.dtype.name())
-            text += "s" if key.string_hash else "i"
-            for value in key.values[]:
-                text += ":" + String(value)
-        for e in node.exprs:
-            text += "|" + _expr_signature(e)
-        # Children by a hash of their text, so a signature stays short
-        # however deep the plan.
-        text += (
-            "|("
-            + (String(_text_hash(below[node.left])) if node.left >= 0 else "")
-            + ")"
-        )
-        text += (
-            "("
-            + (String(_text_hash(below[node.right])) if node.right >= 0 else "")
-            + ")"
-        )
-        return text^
+        return slot
+
+    def _same_node(
+        self, a: Int, b: Int, classes: List[Int], canonical: List[Int]
+    ) -> Bool:
+        """Whether nodes `a` and `b` compute the same thing: every setting
+        and expression equal, and inputs of the same classes (Polars'
+        `is_ir_equal_shallow` with equal child ids)."""
+        ref x = self._nodes[a]
+        ref y = self._nodes[b]
+        if (
+            x.kind != y.kind
+            or x.names != y.names
+            or x.names2 != y.names2
+            or x.flags != y.flags
+            or x.text != y.text
+            or self._canonical_slot(a, canonical)
+            != self._canonical_slot(b, canonical)
+            or x.length != y.length
+            or x.maintain_order != y.maintain_order
+            or x.how != y.how
+            or x.right_keys != y.right_keys
+            or x.coalesce != y.coalesce
+            or x.source_failure != y.source_failure
+            or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
+            or len(x.window_keys) != len(y.window_keys)
+            or len(x.exprs) != len(y.exprs)
+        ):
+            return False
+        for child in [(x.left, y.left), (x.right, y.right)]:
+            var p = child[0]
+            var q = child[1]
+            if (p < 0) != (q < 0) or (p >= 0 and classes[p] != classes[q]):
+                return False
+        if x.asof_tolerance and String(x.asof_tolerance.value()) != String(
+            y.asof_tolerance.value()
+        ):
+            return False
+        for k in range(len(x.window_keys)):
+            ref u = x.window_keys[k]
+            ref v = y.window_keys[k]
+            if (
+                u.name != v.name
+                or u.dtype.name() != v.dtype.name()
+                or u.string_hash != v.string_hash
+                or u.values[] != v.values[]
+            ):
+                return False
+        for k in range(len(x.exprs)):
+            if not _same_expr(x.exprs[k], y.exprs[k]):
+                return False
+        return True
 
     def _parents(self) -> List[Int]:
         var parents = List[Int](length=len(self._nodes), fill=-1)
@@ -5927,31 +5965,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for reverse in range(count):
                 order.append(count - 1 - reverse)
             return (order^, copy_of^)
-        var signatures = self._subtree_signatures()[0].copy()
-        var hits = Dict[String, Int]()
-        for s in signatures:
-            hits[s] = hits.get(s, 0) + 1
+        var classes = self._subplan_classes()[0].copy()
+        var hits = Dict[Int, Int]()
+        for c in classes:
+            hits[c] = hits.get(c, 0) + 1
         var parents = self._parents()
         # The topmost repeated nodes: more copies than the node above
         # them, and under no other such node (Polars caches the topmost
         # and leaves the subplan below it whole).
         var under = List[Bool](length=count, fill=False)
-        var first = Dict[String, Int]()
+        var first = Dict[Int, Int]()
         var members = List[Int](length=count, fill=0)
         for reverse in range(count):
             var i = count - 1 - reverse
             var parent = parents[i]
             if parent >= 0:
                 under[i] = under[parent] or copy_of[parent] >= 0
-            var repeats = hits.get(signatures[i], 0)
+            var repeats = hits.get(classes[i], 0)
             # A source read in two places is not run twice: each read
             # keeps only its own columns.
             if under[i] or repeats < 2 or _is_scan(self._nodes[i].kind):
                 continue
-            if parent >= 0 and hits.get(signatures[parent], 0) >= repeats:
+            if parent >= 0 and hits.get(classes[parent], 0) >= repeats:
                 continue
-            var head = first.get(signatures[i], i)
-            first[signatures[i]] = head
+            var head = first.get(classes[i], i)
+            first[classes[i]] = head
             copy_of[i] = head
             members[head] += 1
         for i in range(count):
@@ -5979,14 +6017,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 order.append(i)
         return (order^, copy_of^)
 
-    def _subtree_signatures(
+    def _subplan_classes(
         self,
-    ) -> Tuple[List[String], List[Int], List[Bool]]:
-        """Each node's `_signature`, its subtree's node count, and whether
-        the subtree holds an aggregation or a unique."""
+    ) -> Tuple[List[Int], List[Int], List[Bool]]:
+        """Each node's class, its subtree's node count, and whether the
+        subtree holds an aggregation or a unique. Two nodes share a class
+        exactly when their subtrees compute the same thing, as Polars'
+        `CanonicalIRMap` assigns ids: a node is hashed with its inputs'
+        classes, and compared only with the earlier nodes of its hash,
+        setting by setting (`_same_node`). A class is named by its first
+        node."""
         # Two plans joined carry their own copies of a frame they both
-        # scan, in separate slots: a scan's signature names the first slot
-        # holding the same buffers.
+        # scan, in separate slots: a scan names the first slot holding the
+        # same buffers.
         var canonical = List[Int](capacity=len(self._frames))
         for f in range(len(self._frames)):
             var first = f
@@ -5997,11 +6040,28 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     first = g
                     break
             canonical.append(first)
-        var signatures = List[String]()
-        var sizes = List[Int]()
-        var reducing = List[Bool]()
+        var classes = List[Int](capacity=len(self._nodes))
+        var sizes = List[Int](capacity=len(self._nodes))
+        var reducing = List[Bool](capacity=len(self._nodes))
+        # The first node of each class, by hash.
+        var firsts = Dict[UInt64, List[Int]]()
         for i in range(len(self._nodes)):
-            signatures.append(self._signature(i, signatures, canonical))
+            var h = self._node_hash(i, classes, canonical)
+            var found = i
+            var known = firsts.get(h)
+            if known:
+                for r in known.value():
+                    if self._same_node(i, r, classes, canonical):
+                        found = r
+                        break
+            if found == i:
+                if known:
+                    var heads = known.take()
+                    heads.append(i)
+                    firsts[h] = heads^
+                else:
+                    firsts[h] = [i]
+            classes.append(found)
             ref node = self._nodes[i]
             var size = 1
             var reduces = node.kind == AGG or node.kind == UNIQUE
@@ -6013,7 +6073,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 reduces = reduces or reducing[node.right]
             sizes.append(size)
             reducing.append(reduces)
-        return (signatures^, sizes^, reducing^)
+        return (classes^, sizes^, reducing^)
 
     def _filter_shared_subplans(mut self):
         """A subplan written in several places that `_share_subplans` will
@@ -6027,7 +6087,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         table of every channel and year."""
         # Copies need two aggregations alike in their kind, keys,
         # aggregate count and subtree size at least; most plans have none,
-        # and full signatures are not worth building for them (ClickBench
+        # and subplan classes are not worth finding for them (ClickBench
         # q29's ninety sums, TPC-DS q41's two small distincts).
         var subtree = List[Int](capacity=len(self._nodes))
         var shapes = Dict[String, Int]()
@@ -6057,8 +6117,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             shapes[shape] = i
         if not alike:
             return
-        var computed = self._subtree_signatures()
-        ref signatures = computed[0]
+        var computed = self._subplan_classes()
+        ref classes = computed[0]
         ref sizes = computed[1]
         ref reducing = computed[2]
         var parents = self._parents()
@@ -6076,18 +6136,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
                 for j in range(count):
-                    if (
-                        j != i
-                        and not covered[j]
-                        and signatures[j] == signatures[i]
-                    ):
+                    if j != i and not covered[j] and classes[j] == classes[i]:
                         best = i
                         break
             if best < 0:
                 break
             var copies = List[Int]()
             for j in range(count):
-                if not covered[j] and signatures[j] == signatures[best]:
+                if not covered[j] and classes[j] == classes[best]:
                     copies.append(j)
                     self._cover(j, covered)
             # Each copy's readers: the run of row-local filters above it.
@@ -9270,12 +9326,75 @@ def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
     ).agg(node.exprs, batch_size=node.length)
 
 
-def _text_hash(text: String) -> UInt64:
-    """FNV-1a over the text's bytes."""
-    var h = UInt64(0xCBF29CE484222325)
+def _mix(h: UInt64, value: UInt64) -> UInt64:
+    """One step of a plan node's hash (`_node_hash`): FNV-1a over a word."""
+    return (h ^ value) * 0x100000001B3
+
+
+def _mix_text(h: UInt64, text: String) -> UInt64:
+    """`h` continued over the text's length and bytes, building no string."""
+    var out = _mix(h, UInt64(text.byte_length()))
     for b in text.as_bytes():
-        h = (h ^ UInt64(b)) * 0x100000001B3
-    return h
+        out = (out ^ UInt64(b)) * 0x100000001B3
+    return out
+
+
+def _mix_list(h: UInt64, items: List[String]) -> UInt64:
+    var out = _mix(h, UInt64(len(items)))
+    for item in items:
+        out = _mix_text(out, item)
+    return out
+
+
+def _mix_expr(h: UInt64, expr: Expr) -> UInt64:
+    """`h` continued over an expression node by node, the fields
+    `_same_expr` compares (dtypes by count only)."""
+    var out = _mix_text(h, expr._name)
+    out = _mix(out, UInt64(len(expr._nodes)))
+    for n in expr._nodes:
+        out = _mix(out, UInt64(n.op))
+        out = _mix(out, UInt64(n.left))
+        out = _mix(out, UInt64(n.right))
+        out = _mix_text(out, n.text)
+        out = _mix(out, UInt64(n.integer))
+        out = _mix(out, bitcast[DType.uint64](n.floating))
+        out = _mix(out, UInt64(n.min_count))
+        out = _mix(out, UInt64(n.extra))
+        out = _mix_text(out, n.text2)
+        out = _mix(out, UInt64(len(n.dtypes)))
+    return out
+
+
+def _same_expr(a: Expr, b: Expr) -> Bool:
+    """Whether two expressions are the same node by node: every field, and
+    dtypes by name (`_expr_signature`'s text equal)."""
+    if a._name != b._name or len(a._nodes) != len(b._nodes):
+        return False
+    for k in range(len(a._nodes)):
+        ref x = a._nodes[k]
+        ref y = b._nodes[k]
+        if (
+            x.op != y.op
+            or x.left != y.left
+            or x.right != y.right
+            or x.text != y.text
+            or x.integer != y.integer
+            or bitcast[DType.uint64](x.floating)
+            != bitcast[DType.uint64](y.floating)
+            or x.min_count != y.min_count
+            or x.extra != y.extra
+            or x.text2 != y.text2
+            or len(x.dtypes) != len(y.dtypes)
+        ):
+            return False
+        for d in range(len(x.dtypes)):
+            if Bool(x.dtypes[d]) != Bool(y.dtypes[d]):
+                return False
+            if x.dtypes[d] and (
+                x.dtypes[d].value().name() != y.dtypes[d].value().name()
+            ):
+                return False
+    return True
 
 
 def _field(text: String) -> String:

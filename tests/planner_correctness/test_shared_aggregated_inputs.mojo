@@ -335,3 +335,42 @@ def test_copies_read_differently_keep_the_union_and_run_once() raises:
             assert_equal(integer(actual.item(r, "t")), totals[item])
             assert_equal(integer(actual.item(r, "n")), counts[item])
     _ = trace^
+
+
+def scaled_totals(frame: DataFrame, factor: Int64) raises -> LazyFrame:
+    return (
+        frame.lazy()
+        .group_by(["ss_item"])
+        .agg([(col("qty") * lit(factor)).sum().alias("t")])
+    )
+
+
+def test_aggregations_apart_by_one_literal_are_not_shared() raises:
+    """Two aggregations of one table that differ only in a literal are
+    different subplans: subplans are told apart setting by setting, not by
+    a hash alone, so each runs and keeps its own values."""
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var frame = sales()
+    var query = scaled_totals(frame, 2).join(
+        scaled_totals(frame, 3).select_exprs(
+            [col("ss_item"), col("t").alias("u")]
+        ),
+        on=["ss_item"],
+    )
+    for optimize in [True, False]:
+        var observed = StrategyTrace()
+        var actual = query.collect(optimize=optimize)
+        assert_equal(
+            "dataframe-path: lazy.shared_subplan\n" in observed.text(), False
+        )
+        _ = observed^
+        var totals = Dict[Int, Int128]()
+        for row in range(ROWS):
+            var item = item_of(row)
+            totals[item] = totals.get(item, Int128(0)) + Int128(quantity(row))
+        assert_equal(actual.height(), len(totals))
+        for r in range(actual.height()):
+            var item = Int(integer(actual.item(r, "ss_item")))
+            assert_equal(integer(actual.item(r, "t")), 2 * totals[item])
+            assert_equal(integer(actual.item(r, "u")), 3 * totals[item])
+    _ = trace^
