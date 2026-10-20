@@ -615,6 +615,9 @@ def execute(
                     scope,
                     resident_input=resident,
                     profiling=profiling,
+                    native_output=task.terminal
+                    and index == dag.root
+                    and not observation_only,
                     terminal_boundary=task.terminal,
                     export_values=not (observation_only and index == dag.root),
                     text_domain=target_domain,
@@ -671,11 +674,22 @@ def execute(
                     state[].record_final(domains)
                 if profiling:
                     var readback_started = Int(perf_counter_ns())
-                    var host = executed[0].readback()
-                    var readback_ns = Int(perf_counter_ns()) - readback_started
-                    var result_started = Int(perf_counter_ns())
-                    result = rows._materialize_host(executed[0], host)
-                    var result_ns = Int(perf_counter_ns()) - result_started
+                    var readback_ns = 0
+                    var result_ns = 0
+                    if len(executed[0].native_columns):
+                        var host = rows._readback_native(executed[0])
+                        readback_ns = Int(perf_counter_ns()) - readback_started
+                        var result_started = Int(perf_counter_ns())
+                        result = rows._materialize_native_host(
+                            executed[0], host^
+                        )
+                        result_ns = Int(perf_counter_ns()) - result_started
+                    else:
+                        var host = executed[0].readback()
+                        readback_ns = Int(perf_counter_ns()) - readback_started
+                        var result_started = Int(perf_counter_ns())
+                        result = rows._materialize_host(executed[0], host)
+                        result_ns = Int(perf_counter_ns()) - result_started
                     for field in List[Tuple[String, Int]](
                         [
                             ("readback_ms", readback_ns),
