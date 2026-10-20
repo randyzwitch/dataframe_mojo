@@ -898,8 +898,7 @@ def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
 def _topk_limit(
     plan: RowPlan, rows: Int, terminal_boundary: Bool
 ) raises -> Int:
-    """Certify only a terminal ORDER BY over raw input columns followed by head.
-    """
+    """Certify only a terminal ORDER BY over raw input columns followed by head."""
     if (
         not terminal_boundary
         or plan.ordered_mode != 0
@@ -976,8 +975,7 @@ def _iana_scalar_slots(plan: RowPlan) raises -> Int:
 
 
 def _source_high_words(plan: RowPlan) -> Bool:
-    """Only wide decimals and original category codes carry source high words.
-    """
+    """Only wide decimals and original category codes carry source high words."""
     for column in plan.source._columns:
         var dtype = column.dtype()
         if dtype.is_decimal() and dtype.decimal_width() == 128:
@@ -3095,7 +3093,9 @@ def execute_plan(
                                 )
                                 var digits = Int(width // 4) + 1
                                 for pass_index in range(digits):
-                                    var null_marker = UInt32(pass_index == Int(width // 4))
+                                    var null_marker = UInt32(
+                                        pass_index == Int(width // 4)
+                                    )
                                     var shift = UInt32(pass_index * 4)
                                     ctx.enqueue_function[radix_histogram](
                                         device_words.unsafe_ptr(),
