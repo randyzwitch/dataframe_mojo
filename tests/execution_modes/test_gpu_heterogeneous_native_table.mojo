@@ -1,7 +1,7 @@
 """Tagged native owners and one-map heterogeneous native Table operations."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_raises, assert_true
-from std.memory import ArcPointer
+from std.memory import ArcPointer, bitcast
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
 from dataframe.accelerator.code_domains import CategoryField, CategoryOwner
@@ -163,6 +163,69 @@ def test_native_table_mixed_gather_reuses_one_index_map_and_materializes() raise
     assert_equal(nullable.column("f").float32()._get(1), Float32(2.5))
     assert_equal(nullable.column("i").int16().is_valid(0), False)
     assert_equal(nullable.column("i").int16().is_valid(1), False)
+
+
+# requires: metal
+def test_native_float64_gather_and_matrix_bridge_preserve_bits() raises:
+    _ = require_metal()
+    var scope = Scope()
+    var bits = List[UInt64](
+        [
+            UInt64(0x7FF8000000000031),
+            UInt64(0x8000000000000000),
+            UInt64(1),
+            UInt64(0x7FF0000000000000),
+            UInt64(0xFFF0000000000000),
+            UInt64(0x7FF8000000000099),
+        ]
+    )
+    var values = List[Float64]()
+    for value in bits:
+        values.append(bitcast[DType.float64](value))
+    var source = Series(
+        "x", Column[Float64](values^, [True, True, True, True, True, False])
+    )
+    var owner = upload_native[DType.float64](scope, source)
+    var schema = DataFrame(
+        List[Series]([Series("x", Column[Float64](List[Float64]()))])
+    )
+    var table = Table.native(
+        schema.copy(), List[NativeColumnAny]([NativeColumnAny(owner)])
+    )
+    var indices = List[Int]([2, 1, 0, 3, 4, 5, -1])
+    var selected = table.gather(scope, indices, allow_missing=True)
+    var direct = materialize(selected)
+    var rows = len(indices)
+    var context = scope.context()
+    var words = context.enqueue_create_buffer[DType.uint64](2 * rows)
+    var validity = context.enqueue_create_buffer[DType.uint8](rows)
+    var errors = context.enqueue_create_buffer[DType.uint32](rows)
+    assert_equal(
+        selected.copy_to(
+            scope, words, validity, errors, rows, 1, List[Int64]([Int64(0)])
+        ),
+        rows * 21,
+    )
+    var generic = Table(
+        Matrix(scope, rows, 1, words^, validity^, errors^),
+        schema.copy(),
+        List[Int64]([Int64(0)]),
+        rows,
+    )
+    var bridged = materialize(generic)
+    for row in range(rows):
+        var present = row < 5
+        assert_equal(direct.column("x").float64().is_valid(row), present)
+        assert_equal(bridged.column("x").float64().is_valid(row), present)
+        var expected = bits[indices[row]] if present else UInt64(0)
+        assert_equal(
+            bitcast[DType.uint64](direct.column("x").float64()._get(row)),
+            expected,
+        )
+        assert_equal(
+            bitcast[DType.uint64](bridged.column("x").float64()._get(row)),
+            expected,
+        )
 
 
 # requires: metal

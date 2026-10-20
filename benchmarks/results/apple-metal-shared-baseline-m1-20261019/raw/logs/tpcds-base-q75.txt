@@ -1,0 +1,129 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-metal-0.schema.json","status":"written"}
+coverage	q75	wrong_answer	full result differs
+expected_rows	25
+actual_rows	25
+expected_sample
+shape: (25, 10)
+┌───────────┬───────┬────────────┬────────────┬───────────────┬───────────────┬─────────────┬─────────────┬────────────────┬─────────────────────┐
+│ prev_year ┆ year_ ┆ i_brand_id ┆ i_class_id ┆ i_category_id ┆ i_manufact_id ┆ prev_yr_cnt ┆ curr_yr_cnt ┆ sales_cnt_diff ┆ sales_amt_diff      │
+│ ---       ┆ ---   ┆ ---        ┆ ---        ┆ ---           ┆ ---           ┆ ---         ┆ ---         ┆ ---            ┆ ---                 │
+│ i64       ┆ i64   ┆ i64        ┆ i64        ┆ i64           ┆ i64           ┆ i64         ┆ i64         ┆ i64            ┆ f64                 │
+╞═══════════╪═══════╪════════════╪════════════╪═══════════════╪═══════════════╪═════════════╪═════════════╪════════════════╪═════════════════════╡
+│ 2001      ┆ 2002  ┆ 7014009    ┆ 1          ┆ 9             ┆ 270           ┆ 6406        ┆ 4902        ┆ -1504          ┆ -96433.08999999994  │
+│ 2001      ┆ 2002  ┆ 1003001    ┆ 11         ┆ 9             ┆ 42            ┆ 6494        ┆ 5035        ┆ -1459          ┆ -114481.62000000002 │
+│ 2001      ┆ 2002  ┆ 9010004    ┆ 10         ┆ 9             ┆ 545           ┆ 5880        ┆ 4551        ┆ -1329          ┆ -37133.98000000007  │
+│ 2001      ┆ 2002  ┆ 9001002    ┆ 1          ┆ 9             ┆ 571           ┆ 5718        ┆ 4459        ┆ -1259          ┆ -84458.37           │
+│ 2001      ┆ 2002  ┆ 9004010    ┆ 4          ┆ 9             ┆ 10            ┆ 5731        ┆ 4515        ┆ -1216          ┆ -40636.79000000001  │
+│ 2001      ┆ 2002  ┆ 9006010    ┆ 6          ┆ 9             ┆ 100           ┆ 5781        ┆ 4720        ┆ -1061          ┆ -54852.45999999996  │
+│ 2001      ┆ 2002  ┆ 9008010    ┆ 2          ┆ 9             ┆ 954           ┆ 6018        ┆ 4961        ┆ -1057          ┆ 11852.780000000028  │
+│ 2001      ┆ 2002  ┆ 9011002    ┆ 11         ┆ 9             ┆ 390           ┆ 5826        ┆ 4800        ┆ -1026          ┆ -49995.57000000001  │
+│ 2001      ┆ 2002  ┆ 9015008    ┆ 15         ┆ 9             ┆ 285           ┆ 5674        ┆ 4668        ┆ -1006          ┆ -19662.599999999977 │
+│ 2001      ┆ 2002  ┆ 10003008   ┆ 8          ┆ 9             ┆ 175           ┆ 5286        ┆ 4288        ┆ -998           ┆ -48826.95999999999  │
+│ …         ┆ …     ┆ …          ┆ …          ┆ …             ┆ …             ┆ …           ┆ …           ┆ …              ┆ …                   │
+│ 2001      ┆ 2002  ┆ 9001009    ┆ 1          ┆ 9             ┆ 117           ┆ 4657        ┆ 3855        ┆ -802           ┆ -22681.71000000002  │
+│ 2001      ┆ 2002  ┆ 9015010    ┆ 2          ┆ 9             ┆ 286           ┆ 5467        ┆ 4745        ┆ -722           ┆ -32261.80999999997  │
+│ 2001      ┆ 2002  ┆ 7004007    ┆ 2          ┆ 9             ┆ 248           ┆ 5696        ┆ 4990        ┆ -706           ┆ -4431.849999999977  │
+│ 2001      ┆ 2002  ┆ 1002001    ┆ 4          ┆ 9             ┆ 546           ┆ 5873        ┆ 5222        ┆ -651           ┆ -35266.76000000004  │
+│ 2001      ┆ 2002  ┆ 10009005   ┆ 9          ┆ 9             ┆ 149           ┆ 6025        ┆ 5376        ┆ -649           ┆ -11139.669999999984 │
+│ 2001      ┆ 2002  ┆ 9002008    ┆ 2          ┆ 9             ┆ 256           ┆ 4778        ┆ 4153        ┆ -625           ┆ -55830.84999999992  │
+│ 2001      ┆ 2002  ┆ 2001001    ┆ 1          ┆ 9             ┆ 2             ┆ 5512        ┆ 4888        ┆ -624           ┆ -27199.28           │
+│ 2001      ┆ 2002  ┆ 1004001    ┆ 4          ┆ 9             ┆ 286           ┆ 5437        ┆ 4848        ┆ -589           ┆ 43130.5             │
+│ 2001      ┆ 2002  ┆ 9010008    ┆ 10         ┆ 9             ┆ 66            ┆ 5362        ┆ 4814        ┆ -548           ┆ -44680.67000000001  │
+│ 2001      ┆ 2002  ┆ 7004005    ┆ 4          ┆ 9             ┆ 156           ┆ 4942        ┆ 4447        ┆ -495           ┆ -34471.54999999999  │
+└───────────┴───────┴────────────┴────────────┴───────────────┴───────────────┴─────────────┴─────────────┴────────────────┴─────────────────────┘
+actual_sample
+shape: (25, 10)
+┌───────────┬───────┬────────────┬────────────┬───────────────┬───────────────┬─────────────┬─────────────┬────────────────┬─────────────────────┐
+│ prev_year ┆ year_ ┆ i_brand_id ┆ i_class_id ┆ i_category_id ┆ i_manufact_id ┆ prev_yr_cnt ┆ curr_yr_cnt ┆ sales_cnt_diff ┆ sales_amt_diff      │
+│ ---       ┆ ---   ┆ ---        ┆ ---        ┆ ---           ┆ ---           ┆ ---         ┆ ---         ┆ ---            ┆ ---                 │
+│ i64       ┆ i64   ┆ i64        ┆ i64        ┆ i64           ┆ i64           ┆ i64         ┆ i64         ┆ i64            ┆ f64                 │
+╞═══════════╪═══════╪════════════╪════════════╪═══════════════╪═══════════════╪═════════════╪═════════════╪════════════════╪═════════════════════╡
+│ 2001      ┆ 2002  ┆ 7014009    ┆ 1          ┆ 9             ┆ 270           ┆ 6406        ┆ 4902        ┆ -1504          ┆ -96433.08999999976  │
+│ 2001      ┆ 2002  ┆ 1003001    ┆ 11         ┆ 9             ┆ 42            ┆ 6494        ┆ 5035        ┆ -1459          ┆ -114481.62000000011 │
+│ 2001      ┆ 2002  ┆ 9010004    ┆ 10         ┆ 9             ┆ 545           ┆ 5880        ┆ 4551        ┆ -1329          ┆ -37133.97999999992  │
+│ 2001      ┆ 2002  ┆ 9001002    ┆ 1          ┆ 9             ┆ 571           ┆ 5718        ┆ 4459        ┆ -1259          ┆ -84458.37000000005  │
+│ 2001      ┆ 2002  ┆ 9004010    ┆ 4          ┆ 9             ┆ 10            ┆ 5731        ┆ 4515        ┆ -1216          ┆ -40636.790000000125 │
+│ 2001      ┆ 2002  ┆ 9006010    ┆ 6          ┆ 9             ┆ 100           ┆ 5781        ┆ 4720        ┆ -1061          ┆ -54852.45999999999  │
+│ 2001      ┆ 2002  ┆ 9008010    ┆ 2          ┆ 9             ┆ 954           ┆ 6018        ┆ 4961        ┆ -1057          ┆ 11852.779999999853  │
+│ 2001      ┆ 2002  ┆ 9011002    ┆ 11         ┆ 9             ┆ 390           ┆ 5826        ┆ 4800        ┆ -1026          ┆ -49995.56999999998  │
+│ 2001      ┆ 2002  ┆ 9015008    ┆ 15         ┆ 9             ┆ 285           ┆ 5674        ┆ 4668        ┆ -1006          ┆ -19662.59999999989  │
+│ 2001      ┆ 2002  ┆ 10003008   ┆ 8          ┆ 9             ┆ 175           ┆ 5286        ┆ 4288        ┆ -998           ┆ -48826.959999999905 │
+│ …         ┆ …     ┆ …          ┆ …          ┆ …             ┆ …             ┆ …           ┆ …           ┆ …              ┆ …                   │
+│ 2001      ┆ 2002  ┆ 9001009    ┆ 1          ┆ 9             ┆ 117           ┆ 4657        ┆ 3855        ┆ -802           ┆ -22681.71000000008  │
+│ 2001      ┆ 2002  ┆ 9015010    ┆ 2          ┆ 9             ┆ 286           ┆ 5467        ┆ 4745        ┆ -722           ┆ -32261.810000000056 │
+│ 2001      ┆ 2002  ┆ 7004007    ┆ 2          ┆ 9             ┆ 248           ┆ 5696        ┆ 4990        ┆ -706           ┆ -4431.849999999802  │
+│ 2001      ┆ 2002  ┆ 1002001    ┆ 4          ┆ 9             ┆ 546           ┆ 5873        ┆ 5222        ┆ -651           ┆ -35266.76000000007  │
+│ 2001      ┆ 2002  ┆ 10009005   ┆ 9          ┆ 9             ┆ 149           ┆ 6025        ┆ 5376        ┆ -649           ┆ -11139.669999999925 │
+│ 2001      ┆ 2002  ┆ 9002008    ┆ 2          ┆ 9             ┆ 256           ┆ 4778        ┆ 4153        ┆ -625           ┆ -55830.850000000064 │
+│ 2001      ┆ 2002  ┆ 2001001    ┆ 1          ┆ 9             ┆ 2             ┆ 5512        ┆ 4888        ┆ -624           ┆ -27199.27999999991  │
+│ 2001      ┆ 2002  ┆ 1004001    ┆ 4          ┆ 9             ┆ 286           ┆ 5437        ┆ 4848        ┆ -589           ┆ 43130.50000000012   │
+│ 2001      ┆ 2002  ┆ 9010008    ┆ 10         ┆ 9             ┆ 66            ┆ 5362        ┆ 4814        ┆ -548           ┆ -44680.669999999955 │
+│ 2001      ┆ 2002  ┆ 7004005    ┆ 4          ┆ 9             ┆ 156           ┆ 4942        ┆ 4447        ┆ -495           ┆ -34471.54999999999  │
+└───────────┴───────┴────────────┴────────────┴───────────────┴───────────────┴─────────────┴─────────────┴────────────────┴─────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	prev_year	True
+column_bag	cpu_metal	year_	True
+column_bag	cpu_metal	i_brand_id	True
+column_bag	cpu_metal	i_class_id	True
+column_bag	cpu_metal	i_category_id	True
+column_bag	cpu_metal	i_manufact_id	True
+column_bag	cpu_metal	prev_yr_cnt	True
+column_bag	cpu_metal	curr_yr_cnt	True
+column_bag	cpu_metal	sales_cnt_diff	True
+column_bag	cpu_metal	sales_amt_diff	False
+diagnostic	cpu_metal.alignment	no_declared_unique_output_keys
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q75-ranucuz6/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	prev_year	True
+column_bag	cpu_repeat	year_	True
+column_bag	cpu_repeat	i_brand_id	True
+column_bag	cpu_repeat	i_class_id	True
+column_bag	cpu_repeat	i_category_id	True
+column_bag	cpu_repeat	i_manufact_id	True
+column_bag	cpu_repeat	prev_yr_cnt	True
+column_bag	cpu_repeat	curr_yr_cnt	True
+column_bag	cpu_repeat	sales_cnt_diff	True
+column_bag	cpu_repeat	sales_amt_diff	True
+diagnostic	cpu_repeat.alignment	no_declared_unique_output_keys
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (25, 10)
+┌───────────┬───────┬────────────┬────────────┬───────────────┬───────────────┬─────────────┬─────────────┬────────────────┬─────────────────────┐
+│ prev_year ┆ year_ ┆ i_brand_id ┆ i_class_id ┆ i_category_id ┆ i_manufact_id ┆ prev_yr_cnt ┆ curr_yr_cnt ┆ sales_cnt_diff ┆ sales_amt_diff      │
+│ ---       ┆ ---   ┆ ---        ┆ ---        ┆ ---           ┆ ---           ┆ ---         ┆ ---         ┆ ---            ┆ ---                 │
+│ i64       ┆ i64   ┆ i64        ┆ i64        ┆ i64           ┆ i64           ┆ i64         ┆ i64         ┆ i64            ┆ f64                 │
+╞═══════════╪═══════╪════════════╪════════════╪═══════════════╪═══════════════╪═════════════╪═════════════╪════════════════╪═════════════════════╡
+│ 2001      ┆ 2002  ┆ 7014009    ┆ 1          ┆ 9             ┆ 270           ┆ 6406        ┆ 4902        ┆ -1504          ┆ -96433.08999999994  │
+│ 2001      ┆ 2002  ┆ 1003001    ┆ 11         ┆ 9             ┆ 42            ┆ 6494        ┆ 5035        ┆ -1459          ┆ -114481.62000000002 │
+│ 2001      ┆ 2002  ┆ 9010004    ┆ 10         ┆ 9             ┆ 545           ┆ 5880        ┆ 4551        ┆ -1329          ┆ -37133.98000000007  │
+│ 2001      ┆ 2002  ┆ 9001002    ┆ 1          ┆ 9             ┆ 571           ┆ 5718        ┆ 4459        ┆ -1259          ┆ -84458.37           │
+│ 2001      ┆ 2002  ┆ 9004010    ┆ 4          ┆ 9             ┆ 10            ┆ 5731        ┆ 4515        ┆ -1216          ┆ -40636.79000000001  │
+│ 2001      ┆ 2002  ┆ 9006010    ┆ 6          ┆ 9             ┆ 100           ┆ 5781        ┆ 4720        ┆ -1061          ┆ -54852.45999999996  │
+│ 2001      ┆ 2002  ┆ 9008010    ┆ 2          ┆ 9             ┆ 954           ┆ 6018        ┆ 4961        ┆ -1057          ┆ 11852.780000000028  │
+│ 2001      ┆ 2002  ┆ 9011002    ┆ 11         ┆ 9             ┆ 390           ┆ 5826        ┆ 4800        ┆ -1026          ┆ -49995.57000000001  │
+│ 2001      ┆ 2002  ┆ 9015008    ┆ 15         ┆ 9             ┆ 285           ┆ 5674        ┆ 4668        ┆ -1006          ┆ -19662.599999999977 │
+│ 2001      ┆ 2002  ┆ 10003008   ┆ 8          ┆ 9             ┆ 175           ┆ 5286        ┆ 4288        ┆ -998           ┆ -48826.95999999999  │
+│ …         ┆ …     ┆ …          ┆ …          ┆ …             ┆ …             ┆ …           ┆ …           ┆ …              ┆ …                   │
+│ 2001      ┆ 2002  ┆ 9001009    ┆ 1          ┆ 9             ┆ 117           ┆ 4657        ┆ 3855        ┆ -802           ┆ -22681.71000000002  │
+│ 2001      ┆ 2002  ┆ 9015010    ┆ 2          ┆ 9             ┆ 286           ┆ 5467        ┆ 4745        ┆ -722           ┆ -32261.80999999997  │
+│ 2001      ┆ 2002  ┆ 7004007    ┆ 2          ┆ 9             ┆ 248           ┆ 5696        ┆ 4990        ┆ -706           ┆ -4431.849999999977  │
+│ 2001      ┆ 2002  ┆ 1002001    ┆ 4          ┆ 9             ┆ 546           ┆ 5873        ┆ 5222        ┆ -651           ┆ -35266.76000000004  │
+│ 2001      ┆ 2002  ┆ 10009005   ┆ 9          ┆ 9             ┆ 149           ┆ 6025        ┆ 5376        ┆ -649           ┆ -11139.669999999984 │
+│ 2001      ┆ 2002  ┆ 9002008    ┆ 2          ┆ 9             ┆ 256           ┆ 4778        ┆ 4153        ┆ -625           ┆ -55830.84999999992  │
+│ 2001      ┆ 2002  ┆ 2001001    ┆ 1          ┆ 9             ┆ 2             ┆ 5512        ┆ 4888        ┆ -624           ┆ -27199.28           │
+│ 2001      ┆ 2002  ┆ 1004001    ┆ 4          ┆ 9             ┆ 286           ┆ 5437        ┆ 4848        ┆ -589           ┆ 43130.5             │
+│ 2001      ┆ 2002  ┆ 9010008    ┆ 10         ┆ 9             ┆ 66            ┆ 5362        ┆ 4814        ┆ -548           ┆ -44680.67000000001  │
+│ 2001      ┆ 2002  ┆ 7004005    ┆ 4          ┆ 9             ┆ 156           ┆ 4942        ┆ 4447        ┆ -495           ┆ -34471.54999999999  │
+└───────────┴───────┴────────────┴────────────┴───────────────┴───────────────┴─────────────┴─────────────┴────────────────┴─────────────────────┘

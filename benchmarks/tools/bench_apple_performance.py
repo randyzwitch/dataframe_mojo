@@ -47,7 +47,7 @@ def engine_identity(tree):
 
 
 def stage(destination):
-    receipt = metal.stage_sources(destination)
+    receipt = metal.stage_sources(destination, audit_runtime=False)
     helper = ROOT / "benchmarks/metal_suite_timing.mojo"
     (destination / helper.name).write_bytes(helper.read_bytes())
     for name in ("h2o", "pdsh", "tpcds", "clickbench"):
@@ -179,15 +179,36 @@ def strict_basis(case, receipts, engine, source_hashes, mojo, threads, metadata)
         audit = coverage.execution_audit(
             measured, originals, metadata, provenance.get("derived_source_sha256", {})
         )
+        runtime = measured.get("runtime_adjudication", {})
+        runtime_verified = (
+            runtime.get("status") == "complete"
+            and runtime.get("observed_calls", 0) >= measured.get("collections", 0)
+            and runtime.get("unknown_calls", 0) == 0
+            and runtime.get("failed_calls", 0) == 0
+        )
+        wrapper_path = "benchmarks/metal_coverage_audit.mojo"
+        wrapper_pin_matches = (
+            originals.get(wrapper_path) == sha(ROOT / wrapper_path)
+            and provenance.get("driver_sha256") == sha(metal.__file__)
+        )
         return dict(
             receipt_sha256=receipt.get("receipt_sha256"),
             status=measured["status"],
             execution_boundary=audit["execution_boundary"],
             execution_audit=audit,
+            runtime_adjudication=runtime,
+            runtime_audit_verified=(
+                runtime_verified
+                and wrapper_pin_matches
+                and audit.get("execution_boundary") != "unknown"
+            ),
             whole_query_gpu_certificate=audit.get("whole_query_gpu_certificate", False),
             verified=measured["status"] == "ok"
             and measured.get("collections", 0) > 0
-            and isinstance(measured.get("ordered_equal"), bool),
+            and isinstance(measured.get("ordered_equal"), bool)
+            and runtime_verified
+            and wrapper_pin_matches
+            and audit.get("execution_boundary") != "unknown",
             note="Separate exact full-schema/duplicate-row receipt; not per-timed-sample exact comparison.",
         )
     return dict(
@@ -225,8 +246,13 @@ def oracle_checks(run, reference):
 
 def ratio_basis(runs, strict, rounds, repetitions):
     """Conservative admission only; HTML and aggregate ratios are a later step."""
+    if not strict.get("runtime_audit_verified"):
+        return "runtime_adjudication_unverified"
     if not strict.get("verified") or strict.get("execution_boundary") != "gpu_collects":
         return "unverified_or_hybrid_exact_basis"
+    runtime = strict.get("runtime_adjudication", {})
+    if runtime.get("cpu_adjudicated_calls", 0) > 0:
+        return "cpu_data_fault_adjudication_observed"
     for engine in ENGINES:
         values = [r for r in runs if r["engine"] == engine]
         if len(values) != rounds or {r["round"] for r in values} != set(range(rounds)):
