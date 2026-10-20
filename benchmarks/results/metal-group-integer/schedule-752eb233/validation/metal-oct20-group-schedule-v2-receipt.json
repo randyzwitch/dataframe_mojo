@@ -1,0 +1,18 @@
+{
+  "observed_after_tests_utc": "2026-10-20T15:28:58.202648+00:00",
+  "gates": [
+    {
+      "label": "group-schedule",
+      "revision": "752eb23322ef9d18e7f2d6b950f733d5e0d8a340",
+      "engine_tree": "2784d4e1e0ab858eb1866127f1933cc15a548751",
+      "clean": true,
+      "files": {
+        "/tmp/metal-oct20-group-schedule-v2-build.log": "ee09cee4c52683264ec7e5a52974ffc5b77ab93aba85c13b38c2eeff1c2ff45b",
+        "/tmp/metal-oct20-group-schedule-v2-test.log": "c014d4babfc5c8eaa27f37243cc914c1e21d9b9e79089f7e8d0621b83212c6f4",
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-v2/build/gate": "b21b2fc88a007ce1ec616f7478a17cfe9390fadb202832fa3d6ab9747c487c12"
+      },
+      "build_exit": 0,
+      "test_exit": 0
+    }
+  ]
+}
