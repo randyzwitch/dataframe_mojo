@@ -1,12 +1,24 @@
 """Stable direct Mojo GPU ordering across public lazy-query compositions."""
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Series, col
+from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col
 from dataframe.decimal import pow10
 from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.key_kernel_reference import KeyCell, expected_order
 from dataframe.accelerator.gpu.ordering import merge_grid
+from dataframe.accelerator.gpu.residency import Scope
+from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
+
+
+def _resident_order_bytes(query: LazyFrame) raises -> Int:
+    # Public collect exports host columns and correctly reports zero resident
+    # output. Inspect the region before export to test its retained capacity.
+    var scope = Scope()
+    var plan = _preflight(query)
+    var executed = execute_plan(plan, scope)
+    scope.synchronize()
+    return executed[0].retained_bytes()
 
 
 def _layout(source: Series, chunked: Bool) raises -> Series:
@@ -220,8 +232,8 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
     var peak = Int(profile[1].item(0, "peak_requested_bytes").int64())
     var topk_launches = profile[1].item(0, "kernel_launches").int64()
     assert_equal(
-        profile[1].item(0, "resident_output_bytes").int64(),
-        Int64(31 * frame.width() * 21),
+        _resident_order_bytes(selected),
+        31 * frame.width() * 21,
     )
     with assert_raises(contains="budget"):
         _ = selected.collect(
@@ -247,13 +259,7 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
         accelerator=MetalRuntime(), engine="accel"
     )
     same(filtered_result, filtered.collect(engine="cpu", streaming=False))
-    var filtered_profile = filtered.profile(
-        accelerator=MetalRuntime(), engine="accel"
-    )
-    assert_true(
-        filtered_profile[1].item(0, "resident_output_bytes").int64()
-        > Int64(31 * frame.width() * 21)
-    )
+    assert_true(_resident_order_bytes(filtered) > 31 * frame.width() * 21)
 
 
 # requires: mojo_gpu
