@@ -1541,12 +1541,18 @@ def _copy_native_to_matrix[
     var high = target_words.create_sub_buffer[DType.uint64](high_target, rows)
     var valid_out = target_validity.create_sub_buffer[DType.uint8](target, rows)
     var error_out = target_errors.create_sub_buffer[DType.uint32](target, rows)
+    comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+    var transport_values = source_values.create_sub_buffer[transport_dtype](
+        0, len(source_values)
+    )
     var ctx = scope.context()
     try:
         if native.has_validity():
             if native.has_errors():
-                ctx.enqueue_function[copy_native_column[dtype, True, True]](
-                    source_values,
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, True]
+                ](
+                    transport_values,
                     source_validity,
                     source_errors,
                     UInt32(native.value_offset),
@@ -1560,8 +1566,10 @@ def _copy_native_to_matrix[
                     block_dim=256,
                 )
             else:
-                ctx.enqueue_function[copy_native_column[dtype, True, False]](
-                    source_values,
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, False]
+                ](
+                    transport_values,
                     source_validity,
                     source_errors,
                     UInt32(native.value_offset),
@@ -1575,8 +1583,10 @@ def _copy_native_to_matrix[
                     block_dim=256,
                 )
         elif native.has_errors():
-            ctx.enqueue_function[copy_native_column[dtype, False, True]](
-                source_values,
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, True]
+            ](
+                transport_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
@@ -1590,8 +1600,10 @@ def _copy_native_to_matrix[
                 block_dim=256,
             )
         else:
-            ctx.enqueue_function[copy_native_column[dtype, False, False]](
-                source_values,
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, False]
+            ](
+                transport_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
