@@ -6,7 +6,12 @@ from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
 from dataframe.accelerator.code_domains import CategoryField, CategoryOwner
 from dataframe.accelerator.gpu.query_scope import Scope
-from dataframe.accelerator.gpu.residency import Matrix, Table
+from dataframe.accelerator.gpu.residency import (
+    Matrix,
+    NativeJoinField,
+    NativeRowMap,
+    Table,
+)
 from dataframe.accelerator.gpu.runtime import materialize
 from dataframe.accelerator.gpu.typed_storage import (
     NativeColumnAny,
@@ -248,3 +253,299 @@ def test_native_gather_carries_deferred_error_sidecars() raises:
     var gathered_errors = gathered.native_columns[0].read_error_codes()
     assert_equal(gathered_errors[0], UInt32(29))
     assert_equal(gathered_errors[1], UInt32(5))
+
+
+# requires: metal
+def test_native_join_gather_coalesces_device_maps_with_one_drain() raises:
+    _ = require_metal()
+    var scope = Scope()
+    var left_id = upload_native[DType.int64](
+        scope, Series("id", Column[Int64]([99, 1, 2, 3, 4]))
+    )
+    var left_value = upload_native[DType.int16](
+        scope,
+        Series("left_value", Column[Int16]([99, 10, 20, 30, 40])),
+    )
+    var right_id = upload_native[DType.int64](
+        scope, Series("id", Column[Int64]([88, 11, 12, 13, 14]))
+    )
+    var right_value = upload_native[DType.float32](
+        scope,
+        Series("right_value", Column[Float32]([8, 5, 6, 7, 8])),
+    )
+    var left_schema = DataFrame(
+        List[Series](
+            [
+                Series("id", Column[Int64](List[Int64]())),
+                Series("left_value", Column[Int16](List[Int16]())),
+            ]
+        )
+    )
+    var right_schema = DataFrame(
+        List[Series](
+            [
+                Series("id", Column[Int64](List[Int64]())),
+                Series("right_value", Column[Float32](List[Float32]())),
+            ]
+        )
+    )
+    var left = Table.native(
+        left_schema,
+        List[NativeColumnAny](
+            [NativeColumnAny(left_id), NativeColumnAny(left_value)]
+        ),
+    )
+    var right = Table.native(
+        right_schema,
+        List[NativeColumnAny](
+            [NativeColumnAny(right_id), NativeColumnAny(right_value)]
+        ),
+    )
+    # Both tables are non-owning row views; gathers must add each table offset.
+    left.offset = 1
+    left.rows = 4
+    right.offset = 1
+    right.rows = 4
+
+    var context = scope.context()
+    var left_device = context.enqueue_create_buffer[DType.uint32](4)
+    var right_device = context.enqueue_create_buffer[DType.uint32](4)
+    var left_host = List[UInt32](
+        [UInt32(0), UInt32(1), UInt32.MAX, UInt32(3)]
+    )
+    var right_host = List[UInt32](
+        [UInt32(0), UInt32.MAX, UInt32(1), UInt32(3)]
+    )
+    context.enqueue_copy(left_device, left_host.unsafe_ptr())
+    context.enqueue_copy(right_device, right_host.unsafe_ptr())
+    scope.record_upload(4 * 4 * 2)
+    scope.synchronize()
+    var left_map = NativeRowMap(scope, left_device, 4, left.rows, True)
+    var right_map = NativeRowMap(scope, right_device, 4, right.rows, True)
+
+    var output_id = Series("id", Column[Int64](List[Int64]()))
+    output_id._field_metadata = ArcPointer(
+        List[UInt8]([UInt8(4), UInt8(5), UInt8(6)])
+    )
+    var output_schema = DataFrame(
+        List[Series](
+            [
+                output_id.copy(),
+                Series("left_value", Column[Int16](List[Int16]())),
+                Series("right_value", Column[Float32](List[Float32]())),
+            ]
+        )
+    )
+    var fields = List[NativeJoinField](
+        [
+            NativeJoinField(0, 0, True),
+            NativeJoinField(1, -1, False),
+            NativeJoinField(-1, 1, False),
+        ]
+    )
+    var before = scope.transfers()
+    var gathered = left.gather_join(
+        scope, right, output_schema, fields, left_map, right_map
+    )
+    var after = scope.transfers()
+    assert_equal(after[0], before[0])
+    assert_equal(after[3] - before[3], 1)
+    assert_equal(after[2] - before[2], 4)
+    assert_equal(gathered.rows, 4)
+    var materialized = materialize(gathered)
+    assert_equal(materialized.column("id").int64()._get(0), Int64(11))
+    assert_equal(materialized.column("id").int64()._get(1), Int64(2))
+    assert_equal(materialized.column("id").int64()._get(2), Int64(12))
+    assert_equal(materialized.column("id").int64()._get(3), Int64(14))
+    assert_equal(materialized.column("left_value").int16()._get(0), Int16(10))
+    assert_equal(materialized.column("left_value").int16().is_valid(2), False)
+    assert_equal(
+        materialized.column("right_value").float32()._get(1), Float32(0)
+    )
+    assert_equal(
+        materialized.column("right_value").float32().is_valid(1), False
+    )
+    assert_equal(
+        materialized.column("id")._field_metadata.value()[],
+        output_id._field_metadata.value()[],
+    )
+
+
+# requires: metal
+def test_native_join_gather_bounds_errors_budget_and_empty() raises:
+    _ = require_metal()
+    var scope = Scope()
+    var left_values = allocate_native_column[DType.int32](
+        scope, DataType.INT32, 2, with_errors=True
+    )
+    var values = left_values.values()
+    var errors = left_values.errors()
+    var host_values = List[Int32]([Int32(17), Int32(29)])
+    var host_errors = List[UInt32]([UInt32(5), UInt32(13)])
+    var context = scope.context()
+    context.enqueue_copy(values, host_values.unsafe_ptr())
+    context.enqueue_copy(errors.value(), host_errors.unsafe_ptr())
+    scope.record_upload(2 * 8)
+    scope.synchronize()
+    var right_values = upload_native[DType.int32](
+        scope, Series("right", Column[Int32]([71, 72]))
+    )
+    var left_field = Series("left", Column[Int32](List[Int32]()))
+    var right_field = Series("right", Column[Int32](List[Int32]()))
+    var left = Table.native(
+        DataFrame(List[Series]([left_field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(left_values)]),
+    )
+    var right = Table.native(
+        DataFrame(List[Series]([right_field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(right_values)]),
+    )
+    var left_device = context.enqueue_create_buffer[DType.uint32](2)
+    var right_device = context.enqueue_create_buffer[DType.uint32](2)
+    var left_host = List[UInt32]([UInt32(1), UInt32(0)])
+    var right_host = List[UInt32]([UInt32(0), UInt32.MAX])
+    context.enqueue_copy(left_device, left_host.unsafe_ptr())
+    context.enqueue_copy(right_device, right_host.unsafe_ptr())
+    scope.record_upload(16)
+    scope.synchronize()
+    var left_map = NativeRowMap(scope, left_device, 2, 2, False)
+    var right_map = NativeRowMap(scope, right_device, 2, 2, True)
+    var output_schema = DataFrame(
+        List[Series]([left_field.copy(), right_field.copy()])
+    )
+    var fields = List[NativeJoinField](
+        [NativeJoinField(0, -1, False), NativeJoinField(-1, 0, False)]
+    )
+    var gathered = left.gather_join(
+        scope, right, output_schema, fields, left_map, right_map
+    )
+    assert_true(gathered.native_columns[0].has_errors())
+    var error_codes = gathered.native_columns[0].read_error_codes()
+    assert_equal(error_codes[0], UInt32(13))
+    assert_equal(error_codes[1], UInt32(5))
+
+    var empty_left_device = context.enqueue_create_buffer[DType.uint32](1)
+    var empty_right_device = context.enqueue_create_buffer[DType.uint32](1)
+    var empty_left = NativeRowMap(scope, empty_left_device, 0, 2, False)
+    var empty_right = NativeRowMap(scope, empty_right_device, 0, 2, False)
+    var before_empty = scope.transfers()
+    var empty = left.gather_join(
+        scope, right, output_schema, fields, empty_left, empty_right
+    )
+    assert_equal(empty.rows, 0)
+    assert_equal(scope.transfers()[3], before_empty[3])
+
+    var bad_device = context.enqueue_create_buffer[DType.uint32](2)
+    var bad_host = List[UInt32]([UInt32(2), UInt32(0)])
+    context.enqueue_copy(bad_device, bad_host.unsafe_ptr())
+    scope.record_upload(8)
+    scope.synchronize()
+    var bad_left = NativeRowMap(scope, bad_device, 2, 2, False)
+    var before_bad = scope.transfers()
+    with assert_raises(contains="row map is outside its bounds"):
+        _ = left.gather_join(
+            scope, right, output_schema, fields, bad_left, right_map
+        )
+    var after_bad = scope.transfers()
+    assert_equal(after_bad[0], before_bad[0])
+    assert_equal(after_bad[3] - before_bad[3], 1)
+
+    var both_missing_left_device = context.enqueue_create_buffer[
+        DType.uint32
+    ](1)
+    var both_missing_right_device = context.enqueue_create_buffer[
+        DType.uint32
+    ](1)
+    var both_missing_host = List[UInt32]([UInt32.MAX])
+    context.enqueue_copy(
+        both_missing_left_device, both_missing_host.unsafe_ptr()
+    )
+    context.enqueue_copy(
+        both_missing_right_device, both_missing_host.unsafe_ptr()
+    )
+    scope.record_upload(8)
+    scope.synchronize()
+    var both_missing_left = NativeRowMap(
+        scope, both_missing_left_device, 1, 2, True
+    )
+    var both_missing_right = NativeRowMap(
+        scope, both_missing_right_device, 1, 2, True
+    )
+    with assert_raises(contains="row map is outside its bounds"):
+        _ = left.gather_join(
+            scope,
+            right,
+            output_schema,
+            fields,
+            both_missing_left,
+            both_missing_right,
+        )
+
+    var bool_owner = allocate_native_column[DType.bool](
+        scope, DataType.BOOL, 2
+    )
+    var bool_field = Series("flag", Column[Bool](List[Bool]()))
+    var bool_table = Table.native(
+        DataFrame(List[Series]([bool_field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(bool_owner)]),
+    )
+    var bool_schema = DataFrame(List[Series]([bool_field.copy()]))
+    var bool_fields = List[NativeJoinField]([NativeJoinField(0, -1, False)])
+    with assert_raises(contains="dtype differs or is unsupported"):
+        _ = bool_table.gather_join(
+            scope, right, bool_schema, bool_fields, left_map, right_map
+        )
+
+    var limited = Scope(budget=32)
+    var limited_left = upload_native[DType.int32](
+        limited, Series("left", Column[Int32]([1, 2]))
+    )
+    var limited_right = upload_native[DType.int32](
+        limited, Series("right", Column[Int32]([3, 4]))
+    )
+    var limited_left_table = Table.native(
+        DataFrame(List[Series]([left_field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(limited_left)]),
+    )
+    var limited_right_table = Table.native(
+        DataFrame(List[Series]([right_field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(limited_right)]),
+    )
+    var limited_context = limited.context()
+    var limited_left_map = limited_context.enqueue_create_buffer[
+        DType.uint32
+    ](2)
+    var limited_right_map = limited_context.enqueue_create_buffer[
+        DType.uint32
+    ](2)
+    var limited_left_host = List[UInt32]([UInt32(0), UInt32(1)])
+    var limited_right_host = List[UInt32]([UInt32(0), UInt32(1)])
+    limited_context.enqueue_copy(
+        limited_left_map, limited_left_host.unsafe_ptr()
+    )
+    limited_context.enqueue_copy(
+        limited_right_map, limited_right_host.unsafe_ptr()
+    )
+    limited.record_upload(16)
+    limited.synchronize()
+    var limited_left_rows = NativeRowMap(
+        limited, limited_left_map, 2, 2, False
+    )
+    var limited_right_rows = NativeRowMap(
+        limited, limited_right_map, 2, 2, False
+    )
+    var before_limited = limited.transfers()
+    with assert_raises(contains="memory budget"):
+        _ = limited_left_table.gather_join(
+            limited,
+            limited_right_table,
+            output_schema,
+            fields,
+            limited_left_rows,
+            limited_right_rows,
+        )
+    var after_limited = limited.transfers()
+    assert_equal(after_limited[0], before_limited[0])
+    assert_equal(after_limited[1], before_limited[1])
+    assert_equal(after_limited[2], before_limited[2])
+    assert_equal(after_limited[3], before_limited[3])
