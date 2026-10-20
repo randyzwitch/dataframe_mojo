@@ -1,0 +1,29 @@
+Note: switching to 'a61e8dd98cf4550b2f4988a6ab09139a00469388'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+START schedule-smoke
+STATUS schedule-smoke 0
+AUDIT schedule-smoke 9 validated workers
+START schedule-vs-frozen
+STATUS schedule-vs-frozen 0
+AUDIT schedule-vs-frozen 108 validated workers
+START schedule-vs-intermediate
+STATUS schedule-vs-intermediate 0
+AUDIT schedule-vs-intermediate 108 validated workers
+START schedule-vs-previous
+STATUS schedule-vs-previous 0
+AUDIT schedule-vs-previous 108 validated workers
