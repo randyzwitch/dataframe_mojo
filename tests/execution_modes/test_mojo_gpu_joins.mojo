@@ -476,7 +476,6 @@ def test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal() rai
     )
 
 
-# requires: mojo_gpu
 def _profile_row_for_algorithm(
     report: DataFrame, algorithm: String
 ) raises -> Int:
