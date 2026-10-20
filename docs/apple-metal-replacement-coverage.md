@@ -18,6 +18,28 @@ This matrix tracks the incremental engine-replacement work in [#877](https://git
 
 Separate prototypes for grouping, ordering, windows and native join inputs are not present in the PR #888 candidate. They are in progress and queued for Apple hardware validation; none is recorded here as having passed that gate. The earlier archived Int32 affine comparison is pinned to its own earlier candidate and is not evidence for the current PR head. The Int64/UInt64 archive above is pinned to `52efeb3a`, an ancestor of the PR #888 head, and remains a comparison for those recorded cases only.
 
+## Follow-up evidence recorded on 2026-10-20
+
+The table above remains pinned to `6398713d`; subsequent branch updates do not
+retroactively change its validation scope.
+
+- [PR #894](https://github.com/randyzwitch/dataframe_mojo/pull/894) extends the
+  reusable device service to resident DAG queries. Its four focused Mac tests
+  passed at `e3434a9fe971020db5399b32cefb4f7108861409`, covering branched joins,
+  grouped fields, overlap rejection, poisoned contexts and budget rejection.
+  That evidence applies to the recorded revision; the later merge of the updated
+  #888 base does not acquire an implicit hardware pass.
+- [PR #895](https://github.com/randyzwitch/dataframe_mojo/pull/895) archives the
+  completed development-suite baseline: 1,812 worker records across 302 planned
+  cases, with 210 cases admitted for CPU/Metal timing ratios. Its package retains
+  exact receipts, raw logs, build identities and exclusions. All 249 recorded
+  engine-source hashes match frozen baseline `a52334e7`. These are baseline
+  measurements, not replacement coverage or a full-scale headline result.
+
+Neither follow-up establishes parity across all operation families or authorizes
+legacy-path retirement. Grouping, ordering, joins and windows still need their
+own implementation-specific correctness and performance evidence.
+
 ## Retirement and validation gates
 
 Keep a family on its current route until its replacement has exact, build-identified Apple-hardware evidence and all required contracts have a replacement. Each family needs public-query parity against the CPU plus independent typed/bitwise expectations where available; null, NaN and signed-zero cases; composed and shared-branch execution; checked-error/fault-order checks; metadata and exact/under-budget behavior; and complete-query timing against a frozen current-Metal baseline. Retain slow and failed cases with the receipts and qualification logs. Kernel-only timing does not satisfy the performance gate.
