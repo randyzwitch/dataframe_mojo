@@ -77,6 +77,22 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
         var expected = expected_order(reference, directions, null_placement)
         for row in range(n):
             assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
+    # Exercise the integer radix certificate itself, including repeated keys
+    # and stable null ties; the two-key cases above intentionally use merge.
+    var direct_reference = List[List[KeyCell]]()
+    for row in reference:
+        direct_reference.append([row[0]])
+    for reverse in [False, True]:
+        var query = frame.lazy().sort(
+            "x", descending=reverse, nulls_last=not reverse
+        )
+        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+        same(actual, query.collect(engine="cpu"))
+        var expected = expected_order(
+            direct_reference, [reverse], [not reverse]
+        )
+        for row in range(n):
+            assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
 
 
 def _topk_composite_frame(rows: Int, chunked: Bool) raises -> DataFrame:
@@ -169,6 +185,30 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
         same(actual, query.collect(engine="cpu", streaming=False))
         assert_equal(actual.height(), k)
 
+    # Cover partial base runs and merge widths around the 256-row boundary.
+    for boundary_rows in [31, 255, 257, 511, 513]:
+        var boundary_frame = _topk_composite_frame(boundary_rows, True)
+        for k in [1, 17, 255, 256]:
+            if k >= boundary_rows:
+                continue
+            var boundary_query = (
+                boundary_frame.lazy()
+                .sort(
+                    ["major", "minor", "wide"],
+                    descending=[True, False, True],
+                    nulls_last=[False, True, False],
+                )
+                .head(k)
+            )
+            var boundary_actual = boundary_query.collect(
+                accelerator=MetalRuntime(), engine="accel"
+            )
+            same(
+                boundary_actual,
+                boundary_query.collect(engine="cpu", streaming=False),
+            )
+            assert_equal(boundary_actual.height(), k)
+
     var selected = frame.lazy().sort("major").head(31)
     var result = selected.collect(accelerator=MetalRuntime(), engine="accel")
     same(result, selected.collect(engine="cpu", streaming=False))
@@ -212,24 +252,6 @@ def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
         filtered_profile[1].item(0, "resident_output_bytes").int64()
         > Int64(31 * frame.width() * 21)
     )
-    # Exercise the integer radix certificate itself, including repeated keys
-    # and stable null ties; the two-key cases above intentionally use merge.
-    var direct_reference = List[List[KeyCell]]()
-    for row in reference:
-        direct_reference.append([row[0]])
-    for reverse in [False, True]:
-        var query = frame.lazy().sort(
-            "x", descending=reverse, nulls_last=not reverse
-        )
-        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
-        same(actual, query.collect(engine="cpu"))
-        var expected = expected_order(
-            direct_reference, [reverse], [not reverse]
-        )
-        for row in range(n):
-            assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
-
-
 # requires: mojo_gpu
 def test_mojo_gpu_ordering_integer_layouts_nulls_mixed_keys_and_stability() raises:
     comptime types = (
