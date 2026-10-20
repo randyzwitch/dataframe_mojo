@@ -168,7 +168,8 @@ from .movement import (
     filter_gather,
     observe_slot,
 )
-from . import statistics, quantiles, decimal_descriptors
+from . import statistics, quantiles, decimal_descriptors, hash_grouping
+from dataframe.trace import trace_path
 from .program import Program, kind as _kind
 from .grouping import (
     group_mark,
@@ -974,6 +975,13 @@ def estimate_resources(
             # Group shape/bounds control expands from two to four UInt32
             # words, retained on both host and device during this region.
             shared = _checked_add(shared, 16)
+    if rows >= 256:
+        for step in plan.steps:
+            if hash_grouping.eligible(plan, step):
+                shared = _checked_add(
+                    shared, _checked_mul(hash_grouping.capacity(rows), 8)
+                )
+                break
     if rows and _quantile_indices(plan):
         # One device UInt32 source-index plane is reused across scalar outputs
         # and grouped phases; no host copy, download or extra wait is needed.
@@ -1235,7 +1243,8 @@ def estimate_resources(
     # resident DAG context can return to the idle pool. This conservative
     # per-plan bound includes the DAG's terminal service drain; shared-region
     # and uncached calls may omit it.
-    if rows:
+    # Zero-column inputs carry row metadata without creating a device context.
+    if rows and cells:
         waits = _checked_add(waits, 1)
         # Native computation drains before its temporary owners leave scope;
         # terminal readback is a separate phase from that ownership boundary.
@@ -2195,65 +2204,161 @@ def execute_plan(
                             device_slot_types, slot_types.unsafe_ptr()
                         )
                         uploaded += len(slot_types) * 8
-                        ctx.enqueue_function[order_init](
-                            index.unsafe_ptr(),
-                            UInt32(current_rows),
-                            grid_dim=blocks,
-                            block_dim=256,
-                        )
-                        submissions += 1
-                        var run_width = 1
-                        while run_width < current_rows:
-                            ctx.enqueue_function[order_merge](
-                                device_words.unsafe_ptr(),
-                                device_valid.unsafe_ptr(),
+                        var hash_route = False
+                        var shape = List[UInt32]()
+                        if current_rows >= 256 and hash_grouping.eligible(
+                            plan, step
+                        ):
+                            var capacity = hash_grouping.capacity(current_rows)
+                            var representatives = ctx.enqueue_create_buffer[
+                                DType.uint32
+                            ](capacity)
+                            var counts = ctx.enqueue_create_buffer[
+                                DType.uint32
+                            ](capacity)
+                            try:
+                                ctx.enqueue_function[hash_grouping.initialize](
+                                    representatives.unsafe_ptr(),
+                                    counts.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32(capacity),
+                                    grid_dim=(capacity + 255) // 256,
+                                    block_dim=256,
+                                )
+                                ctx.enqueue_function[hash_grouping.build](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    device_errors.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    representatives.unsafe_ptr(),
+                                    counts.unsafe_ptr(),
+                                    positions.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32(step.start),
+                                    UInt32(keys),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(plan.slots),
+                                    UInt32(capacity),
+                                    grid_dim=blocks,
+                                    block_dim=256,
+                                )
+                                ctx.enqueue_function[
+                                    hash_grouping.offsets_local
+                                ](
+                                    counts.unsafe_ptr(),
+                                    representatives.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32(capacity),
+                                    grid_dim=(capacity + 255) // 256,
+                                    block_dim=256,
+                                )
+                                ctx.enqueue_function[
+                                    hash_grouping.offsets_blocks
+                                ](
+                                    next_index.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32((capacity + 255) // 256),
+                                    grid_dim=1,
+                                    block_dim=1,
+                                )
+                                ctx.enqueue_function[
+                                    hash_grouping.offsets_finish
+                                ](
+                                    counts.unsafe_ptr(),
+                                    representatives.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    starts.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32(capacity),
+                                    grid_dim=(capacity + 255) // 256,
+                                    block_dim=256,
+                                )
+                                ctx.enqueue_function[hash_grouping.scatter](
+                                    positions.unsafe_ptr(),
+                                    counts.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    UInt32(current_rows),
+                                    grid_dim=blocks,
+                                    block_dim=256,
+                                )
+                                submissions += 6
+                                shape = scope.read_control(metadata)
+                                downloaded += len(shape) * 4
+                                waits += 1
+                                hash_route = shape[2] == 0
+                                if hash_route:
+                                    trace_path("metal.hash_grouping")
+                                else:
+                                    trace_path(
+                                        "metal.hash_grouping_probe_fallback"
+                                    )
+                            except error:
+                                scope.synchronize()
+                                raise error^
+                        if not hash_route:
+                            ctx.enqueue_function[order_init](
                                 index.unsafe_ptr(),
-                                next_index.unsafe_ptr(),
-                                device_code.unsafe_ptr(),
-                                device_types.unsafe_ptr(),
-                                UInt32(step.start + 1),
-                                UInt32(keys),
                                 UInt32(current_rows),
-                                UInt32(rows),
-                                UInt32(run_width),
-                                UInt32(plan.slots),
-                                device_literals.unsafe_ptr(),
                                 grid_dim=blocks,
                                 block_dim=256,
                             )
-                            var previous = index^
-                            index = next_index^
-                            next_index = previous^
-                            run_width *= 2
                             submissions += 1
-                        ctx.enqueue_function[group_mark](
-                            device_words.unsafe_ptr(),
-                            device_valid.unsafe_ptr(),
-                            device_errors.unsafe_ptr(),
-                            index.unsafe_ptr(),
-                            positions.unsafe_ptr(),
-                            offsets.unsafe_ptr(),
-                            device_code.unsafe_ptr(),
-                            device_types.unsafe_ptr(),
-                            UInt32(step.start),
-                            UInt32(keys),
-                            UInt32(current_rows),
-                            UInt32(rows),
-                            UInt32(plan.slots),
-                            grid_dim=blocks,
-                            block_dim=256,
-                        )
-                        ctx.enqueue_function[group_offsets](
-                            offsets.unsafe_ptr(),
-                            metadata.unsafe_ptr(),
-                            UInt32(blocks),
-                            grid_dim=1,
-                            block_dim=1,
-                        )
-                        submissions += 2
-                        var shape = scope.read_control(metadata)
-                        downloaded += len(shape) * 4
-                        waits += 1
+                            var run_width = 1
+                            while run_width < current_rows:
+                                ctx.enqueue_function[order_merge](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    UInt32(step.start + 1),
+                                    UInt32(keys),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(run_width),
+                                    UInt32(plan.slots),
+                                    device_literals.unsafe_ptr(),
+                                    grid_dim=blocks,
+                                    block_dim=256,
+                                )
+                                var previous = index^
+                                index = next_index^
+                                next_index = previous^
+                                run_width *= 2
+                                submissions += 1
+                            ctx.enqueue_function[group_mark](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                device_errors.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                positions.unsafe_ptr(),
+                                offsets.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(keys),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(plan.slots),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                            ctx.enqueue_function[group_offsets](
+                                offsets.unsafe_ptr(),
+                                metadata.unsafe_ptr(),
+                                UInt32(blocks),
+                                grid_dim=1,
+                                block_dim=1,
+                            )
+                            submissions += 2
+                            shape = scope.read_control(metadata)
+                            downloaded += len(shape) * 4
+                            waits += 1
                         if shape[1]:
                             raise data_fault(
                                 "Mojo GPU group key failed: checked arithmetic"
@@ -2269,23 +2374,24 @@ def execute_plan(
                             DType.uint32
                         ](cells)
                         if shape[0]:
-                            ctx.enqueue_function[group_starts](
-                                device_words.unsafe_ptr(),
-                                device_valid.unsafe_ptr(),
-                                index.unsafe_ptr(),
-                                positions.unsafe_ptr(),
-                                offsets.unsafe_ptr(),
-                                starts.unsafe_ptr(),
-                                device_code.unsafe_ptr(),
-                                device_types.unsafe_ptr(),
-                                UInt32(step.start),
-                                UInt32(keys),
-                                UInt32(current_rows),
-                                UInt32(rows),
-                                UInt32(plan.slots),
-                                grid_dim=blocks,
-                                block_dim=256,
-                            )
+                            if not hash_route:
+                                ctx.enqueue_function[group_starts](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    positions.unsafe_ptr(),
+                                    offsets.unsafe_ptr(),
+                                    starts.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    UInt32(step.start),
+                                    UInt32(keys),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(plan.slots),
+                                    grid_dim=blocks,
+                                    block_dim=256,
+                                )
                             if code[
                                 4 * step.start
                             ] == ROW_GROUP_HEADER_WINDOW and literals[
@@ -2383,11 +2489,12 @@ def execute_plan(
                                 UInt32(current_rows),
                                 UInt32(rows),
                                 UInt32(plan.slots),
+                                UInt32(hash_route),
                                 grid_dim=(Int(shape[0]) * step.nodes + 255)
                                 // 256,
                                 block_dim=256,
                             )
-                            submissions += 2
+                            submissions += 1 + Int(not hash_route)
                             if _group_quantiles(plan, step.start, step.nodes):
                                 ctx.enqueue_function[
                                     quantiles.correct_zero_groups

@@ -5,21 +5,22 @@
 # suites, the mechanism programs and their drivers in benchmarks/tools/),
 # unless a commit explains why in a "Benchmark-Change:" trailer.
 #
-# Usage: scripts/check_benchmark_separation.sh [BASE_REF]   (default origin/main)
+# Usage: scripts/check_benchmark_separation.sh [BASE_REF] [HEAD_REF]   (defaults origin/main HEAD)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 base_ref="${1:-origin/main}"
-base="$(git merge-base "$base_ref" HEAD)"
-changed="$(git diff --name-only "$base" HEAD)"
+head_ref="${2:-HEAD}"
+base="$(git merge-base "$base_ref" "$head_ref")"
+changed="$(git diff --name-only "$base" "$head_ref")"
 engine="$(grep -E '^dataframe/' <<<"$changed" || true)"
 bench="$(grep -E '^benchmarks/' <<<"$changed" || true)"
 if [ -z "$engine" ] || [ -z "$bench" ]; then
     echo "benchmark separation: ok"
     exit 0
 fi
-if git log --format=%B "$base..HEAD" | grep -q '^Benchmark-Change:'; then
+if git log --format=%B "$base..$head_ref" | grep -q '^Benchmark-Change:'; then
     echo "benchmark separation: engine and benchmark changes together, explained by:"
-    git log --format=%B "$base..HEAD" | grep '^Benchmark-Change:'
+    git log --format=%B "$base..$head_ref" | grep '^Benchmark-Change:'
     exit 0
 fi
 echo "This PR changes both the engine and the benchmarks that measure it:" >&2

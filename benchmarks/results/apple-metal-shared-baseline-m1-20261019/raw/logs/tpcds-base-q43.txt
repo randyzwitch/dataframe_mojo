@@ -1,0 +1,85 @@
+answer_export	{"engine":"cpu","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-cpu-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-cpu-0.schema.json","status":"written"}
+runtime_audit	no_marker
+answer_export	{"engine":"metal","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-metal-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-metal-0.schema.json","status":"written"}
+coverage	q43	wrong_answer	full result differs
+expected_rows	1
+actual_rows	1
+expected_sample
+shape: (1, 9)
+┌──────────────┬──────────────────┬────────────────────┬───────────────────┬────────────────────┬───────────┬───────────────────┬───────────────────┬────────────────────┐
+│ s_store_name ┆ s_store_id       ┆ sun_sales          ┆ mon_sales         ┆ tue_sales          ┆ wed_sales ┆ thu_sales         ┆ fri_sales         ┆ sat_sales          │
+│ ---          ┆ ---              ┆ ---                ┆ ---               ┆ ---                ┆ ---       ┆ ---               ┆ ---               ┆ ---                │
+│ str          ┆ str              ┆ f64                ┆ f64               ┆ f64                ┆ f64       ┆ f64               ┆ f64               ┆ f64                │
+╞══════════════╪══════════════════╪════════════════════╪═══════════════════╪════════════════════╪═══════════╪═══════════════════╪═══════════════════╪════════════════════╡
+│ ought        ┆ AAAAAAAABAAAAAAA ┆ 319804.54000000015 ┆ 296307.0600000001 ┆ 259842.94000000003 ┆ 273019.09 ┆ 280288.9299999998 ┆ 307104.5699999999 ┆ 302928.28999999986 │
+└──────────────┴──────────────────┴────────────────────┴───────────────────┴────────────────────┴───────────┴───────────────────┴───────────────────┴────────────────────┘
+actual_sample
+shape: (1, 9)
+┌──────────────┬──────────────────┬───────────────────┬────────────────────┬────────────────────┬────────────────────┬───────────────────┬───────────────────┬────────────────────┐
+│ s_store_name ┆ s_store_id       ┆ sun_sales         ┆ mon_sales          ┆ tue_sales          ┆ wed_sales          ┆ thu_sales         ┆ fri_sales         ┆ sat_sales          │
+│ ---          ┆ ---              ┆ ---               ┆ ---                ┆ ---                ┆ ---                ┆ ---               ┆ ---               ┆ ---                │
+│ str          ┆ str              ┆ f64               ┆ f64                ┆ f64                ┆ f64                ┆ f64               ┆ f64               ┆ f64                │
+╞══════════════╪══════════════════╪═══════════════════╪════════════════════╪════════════════════╪════════════════════╪═══════════════════╪═══════════════════╪════════════════════╡
+│ ought        ┆ AAAAAAAABAAAAAAA ┆ 319804.5399999993 ┆ 296307.05999999976 ┆ 259842.93999999992 ┆ 273019.09000000067 ┆ 280288.9300000003 ┆ 307104.5700000008 ┆ 302928.29000000004 │
+└──────────────┴──────────────────┴───────────────────┴────────────────────┴────────────────────┴────────────────────┴───────────────────┴───────────────────┴────────────────────┘
+diagnostic	cpu_metal.schema_equal	True
+diagnostic	cpu_metal.row_count_equal	True
+diagnostic	cpu_metal.ordered_equal	False
+diagnostic	cpu_metal.row_multiset_equal	False
+diagnostic	cpu_metal.classification	row_multiset_difference
+column_bag	cpu_metal	s_store_name	True
+column_bag	cpu_metal	s_store_id	True
+column_bag	cpu_metal	sun_sales	False
+column_bag	cpu_metal	mon_sales	False
+column_bag	cpu_metal	tue_sales	False
+column_bag	cpu_metal	wed_sales	False
+column_bag	cpu_metal	thu_sales	False
+column_bag	cpu_metal	fri_sales	False
+column_bag	cpu_metal	sat_sales	False
+diagnostic	cpu_metal.alignment	at_most_one_row
+column_diagnostic	cpu_metal	s_store_name	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	s_store_id	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_metal	sun_sales	float64	1	0	1	0	15	8.731149137020111e-10	2.7301517161138823e-15
+column_diagnostic	cpu_metal	mon_sales	float64	1	0	1	0	6	3.4924596548080444e-10	1.178662315642443e-15
+column_diagnostic	cpu_metal	tue_sales	float64	1	0	1	0	4	1.1641532182693481e-10	4.480218774731182e-16
+column_diagnostic	cpu_metal	wed_sales	float64	1	0	1	0	11	6.402842700481415e-10	2.3451996343850533e-15
+column_diagnostic	cpu_metal	thu_sales	float64	1	0	1	0	8	4.656612873077393e-10	1.6613616788495313e-15
+column_diagnostic	cpu_metal	fri_sales	float64	1	0	1	0	16	9.313225746154785e-10	3.032591063739221e-15
+column_diagnostic	cpu_metal	sat_sales	float64	1	0	1	0	3	1.7462298274040222e-10	5.764499008673049e-16
+diagnostic	cpu_metal.ties_cause	unassessed; no declared output sort keys
+answer_export	{"engine":"cpu_repeat","repetition":0,"path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-cpu_repeat-0.parquet","schema_path":"/Users/randyzwitch/github/dataframe_mojo-metal-868-coverage-audit/build/metal-868-dev-coverage-a52334e7/answers/tpcds-base-q43-3ea1ukc6/answer-cpu_repeat-0.schema.json","status":"written"}
+cpu_repeat_equal	True
+diagnostic	cpu_repeat.schema_equal	True
+diagnostic	cpu_repeat.row_count_equal	True
+diagnostic	cpu_repeat.ordered_equal	True
+diagnostic	cpu_repeat.row_multiset_equal	True
+diagnostic	cpu_repeat.classification	equal
+column_bag	cpu_repeat	s_store_name	True
+column_bag	cpu_repeat	s_store_id	True
+column_bag	cpu_repeat	sun_sales	True
+column_bag	cpu_repeat	mon_sales	True
+column_bag	cpu_repeat	tue_sales	True
+column_bag	cpu_repeat	wed_sales	True
+column_bag	cpu_repeat	thu_sales	True
+column_bag	cpu_repeat	fri_sales	True
+column_bag	cpu_repeat	sat_sales	True
+diagnostic	cpu_repeat.alignment	at_most_one_row
+column_diagnostic	cpu_repeat	s_store_name	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	s_store_id	string	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	sun_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	mon_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	tue_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	wed_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	thu_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	fri_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+column_diagnostic	cpu_repeat	sat_sales	float64	0	0	0	0	unavailable	unavailable	unavailable
+diagnostic	cpu_repeat.ties_cause	unassessed; no declared output sort keys
+cpu_repeat_sample
+shape: (1, 9)
+┌──────────────┬──────────────────┬────────────────────┬───────────────────┬────────────────────┬───────────┬───────────────────┬───────────────────┬────────────────────┐
+│ s_store_name ┆ s_store_id       ┆ sun_sales          ┆ mon_sales         ┆ tue_sales          ┆ wed_sales ┆ thu_sales         ┆ fri_sales         ┆ sat_sales          │
+│ ---          ┆ ---              ┆ ---                ┆ ---               ┆ ---                ┆ ---       ┆ ---               ┆ ---               ┆ ---                │
+│ str          ┆ str              ┆ f64                ┆ f64               ┆ f64                ┆ f64       ┆ f64               ┆ f64               ┆ f64                │
+╞══════════════╪══════════════════╪════════════════════╪═══════════════════╪════════════════════╪═══════════╪═══════════════════╪═══════════════════╪════════════════════╡
+│ ought        ┆ AAAAAAAABAAAAAAA ┆ 319804.54000000015 ┆ 296307.0600000001 ┆ 259842.94000000003 ┆ 273019.09 ┆ 280288.9299999998 ┆ 307104.5699999999 ┆ 302928.28999999986 │
+└──────────────┴──────────────────┴────────────────────┴───────────────────┴────────────────────┴───────────┴───────────────────┴───────────────────┴────────────────────┘
