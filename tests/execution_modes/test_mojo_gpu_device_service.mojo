@@ -15,7 +15,7 @@ from tests.support.resident_grouped_publication_reference import (
 )
 
 
-def _region_synchronizations(report: DataFrame) -> Int64:
+def _region_synchronizations(report: DataFrame) raises -> Int64:
     var total = Int64(0)
     for row in range(report.height()):
         total += report.item(row, "synchronizations").int64()
