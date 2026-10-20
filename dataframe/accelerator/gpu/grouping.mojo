@@ -72,9 +72,7 @@ def integer_partial_supported(
 @always_inline
 def _group_shared_state_store(
     state: BasicState,
-    output: Pointer[
-        UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED
-    ],
+    output: Pointer[UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED],
     at: Int,
 ):
     """Write the eight reducer words directly into CTA shared memory."""
@@ -90,9 +88,7 @@ def _group_shared_state_store(
 
 @always_inline
 def _group_shared_state_load(
-    input: Pointer[
-        UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED
-    ],
+    input: Pointer[UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED],
     at: Int,
 ) -> BasicState:
     """Load reducer state from CTA shared memory without address-space casts."""

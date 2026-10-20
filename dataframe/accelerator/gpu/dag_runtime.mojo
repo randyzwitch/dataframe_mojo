@@ -59,8 +59,7 @@ def preflight(
     ordered_source: Bool = False,
     eager_feed: Bool = False,
 ) raises -> JoinDag:
-    """Check every reachable task and operation without device initialization.
-    """
+    """Check every reachable task and operation without device initialization."""
     var semantic = capabilities.copy()
     semantic.scalar_regions = True
     var dag = lower_join_dag(
