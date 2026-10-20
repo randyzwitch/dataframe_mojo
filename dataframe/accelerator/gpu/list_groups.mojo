@@ -166,7 +166,7 @@ def build_groups(
                 UInt32(width),
                 UInt32(matrix[].slots),
                 literals.unsafe_ptr(),
-                grid_dim=blocks,
+                grid_dim=ordering.merge_grid(rows, width),
                 block_dim=256,
             )
             var old = index^

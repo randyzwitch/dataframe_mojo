@@ -5,6 +5,7 @@ from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.key_kernel_reference import KeyCell, expected_order
+from dataframe.accelerator.gpu.ordering import merge_grid
 
 
 def _layout(source: Series, chunked: Bool) raises -> Series:
@@ -310,4 +311,97 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
             accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
         ),
         actual,
+    )
+
+
+def _tiled_integer_boundary(rows: Int) raises:
+    var keys = List[Int64](length=rows, fill=0)
+    var secondary = List[Int32](length=rows, fill=0)
+    var valid = List[Bool](length=rows, fill=True)
+    var ids = List[Int64](length=rows, fill=0)
+    for row in range(rows):
+        # Many equal composite keys straddle run and output-tile boundaries.
+        keys[row] = Int64((rows - row + row // 13) % 19 - 9)
+        secondary[row] = Int32((row * 7 + row // 5) % 5)
+        valid[row] = row % 97 != 0
+        ids[row] = Int64(row)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int64](keys^, valid^)),
+            Series("secondary", Column[Int32](secondary^)),
+            Series("id", Column[Int64](ids^)),
+        ]
+    )
+    var query = frame.lazy().sort(
+        ["key", "secondary"],
+        descending=[True, False],
+        nulls_last=[True, False],
+    )
+    var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+    same(actual, query.collect(engine="cpu", streaming=False))
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings() raises:
+    assert_equal(merge_grid(1024, 512), 4)
+    assert_equal(merge_grid(1025, 1024), 1)
+    assert_equal(merge_grid(2047, 512), 8)
+    assert_equal(merge_grid(2048, 1024), 1)
+    assert_equal(merge_grid(4096, 2048), 2)
+    assert_equal(merge_grid(4097, 4096), 4)
+    for rows in [
+        1023,
+        1024,
+        1025,
+        2047,
+        2048,
+        2049,
+        4095,
+        4096,
+        4097,
+        8191,
+        8192,
+        8193,
+        16385,
+    ]:
+        _tiled_integer_boundary(rows)
+
+    var encodings: List[UInt64] = [
+        0,
+        0x8000000000000000,
+        0x3FF0000000000000,
+        0xBFF0000000000000,
+        0x7FF0000000000000,
+        0xFFF0000000000000,
+        0x7FF8000000000011,
+        0xFFF8000000000022,
+        1,
+        0x8000000000000001,
+        0x0010000000000000,
+        0x8010000000000000,
+    ]
+    var floats = List[Float64](length=4097, fill=0)
+    var secondary = List[Int16](length=4097, fill=0)
+    var valid = List[Bool](length=4097, fill=True)
+    var ids = List[Int64](length=4097, fill=0)
+    for row in range(4097):
+        floats[row] = bitcast[DType.float64](encodings[(row * 5 + row // 7) % len(encodings)])
+        secondary[row] = Int16((row * 3 + row // 11) % 7)
+        valid[row] = row % 113 != 0
+        ids[row] = Int64(row)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Float64](floats^, valid^)),
+            Series("secondary", Column[Int16](secondary^)),
+            Series("id", Column[Int64](ids^)),
+        ]
+    )
+    var query = frame.lazy().sort(
+        ["key", "secondary"],
+        descending=[True, False],
+        nulls_last=[False, True],
+    )
+    same(
+        query.collect(accelerator=MetalRuntime(), engine="accel"),
+        query.collect(engine="cpu", streaming=False),
     )

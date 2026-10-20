@@ -11,7 +11,11 @@ from dataframe.accelerator.rows import (
 )
 from dataframe.accelerator.gpu.runtime import _kind, _stage, _output
 from dataframe.accelerator.gpu.rows import row_program
-from dataframe.accelerator.gpu.ordering import order_init, order_merge
+from dataframe.accelerator.gpu.ordering import (
+    order_init,
+    order_merge,
+    merge_grid,
+)
 from dataframe.accelerator.gpu.windows import (
     window_assign,
     window_input_errors,
@@ -130,7 +134,7 @@ def _gpu(query: LazyFrame) raises -> DataFrame:
                     UInt32(width),
                     UInt32(0),
                     dl.unsafe_ptr(),
-                    grid_dim=blocks,
+                    grid_dim=merge_grid(rows, width),
                     block_dim=256,
                 )
                 var previous = a^

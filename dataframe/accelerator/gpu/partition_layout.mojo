@@ -437,7 +437,7 @@ def build(
                 UInt32(width),
                 UInt32(matrix[].slots),
                 d_literals.unsafe_ptr(),
-                grid_dim=block_count,
+                grid_dim=ordering.merge_grid(rows, width),
                 block_dim=256,
             )
             scope.record_launches()

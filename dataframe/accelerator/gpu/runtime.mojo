@@ -180,7 +180,13 @@ from .grouping import (
     group_window_schedule,
     group_reduce,
 )
-from .ordering import order_init, order_merge, order_key_errors, order_gather
+from .ordering import (
+    order_init,
+    order_merge,
+    order_key_errors,
+    order_gather,
+    merge_grid,
+)
 from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
 from .windows import (
     window_assign,
@@ -2305,7 +2311,7 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=blocks,
+                                    grid_dim=merge_grid(current_rows, run_width),
                                     block_dim=256,
                                 )
                                 var previous = index^
@@ -2617,7 +2623,7 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=blocks,
+                                    grid_dim=merge_grid(current_rows, run_width),
                                     block_dim=256,
                                 )
                             var previous = index^
@@ -2824,7 +2830,7 @@ def execute_plan(
                                 UInt32(run_width),
                                 UInt32(plan.slots),
                                 device_literals.unsafe_ptr(),
-                                grid_dim=blocks,
+                                grid_dim=merge_grid(current_rows, run_width),
                                 block_dim=256,
                             )
                             # Swapping owners keeps both buffers alive across queued passes.
