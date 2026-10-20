@@ -1,8 +1,10 @@
 """Tagged native owners and one-map heterogeneous native Table operations."""
 # contract-group: execution.backends
-from std.testing import assert_equal, assert_raises
+from std.testing import assert_equal, assert_raises, assert_true
 from std.memory import ArcPointer
 from dataframe import Column, DataFrame, DataType, Series
+from dataframe.dtype import CategoricalDictionary
+from dataframe.accelerator.code_domains import CategoryField, CategoryOwner
 from dataframe.accelerator.gpu.query_scope import Scope
 from dataframe.accelerator.gpu.residency import Matrix, Table
 from dataframe.accelerator.gpu.runtime import materialize
@@ -185,6 +187,21 @@ def test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer
     assert_equal(scope.transfers()[2], before[2])
     assert_equal(scope.transfers()[3], before[3])
 
+    var dictionary = CategoricalDictionary()
+    dictionary.append("metadata-only")
+    var category_owner = ArcPointer(
+        CategoryOwner(DataType.categorical(dictionary^), List[Column[UInt32]]())
+    )
+    table.categories[0] = CategoryField(category_owner.copy())
+    var metadata_before = scope.transfers()
+    with assert_raises(contains="cannot carry text metadata"):
+        _ = table.gather(scope, List[Int]([0]))
+    var metadata_after = scope.transfers()
+    assert_equal(metadata_after[0], metadata_before[0])
+    assert_equal(metadata_after[1], metadata_before[1])
+    assert_equal(metadata_after[2], metadata_before[2])
+    assert_equal(metadata_after[3], metadata_before[3])
+
     var decimal = Series("d", Column[Int64]([1])).with_dtype(
         DataType.decimal(18, 0, 64)
     )
@@ -193,3 +210,35 @@ def test_native_table_gather_budget_and_unsupported_storage_fail_before_transfer
     var boolean = Series("b", Column[Bool]([True, False]))
     with assert_raises(contains="Native Bool upload is not implemented"):
         _ = upload_native[DType.bool](scope, boolean)
+
+
+# requires: metal
+def test_native_gather_carries_deferred_error_sidecars() raises:
+    _ = require_metal()
+    var scope = Scope()
+    var source = allocate_native_column[DType.int16](
+        scope, DataType.INT16, 3, with_errors=True
+    )
+    var values = source.values()
+    var errors = source.errors()
+    var host_values = List[Int16]([10, 20, 30])
+    var host_errors = List[UInt32]([5, 17, 29])
+    var context = scope.context()
+    context.enqueue_copy(values, host_values.unsafe_ptr())
+    context.enqueue_copy(errors.value(), host_errors.unsafe_ptr())
+    scope.record_upload(3 * 2 + 3 * 4)
+    scope.synchronize()
+
+    var field = Series("value", Column[Int16](List[Int16]()))
+    var table = Table.native(
+        DataFrame(List[Series]([field.copy()])),
+        List[NativeColumnAny]([NativeColumnAny(source)]),
+    )
+    var before = scope.transfers()
+    var gathered = table.gather(scope, List[Int]([2, 0]))
+    var after = scope.transfers()
+    assert_equal(after[3] - before[3], 1)
+    assert_true(gathered.native_columns[0].has_errors())
+    var gathered_errors = gathered.native_columns[0].read_error_codes()
+    assert_equal(gathered_errors[0], UInt32(29))
+    assert_equal(gathered_errors[1], UInt32(5))

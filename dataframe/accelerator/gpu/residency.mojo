@@ -1330,25 +1330,32 @@ def _gather_native_typed[dtype: DType](
     if output_errors_buffer:
         output_errors = output_errors_buffer.value().copy()
     var ctx = scope.context()
-    ctx.enqueue_function[gather_native_column[dtype]](
-        source_values,
-        source_validity,
-        source_errors,
-        indices,
-        UInt32(input.value_offset),
-        UInt32(input.validity_bit_offset),
-        UInt32(input.value_offset),
-        input.has_validity(),
-        input.has_errors(),
-        Bool(output_validity_buffer),
-        UInt32(rows),
-        output_values,
-        output_validity,
-        output_errors,
-        grid_dim=((rows + 7) // 8 + 127) // 128,
-        block_dim=128,
-    )
-    scope.record_launches()
+    try:
+        ctx.enqueue_function[gather_native_column[dtype]](
+            source_values,
+            source_validity,
+            source_errors,
+            indices,
+            UInt32(input.value_offset),
+            UInt32(input.validity_bit_offset),
+            UInt32(input.value_offset),
+            input.has_validity(),
+            input.has_errors(),
+            Bool(output_validity_buffer),
+            UInt32(rows),
+            output_values,
+            output_validity,
+            output_errors,
+            grid_dim=((rows + 7) // 8 + 127) // 128,
+            block_dim=128,
+        )
+        scope.record_launches()
+    except error:
+        # The destination and all sub-buffer handles are local to this helper.
+        # Drain while they and the source/index owners still exist; only then
+        # unwind to Table.gather's aggregate cleanup path.
+        scope.synchronize()
+        raise error^
     return output^
 
 
@@ -1523,14 +1530,45 @@ def _copy_native_to_matrix[
     var valid_out = target_validity.create_sub_buffer[DType.uint8](target, rows)
     var error_out = target_errors.create_sub_buffer[DType.uint32](target, rows)
     var ctx = scope.context()
-    if native.has_validity():
-        if native.has_errors():
-            ctx.enqueue_function[copy_native_column[dtype, True, True]](
+    try:
+        if native.has_validity():
+            if native.has_errors():
+                ctx.enqueue_function[copy_native_column[dtype, True, True]](
+                    source_values,
+                    source_validity,
+                    source_errors,
+                    UInt32(native.value_offset),
+                    UInt32(native.validity_bit_offset),
+                    UInt32(rows),
+                    low,
+                    high,
+                    valid_out,
+                    error_out,
+                    grid_dim=(rows + 255) // 256,
+                    block_dim=256,
+                )
+            else:
+                ctx.enqueue_function[copy_native_column[dtype, True, False]](
+                    source_values,
+                    source_validity,
+                    source_errors,
+                    UInt32(native.value_offset),
+                    UInt32(native.validity_bit_offset),
+                    UInt32(rows),
+                    low,
+                    high,
+                    valid_out,
+                    error_out,
+                    grid_dim=(rows + 255) // 256,
+                    block_dim=256,
+                )
+        elif native.has_errors():
+            ctx.enqueue_function[copy_native_column[dtype, False, True]](
                 source_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
-                UInt32(native.validity_bit_offset),
+                UInt32(0),
                 UInt32(rows),
                 low,
                 high,
@@ -1540,12 +1578,12 @@ def _copy_native_to_matrix[
                 block_dim=256,
             )
         else:
-            ctx.enqueue_function[copy_native_column[dtype, True, False]](
+            ctx.enqueue_function[copy_native_column[dtype, False, False]](
                 source_values,
                 source_validity,
                 source_errors,
                 UInt32(native.value_offset),
-                UInt32(native.validity_bit_offset),
+                UInt32(0),
                 UInt32(rows),
                 low,
                 high,
@@ -1554,37 +1592,12 @@ def _copy_native_to_matrix[
                 grid_dim=(rows + 255) // 256,
                 block_dim=256,
             )
-    elif native.has_errors():
-        ctx.enqueue_function[copy_native_column[dtype, False, True]](
-            source_values,
-            source_validity,
-            source_errors,
-            UInt32(native.value_offset),
-            UInt32(0),
-            UInt32(rows),
-            low,
-            high,
-            valid_out,
-            error_out,
-            grid_dim=(rows + 255) // 256,
-            block_dim=256,
-        )
-    else:
-        ctx.enqueue_function[copy_native_column[dtype, False, False]](
-            source_values,
-            source_validity,
-            source_errors,
-            UInt32(native.value_offset),
-            UInt32(0),
-            UInt32(rows),
-            low,
-            high,
-            valid_out,
-            error_out,
-            grid_dim=(rows + 255) // 256,
-            block_dim=256,
-        )
-    scope.record_launches()
+        scope.record_launches()
+    except error:
+        # Keep the source owner, destination and all local sub-buffer handles
+        # alive until partially submitted work has drained.
+        scope.synchronize()
+        raise error^
     # The caller drains once after all source columns have been enqueued.
     # `column` and its underlying owner stay alive in the Table until then.
 
