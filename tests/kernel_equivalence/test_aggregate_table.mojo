@@ -32,6 +32,7 @@ from tests.support.aggregate_table_reference import (
     key_text,
     model_key_text,
 )
+from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import chunk_layout, offset_layout
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -382,6 +383,114 @@ def test_decimal_sum_past_its_precision_raises() raises:
             Series("v", Column[Int128](values^)).with_dtype(
                 DataType.decimal(38, 0)
             ),
+        ]
+    )
+    with assert_raises():
+        _ = frame.group_by(["k"]).agg([col("v").sum().alias("total")])
+    _ = workers^
+
+
+def narrow_frame(rows: Int, groups: Int) raises -> DataFrame:
+    """Narrow integer and Float32 columns (whole-valued, so every route's
+    float totals are exact), null in every row of each seventh group and in
+    every fifth row of the others."""
+    var keys = List[Int64]()
+    var i8 = List[Int8]()
+    var i16 = List[Int16]()
+    var i32 = List[Int32]()
+    var u32 = List[UInt32]()
+    var f32 = List[Float32]()
+    var valid = List[Bool]()
+    for row in range(rows):
+        var k = row % groups
+        keys.append(Int64(k))
+        i8.append(Int8(row % 100 - 50))
+        i16.append(Int16(row % 3000 - 1500))
+        i32.append(Int32(row * 7919 % 2_000_000 - 1_000_000))
+        u32.append(UInt32(row % 70_000))
+        f32.append(Float32(row % 64 - 20))
+        valid.append(k % 7 != 0 and row % 5 != 0)
+    return DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("i8", Column[Int8](i8^, valid)),
+            Series("i16", Column[Int16](i16^, valid)),
+            Series("i32", Column[Int32](i32^, valid)),
+            Series("u32", Column[UInt32](u32^, valid)),
+            Series("f32", Column[Float32](f32^, valid)),
+        ]
+    )
+
+
+def narrow_reductions() -> List[Expr]:
+    var out = List[Expr]()
+    for name in ["i8", "i16", "i32", "u32", "f32"]:
+        out.append(col(name).sum().alias(name + "_sum"))
+        out.append(col(name).sum(min_count=1).alias(name + "_sum1"))
+        out.append(col(name).mean().alias(name + "_mean"))
+        out.append(col(name).count().alias(name + "_count"))
+    out.append(col("k").len().alias("rows"))
+    return out^
+
+
+def test_results_written_from_group_rows_match_the_single_thread_route() raises:
+    # Counts, sums and means are finished straight from the table's group
+    # rows: each must have the type, value and validity the reducers give
+    # (an Int8 or Int16 sum as Int64, an Int32, UInt32 or Float32 sum in its
+    # own type, a group of nulls null under min_count and as a mean), in
+    # any order and in first-occurrence order.
+    var rows = 72_000
+    var groups = 6_000
+    var frame = narrow_frame(rows, groups)
+    var single = ScopedEnvironment("DATAFRAME_THREADS", "1")
+    var expected = frame.group_by(["k"], maintain_order=True).agg(
+        narrow_reductions()
+    )
+    _ = single^
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var ordered = frame.group_by(["k"], maintain_order=True).agg(
+        narrow_reductions()
+    )
+    var unordered = frame.group_by(["k"]).agg(narrow_reductions())
+    assert_true(
+        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "narrow sums did not reach the aggregate table",
+    )
+    _ = observed^
+    assert_frame(ordered, expected)
+    assert_frame(unordered.sort("k"), expected)
+    observed = StrategyTrace()
+    var piped = (
+        frame.lazy()
+        .filter(col("k") >= lit(Int64(0)))
+        .group_by(["k"])
+        .agg(narrow_reductions())
+        .collect()
+    )
+    assert_true(
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
+        "narrow sums did not reach the aggregate table sink",
+    )
+    _ = observed^
+    assert_frame(piped.sort("k"), expected)
+    _ = trace^
+    _ = workers^
+
+
+def test_int32_sum_past_its_type_raises_from_group_rows() raises:
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var rows = 40_000
+    var keys = List[Int64]()
+    var values = List[Int32]()
+    for row in range(rows):
+        keys.append(Int64(row % 9_000))
+        values.append(Int32(2_000_000_000))
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("v", Column[Int32](values^)),
         ]
     )
     with assert_raises():
