@@ -135,7 +135,14 @@ from dataframe.accelerator.rows import (
 from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
-from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
+from .residency import (
+    DeviceService,
+    Scope,
+    Matrix,
+    Table,
+    HostMatrix,
+    raise_value_error,
+)
 from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
@@ -283,7 +290,8 @@ def _preflight(
 ) raises -> RowPlan:
     if source_rows < -1 or source_rows > Int(Int32.MAX):
         raise Error(
-            "Mojo GPU source row override exceeds the supported device index range"
+            "Mojo GPU source row override exceeds the supported device index"
+            " range"
         )
     var plan = lower_rows(
         query,
@@ -540,7 +548,8 @@ def _preflight(
                     )
                 ):
                     raise Error(
-                        "Mojo GPU integer division and rounding are not implemented yet"
+                        "Mojo GPU integer division and rounding are not"
+                        " implemented yet"
                     )
             if (
                 op >= DT_YEAR
@@ -581,7 +590,8 @@ def _preflight(
                     plan.ordered_mode != 5 and plan.ordered_mode != 6
                 ) or plan.code[4 * node + 2] < 0:
                     raise Error(
-                        "Mojo GPU IANA mutation requires an occurrence-certified phase"
+                        "Mojo GPU IANA mutation requires an"
+                        " occurrence-certified phase"
                     )
                 validate_descriptor(
                     plan.zone_words, Int(plan.code[4 * node + 2])
@@ -893,6 +903,8 @@ def estimate_resources(
     charged. Filters and
     groups use the source-row upper bound, without reading selectivity/nulls.
     """
+    from . import typed_rows
+
     if rows_override < -1:
         raise Error("Mojo GPU resource row override must be >= -1")
     var rows = plan.source.height() if rows_override < 0 else rows_override
@@ -1227,6 +1239,22 @@ def estimate_resources(
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
+    # A reusable standalone service drains its stream once more before the
+    # context can return to the idle pool. Shared-region and uncached calls
+    # may omit this drain; the metadata estimate remains an upper bound.
+    # Zero-column inputs carry row metadata without creating a device context.
+    if rows and cells:
+        waits = _checked_add(waits, 1)
+        # Native computation drains before its temporary owners leave scope;
+        # terminal readback is a separate phase from that ownership boundary.
+        if (
+            terminal_boundary
+            and export_values
+            and not resident_input
+            and len(plan.steps)
+            and typed_rows.supports(plan)
+        ):
+            waits = _checked_add(waits, 1)
     peak = max(peak, plan.iana_construction_peak_bytes)
     return ResourceFacts(
         peak,
@@ -1242,7 +1270,55 @@ def estimate_resources(
 
 def materialize(table: Table) raises -> DataFrame:
     """Export one compact resident result through the existing typed builder."""
+    if len(table.native_columns):
+        return _materialize_native_host(table, _readback_native(table))
     var host = table.readback()
+    return _materialize_host(table, host)
+
+
+def _readback_native(table: Table) raises -> List[Column[Float32]]:
+    from .typed_storage import readback_float32
+
+    var additional = 0
+    for slot in table.columns:
+        ref column = table.native_columns[Int(slot)]
+        additional = _checked_add(additional, _checked_mul(table.rows, 4))
+        var validity = column.validity()
+        if validity:
+            additional = _checked_add(additional, len(validity.value()))
+            additional = _checked_add(
+                additional, _checked_add(table.rows, 7) // 8
+            )
+        var errors = column.errors()
+        if errors:
+            additional = _checked_add(
+                additional, _checked_mul(len(errors.value()), 4)
+            )
+    _ = table.native_columns[0].scope().check(additional)
+    var columns = List[Column[Float32]](capacity=table.schema.width())
+    for slot in table.columns:
+        columns.append(
+            readback_float32(
+                table.native_columns[Int(slot)].view(table.offset, table.rows)
+            )
+        )
+    return columns^
+
+
+def _materialize_native_host(
+    table: Table, var host: List[Column[Float32]]
+) raises -> DataFrame:
+    var columns = List[Series](capacity=table.schema.width())
+    for i in range(table.schema.width()):
+        ref field = table.schema._columns[i]
+        var output = Series(field.name(), host[i].copy())
+        output._field_metadata = field._field_metadata
+        columns.append(output^)
+    return DataFrame(columns^, height=table.rows)
+
+
+def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
+    """Construct typed columns from an already completed host readback."""
     var additional = 0
     for category in table.categories:
         if category and category.value().string_codes:
@@ -1328,23 +1404,34 @@ def materialize(table: Table) raises -> DataFrame:
     return DataFrame(columns^, height=host.rows)
 
 
-def execute(
-    query: LazyFrame,
-    device_id: Int,
-    budget: Int,
+def _execute_preflighted(
+    plan: RowPlan,
+    scope: Scope,
     profiling: Bool,
-    *,
-    terminal_boundary: Bool = True,
-    ordered_source: Bool = False,
-    observation_only: Bool = False,
+    started: Int,
+    preflight_ns: Int,
+    terminal_boundary: Bool,
+    observation_only: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
-    var started = Int(perf_counter_ns())
-    var plan = _preflight(
-        query,
-        terminal_boundary=terminal_boundary,
-        ordered_source=ordered_source,
-    )
-    var scope = Scope(device_id, budget)
+    from . import fused_int32_plan, fused_int32_runtime
+    from . import wide_integer_plan, wide_integer_runtime
+
+    if terminal_boundary and not observation_only:
+        var program = fused_int32_plan.bind(plan)
+        if program:
+            return fused_int32_runtime.execute(
+                plan, program.value(), scope, profiling, started, preflight_ns
+            )
+        var wide_programs = wide_integer_plan.bind(plan)
+        if wide_programs:
+            return wide_integer_runtime.execute(
+                plan,
+                wide_programs.value(),
+                scope,
+                profiling,
+                started,
+                preflight_ns,
+            )
     var executed = execute_plan(
         plan,
         scope,
@@ -1352,16 +1439,44 @@ def execute(
         profiling,
         terminal_boundary=terminal_boundary,
         export_values=not observation_only,
+        native_output=not observation_only,
     )
     var result: DataFrame
+    var readback_ns = 0
+    var result_copy_ns = 0
     if observation_only:
         if terminal_boundary:
             executed[0].observe_errors()
         result = executed[0].schema.copy()
+    elif profiling:
+        var readback_started = Int(perf_counter_ns())
+        if len(executed[0].native_columns):
+            var host = _readback_native(executed[0])
+            readback_ns = Int(perf_counter_ns()) - readback_started
+            var result_started = Int(perf_counter_ns())
+            result = _materialize_native_host(executed[0], host^)
+            result_copy_ns = Int(perf_counter_ns()) - result_started
+        else:
+            var host = executed[0].readback()
+            readback_ns = Int(perf_counter_ns()) - readback_started
+            var result_started = Int(perf_counter_ns())
+            result = _materialize_host(executed[0], host)
+            result_copy_ns = Int(perf_counter_ns()) - result_started
     else:
         result = materialize(executed[0])
     var traffic = scope.transfers()
     var report = executed[1].copy()
+    if profiling:
+        for field in List[Tuple[String, Int]](
+            [
+                ("preflight_ms", preflight_ns),
+                ("readback_ms", readback_ns),
+                ("result_copy_ms", result_copy_ns),
+            ]
+        ):
+            report = report.with_column(
+                Series(field[0], Column[Float64]([Float64(field[1]) / 1e6]))
+            )
     report = report.with_column(
         Series("kernel_launches", Column[Int64]([Int64(traffic[2])]))
     )
@@ -1398,6 +1513,100 @@ def execute(
     return (result^, report^)
 
 
+def execute(
+    query: LazyFrame,
+    device_id: Int,
+    budget: Int,
+    profiling: Bool,
+    *,
+    terminal_boundary: Bool = True,
+    ordered_source: Bool = False,
+    observation_only: Bool = False,
+    device_service: Optional[DeviceService] = None,
+) raises -> Tuple[DataFrame, DataFrame]:
+    var started = Int(perf_counter_ns())
+    var plan = _preflight(
+        query,
+        terminal_boundary=terminal_boundary,
+        ordered_source=ordered_source,
+    )
+    var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
+    var scope = Scope(
+        device_id, budget, profiling=profiling, service=device_service
+    )
+    try:
+        var executed = _execute_preflighted(
+            plan,
+            scope,
+            profiling,
+            started,
+            preflight_ns,
+            terminal_boundary,
+            observation_only,
+        )
+        if not device_service:
+            return executed^
+        # Runtime-owned services require a final drain before caching.
+        scope.synchronize()
+        var traffic = scope.transfers()
+        var timing = scope.timing_ns()
+        var report = executed[1].copy()
+        report = report.with_column(
+            Series("synchronizations", Column[Int64]([Int64(traffic[3])]))
+        )
+        report = report.with_column(
+            Series(
+                "query_wall_ms",
+                Column[Float64](
+                    [Float64(Int(perf_counter_ns()) - started) / 1e6]
+                ),
+            )
+        )
+        if profiling:
+            var scratch_cache = device_service.value().scratch_info()
+            var pipeline_cache = device_service.value().pipeline_info()
+            for field in List[Tuple[String, Int]](
+                [
+                    (
+                        "service_context_generations",
+                        device_service.value().cached_generations(),
+                    ),
+                    ("service_idle_scratch_bytes", scratch_cache[0]),
+                    ("service_idle_scratch_entries", scratch_cache[1]),
+                    ("service_scratch_hits", scratch_cache[2]),
+                    ("service_scratch_misses", scratch_cache[3]),
+                    ("service_pipeline_entries", pipeline_cache[0]),
+                    ("service_pipeline_hits", pipeline_cache[1]),
+                    ("service_pipeline_misses", pipeline_cache[2]),
+                    ("service_pipeline_clears", pipeline_cache[3]),
+                    ("service_pipeline_capacity", 9),
+                ]
+            ):
+                report = report.with_column(
+                    Series(field[0], Column[Int64]([Int64(field[1])]))
+                )
+            report = report.with_column(
+                Series(
+                    "synchronization_ms",
+                    Column[Float64]([Float64(timing[1]) / 1e6]),
+                )
+            )
+        var result = executed[0].copy()
+        scope.mark_success()
+        return (result^, report^)
+    except error:
+        scope.mark_failed()
+        # Inner helpers must drain while submitted-buffer owners are alive.
+        # The helper stack has unwound here, so this only drains remaining scope
+        # work; preserve the original error if cleanup also fails.
+        if device_service:
+            try:
+                scope.synchronize()
+            except cleanup_error:
+                _ = String(cleanup_error)
+        raise error^
+
+
 def execute_plan(
     plan: RowPlan,
     scope: Scope,
@@ -1406,6 +1615,7 @@ def execute_plan(
     *,
     terminal_boundary: Bool = True,
     export_values: Bool = True,
+    native_output: Bool = False,
     text_domain: Optional[ArcPointer[TextDomain]] = None,
 ) raises -> Tuple[Table, DataFrame]:
     """Execute one preflighted region on the query's shared Metal context.
@@ -1416,8 +1626,22 @@ def execute_plan(
     """
     if plan.source_failure:
         raise Error(plan.source_failure)
+    # Native owners are currently published only at terminal row boundaries.
+    # Other region families retain their existing representation explicitly.
+    from . import typed_rows, typed_runtime
+
+    if (
+        native_output
+        and terminal_boundary
+        and export_values
+        and not resident_input
+        and not text_domain
+        and typed_rows.supports(plan)
+    ):
+        return typed_runtime.execute(plan, scope, profiling)
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
+    var timing_before = scope.timing_ns()
     var rows = (
         resident_input.value().rows if resident_input else plan.source.height()
     )
@@ -1510,7 +1734,8 @@ def execute_plan(
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
                 raise Error(
-                    "Mojo GPU ordered ROWS cannot feed row movement or state phases"
+                    "Mojo GPU ordered ROWS cannot feed row movement or state"
+                    " phases"
                 )
     if precision_rows:
         if (
@@ -1534,7 +1759,8 @@ def execute_plan(
         or len(plan.ordered_ranks[]) != len(plan.literals)
     ):
         raise Error(
-            "Mojo GPU ordered ROWS requires an original raw scan and terminal projections"
+            "Mojo GPU ordered ROWS requires an original raw scan and terminal"
+            " projections"
         )
     if ordered_private and (
         not terminal_boundary
@@ -1545,7 +1771,8 @@ def execute_plan(
         or len(plan.ordered_ranks[]) != len(plan.literals)
     ):
         raise Error(
-            "Mojo GPU ordered IMPLODE requires one certified observed row producer"
+            "Mojo GPU ordered IMPLODE requires one certified observed row"
+            " producer"
         )
     if ordered_decimal and (
         not terminal_boundary
@@ -1713,10 +1940,15 @@ def execute_plan(
     if grouping:
         for dtype in plan.slot_dtypes:
             slot_types.append(_kind(dtype))
+    var staging_started = Int(perf_counter_ns()) if profiling else 0
+    var host_prepare_ns = staging_started - started if profiling else 0
     if not resident_input:
         for slot in range(plan.source.width()):
             _stage(plan.source._columns[slot], rows, slot, 0, words, validity)
         _stage_categories(plan.source_text, plan.source, rows, words)
+    var staging_ns = (
+        Int(perf_counter_ns()) - staging_started if profiling else 0
+    )
     var submissions = 0
     var waits = 0
     var uploaded = 0
@@ -1744,6 +1976,7 @@ def execute_plan(
     # Certificate regions observe their own faults in CPU order; plain
     # regions flag every written fault (accelerator/faults.mojo).
     var plain = plan.ordered_mode == 0
+    var submit_started = Int(perf_counter_ns()) if profiling else 0
     if rows and cells and not projection_view:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
@@ -1772,7 +2005,8 @@ def execute_plan(
                             break
                     if found < 0:
                         raise Error(
-                            "Mojo GPU resident source field does not match the row plan"
+                            "Mojo GPU resident source field does not match the"
+                            " row plan"
                         )
                     mapping.append(Int64(found))
                 _ = resident_input.value().copy_to(
@@ -1880,7 +2114,8 @@ def execute_plan(
                         waits += 1
                         if input_failure[0]:
                             raise Error(
-                                "Mojo GPU ordered scalar requires already observed successful inputs"
+                                "Mojo GPU ordered scalar requires already"
+                                " observed successful inputs"
                             )
                     if (
                         ordered_private
@@ -1921,7 +2156,8 @@ def execute_plan(
                         waits += 1
                         if input_failure[0]:
                             raise Error(
-                                "Mojo GPU ordered row producer requires already observed successful inputs"
+                                "Mojo GPU ordered row producer requires already"
+                                " observed successful inputs"
                             )
                 if len(plan.key_values):
                     var lookup = ctx.enqueue_create_buffer[DType.uint64](
@@ -2124,7 +2360,8 @@ def execute_plan(
                             waits += 1
                         if shape[1]:
                             raise data_fault(
-                                "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
+                                "Mojo GPU group key failed: checked arithmetic"
+                                " overflow or strict cast failed"
                             )
                         var gathered_words = ctx.enqueue_create_buffer[
                             DType.uint64
@@ -2411,7 +2648,8 @@ def execute_plan(
                         for failure in host_failures:
                             if failure:
                                 raise data_fault(
-                                    "Mojo GPU window key failed: checked arithmetic overflow or strict cast failed"
+                                    "Mojo GPU window key failed: checked"
+                                    " arithmetic overflow or strict cast failed"
                                 )
                         if header == ROW_RANK_KEY:
                             var dense_blocks = ctx.enqueue_create_buffer[
@@ -2529,15 +2767,18 @@ def execute_plan(
                                 for block in range(blocks):
                                     if host_failures[4 * block]:
                                         raise data_fault(
-                                            "Mojo GPU time window index contains nulls"
+                                            "Mojo GPU time window index"
+                                            " contains nulls"
                                         )
                                     if host_failures[4 * block + 1]:
                                         raise data_fault(
-                                            "Mojo GPU time window index is not sorted within its group"
+                                            "Mojo GPU time window index is not"
+                                            " sorted within its group"
                                         )
                                     if host_failures[4 * block + 2]:
                                         raise data_fault(
-                                            "Mojo GPU time window bounds overflow"
+                                            "Mojo GPU time window bounds"
+                                            " overflow"
                                         )
                                     if host_failures[4 * block + 3]:
                                         raise data_fault(
@@ -2549,7 +2790,9 @@ def execute_plan(
                                 for failure in host_failures:
                                     if failure:
                                         raise data_fault(
-                                            "Mojo GPU cumulative or rolling window overflow or input expression failure"
+                                            "Mojo GPU cumulative or rolling"
+                                            " window overflow or input"
+                                            " expression failure"
                                         )
                         continue
                     if step.order:
@@ -2663,7 +2906,8 @@ def execute_plan(
                         for failure in host_failures:
                             if failure:
                                 raise data_fault(
-                                    "Mojo GPU sort key failed: checked arithmetic overflow or strict cast failed"
+                                    "Mojo GPU sort key failed: checked"
+                                    " arithmetic overflow or strict cast failed"
                                 )
                         device_words = gathered_words^
                         device_valid = gathered_valid^
@@ -2870,7 +3114,8 @@ def execute_plan(
                             var category = ordered_faults.category(fault[0])
                             if ordered_precision and category != 8:
                                 raise data_fault(
-                                    "Mojo GPU narrow Decimal precision proof was violated"
+                                    "Mojo GPU narrow Decimal precision proof"
+                                    " was violated"
                                 )
                             if iana_certified and category > 64:
                                 var mask_base = -1
@@ -2949,7 +3194,10 @@ def execute_plan(
                                 )
                             raise_value_error(
                                 ordered_faults.category(fault[0]),
-                                "Mojo GPU arithmetic overflow or strict cast failed",
+                                (
+                                    "Mojo GPU arithmetic overflow or strict"
+                                    " cast failed"
+                                ),
                             )
                     else:
                         ctx.enqueue_function[row_program](
@@ -3034,7 +3282,8 @@ def execute_plan(
                         waits += 1
                         if shape[1]:
                             raise data_fault(
-                                "Mojo GPU filter predicate failed: checked arithmetic overflow or strict cast failed"
+                                "Mojo GPU filter predicate failed: checked"
+                                " arithmetic overflow or strict cast failed"
                             )
                         if shape[0] and step.gather_count:
                             var gathers = List[Int64](
@@ -3314,6 +3563,12 @@ def execute_plan(
             reduced_words[i] = empty[0]
             reduced_validity[i] = empty[1]
             reduced_errors[i] = empty[2]
+    var initialization_ns = scope.timing_ns()[0] - timing_before[0]
+    var submit_wait_ns = (
+        Int(perf_counter_ns())
+        - submit_started
+        - initialization_ns if profiling else 0
+    )
     # Mojo destroys owners after their last use. Explicitly consume every
     # asynchronous upload owner only after the completed submission phase.
     _ = words^
@@ -3422,6 +3677,22 @@ def execute_plan(
         wall_ns=Int(perf_counter_ns()) - started,
     )
     var fields = report.frame()._columns.copy()
+    if profiling:
+        for field in List[Tuple[String, Int]](
+            [
+                ("host_prepare_ms", host_prepare_ns),
+                ("staging_copy_ms", staging_ns),
+                ("initialization_ms", initialization_ns),
+                ("submit_wait_ms", submit_wait_ns),
+                (
+                    "synchronization_ms",
+                    scope.timing_ns()[1] - timing_before[1],
+                ),
+            ]
+        ):
+            fields.append(
+                Series(field[0], Column[Float64]([Float64(field[1]) / 1e6]))
+            )
     fields.append(
         Series("kernel_launches", Column[Int64]([Int64(submissions)]))
     )
@@ -3464,8 +3735,23 @@ def execute_plan(
 
 
 def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
+    from .fused_int32_plan import bind as bind_fused_int32
+    from .wide_integer_plan import bind as bind_wide_integer
+
     try:
         var plan = _preflight(query, ordered_source=ordered_source)
+        if bind_fused_int32(plan):
+            return (
+                "ENGINE accel: Mojo GPU fused Int32 predicate/arithmetic and "
+                "Int64 SUM; native values, at most 4096 partial records, "
+                "scalar-only export\n"
+            )
+        if bind_wide_integer(plan):
+            return (
+                "ENGINE accel: Mojo GPU native wide integer SUM; exact two-word"
+                " state, at most 4096 shared partial records, scalar-only"
+                " export\n"
+            )
         return (
             "ENGINE accel: Mojo GPU row expressions; "
             + String(len(plan.steps))
@@ -3474,7 +3760,8 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
                 == 2 else " steps; certified IMPLODE batch/AST faults" if plan.ordered_mode
                 == 3 else " steps"
             )
-            + "; kernels and runtime execute directly in the dataframe library\n"
+            + "; kernels and runtime execute directly in the dataframe"
+            " library\n"
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"

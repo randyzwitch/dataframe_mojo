@@ -936,6 +936,10 @@ struct Reducer(Movable):
     # (each kept within the result type) or Float64.
     var int_products: List[Int128]
     var float_products: List[Float64]
+    # The result already finished, from the aggregate table's group rows
+    # (DuckDB's FinalizeStates): `finish` returns it, and no state above
+    # is held.
+    var finished: Optional[Series]
 
     def __init__(
         out self,
@@ -1090,6 +1094,7 @@ struct Reducer(Movable):
         self.float_products = List[Float64](
             length=n if op == PRODUCT and not exact else 0, fill=1
         )
+        self.finished = None
 
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
@@ -2031,6 +2036,8 @@ struct Reducer(Movable):
         self.group_count = count
 
     def finish(self) raises -> Series:
+        if self.finished:
+            return self.finished.value().copy()
         var op = self.op
         if op == PRODUCT:
             # Never null: an empty or all-null group's product is 1.

@@ -153,8 +153,9 @@ def estimate(query: LazyFrame) raises -> PlanEstimate:
     device[10] = Float64(resources.upload_bytes)
     device[11] = Float64(resources.download_bytes)
     device[12] = Float64(resources.peak_bytes)
-    # Each standalone call currently creates its own context/buffers. A future
-    # residency cost model must use its own family and measured cold feature.
+    # Retain a conservative first-use feature. Runtime-owned context reuse
+    # depends on the instance's history; a measured reuse-aware cost model
+    # needs its own family rather than assuming every invocation is warm.
     device[13] = 1
     device[14] = 0
     var operations = List[Int]()
