@@ -1898,11 +1898,15 @@ def _native_join_gather_typed[
         output_errors = output_errors_buffer.value().copy()
     var ctx = scope.context()
     try:
-        ctx.enqueue_function[native_join_gather_column[dtype]](
-            left_values,
+        # Float64 payloads move as bits; Metal cannot load native doubles.
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_function[native_join_gather_column[transport_dtype]](
+            left_values.create_sub_buffer[transport_dtype](0, len(left_values)),
             left_validity,
             left_errors,
-            right_values,
+            right_values.create_sub_buffer[transport_dtype](
+                0, len(right_values)
+            ),
             right_validity,
             right_errors,
             left_indices,
@@ -1929,7 +1933,9 @@ def _native_join_gather_typed[
             UInt8(Bool(output_validity_buffer)),
             UInt8(Bool(output_errors_buffer)),
             UInt8(nullable),
-            output_values,
+            output_values.create_sub_buffer[transport_dtype](
+                0, len(output_values)
+            ),
             output_validity,
             output_errors,
             grid_dim=((rows + 7) // 8 + 127) // 128,
@@ -1967,7 +1973,11 @@ def _native_null_join_typed[
     var validity = output.validity().value()
     var ctx = scope.context()
     try:
-        ctx.enqueue_memset(values, Scalar[dtype](0))
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_memset(
+            values.create_sub_buffer[transport_dtype](0, len(values)),
+            Scalar[transport_dtype](0),
+        )
         ctx.enqueue_memset(validity, UInt8(0))
     except error:
         # A partially submitted clear needs its owner alive through the drain.
@@ -2102,8 +2112,12 @@ def _gather_native_typed[
         output_errors = output_errors_buffer.value().copy()
     var ctx = scope.context()
     try:
-        ctx.enqueue_function[gather_native_column[dtype]](
-            source_values,
+        # Float64 payloads move as bits; Metal cannot load native doubles.
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_function[gather_native_column[transport_dtype]](
+            source_values.create_sub_buffer[transport_dtype](
+                0, len(source_values)
+            ),
             source_validity,
             source_errors,
             indices,
@@ -2114,7 +2128,9 @@ def _gather_native_typed[
             UInt8(input.has_errors()),
             UInt8(Bool(output_validity_buffer)),
             UInt32(rows),
-            output_values,
+            output_values.create_sub_buffer[transport_dtype](
+                0, len(output_values)
+            ),
             output_validity,
             output_errors,
             grid_dim=((rows + 7) // 8 + 127) // 128,
