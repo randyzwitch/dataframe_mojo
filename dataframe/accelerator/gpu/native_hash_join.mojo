@@ -1045,7 +1045,7 @@ def try_execute(
                 Series(item[0], Column[Int64]([Int64(item[1])]))
             )
         report = report.with_column(
-            Series("runtime_implementation", Column[String]("mojo"))
+            Series("runtime_implementation", Column[String](["mojo"]))
         )
         report = report.with_column(
             Series(

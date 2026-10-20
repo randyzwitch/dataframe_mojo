@@ -94,7 +94,7 @@ def _assert_native_null_join(
     # values through the same public lazy query and native join router.
     query._nodes[len(query._nodes) - 1].flags = [nulls_equal]
     var measured = query.profile(accelerator=runtime, engine="accel")
-    var actual = measured[0]
+    var actual = measured[0].copy()
     var expected = _null_join_pairs(how, nulls_equal)
     assert_equal(actual.height(), len(expected[0]))
     var joined = False
@@ -361,7 +361,7 @@ def test_mojo_gpu_native_hash_join_float32_encodings_and_nulls() raises:
     var native_row = _profile_row_for_algorithm(
         measured[1], "mojo_gpu_native_hash_join"
     )
-    var actual = measured[0]
+    var actual = measured[0].copy()
     assert_equal(actual.height(), 10)
 
     # The expected relation explicitly covers both zeros, distinct NaN
@@ -424,7 +424,7 @@ def _collision_fallback_query(how: String) raises -> LazyFrame:
     keys.append(0)
     build_valid[128] = False
     var probe_keys: List[Int32] = [outsider, 0]
-    var build_ids = List[Int32](length=129)
+    var build_ids = List[Int32](length=129, fill=Int32(0))
     for row in range(128):
         build_ids[row] = Int32(100 + row)
     build_ids[128] = 228
@@ -452,7 +452,7 @@ def test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal() rai
     for how in ["inner", "full"]:
         var query = _collision_fallback_query(how)
         var measured = query.profile(accelerator=runtime, engine="accel")
-        var actual = measured[0]
+        var actual = measured[0].copy()
         assert_equal(actual.height(), 1 if how == "inner" else 130)
         var sorted_fallback = False
         for row in range(measured[1].height()):
@@ -490,7 +490,10 @@ def _profile_row_for_algorithm(
 def test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts() raises:
     var runtime = MetalRuntime()
     var empty = DataFrame(
-        [Series("k", Column[Int32]()), Series("x", Column[Float64]())]
+        [
+            Series("k", Column[Int32](List[Int32]())),
+            Series("x", Column[Float64](List[Float64]())),
+        ]
     )
     var nonempty = DataFrame(
         [Series("k", Column[Int32]([1])), Series("x", Column[Float64]([2]))]
@@ -662,8 +665,10 @@ def test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery() raises:
     var too_large = source.lazy().join(source.lazy(), how="cross")
     with assert_raises(contains="memory budget"):
         _ = too_large.collect(accelerator=limited_runtime, engine="accel")
-    var tiny = left.head(1).join(
-        right.head(1), on="k", how="inner", coalesce=False
+    var tiny = (
+        left.head(1)
+        .lazy()
+        .join(right.head(1).lazy(), on="k", how="inner", coalesce=False)
     )
     var recovered = tiny.collect(accelerator=limited_runtime, engine="accel")
     same(recovered, tiny.collect(engine="cpu", streaming=False))
