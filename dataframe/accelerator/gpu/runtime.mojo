@@ -877,8 +877,7 @@ def _iana_scalar_slots(plan: RowPlan) raises -> Int:
 
 
 def _source_high_words(plan: RowPlan) -> Bool:
-    """Only wide decimals and original category codes carry source high words.
-    """
+    """Only wide decimals and original category codes carry source high words."""
     for column in plan.source._columns:
         var dtype = column.dtype()
         if dtype.is_decimal() and dtype.decimal_width() == 128:

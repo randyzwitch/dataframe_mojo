@@ -344,7 +344,9 @@ struct NativeColumnAny(Copyable):
             )
             or not _native_logical_dtype_matches[dtype](logical)
         ):
-            raise Error("Native table column logical or physical dtype is unsupported")
+            raise Error(
+                "Native table column logical or physical dtype is unsupported"
+            )
         self._storage = NativeStorage(column.copy())
         self.logical = logical
         self.length = column.length
@@ -396,7 +398,9 @@ struct NativeColumnAny(Copyable):
             return Self(
                 self._storage[NativeColumn[DType.uint64]].view(offset, length)
             )
-        return Self(self._storage[NativeColumn[DType.float32]].view(offset, length))
+        return Self(
+            self._storage[NativeColumn[DType.float32]].view(offset, length)
+        )
 
     def scope(self) -> Scope:
         if self._storage.isa[NativeColumn[DType.int64]]():
@@ -564,7 +568,9 @@ struct NativeColumnAny(Copyable):
         if self._storage.isa[NativeColumn[DType.int64]]():
             return _native_gather_bytes[DType.int64](rows, nullable, error_rows)
         if self._storage.isa[NativeColumn[DType.float64]]():
-            return _native_gather_bytes[DType.float64](rows, nullable, error_rows)
+            return _native_gather_bytes[DType.float64](
+                rows, nullable, error_rows
+            )
         if self._storage.isa[NativeColumn[DType.bool]]():
             return _native_gather_bytes[DType.bool](rows, nullable, error_rows)
         if self._storage.isa[NativeColumn[DType.int8]]():
@@ -576,35 +582,63 @@ struct NativeColumnAny(Copyable):
         if self._storage.isa[NativeColumn[DType.uint8]]():
             return _native_gather_bytes[DType.uint8](rows, nullable, error_rows)
         if self._storage.isa[NativeColumn[DType.uint16]]():
-            return _native_gather_bytes[DType.uint16](rows, nullable, error_rows)
+            return _native_gather_bytes[DType.uint16](
+                rows, nullable, error_rows
+            )
         if self._storage.isa[NativeColumn[DType.uint32]]():
-            return _native_gather_bytes[DType.uint32](rows, nullable, error_rows)
+            return _native_gather_bytes[DType.uint32](
+                rows, nullable, error_rows
+            )
         if self._storage.isa[NativeColumn[DType.uint64]]():
-            return _native_gather_bytes[DType.uint64](rows, nullable, error_rows)
+            return _native_gather_bytes[DType.uint64](
+                rows, nullable, error_rows
+            )
         return _native_gather_bytes[DType.float32](rows, nullable, error_rows)
 
     def owner_identity(self) -> Int:
         if self._storage.isa[NativeColumn[DType.int64]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.int64]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int64]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.float64]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.float64]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.float64]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.bool]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.bool]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.bool]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.int8]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.int8]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int8]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.int16]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.int16]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int16]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.int32]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.int32]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int32]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.uint8]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.uint8]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint8]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.uint16]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.uint16]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint16]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.uint32]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.uint32]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint32]]._owner[])
+            )
         if self._storage.isa[NativeColumn[DType.uint64]]():
-            return Int(Pointer(to=self._storage[NativeColumn[DType.uint64]]._owner[]))
-        return Int(Pointer(to=self._storage[NativeColumn[DType.float32]]._owner[]))
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint64]]._owner[])
+            )
+        return Int(
+            Pointer(to=self._storage[NativeColumn[DType.float32]]._owner[])
+        )
 
     def readback_series(self, field: Series) raises -> Series:
         """Materialize this typed view with the schema's logical metadata."""
@@ -657,6 +691,7 @@ struct NativeColumnAny(Copyable):
                 field, self._storage[NativeColumn[DType.float32]]
             )
         return result^
+
 
 def allocate_native_column[
     dtype: DType
@@ -868,9 +903,7 @@ def readback_float32(
 def _native_readback_bytes[
     dtype: DType
 ](column: NativeColumn[dtype]) raises -> Int:
-    var bytes = checked_mul(
-        column.length, size_of[Scalar[dtype]]()
-    )
+    var bytes = checked_mul(column.length, size_of[Scalar[dtype]]())
     var validity = column.validity()
     if validity:
         bytes = checked_add(bytes, len(validity.value()))
@@ -921,9 +954,7 @@ def readback_native[
     var error_codes = column.read_error_codes()
     for code in error_codes:
         if code:
-            raise data_fault(
-                "Mojo GPU typed result reported a deferred error"
-            )
+            raise data_fault("Mojo GPU typed result reported a deferred error")
 
     var values = List[Scalar[dtype]](length=column.length, fill=0)
     var validity_bytes = List[UInt8]()
@@ -941,9 +972,7 @@ def readback_native[
                 ctx.enqueue_copy(values.unsafe_ptr(), source)
                 transferred = checked_add(
                     transferred,
-                    checked_mul(
-                        column.length, size_of[Scalar[dtype]]()
-                    ),
+                    checked_mul(column.length, size_of[Scalar[dtype]]()),
                 )
             if len(validity_bytes):
                 ctx.enqueue_copy(validity_bytes.unsafe_ptr(), validity.value())

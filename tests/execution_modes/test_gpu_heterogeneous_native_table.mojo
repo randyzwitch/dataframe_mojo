@@ -18,9 +18,7 @@ from tests.execution_modes.test_backend_metal import require_metal
 
 def test_native_bool_descriptor_is_tagged_without_admitting_host_transport() raises:
     var scope = Scope()
-    var owner = allocate_native_column[DType.bool](
-        scope, DataType.BOOL, 0
-    )
+    var owner = allocate_native_column[DType.bool](scope, DataType.BOOL, 0)
     var tagged = NativeColumnAny(owner)
     var view = tagged.view(0, 0)
     assert_equal(view.logical, DataType.BOOL)
@@ -39,10 +37,16 @@ def test_native_bool_descriptor_is_tagged_without_admitting_host_transport() rai
 # requires: metal
 def test_native_any_view_preserves_temporal_logical_dtype_and_bitmap() raises:
     _ = require_metal()
-    var source = Series(
-        "day",
-        Column[Int64]([90, 10, 20, 30, 40, 99], [True, True, False, True, True, True]),
-    ).with_dtype(DataType.DATE).slice(1, 4)
+    var source = (
+        Series(
+            "day",
+            Column[Int64](
+                [90, 10, 20, 30, 40, 99], [True, True, False, True, True, True]
+            ),
+        )
+        .with_dtype(DataType.DATE)
+        .slice(1, 4)
+    )
     var scope = Scope()
     var typed = upload_native[DType.int64](scope, source)
     var any = NativeColumnAny(typed)

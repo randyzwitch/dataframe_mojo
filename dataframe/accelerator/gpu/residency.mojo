@@ -595,9 +595,7 @@ struct Table(Copyable):
                 or self.categories[output]
                 or self.grouped_keys[output]
             ):
-                raise Error(
-                    "Mojo GPU native gather cannot carry text metadata"
-                )
+                raise Error("Mojo GPU native gather cannot carry text metadata")
             payload = checked_add(
                 payload, column.gather_bytes(len(indices), allow_missing)
             )
@@ -610,9 +608,9 @@ struct Table(Copyable):
             host_indices.append(Int32(row))
         var device_indices: Optional[DeviceBuffer[DType.int32]]()
         if len(indices):
-            device_indices = scope.context().enqueue_create_buffer[
-                DType.int32
-            ](len(indices))
+            device_indices = scope.context().enqueue_create_buffer[DType.int32](
+                len(indices)
+            )
         var outputs = List[NativeColumnAny](capacity=self.schema.width())
         var queued = False
         try:
@@ -634,13 +632,13 @@ struct Table(Copyable):
                         len(indices),
                         allow_missing,
                     )
-                    outputs.append(NativeColumnAny(destination^))
+                    outputs.append(destination^)
                 scope.synchronize()
             else:
                 for output in range(self.schema.width()):
                     ref column = self.native_columns[Int(self.columns[output])]
                     var destination = _empty_native_column(scope, column)
-                    outputs.append(NativeColumnAny(destination^))
+                    outputs.append(destination^)
         except error:
             if queued:
                 scope.synchronize()
@@ -864,9 +862,7 @@ struct Table(Copyable):
                         )
                     var index = Int(self.columns[source])
                     if index < 0 or index >= len(self.native_columns):
-                        raise Error(
-                            "Mojo GPU native owner mapping is invalid"
-                        )
+                        raise Error("Mojo GPU native owner mapping is invalid")
                     ref column = self.native_columns[index]
                     if (
                         self.text[source]
@@ -876,9 +872,7 @@ struct Table(Copyable):
                         raise Error(
                             "Mojo GPU native input cannot carry text metadata"
                         )
-                    if column._storage.isa[
-                        NativeColumn[DType.bool]
-                    ]():
+                    if column._storage.isa[NativeColumn[DType.bool]]():
                         raise Error("Native Bool transport is not implemented")
                     if column._storage.isa[NativeColumn[DType.int64]]():
                         _copy_native_to_matrix[DType.int64](
@@ -1026,9 +1020,7 @@ struct Table(Copyable):
                 _ = target_words^
                 raise error^
             _ = target_words^
-            return checked_mul(
-                checked_mul(self.rows, len(mapping)), CELL_BYTES
-            )
+            return checked_mul(checked_mul(self.rows, len(mapping)), CELL_BYTES)
         if self.identity_storage:
             var owner = self.identity_storage.value().copy()
             if not owner[].scope.same_query(scope):
@@ -1185,7 +1177,9 @@ def copy_native_column[
         output_errors[unsafe_offset=row] = 0
 
 
-def gather_native_column[dtype: DType](
+def gather_native_column[
+    dtype: DType
+](
     source: Pointer[Scalar[dtype], ImmutAnyOrigin],
     source_validity: Pointer[UInt8, ImmutAnyOrigin],
     source_errors: Pointer[UInt32, ImmutAnyOrigin],
@@ -1216,8 +1210,10 @@ def gather_native_column[dtype: DType](
         if present and source_has_validity:
             var source_bit = Int(validity_offset) + Int(selected)
             present = (
-                (source_validity[unsafe_offset=source_bit // 8]
-                    >> UInt8(source_bit % 8))
+                (
+                    source_validity[unsafe_offset=source_bit // 8]
+                    >> UInt8(source_bit % 8)
+                )
                 & 1
             ) != 0
         if selected >= 0:
@@ -1229,11 +1225,9 @@ def gather_native_column[dtype: DType](
         if present:
             mask |= UInt8(1) << UInt8(bit)
         if source_has_errors:
-            output_errors[unsafe_offset=row] = (
-                source_errors[
-                    unsafe_offset=Int(error_offset) + Int(selected)
-                ] if selected >= 0 else UInt32(0)
-            )
+            output_errors[unsafe_offset=row] = source_errors[
+                unsafe_offset=Int(error_offset) + Int(selected)
+            ] if selected >= 0 else UInt32(0)
     if output_has_validity:
         output_validity[unsafe_offset=byte] = mask
 
@@ -1289,7 +1283,9 @@ def _empty_native_column(
     return result^
 
 
-def _gather_native_typed[dtype: DType](
+def _gather_native_typed[
+    dtype: DType
+](
     scope: Scope,
     source: NativeColumn[dtype],
     offset: Int,
@@ -1355,6 +1351,9 @@ def _gather_native_typed[dtype: DType](
         # Drain while they and the source/index owners still exist; only then
         # unwind to Table.gather's aggregate cleanup path.
         scope.synchronize()
+        _ = output^
+        _ = input^
+        _ = indices^
         raise error^
     return output^
 
@@ -1378,7 +1377,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.float64]]():
         return NativeColumnAny(
@@ -1390,7 +1390,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.int8]]():
         return NativeColumnAny(
@@ -1402,7 +1403,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.int16]]():
         return NativeColumnAny(
@@ -1414,7 +1416,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.int32]]():
         return NativeColumnAny(
@@ -1426,7 +1429,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.uint8]]():
         return NativeColumnAny(
@@ -1438,7 +1442,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.uint16]]():
         return NativeColumnAny(
@@ -1450,7 +1455,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.uint32]]():
         return NativeColumnAny(
@@ -1462,7 +1468,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     if column._storage.isa[NativeColumn[DType.uint64]]():
         return NativeColumnAny(
@@ -1474,7 +1481,8 @@ def _gather_native_column(
                 indices,
                 rows,
                 allow_missing,
-            )^
+            )
+            ^
         )
     return NativeColumnAny(
         _gather_native_typed[DType.float32](
@@ -1485,7 +1493,8 @@ def _gather_native_column(
             indices,
             rows,
             allow_missing,
-        )^
+        )
+        ^
     )
 
 
@@ -1524,9 +1533,7 @@ def _copy_native_to_matrix[
     var target = checked_mul(output_column, capacity)
     var high_target = checked_add(target_cells, target)
     var low = target_words.create_sub_buffer[DType.uint64](target, rows)
-    var high = target_words.create_sub_buffer[DType.uint64](
-        high_target, rows
-    )
+    var high = target_words.create_sub_buffer[DType.uint64](high_target, rows)
     var valid_out = target_validity.create_sub_buffer[DType.uint8](target, rows)
     var error_out = target_errors.create_sub_buffer[DType.uint32](target, rows)
     var ctx = scope.context()
