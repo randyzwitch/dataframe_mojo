@@ -286,7 +286,7 @@ def test_grouped_key_domain_independent_raw_hashes_restore_and_null_poison() rai
     ]
     var binary = Series.binary(
         "k",
-        binary_values^,
+        binary_values,
         List[Bool]([True, True, True, True, False]),
     )
     var domain = KeyDomain(binary)

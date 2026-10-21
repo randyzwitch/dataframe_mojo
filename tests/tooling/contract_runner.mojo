@@ -69,7 +69,7 @@ def capture(args: List[String]) raises -> Tuple[Int, String]:
             break
         output.append(UInt8(byte))
     var status = external_call["pclose", Int32](stream)
-    return (exit_code(status), String(unsafe_from_utf8=output^))
+    return (exit_code(status), String(unsafe_from_utf8=output))
 
 
 def run_command(args: List[String]) raises:
@@ -98,7 +98,7 @@ def temporary_directory(parent: String) raises -> String:
     if not result:
         raise Error("Cannot create suite temporary directory")
     _ = bytes.pop()
-    return String(unsafe_from_utf8=bytes^)
+    return String(unsafe_from_utf8=bytes)
 
 
 def json_strings(values: List[String]) -> String:
