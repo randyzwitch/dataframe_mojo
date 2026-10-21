@@ -70,7 +70,7 @@ docs = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 script
 docs-check = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json --check"
 
 [feature.oracle.dependencies]
-polars = ">=1.0"
+polars = ">=2.0"
 pyarrow = ">=15"
 python = ">=3.11"
 # Use compiled PROJ packages: pyproj's macOS wheels require a newer OS than
