@@ -35,7 +35,7 @@ def extended_frame(
     var frame = DataFrame(
         [
             Series("row", Column[Int64](rows^)),
-            Series("g", Column[Int64](keys^, key_valid^)),
+            Series("g", Column[Int64](keys^, key_valid)),
             selection_column(kind, n, offset, mode),
         ]
     )

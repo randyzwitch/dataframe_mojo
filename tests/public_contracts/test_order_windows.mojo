@@ -296,7 +296,7 @@ def test_ranks_use_declared_ties_null_nan_and_descending_policy() raises:
         for row in range(n):
             values.append(cells.values[row])
             valid.append(cells.valid[row])
-        var subset = WindowCells(values^, valid^)
+        var subset = WindowCells(values, valid)
         var original = DataFrame(
             [
                 Series(

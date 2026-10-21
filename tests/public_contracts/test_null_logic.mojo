@@ -23,7 +23,7 @@ def test_boolean_truth_tables_for_every_validity_pair() raises:
             av.append(left >= 0)
             bv.append(right >= 0)
     var input = DataFrame(
-        [Series("a", Column[Bool](a^, av^)), Series("b", Column[Bool](b^, bv^))]
+        [Series("a", Column[Bool](a^, av)), Series("b", Column[Bool](b^, bv))]
     )
     for layout in range(2):
         var frame = input.copy() if layout == 0 else chunk_layout(input)
