@@ -423,7 +423,7 @@ def test_many_key_columns_number_through_direct_hashed_and_overflow_stages() rai
             rows[i].append(
                 KeyCell(0, ok, integer=Int128(value) if ok else Int128(0))
             )
-        keys.append(Series(String("k", c), Column[Int64](values^, valid^)))
+        keys.append(Series(String("k", c), Column[Int64](values^, valid)))
     for nulls_equal in [False, True]:
         assert_key_encoding(encode_rows(keys, nulls_equal), rows, nulls_equal)
 
@@ -470,7 +470,7 @@ def test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_seman
                                 )
                             ]
                         )
-                var source = Series("s", Column[String](values^, valid^)).slice(
+                var source = Series("s", Column[String](values^, valid)).slice(
                     offset, n
                 )
                 for layout in [0, 2]:
@@ -581,7 +581,7 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
             var first_keys = List[List[KeyCell]]()
             for ref row in rows:
                 first_keys.append([row[0].copy()])
-            var strings = Series("s", Column[String](values^, valid^))
+            var strings = Series("s", Column[String](values^, valid))
             assert_true(
                 Bool(string_sort_ranks(strings)), "repeated strings rank"
             )
@@ -797,10 +797,10 @@ def test_boolean_and_decimal_key_fallbacks_preserve_typed_membership_and_order()
                             [KeyCell(0, present, integer=pattern[physical % 6])]
                         )
                 var boolean = Series(
-                    "b", BoolColumn(flags^, valid.copy())
+                    "b", BoolColumn(flags, valid.copy())
                 ).slice(offset, n)
                 var decimal = (
-                    Series._wrap("d", Column[Int128](decimals^, valid^))
+                    Series._wrap("d", Column[Int128](decimals^, valid))
                     .with_dtype(DataType.decimal(38, 2))
                     .slice(offset, n)
                 )
@@ -957,8 +957,8 @@ def test_packed_top_k_matches_stable_full_order_prefix_at_tie_boundaries() raise
                             ),
                         ]
                     )
-            var a = Series("a", Column[Int64](integers^, iv^)).slice(offset, n)
-            var b = Series("b", Column[String](text^, sv^)).slice(offset, n)
+            var a = Series("a", Column[Int64](integers^, iv)).slice(offset, n)
+            var b = Series("b", Column[String](text^, sv)).slice(offset, n)
             for layout in [0, 2]:
                 var keys: List[Series] = [
                     key_layout(a, layout),

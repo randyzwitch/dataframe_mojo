@@ -47,7 +47,7 @@ def dyadic_fixture(
         keys.append(Int32(i % 5))
         valid.append(i % 7 != 2 and i % 5 != 4)
         key_valid.append(i % 19 != 7)
-    var x = Series("x", Column[Float64](values^, valid^)).slice(3, n)
+    var x = Series("x", Column[Float64](values^, valid)).slice(3, n)
     if narrow:
         x = x.cast(DataType.FLOAT32)
     var k = Series("k", Column[Int32](keys^, key_valid^)).slice(3, n)

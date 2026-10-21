@@ -117,8 +117,8 @@ def test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_c
     var source = DataFrame(
         [
             Series("x", Column[Int32](numbers^, valid.copy())).slice(7, n),
-            Series("y", Column[Int32](others^, valid^)).slice(7, n),
-            Series("s", Column[String](strings^, string_valid^)).slice(7, n),
+            Series("y", Column[Int32](others^, valid)).slice(7, n),
+            Series("s", Column[String](strings^, string_valid)).slice(7, n),
         ]
     )
     for chunked in [False, True]:
@@ -200,11 +200,11 @@ def test_selection_trees_narrow_kept_rows_with_and_or_comparisons_and_null_tests
         code_valid.append(row % 11 != 5)
     var frame = DataFrame(
         [
-            Series("q", Column[Int64](quantities^, quantity_valid^)).slice(
+            Series("q", Column[Int64](quantities^, quantity_valid)).slice(
                 7, n
             ),
-            Series("a", Column[Float64](prices^, price_valid^)).slice(7, n),
-            Series("b", Column[Int32](codes^, code_valid^)).slice(7, n),
+            Series("a", Column[Float64](prices^, price_valid)).slice(7, n),
+            Series("b", Column[Int32](codes^, code_valid)).slice(7, n),
         ]
     )
     var band = (

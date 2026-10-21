@@ -183,7 +183,7 @@ def test_native_metal_higher_moments_workers_compositions_cost_budget_and_runtim
         valid.append(i % 13 != 0)
     var frame = DataFrame(
         [
-            Series("x", Column[Float64](values^, valid^)),
+            Series("x", Column[Float64](values^, valid)),
             Series("k", Column[Int32](keys^)),
         ]
     )

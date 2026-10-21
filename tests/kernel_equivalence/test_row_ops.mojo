@@ -96,7 +96,7 @@ def test_bitmap_filter_compaction_matches_scalar_rows_at_every_density() raises:
                     for row in range(n):
                         flags.append(row_selected(row, n, density))
                         valid.append(row_valid(row, validity))
-                    var mask = BoolColumn(flags^, valid^).slice(offset, n)
+                    var mask = BoolColumn(flags, valid).slice(offset, n)
                     var expected = expected_selection(n, density, validity)
                     assert_equal(true_rows(mask), expected)
                     # Directly invoke the specialized 64-bit bitmap scan:
@@ -659,16 +659,16 @@ def test_boolean_and_string_row_kernels_preserve_selected_payload_and_validity()
                     text_b.append("β" + String(row))
                     valid_a.append(row_valid(row, mode))
                     valid_b.append(row_valid(row + 1, mode))
-                var a = Series("a", BoolColumn(bool_a^, valid_a.copy())).slice(
+                var a = Series("a", BoolColumn(bool_a, valid_a.copy())).slice(
                     offset, n
                 )
-                var b = Series("b", BoolColumn(bool_b^, valid_b.copy())).slice(
+                var b = Series("b", BoolColumn(bool_b, valid_b.copy())).slice(
                     offset, n
                 )
-                var ta = Series("ta", Column[String](text_a^, valid_a^)).slice(
+                var ta = Series("ta", Column[String](text_a^, valid_a)).slice(
                     offset, n
                 )
-                var tb = Series("tb", Column[String](text_b^, valid_b^)).slice(
+                var tb = Series("tb", Column[String](text_b^, valid_b)).slice(
                     offset, n
                 )
                 for broadcast in range(3):
@@ -860,7 +860,7 @@ def test_float_filter_direct_selection_matches_materialized_bitmap_and_scalar_ro
                     values.append(pattern[row % 7])
                     valid.append(row_valid(row, mode))
                 var source = Series(
-                    "x", Column[Float64](values^, valid^)
+                    "x", Column[Float64](values^, valid)
                 ).slice(offset, n)
                 var cut = min(3, n)
                 var chunked = Series._from_chunks(

@@ -115,7 +115,7 @@ def test_mojo_gpu_quantiles_grouped_filtered_sliced_and_checked_errors() raises:
     var frame = DataFrame(
         [
             Series("k", Column[Int32](keys^)),
-            Series("x", Column[Float64](values^, valid^)),
+            Series("x", Column[Float64](values^, valid)),
         ]
     )
     _ = _check(

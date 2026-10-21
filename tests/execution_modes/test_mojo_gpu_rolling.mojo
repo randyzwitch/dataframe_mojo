@@ -229,7 +229,7 @@ def _floating_cases() raises -> List[LazyFrame]:
         values.append(1e15 + Float64(row % 17))
         valid.append(row % 7 != 3)
     queries.append(
-        DataFrame([Series("x", Column[Float64](values^, valid^))])
+        DataFrame([Series("x", Column[Float64](values^, valid))])
         .lazy()
         .select_exprs(
             [

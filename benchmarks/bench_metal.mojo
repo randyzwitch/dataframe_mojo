@@ -131,7 +131,7 @@ def make_float64_frame(n: Int, variant: String) raises -> DataFrame:
             )
             valid[i] = i % 20 != 0
         values[i] = Float64(key) / 1024
-    return DataFrame([Series("x", Column[Float64](values^, valid^))])
+    return DataFrame([Series("x", Column[Float64](values^, valid))])
 
 
 def make_decimal_frame(n: Int, variant: String) raises -> DataFrame:

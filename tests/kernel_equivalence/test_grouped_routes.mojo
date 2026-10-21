@@ -212,7 +212,7 @@ def test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_a
     var frame = DataFrame(
         [
             Series("k", Column[Int64](ks^)),
-            Series("x", Column[Int64](xs^, xv^)),
+            Series("x", Column[Int64](xs^, xv)),
             Series("y", Column[Float64](ys^)),
             Series("s", Column[String](texts^)).cast("categorical"),
         ]

@@ -84,7 +84,7 @@ def _higher_moment_source(
     columns.append(
         Series("k", Column[Int32](List[Int32](length=len(values), fill=0)))
     )
-    columns.append(Series("x", Column[Float64](values^, valid^)))
+    columns.append(Series("x", Column[Float64](values^, valid)))
     return DataFrame(columns^)
 
 

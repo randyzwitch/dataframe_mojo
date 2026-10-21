@@ -76,7 +76,7 @@ def test_kept_rows_group_as_the_filtered_frame_does() raises:
     var eager = (
         source.filter(kept)
         .group_by(["flag", "g"])
-        .agg(aggregations^)
+        .agg(aggregations)
         .sort(["flag", "g"])
     )
     assert_frame(piped, eager)
