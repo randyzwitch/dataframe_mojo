@@ -81,7 +81,7 @@ pyproj = ">=3.5,<4"
 bench-suites = "python3 benchmarks/tools/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]
-duckdb = ">=1.5.5, <2"
+duckdb = ">=2.0, <3"
 geopandas = ">=1.1, <2"
 shapely = ">=2.1, <3"
 
