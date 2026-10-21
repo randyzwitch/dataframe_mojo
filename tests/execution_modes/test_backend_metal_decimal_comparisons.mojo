@@ -33,17 +33,17 @@ def decimal_series(
         var values = List[Int32]()
         for value in raw:
             values.append(Int32(value))
-        return Series(name, Column[Int32](values^, valid^)).with_dtype(
+        return Series(name, Column[Int32](values^, valid)).with_dtype(
             DataType.decimal(9, scale, 32)
         )
     if width == 64:
         var values = List[Int64]()
         for value in raw:
             values.append(Int64(value))
-        return Series(name, Column[Int64](values^, valid^)).with_dtype(
+        return Series(name, Column[Int64](values^, valid)).with_dtype(
             DataType.decimal(18, scale, 64)
         )
-    return Series(name, Column[Int128](raw^, valid^)).with_dtype(
+    return Series(name, Column[Int128](raw^, valid)).with_dtype(
         DataType.decimal(38, scale)
     )
 

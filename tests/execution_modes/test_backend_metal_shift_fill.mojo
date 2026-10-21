@@ -139,7 +139,7 @@ def test_native_metal_shift_fill_numeric_widths_offsets_limits_and_slices() rais
             keys.append(Int32(i % 5))
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
                 Series("k", Column[Int32](keys^)),
             ]
         ).slice(3, 513)

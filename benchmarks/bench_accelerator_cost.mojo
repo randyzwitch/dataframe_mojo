@@ -24,7 +24,7 @@ def frame[D: DType](rows: Int, null_percent: Int) raises -> DataFrame:
     for i in range(rows):
         values[i] = Scalar[D]((i * 37 + 11) % 17)
         valid[i] = (i * 37 + 13) % 100 >= null_percent
-    return DataFrame([Series("x", Column[Scalar[D]](values^, valid^))])
+    return DataFrame([Series("x", Column[Scalar[D]](values^, valid))])
 
 
 def project[D: DType](query: LazyFrame, adds: Int) -> LazyFrame:

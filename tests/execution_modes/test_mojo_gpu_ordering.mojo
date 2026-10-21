@@ -51,7 +51,7 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
     var frame = DataFrame(
         [
             _layout(
-                Series("x", Column[Scalar[D]](values^, valid^)).slice(3, n),
+                Series("x", Column[Scalar[D]](values^, valid)).slice(3, n),
                 chunked,
             ),
             _layout(

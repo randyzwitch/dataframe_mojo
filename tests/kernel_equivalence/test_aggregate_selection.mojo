@@ -37,7 +37,7 @@ def frame() raises -> DataFrame:
     return DataFrame(
         [
             Series("flag", Column[String](flags^)),
-            Series("g", Column[Int64](groups^, group_valid^)),
+            Series("g", Column[Int64](groups^, group_valid)),
             Series("price", Column[Float64](price^)),
             Series("amount", Column[String](cents^)).cast(
                 DataType.decimal(12, 2, 64)

@@ -132,7 +132,7 @@ def test_native_metal_rolling_moments_numeric_widths_bounds_nulls_and_anchors() 
             keys.append(Int32(i % 3))
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
                 Series("k", Column[Int32](keys^)),
             ]
         ).slice(3, 61)

@@ -120,7 +120,7 @@ def test_over_on_contiguous_partitions_matches_the_scalar_models() raises:
             if x._valid(row):
                 total += x._get(row)
                 counted += 1
-        var cells = WindowCells(values^, valid^)
+        var cells = WindowCells(values, valid)
         var expected: List[WindowCells] = [
             cumulative(cells, "sum", False),
             cumulative(cells, "sum", True),

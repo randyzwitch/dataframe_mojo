@@ -18,7 +18,7 @@ def integers() raises -> DataFrame:
     for row in range(ROWS):
         values.append(Int64((row * 7919) % 20_001) - 10_000)
         valid.append(row % 17 != 3)
-    return DataFrame([Series("i", Column[Int64](values^, valid^))])
+    return DataFrame([Series("i", Column[Int64](values^, valid))])
 
 
 def test_integer_to_decimal_casts_match_the_scaled_values() raises:

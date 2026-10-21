@@ -976,7 +976,7 @@ def decimal_series_for_rows[
         9 if width == 32 else 18 if width == 64 else 38, scale, width
     )
     return (
-        Series._wrap("d", Column[Scalar[D]](values^, valid^))
+        Series._wrap("d", Column[Scalar[D]](values^, valid))
         .with_dtype(dtype)
         .slice(offset, n)
     )
@@ -1135,7 +1135,7 @@ def test_decimal_precision_overflow_never_evaluates_null_or_inactive_slots() rai
         present[at] = False
         values[at] = Int128.MAX
         var hidden = Series._wrap(
-            "a", Column[Int128](values^, present^)
+            "a", Column[Int128](values^, present)
         ).with_dtype(dtype)
         var masked = binary[ADD](hidden, right)
         assert_true(masked.get(at).is_null())

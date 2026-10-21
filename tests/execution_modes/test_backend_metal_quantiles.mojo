@@ -121,8 +121,8 @@ def test_native_metal_quantiles_numeric_widths_nulls_groups_and_partitions() rai
             key_valid.append(i % 7 != 0)
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
-                Series("k", Column[Int32](keys^, key_valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
+                Series("k", Column[Int32](keys^, key_valid)),
             ]
         ).slice(3, 257)
         var probabilities: List[Float64] = [0, 0.12345678901234567, 0.5, 1]

@@ -80,8 +80,8 @@ def test_native_metal_cumulative_numeric_widths_null_partitions_and_reverse() ra
             key_valid.append(i % 11 != 0)
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
-                Series("k", Column[Int32](keys^, key_valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
+                Series("k", Column[Int32](keys^, key_valid)),
             ]
         ).slice(3, 513)
         for method in range(4):

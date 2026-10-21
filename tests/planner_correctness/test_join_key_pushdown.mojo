@@ -189,8 +189,8 @@ def _query(
         right_keys.append("join_day")
     var joined = left.join(
         stock,
-        left_on=left_keys^,
-        right_on=right_keys^,
+        left_on=left_keys,
+        right_on=right_keys,
         how="semi" if semi else "inner",
     )
     if semi:

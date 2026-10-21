@@ -111,8 +111,8 @@ def test_native_metal_moments_numeric_widths_ddof_empty_null_and_literal_results
             key_valid.append(i % 7 != 0)
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
-                Series("k", Column[Int32](keys^, key_valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
+                Series("k", Column[Int32](keys^, key_valid)),
             ]
         ).slice(3, 257)
         for ddof in List[Int]([0, 1, 2, 100, Int(Int64.MAX)]):

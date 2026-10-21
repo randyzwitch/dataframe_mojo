@@ -83,8 +83,8 @@ def test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_parti
             key_valid.append(i % 7 != 0)
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
-                Series("k", Column[Int32](keys^, key_valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
+                Series("k", Column[Int32](keys^, key_valid)),
             ]
         ).slice(3, 257)
         check(frame.lazy().select_exprs(expressions("x")), runtime)

@@ -52,7 +52,7 @@ def fused_dtype[D: DType]() raises:
                     )
                     valid.append(present)
                 var column = Series(
-                    "x", Column[Scalar[D]](values^, valid^)
+                    "x", Column[Scalar[D]](values^, valid)
                 ).slice(offset, n)
                 var columns: List[Series] = [column.copy()]
                 var constant = lit(Scalar[D](5))

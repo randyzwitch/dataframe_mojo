@@ -106,7 +106,7 @@ def test_native_metal_rank_all_numeric_widths_and_boolean() raises:
         for i in range(37):
             values.append(Scalar[D](i % 9))
             valid.append(i % 5 != 0)
-        var frame = DataFrame([Series("x", Column[Scalar[D]](values^, valid^))])
+        var frame = DataFrame([Series("x", Column[Scalar[D]](values^, valid))])
         for method in methods():
             var query = frame.lazy().select(
                 col("x").rank(method, descending=True)

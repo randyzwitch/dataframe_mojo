@@ -128,7 +128,7 @@ def test_native_metal_rolling_numeric_widths_windows_thresholds_and_literal_anch
             keys.append(Int32(i % 3))
         var frame = DataFrame(
             [
-                Series("x", Column[Scalar[D]](values^, valid^)),
+                Series("x", Column[Scalar[D]](values^, valid)),
                 Series("k", Column[Int32](keys^)),
             ]
         ).slice(3, 257)
