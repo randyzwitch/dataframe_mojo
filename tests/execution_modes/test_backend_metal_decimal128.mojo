@@ -47,7 +47,7 @@ def sums_fixture(n: Int, sign: Int = 1) raises -> DataFrame:
         key_valid.append(i % 13 != 3)
     return DataFrame(
         [
-            Series("k", Column[Int32](keys^, key_valid^)),
+            Series("k", Column[Int32](keys^, key_valid)),
             Series("a", Column[Int64](large^, valid)).with_dtype(
                 DataType.decimal(18, 2, 64)
             ),

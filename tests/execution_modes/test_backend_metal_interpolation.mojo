@@ -32,7 +32,7 @@ def fixture(n: Int = 33) raises -> DataFrame:
     return DataFrame(
         [
             Series("x", Column[Int64](values^, valid)),
-            Series("k", Column[Int32](keys^, key_valid^)),
+            Series("k", Column[Int32](keys^, key_valid)),
             Series("j", Column[Int32](second^)),
         ]
     )

@@ -205,7 +205,7 @@ def test_streamed_misaligned_numeric_chunks_preserve_group_validity_counts() rai
     var source = chunk_layout(
         DataFrame(
             [
-                Series("x", Column[Float32](values^, valid^)),
+                Series("x", Column[Float32](values^, valid)),
                 Series("g", Column[Int64](groups^)),
             ]
         )

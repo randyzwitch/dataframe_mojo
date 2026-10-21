@@ -25,7 +25,7 @@ def wide_frame(
             values.append(Int64.MAX - Int64(c * 64 + r))
             valid.append((c + r) % 7 != 3)
         fields.append(
-            Series(prefix + String(c), Column[Int64](values^, valid^))
+            Series(prefix + String(c), Column[Int64](values^, valid))
         )
     return DataFrame(fields^)
 

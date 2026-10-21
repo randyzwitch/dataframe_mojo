@@ -50,7 +50,7 @@ def dyadic_fixture(
     var x = Series("x", Column[Float64](values^, valid)).slice(3, n)
     if narrow:
         x = x.cast(DataType.FLOAT32)
-    var k = Series("k", Column[Int32](keys^, key_valid^)).slice(3, n)
+    var k = Series("k", Column[Int32](keys^, key_valid)).slice(3, n)
     if chunked:
         x = Series._from_chunks(
             [
