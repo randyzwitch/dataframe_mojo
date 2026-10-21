@@ -1,0 +1,859 @@
+{
+  "complete": true,
+  "workers": 108,
+  "cells": [
+    {
+      "rows": 4097,
+      "workload": "group_hash",
+      "variant": "base",
+      "baseline_ms": 11.528,
+      "candidate_ms": 8.634,
+      "candidate_cpu_ms": 0.175,
+      "speedup": 1.3351864720870976,
+      "round_speedups": [
+        1.2846420323325636,
+        1.3595492698631713,
+        1.3465716621889967
+      ],
+      "baseline_first_use_ms": 42.127,
+      "candidate_first_use_ms": 41.612,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "baseline_ms": 11.696,
+      "candidate_ms": 8.506,
+      "candidate_cpu_ms": 0.184,
+      "speedup": 1.3750293910181048,
+      "round_speedups": [
+        1.3668728843235671,
+        1.381824935000619,
+        1.4211545443543507
+      ],
+      "baseline_first_use_ms": 42.396,
+      "candidate_first_use_ms": 41.336,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "baseline_ms": 11.961,
+      "candidate_ms": 9.002,
+      "candidate_cpu_ms": 0.19,
+      "speedup": 1.3287047322817152,
+      "round_speedups": [
+        1.326797385620915,
+        1.5881147540983607,
+        1.3167107001321003
+      ],
+      "baseline_first_use_ms": 42.339,
+      "candidate_first_use_ms": 41.71,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 64615,
+          "host_result_bytes": 16787,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 64615,
+          "host_result_bytes": 16787,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_high",
+      "variant": "base",
+      "baseline_ms": 11.712,
+      "candidate_ms": 8.955,
+      "candidate_cpu_ms": 0.247,
+      "speedup": 1.3078726968174204,
+      "round_speedups": [
+        1.2182021217197097,
+        1.321150592216582,
+        1.3351525952327912
+      ],
+      "baseline_first_use_ms": 41.508,
+      "candidate_first_use_ms": 42.281,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 129076,
+          "host_result_bytes": 33536,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 129076,
+          "host_result_bytes": 33536,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_high",
+      "variant": "sorted",
+      "baseline_ms": 11.976,
+      "candidate_ms": 8.96,
+      "candidate_cpu_ms": 0.226,
+      "speedup": 1.3366071428571429,
+      "round_speedups": [
+        1.3402901785714285,
+        1.3130502618968014,
+        1.3527673599272645
+      ],
+      "baseline_first_use_ms": 42.65,
+      "candidate_first_use_ms": 42.091,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 129076,
+          "host_result_bytes": 33536,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 129076,
+          "host_result_bytes": 33536,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_high",
+      "variant": "nulls",
+      "baseline_ms": 12.441,
+      "candidate_ms": 9.306,
+      "candidate_cpu_ms": 0.276,
+      "speedup": 1.3368794326241136,
+      "round_speedups": [
+        1.3548738033072236,
+        1.359652976059741,
+        1.3321928792900675
+      ],
+      "baseline_first_use_ms": 42.835,
+      "candidate_first_use_ms": 42.317,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 26,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 129143,
+          "host_result_bytes": 33555,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 26,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 129143,
+          "host_result_bytes": 33555,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_skew",
+      "variant": "base",
+      "baseline_ms": 15.791,
+      "candidate_ms": 14.137,
+      "candidate_cpu_ms": 0.179,
+      "speedup": 1.1169979486453987,
+      "round_speedups": [
+        1.2169484331895026,
+        1.1744013089394616,
+        1.085995944906663
+      ],
+      "baseline_first_use_ms": 46.124,
+      "candidate_first_use_ms": 46.073,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 22,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 16152,
+          "host_result_bytes": 4192,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 22,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 16152,
+          "host_result_bytes": 4192,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_skew",
+      "variant": "sorted",
+      "baseline_ms": 17.542,
+      "candidate_ms": 14.442,
+      "candidate_cpu_ms": 0.22,
+      "speedup": 1.2146517102894336,
+      "round_speedups": [
+        1.200041245617653,
+        1.27593537414966,
+        1.2480958316022712
+      ],
+      "baseline_first_use_ms": 48.402,
+      "candidate_first_use_ms": 47.61,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 4097,
+      "workload": "group_skew",
+      "variant": "nulls",
+      "baseline_ms": 15.708,
+      "candidate_ms": 13.427,
+      "candidate_cpu_ms": 0.198,
+      "speedup": 1.1698815818872421,
+      "round_speedups": [
+        1.2562083585705632,
+        1.1667554608417687,
+        1.1687136393018747
+      ],
+      "baseline_first_use_ms": 46.226,
+      "candidate_first_use_ms": 46.73,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 23,
+          "peak_requested_bytes": 2604134,
+          "upload_bytes": 74182,
+          "download_bytes": 16219,
+          "host_result_bytes": 4211,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 23,
+          "peak_requested_bytes": 2866278,
+          "upload_bytes": 74182,
+          "download_bytes": 16219,
+          "host_result_bytes": 4211,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "base",
+      "baseline_ms": 62.749,
+      "candidate_ms": 57.039,
+      "candidate_cpu_ms": 4.721,
+      "speedup": 1.1001069443713951,
+      "round_speedups": [
+        1.1081666725871195,
+        1.1022132443351484,
+        1.0979108200810725
+      ],
+      "baseline_first_use_ms": 93.238,
+      "candidate_first_use_ms": 92.965,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "baseline_ms": 62.876,
+      "candidate_ms": 58.761,
+      "candidate_cpu_ms": 5.337,
+      "speedup": 1.0700294412960978,
+      "round_speedups": [
+        1.0700294412960978,
+        1.12555520022741,
+        1.0461009798584648
+      ],
+      "baseline_first_use_ms": 92.948,
+      "candidate_first_use_ms": 91.966,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "baseline_ms": 130.404,
+      "candidate_ms": 67.699,
+      "candidate_cpu_ms": 5.949,
+      "speedup": 1.9262322929437659,
+      "round_speedups": [
+        1.9406919028824303,
+        1.9262322929437659,
+        1.9013948667751084
+      ],
+      "baseline_first_use_ms": 169.321,
+      "candidate_first_use_ms": 106.698,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 25,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 64615,
+          "host_result_bytes": 16787,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 29,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 64615,
+          "host_result_bytes": 16787,
+          "synchronizations": 8,
+          "routes": {
+            "mojo_gpu_grouped_int_partials": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "base",
+      "baseline_ms": 273.572,
+      "candidate_ms": 269.575,
+      "candidate_cpu_ms": 66.509,
+      "speedup": 1.0148270425670036,
+      "round_speedups": [
+        1.014086558934935,
+        1.0189765616321695,
+        1.003447871122979
+      ],
+      "baseline_first_use_ms": 301.052,
+      "candidate_first_use_ms": 301.192,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 33,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038356,
+          "host_result_bytes": 8585216,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 33,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038356,
+          "host_result_bytes": 8585216,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "sorted",
+      "baseline_ms": 271.422,
+      "candidate_ms": 268.459,
+      "candidate_cpu_ms": 60.557,
+      "speedup": 1.011037067112669,
+      "round_speedups": [
+        1.015481018697999,
+        1.0060515050317145,
+        1.0047855206565113
+      ],
+      "baseline_first_use_ms": 298.322,
+      "candidate_first_use_ms": 301.157,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 33,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038356,
+          "host_result_bytes": 8585216,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 33,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038356,
+          "host_result_bytes": 8585216,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "nulls",
+      "baseline_ms": 371.298,
+      "candidate_ms": 369.443,
+      "candidate_cpu_ms": 64.865,
+      "speedup": 1.005021072262839,
+      "round_speedups": [
+        1.0104015638999755,
+        1.0082441305374978,
+        1.0029400388939829
+      ],
+      "baseline_first_use_ms": 399.332,
+      "candidate_first_use_ms": 400.69,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 34,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038423,
+          "host_result_bytes": 8585235,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 34,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 33038423,
+          "host_result_bytes": 8585235,
+          "synchronizations": 8,
+          "routes": {
+            "legacy": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_skew",
+      "variant": "base",
+      "baseline_ms": 911.564,
+      "candidate_ms": 185.925,
+      "candidate_cpu_ms": 8.494,
+      "speedup": 4.902858679575098,
+      "round_speedups": [
+        4.881427622232186,
+        4.862565081939229,
+        4.980143836508005
+      ],
+      "baseline_first_use_ms": 932.645,
+      "candidate_first_use_ms": 214.289,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 22,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 16152,
+          "host_result_bytes": 4192,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 26,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 16152,
+          "host_result_bytes": 4192,
+          "synchronizations": 8,
+          "routes": {
+            "mojo_gpu_grouped_int_partials": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_skew",
+      "variant": "sorted",
+      "baseline_ms": 904.498,
+      "candidate_ms": 187.233,
+      "candidate_cpu_ms": 7.845,
+      "speedup": 4.8308684900631835,
+      "round_speedups": [
+        4.785020129399504,
+        4.891595826683603,
+        4.831039400105751
+      ],
+      "baseline_first_use_ms": 928.847,
+      "candidate_first_use_ms": 216.048,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 24,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 28,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 64548,
+          "host_result_bytes": 16768,
+          "synchronizations": 8,
+          "routes": {
+            "mojo_gpu_grouped_int_partials": 3
+          }
+        }
+      }
+    },
+    {
+      "rows": 1048576,
+      "workload": "group_skew",
+      "variant": "nulls",
+      "baseline_ms": 887.588,
+      "candidate_ms": 184.542,
+      "candidate_cpu_ms": 9.929,
+      "speedup": 4.809680181205363,
+      "round_speedups": [
+        4.805770990895515,
+        4.810108268036545,
+        4.7816723065167555
+      ],
+      "baseline_first_use_ms": 902.679,
+      "candidate_first_use_ms": 213.755,
+      "profiles": {
+        "baseline": {
+          "kernel_launches": 23,
+          "peak_requested_bytes": 641106816,
+          "upload_bytes": 18874804,
+          "download_bytes": 16219,
+          "host_result_bytes": 4211,
+          "synchronizations": 7,
+          "routes": {
+            "unavailable": 3
+          }
+        },
+        "candidate": {
+          "kernel_launches": 27,
+          "peak_requested_bytes": 641368960,
+          "upload_bytes": 18874804,
+          "download_bytes": 16219,
+          "host_result_bytes": 4211,
+          "synchronizations": 8,
+          "routes": {
+            "mojo_gpu_grouped_int_partials": 3
+          }
+        }
+      }
+    }
+  ],
+  "source_results_sha256": "17a623de9c3e9bc1c4a27196cbc6a2077085a85544a0ac3eaf9efe7c078812ea",
+  "selection": {
+    "rows": [
+      4097,
+      1048576
+    ],
+    "workloads": [
+      "group_hash",
+      "group_high",
+      "group_skew"
+    ],
+    "variants": [
+      "base",
+      "sorted",
+      "nulls"
+    ],
+    "rounds": 3,
+    "reps": 3,
+    "warmups": 1,
+    "threads": 8,
+    "timeout_seconds": 300
+  },
+  "binary_receipts": {
+    "mojo": {
+      "status": "verified",
+      "schema_version": 1,
+      "built_at_utc": "2026-10-20T15:36:16.773394+00:00",
+      "binary_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-benchmark-v2/build/bench_metal",
+      "binary_sha256": "2115571fa1356aeb42f2941920c16c049b406ec2654882be8fba7d0a082281b7",
+      "build_command": [
+        "mojo",
+        "build",
+        "-O3",
+        "-I",
+        ".",
+        "benchmarks/bench_metal.mojo",
+        "-o",
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-group-schedule-benchmark-v2/build/bench_metal"
+      ],
+      "git_commit": "a61e8dd98cf4550b2f4988a6ab09139a00469388",
+      "git_status": "",
+      "engine_status": "",
+      "engine_content_sha256": "5bae65bb1f5d7fe8dac2df79a8e5a5b1767f9d069030d751eb12a0317af72247",
+      "engine_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiler_identity": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+      "build_platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+      "build_sdk": "26.5",
+      "build_xcode": "Xcode 26.6\nBuild version 17F113",
+      "compiler_executable": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/oracle/bin/mojo",
+      "compiler_executable_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+      "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+      "benchmark_source_sha256": "704598dab6810b1197074b35400839e3ca298ba1a04755cf35c8671fd3552e97",
+      "driver_source_sha256": "09bcbbb472ef308a945b4d4d33783c6b832c34cce9359ac1e749f3ac98618fc7",
+      "compile_flags": [
+        "-O3",
+        "-I",
+        "."
+      ],
+      "powerconditions": {
+        "battery": {
+          "status": "available",
+          "returncode": 0,
+          "output": "Now drawing from 'AC Power'"
+        },
+        "thermal": {
+          "status": "available",
+          "returncode": 0,
+          "output": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+        }
+      }
+    },
+    "baseline": {
+      "status": "verified",
+      "schema_version": 1,
+      "built_at_utc": "2026-10-20T14:43:46.352465+00:00",
+      "binary_path": "/Users/randyzwitch/GitHub/dataframe_mojo-metal-paired-group-intermediate-v2/build/bench_metal",
+      "binary_sha256": "ea9edee7a88d12d6e94d84fa3aafb9a6e78dad72308474d4c857c0f44a4b9185",
+      "build_command": [
+        "mojo",
+        "build",
+        "-O3",
+        "-I",
+        ".",
+        "benchmarks/bench_metal.mojo",
+        "-o",
+        "/Users/randyzwitch/GitHub/dataframe_mojo-metal-paired-group-intermediate-v2/build/bench_metal"
+      ],
+      "git_commit": "f758ce9a067cd3ddf67b0c3393f5d26d684ddeb0",
+      "git_status": "",
+      "engine_status": "",
+      "engine_content_sha256": "f10aba9f86f6e194c817bdd8d33bf4bce2ee81f4c577a696d672e9d7bb535b1f",
+      "engine_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiler_identity": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+      "build_platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+      "build_sdk": "26.5",
+      "build_xcode": "Xcode 26.6\nBuild version 17F113",
+      "compiler_executable": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/oracle/bin/mojo",
+      "compiler_executable_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+      "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+      "benchmark_source_sha256": "704598dab6810b1197074b35400839e3ca298ba1a04755cf35c8671fd3552e97",
+      "driver_source_sha256": "09bcbbb472ef308a945b4d4d33783c6b832c34cce9359ac1e749f3ac98618fc7",
+      "compile_flags": [
+        "-O3",
+        "-I",
+        "."
+      ],
+      "powerconditions": {
+        "battery": {
+          "status": "available",
+          "returncode": 0,
+          "output": "Now drawing from 'AC Power'"
+        },
+        "thermal": {
+          "status": "available",
+          "returncode": 0,
+          "output": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+        }
+      }
+    }
+  },
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "cpu": "Apple M1",
+    "physical_cores": "8",
+    "memory_bytes": "17179869184",
+    "mojo_version": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+    "dataframe_threads": 8,
+    "compile_flags": [
+      "-O3",
+      "-I",
+      "."
+    ]
+  }
+}

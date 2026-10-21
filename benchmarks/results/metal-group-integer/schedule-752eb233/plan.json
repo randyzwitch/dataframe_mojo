@@ -1,0 +1,51 @@
+{
+  "candidate_engine": "752eb23322ef9d18e7f2d6b950f733d5e0d8a340",
+  "candidate_pin": "a61e8dd98cf4550b2f4988a6ab09139a00469388",
+  "candidate_remote": "dataframe_mojo-metal-oct20-group-schedule-benchmark-v2",
+  "gate_receipt": "/tmp/metal-oct20-group-schedule-v2-receipt.json",
+  "rows": [
+    4097,
+    1048576
+  ],
+  "workloads": [
+    "group_hash",
+    "group_high",
+    "group_skew"
+  ],
+  "variants": [
+    "base",
+    "sorted",
+    "nulls"
+  ],
+  "rounds": 3,
+  "reps": 3,
+  "warmups": 1,
+  "timeout_seconds": 300,
+  "benchmark_file_sha256": {
+    "benchmarks/bench_metal.mojo": "704598dab6810b1197074b35400839e3ca298ba1a04755cf35c8671fd3552e97",
+    "benchmarks/tools/bench_metal.py": "09bcbbb472ef308a945b4d4d33783c6b832c34cce9359ac1e749f3ac98618fc7"
+  },
+  "references": [
+    {
+      "label": "frozen",
+      "remote": "dataframe_mojo-metal-group-benchmark-v2",
+      "measurement_pin": "5a07d32fd8c2e7fbcc65ae717a4949dedbe07bad",
+      "binary_sha256": "fde59b3869eeb50785cc37b8b2e92234f531d320d6cf5b5b42920bc7aa937633",
+      "engine_content_sha256": "579b19cbd598cf423107a282daccf7ecc154fdae820700d6290b91fb917f4c32"
+    },
+    {
+      "label": "intermediate",
+      "remote": "dataframe_mojo-metal-paired-group-intermediate-v2",
+      "measurement_pin": "f758ce9a067cd3ddf67b0c3393f5d26d684ddeb0",
+      "binary_sha256": "ea9edee7a88d12d6e94d84fa3aafb9a6e78dad72308474d4c857c0f44a4b9185",
+      "engine_content_sha256": "f10aba9f86f6e194c817bdd8d33bf4bce2ee81f4c577a696d672e9d7bb535b1f"
+    },
+    {
+      "label": "previous",
+      "remote": "dataframe_mojo-metal-paired-group-current",
+      "measurement_pin": "b3e231a652d5e64571a2ab416e93d037aa06afbb",
+      "binary_sha256": "8e6a646f1aa5579ba454b6795fa0c9bc6ed38c2f3e3e6869923048342bcbee44",
+      "engine_content_sha256": "11b0037108c776e23b6bb9d6dd3389510982f92f28439cf4374ebbc2c1362261"
+    }
+  ]
+}

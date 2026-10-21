@@ -1,0 +1,14 @@
+PASS context-free metadata, copied runtime identity and query budget
+PASS public typed execution, overlapping leases, poison and budget
+PASS native storage slices, chunks, nulls, lifetimes and budgets
+PASS native Float32 arithmetic, stable filters, metadata and profiles
+PASS fused sum layouts/nulls/empty/min_count
+PASS fused sum bounded partials and budgets
+PASS fused sum independent endpoints and cross-partial cancellation
+PASS fused sum checked arithmetic and filter ordering
+PASS scratch and fused pipeline cache, budgets, poison and overlap
+PASS wide integer cancellation, layouts and scalar outputs
+PASS unsigned endpoints, nulls, empty and min_count
+PASS final overflow, late row faults and distinct expressions
+PASS bounded wide state, exact budgets and scratch reuse
+PASS calibration bounds, ordered profile and analytical metadata
