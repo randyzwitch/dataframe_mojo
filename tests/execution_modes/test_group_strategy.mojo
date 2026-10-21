@@ -2,7 +2,7 @@
 # contract-group: execution.modes
 from std.math import abs
 from std.os import getenv
-from std.io import FileDescriptor
+from std.io import RawFileDescriptor
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
 from dataframe.lazy import (
@@ -276,7 +276,7 @@ def test_group_strategy_scalar_models_anchor_distinct_classes_and_median() raise
 
 def test_group_decision_density_boundaries_and_scoped_environment_restore() raises:
     var captured = StrategyTrace()
-    print("literal trace anchor", file=FileDescriptor(2))
+    print("literal trace anchor", file=RawFileDescriptor(2))
     assert_equal(captured.text(), "literal trace anchor\n")
     _ = captured^
     # Literal threshold anchors distinguish exact-sample density from a
