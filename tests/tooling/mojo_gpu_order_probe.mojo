@@ -8,6 +8,7 @@ from dataframe.accelerator.gpu.ordering import (
     order_merge,
     order_key_errors,
     order_gather,
+    merge_grid,
 )
 from tests.support.key_kernel_reference import KeyCell, expected_order
 
@@ -164,7 +165,7 @@ def _case(kind: Int, n: Int, descending: Bool, nulls_last: Bool) raises:
             UInt32(width),
             UInt32(0),
             Pointer[UInt64, ImmutAnyOrigin](unsafe_from_address=0),
-            grid_dim=blocks,
+            grid_dim=merge_grid(n, width),
             block_dim=256,
         )
         var previous = a^
@@ -233,5 +234,6 @@ def main() raises:
         _case(10, n, True, False)
     print(
         "PASS Mojo GPU stable ordering: 58 mixed-key cases, every scalar kind,"
-        " null placement, NaNs, signed zeros, subnormals, exact gathers and errors"
+        " null placement, NaNs, signed zeros, subnormals, exact gathers and"
+        " errors"
     )
