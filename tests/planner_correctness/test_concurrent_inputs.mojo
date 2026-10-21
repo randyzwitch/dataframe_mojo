@@ -25,7 +25,7 @@ def source() raises -> DataFrame:
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("v", Column[Int64](values^, valid^)),
+            Series("v", Column[Int64](values^, valid)),
             Series("s", Column[String](text^)),
         ]
     )

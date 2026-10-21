@@ -257,13 +257,13 @@ def decimal_frame(rows: Int, groups: Int) raises -> DataFrame:
         [
             keys.column("s"),
             keys.column("i"),
-            Series("d32", Column[Int32](d32^, v32^)).with_dtype(
+            Series("d32", Column[Int32](d32^, v32)).with_dtype(
                 DataType.decimal(7, 2, 32)
             ),
-            Series("d64", Column[Int64](d64^, v64^)).with_dtype(
+            Series("d64", Column[Int64](d64^, v64)).with_dtype(
                 DataType.decimal(15, 2, 64)
             ),
-            Series("d128", Column[Int128](d128^, v128^)).with_dtype(
+            Series("d128", Column[Int128](d128^, v128)).with_dtype(
                 DataType.decimal(30, 4)
             ),
             keys.column("r"),

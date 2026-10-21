@@ -236,7 +236,7 @@ def lower_terminal_implode(
             )
         producer = len(flattened._nodes) - 1
         final_columns.append(col(outputs[index].child_name))
-    flattened._nodes.append(_plan_node(SELECT, producer, exprs=final_columns^))
+    flattened._nodes.append(_plan_node(SELECT, producer, exprs=final_columns))
     var schema = schema_frame(flattened, len(flattened._nodes) - 1)
     for index in range(len(outputs)):
         if (

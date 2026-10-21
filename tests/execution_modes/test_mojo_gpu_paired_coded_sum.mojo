@@ -29,7 +29,7 @@ def coded(
     var values = List[String](capacity=len(codes))
     for row in range(len(codes)):
         values.append(labels[Int(codes[row])] if valid[row] else "")
-    var strings = StringColumn(values^, valid)
+    var strings = StringColumn(values, valid)
     strings._codes = ArcPointer(
         StringCodes(ArcPointer(codes.copy()), DataType.categorical(dictionary^))
     )

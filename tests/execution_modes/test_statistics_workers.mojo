@@ -117,8 +117,8 @@ def _matrix[D: DType]() raises:
                 pairs[target].add(x, y)
     var source = DataFrame(
         [
-            Series("x", Column[Scalar[D]](xvalues^, xv^)),
-            Series("y", Column[Scalar[D]](yvalues^, yv^)),
+            Series("x", Column[Scalar[D]](xvalues^, xv)),
+            Series("y", Column[Scalar[D]](yvalues^, yv)),
             Series("g", Column[Int64](groups^)),
         ]
     )
@@ -205,7 +205,7 @@ def test_streamed_misaligned_numeric_chunks_preserve_group_validity_counts() rai
     var source = chunk_layout(
         DataFrame(
             [
-                Series("x", Column[Float32](values^, valid^)),
+                Series("x", Column[Float32](values^, valid)),
                 Series("g", Column[Int64](groups^)),
             ]
         )

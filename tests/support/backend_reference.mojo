@@ -27,7 +27,7 @@ def backend_source(n: Int, offset: Int = 7) raises -> DataFrame:
         ids.append(UInt64(i) + (UInt64(1) << 63))
     return DataFrame(
         [
-            Series("value", Column[Int64](values^, valid^)),
+            Series("value", Column[Int64](values^, valid)),
             Series("id", Column[UInt64](ids^)),
         ]
     ).slice(offset, n)

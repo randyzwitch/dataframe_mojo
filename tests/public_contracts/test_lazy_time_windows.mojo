@@ -23,7 +23,7 @@ def _source() raises -> DataFrame:
         [
             _times("t", [0, 0, HOUR, 2 * HOUR, 3 * HOUR, 5 * HOUR]),
             Series("g", Column[Int64]([0, 1, 0, 1, 0, 1])),
-            Series("x", Column[Int64](x^, valid^)),
+            Series("x", Column[Int64](x^, valid)),
             Series("unused", Column[Int64]([9, 9, 9, 9, 9, 9])),
         ]
     )
@@ -137,7 +137,7 @@ def test_lazy_group_by_dynamic_by_keys_and_nulls() raises:
     var keys: List[Int64] = [0, 0, 0, 0, 0, 0]
     var key_valid: List[Bool] = [False, True, False, True, False, True]
     var nullable = source.with_column(
-        Series("g", Column[Int64](keys^, key_valid^))
+        Series("g", Column[Int64](keys^, key_valid))
     )
     _assert_collects(
         nullable.lazy()
@@ -277,7 +277,7 @@ def test_lazy_time_windows_empty_input_and_errors() raises:
     var nulls = (
         _source()
         .with_column(
-            Series("t", Column[Int64](stamps^, present^)).with_dtype(
+            Series("t", Column[Int64](stamps^, present)).with_dtype(
                 DataType.datetime("ms")
             )
         )

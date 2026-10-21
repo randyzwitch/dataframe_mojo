@@ -32,7 +32,7 @@ def columns(rows: Int) raises -> Tuple[Series, Series, List[Bool]]:
         else:
             builder.append_null()
     return (
-        Series("s", StringColumn(values^, valid.copy())),
+        Series("s", StringColumn(values, valid.copy())),
         Series("s", StringColumn(builder^.finish())),
         valid^,
     )

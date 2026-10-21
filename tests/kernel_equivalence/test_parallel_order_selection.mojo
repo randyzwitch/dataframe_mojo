@@ -50,7 +50,7 @@ def topk_frame(n: Int, groups: Int, offset: Int = 7) raises -> DataFrame:
         keys.append(Int64(row % groups))
         key_valid.append(row % 97 != 3)
         ids.append(Int64(row - offset))
-    var value = Series("value", Column[Float64](values^, valid^)).slice(
+    var value = Series("value", Column[Float64](values^, valid)).slice(
         offset, n
     )
     if n > 65536:
@@ -63,7 +63,7 @@ def topk_frame(n: Int, groups: Int, offset: Int = 7) raises -> DataFrame:
         )
     return DataFrame(
         [
-            Series("group", Column[Int64](keys^, key_valid^)).slice(offset, n),
+            Series("group", Column[Int64](keys^, key_valid)).slice(offset, n),
             value^,
             Series("row", Column[Int64](ids^)).slice(offset, n),
         ]

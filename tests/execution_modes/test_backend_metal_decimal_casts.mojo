@@ -59,7 +59,7 @@ def fixture(n: Int, scale: Int) raises -> DataFrame:
             Series("large", Column[Int64](large^, valid)).with_dtype(
                 DataType.decimal(18, min(scale, 18), 64)
             ),
-            Series("small", Column[Int32](small^, valid^)).with_dtype(
+            Series("small", Column[Int32](small^, valid)).with_dtype(
                 DataType.decimal(9, min(scale, 9), 32)
             ),
             Series("k", Column[Int64](keys^)),

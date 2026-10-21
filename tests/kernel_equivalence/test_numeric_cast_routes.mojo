@@ -61,7 +61,7 @@ def test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_ty
                         )
                         valid.append(present)
                     var source = Series(
-                        "number", Column[Scalar[S]](values^, valid^)
+                        "number", Column[Scalar[S]](values^, valid)
                     ).slice(offset, n)
                     comptime for target_index in range(len(CAST_NUMBERS)):
                         comptime T = CAST_NUMBERS[target_index]
@@ -93,7 +93,7 @@ def test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_ty
                             for i in range(n):
                                 observed.append(i % 4 != 1)
                             assert_small_cast[T](
-                                cast_series(source, target, True, 0, observed^),
+                                cast_series(source, target, True, 0, observed),
                                 n,
                                 offset,
                                 mode,
@@ -110,7 +110,7 @@ def test_bool_cast_exact_routes_keep_unaligned_validity_and_literal_zero_one_val
                 for row in range(n + offset):
                     flags.append(row % 3 == 0 or not cast_present(row, mode))
                     valid.append(cast_present(row, mode))
-                var source = Series("flag", BoolColumn(flags^, valid^)).slice(
+                var source = Series("flag", BoolColumn(flags, valid)).slice(
                     offset, n
                 )
                 comptime for k in range(len(CAST_NUMBERS)):
@@ -129,7 +129,7 @@ def test_bool_cast_exact_routes_keep_unaligned_validity_and_literal_zero_one_val
                     )
                     var observed = List[Bool](length=n, fill=True)
                     assert_small_cast[T](
-                        cast_series(source, DataType.of(T), True, 0, observed^),
+                        cast_series(source, DataType.of(T), True, 0, observed),
                         n,
                         offset,
                         mode,
@@ -165,7 +165,7 @@ def test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and
                         values.append(raw[i])
                         valid.append(observed)
                     var source = Series(
-                        "bounded", Column[Scalar[S]](values^, valid^)
+                        "bounded", Column[Scalar[S]](values^, valid)
                     ).slice(offset, 4)
                     var exact = _cast_exact(source, DataType.of(T))
                     assert_equal(Bool(exact), S != T and fits)

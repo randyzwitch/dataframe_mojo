@@ -116,8 +116,8 @@ struct ScratchPool(Movable):
             ):
                 return
             comptime if dtype == DType.int64:
-                self.int64_buffers.append(rebind[_Int64Buffer](buffer^))
+                self.int64_buffers.append(rebind[_Int64Buffer](buffer))
             else:
-                self.uint32_buffers.append(rebind[_UInt32Buffer](buffer^))
+                self.uint32_buffers.append(rebind[_UInt32Buffer](buffer))
             self.idle_bytes += bytes
             self.idle_entries += 1

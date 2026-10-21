@@ -239,7 +239,7 @@ def _narrow_projection_inputs(
                 child,
                 exprs=exprs,
                 code_domain=query._nodes[child].code_domain,
-                text_fields=fields^,
+                text_fields=fields,
             )
         )
         if right_sides[k]:

@@ -796,12 +796,12 @@ def _output(
             values.append(
                 value.cast[DType.int128]() if valid[row] else Int128(0)
             )
-        return Series(name, Column[Int128](values^, valid^)).with_dtype(dtype)
+        return Series(name, Column[Int128](values^, valid)).with_dtype(dtype)
     if dtype == DataType.BOOL:
         var values = List[Bool](capacity=count)
         for row in range(count):
             values.append(valid[row] and words[base + row] != 0)
-        return Series(name, Column[Bool](values^, valid^))
+        return Series(name, Column[Bool](values^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype.physical() == DataType.of(D):
@@ -816,7 +816,7 @@ def _output(
                     )
                 else:
                     values.append(value.cast[D]())
-            return Series(name, Column[Scalar[D]](values^, valid^)).with_dtype(
+            return Series(name, Column[Scalar[D]](values^, valid)).with_dtype(
                 dtype
             )
     raise Error("Mojo GPU unsupported output storage")
@@ -1384,7 +1384,7 @@ def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
                 codes.append(UInt32(original - 1) if present else UInt32(0))
                 valid.append(present)
             output = Series(
-                field.name(), Column[UInt32](codes^, valid^)
+                field.name(), Column[UInt32](codes^, valid)
             ).with_dtype(owner[].dtype)
             if table.categories[column].value().string_codes:
                 # A source coded String keeps its own codes when transported.

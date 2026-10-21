@@ -125,7 +125,7 @@ def float_mode_source(single: Bool) raises -> Series:
         var values = List[Float32]()
         for word in words:
             values.append(bitcast[DType.float32](word))
-        return Series("x", Column[Float32](values^, valid^))
+        return Series("x", Column[Float32](values^, valid))
     var words: List[UInt64] = [
         0x8000000000000000,
         0,
@@ -141,7 +141,7 @@ def float_mode_source(single: Bool) raises -> Series:
     var values = List[Float64]()
     for word in words:
         values.append(bitcast[DType.float64](word))
-    return Series("x", Column[Float64](values^, valid^))
+    return Series("x", Column[Float64](values^, valid))
 
 
 def assert_float_mode_bits(actual: DataFrame, single: Bool) raises:
