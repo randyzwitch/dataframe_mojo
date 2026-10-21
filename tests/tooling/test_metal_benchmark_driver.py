@@ -145,6 +145,7 @@ class MetalBenchmarkDriver(unittest.TestCase):
             (),
             {
                 "timeout_seconds": 90,
+                "warmups": 3,
                 "binary": Path("build/current"),
                 "baseline_binary": Path("build/baseline"),
                 "output": Path("build/run.json"),
@@ -154,6 +155,7 @@ class MetalBenchmarkDriver(unittest.TestCase):
         record = driver.invocation_metadata(args, ["bench_metal.py", "--skip-build"])
         self.assertEqual(record["argv"], ["bench_metal.py", "--skip-build"])
         self.assertEqual(record["timeout_seconds"], 90)
+        self.assertEqual(record["warmups"], 3)
         self.assertTrue(record["skip_build"])
         self.assertEqual(record["binary"], str(args.binary.resolve()))
         self.assertEqual(
@@ -169,6 +171,69 @@ class MetalBenchmarkDriver(unittest.TestCase):
             "join_fanout",
         ):
             self.assertIn(workload, driver.WORKLOADS)
+
+    def test_native64_sum_cases_are_optional(self):
+        self.assertEqual(
+            driver.OPTIONAL_NATIVE64_SUM_WORKLOADS,
+            [
+                "int64_sum",
+                "uint64_sum",
+                "int64_affine_sum",
+                "int64_wide_sum16",
+            ],
+        )
+        self.assertFalse(
+            set(driver.OPTIONAL_NATIVE64_SUM_WORKLOADS)
+            & set(driver.DEFAULT_WORKLOADS)
+        )
+        self.assertEqual(driver.DEFAULT_WORKLOADS[-1], "filter_unused")
+        self.assertEqual(
+            driver.NATIVE64_SUM_CASES["uint64_sum"]["input_dtype"], "UInt64"
+        )
+
+    def test_paired_build_receipts_require_fresh_matching_harness_identity(self):
+        common = {
+            "status": "verified",
+            "benchmark_source_sha256": "a" * 64,
+            "driver_source_sha256": "b" * 64,
+            "pixi_lock_sha256": "c" * 64,
+            "compile_flags": ["-O3", "-I", "."],
+            "compiler_identity": "Mojo 0.0",
+            "compiler_executable_sha256": "d" * 64,
+            "build_platform": "macOS arm64",
+            "build_sdk": "15.0",
+            "build_xcode": "Xcode 16",
+        }
+        baseline = {
+            **common,
+            "git_commit": "baseline",
+            "engine_content_sha256": "d" * 64,
+        }
+        candidate = {
+            **common,
+            "git_commit": "candidate",
+            "engine_content_sha256": "e" * 64,
+        }
+        driver.validate_paired_build_receipts(baseline, candidate)
+        with self.assertRaisesRegex(ValueError, "verified fresh build receipt"):
+            driver.validate_paired_build_receipts(
+                {**baseline, "status": "unknown"}, candidate
+            )
+        with self.assertRaisesRegex(ValueError, "benchmark source"):
+            driver.validate_paired_build_receipts(
+                baseline,
+                {**candidate, "benchmark_source_sha256": "f" * 64},
+            )
+        with self.assertRaisesRegex(ValueError, "compiler"):
+            driver.validate_paired_build_receipts(
+                baseline,
+                {**candidate, "compiler_identity": "Mojo 1.0"},
+            )
+        with self.assertRaisesRegex(ValueError, "lacks paired identity fields"):
+            driver.validate_paired_build_receipts(
+                {k: v for k, v in baseline.items() if k != "driver_source_sha256"},
+                candidate,
+            )
 
     def test_powerconditions_preserves_unavailable_commands(self):
         with patch.object(

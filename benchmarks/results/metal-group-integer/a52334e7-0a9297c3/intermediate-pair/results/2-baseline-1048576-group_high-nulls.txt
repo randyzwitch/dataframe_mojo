@@ -1,0 +1,33 @@
+FIRST 72858000 405688000
+WORKERS 8
+OUTPUT_ROWS 524289
+SAMPLE 0 67570000 371197000
+SAMPLE 1 77982000 371647000
+SAMPLE 2 63932000 373682000
+PROFILE_I profile_regions 1
+PROFILE_I region_0_upload_bytes 18874804
+PROFILE_I upload_bytes 18874804
+PROFILE_S upload_bytes_basis single_region
+PROFILE_I region_0_download_bytes 33038423
+PROFILE_I download_bytes 33038423
+PROFILE_S download_bytes_basis single_region
+PROFILE_I region_0_host_result_bytes 8585235
+PROFILE_I host_result_bytes 8585235
+PROFILE_S host_result_bytes_basis single_region
+PROFILE_I region_0_peak_requested_bytes 641106816
+PROFILE_I peak_requested_bytes 641106816
+PROFILE_S peak_requested_bytes_basis single_region
+PROFILE_I region_0_kernel_launches 34
+PROFILE_I kernel_launches 34
+PROFILE_S kernel_launches_basis single_region
+PROFILE_I region_0_synchronizations 7
+PROFILE_I synchronizations 7
+PROFILE_S synchronizations_basis single_region
+PROFILE_F region_0_wall_ms 214.307
+PROFILE_F query_wall_ms 371.088
+PROFILE_S region_0_algorithm mojo_gpu_grouped_rows
+PROFILE_S region_0_grouped_int_algorithm unavailable
+PROFILE_S runtime_implementation mojo
+PROFILE_S algorithm mojo_gpu_grouped_rows
+BUILD_ID development-source-no-calibration
+VALIDATED True

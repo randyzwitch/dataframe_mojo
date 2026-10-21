@@ -1,0 +1,3 @@
+# Preserve exact diagnostic output.
+validation/*.log -whitespace
+buildlogs/*.log -whitespace

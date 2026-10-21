@@ -1,0 +1,12 @@
+{
+  "baseline": {
+    "measurement_revision": "ee063de049f9fcbfd95184c9b310304e1ce1fe56",
+    "engine_revision": "a52334e7",
+    "engine_content_sha256": "579b19cbd598cf423107a282daccf7ecc154fdae820700d6290b91fb917f4c32"
+  },
+  "candidate": {
+    "measurement_revision": "e90323de8965bb775abbdb91d336bc5fda530d89",
+    "engine_revision": "004d73e75ab4b029fd8e20387759e415dbc85c62",
+    "engine_content_sha256": "0e6bfbf67197885a9abeffc8f12c275a8d7f39825cf4110a08a788af77581025"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "baseline_engine": "a52334e7",
+  "baseline_pin": "ee063de049f9fcbfd95184c9b310304e1ce1fe56",
+  "candidate_engine": "004d73e75ab4b029fd8e20387759e415dbc85c62",
+  "candidate_pin": "e90323de8965bb775abbdb91d336bc5fda530d89",
+  "baseline_remote": "dataframe_mojo-metal-float32-benchmark",
+  "candidate_remote": "dataframe_mojo-metal-paired-float32",
+  "gate_label": "float32-cache",
+  "gate_remote": "dataframe_mojo-metal-oct20-float32-cache",
+  "gate_log": "/tmp/metal-float32-cache-oct20-queue.log",
+  "rows": [
+    4097,
+    1048576
+  ],
+  "workloads": [
+    "float32_affine_sum",
+    "filtered_float32_affine_sum"
+  ],
+  "variants": [
+    "base",
+    "sorted",
+    "nulls"
+  ],
+  "rounds": 3,
+  "reps": 3,
+  "warmups": 1,
+  "timeout_seconds": 300,
+  "benchmark_file_sha256": {
+    "benchmarks/bench_metal.mojo": "cd8db3c71a6d4acb08bc71f1a8d14bedf64dcdbb7ea9697c152b3a4a0d2ad360",
+    "benchmarks/tools/bench_metal.py": "81d2f14b5d59cc03a40d25e75899ce2f30091eef3f1ceba141fd9216184dc5b0"
+  }
+}

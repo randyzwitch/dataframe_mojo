@@ -3,7 +3,7 @@
 Prints `available` or `absent` on stdout, and on stderr why: the accelerator
 this program was compiled for (none unless the compiler detected or was told
 one), and the devices found."""
-from std.io import FileDescriptor
+from std.io import RawFileDescriptor
 from std.sys import CompilationTarget
 from std.sys.info import _accelerator_arch
 from dataframe.accelerator.gpu.target import compiled_for_metal
@@ -11,7 +11,7 @@ from dataframe.metal import MetalRuntime, metal_installed
 
 
 def main() raises:
-    var why = FileDescriptor(2)
+    var why = RawFileDescriptor(2)
     print(
         "metal probe: accelerator '", _accelerator_arch(), "'", sep="", file=why
     )

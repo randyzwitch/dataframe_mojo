@@ -32,9 +32,9 @@ because that would change which rows those operators see.
 """
 from std.os import getenv
 from std.time import perf_counter_ns
-from std.io import FileDescriptor
+from std.io import RawFileDescriptor
 from std.collections import Dict, Optional
-from std.memory import ArcPointer
+from std.memory import ArcPointer, bitcast
 from .io.csv_reader import _CsvBatches, _DecodeJob
 from .io.csv_types import _map_file
 from .io.parquet import _ParquetBatches
@@ -134,6 +134,8 @@ from .frame import (
     _reduce_column,
     _row_local,
     _stream_reductions,
+    group_by_workers,
+    range_states,
     table_supported,
 )
 from .io.parquet import (
@@ -3153,7 +3155,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         parts.append(cell.string())
                 print(
                     "dataframe-operator:\t" + String("\t").join(parts),
-                    file=FileDescriptor(2),
+                    file=RawFileDescriptor(2),
                 )
             return profiled[0].copy()
         var plan = self._optimized() if optimize else self.copy()
@@ -3294,6 +3296,51 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return -1
             picked.append(source.column(name).take(rows))
         return encode_rows(picked, nulls_equal=True).count()
+
+    def _batch_states_win(
+        self, keys: List[String], frame: Int, batch_size: Int
+    ) raises -> Bool:
+        """Whether an unfiltered grouped reduction over in-memory `frame`
+        runs faster as batches, each reduced into a state of its own, than
+        through the eager group-by (#608). Each route's own tests decide,
+        not a count of groups:
+        - The eager group-by keeps private per-worker states when its keys
+          have few values (`range_states`); batch states are the same work
+          plus batching and a merge per batch.
+        - Otherwise it hash-partitions every row, which costs more than
+          batch states while a batch holds few of its rows' groups. A
+          batch that shows many (`_batch_shows_many_groups`, the stream's
+          own test) makes the stream collect its batches into that same
+          partitioned group-by, which then also pays the copy.
+        - The stream reduces one batch per worker, so with fewer batches
+          than the eager group-by has workers (or one worker) it leaves
+          threads idle.
+        Measured on generated int, string and two-key frames of 100K to
+        10M rows, 50 to 5,000 groups, uniform and skewed, one and six
+        aggregates, 1 and 8 threads: batch states won only where all three
+        hold (int and string keys of about 190 to 1,000 groups at 1M and
+        10M rows, 8 threads: 0.4-0.85 of the eager time); everywhere else
+        the eager route was as fast or faster (up to 2.6 times)."""
+        ref source = self._frames[frame]
+        var height = source.height()
+        var columns = List[Series](capacity=len(keys))
+        for name in keys:
+            if name not in source.columns():
+                # Made by an earlier step: ClickBench q18's (UserID,
+                # minute, SearchPhrase) took 354 ms eagerly, 1,645 batched.
+                return False
+            columns.append(source.column(name).copy())
+        var workers = group_by_workers(height)
+        if workers <= 1 or (height + batch_size - 1) // batch_size < workers:
+            return False
+        if range_states(columns) or _batch_shows_many_groups(
+            source.slice(0, min(height, batch_size)),
+            keys,
+            _stream_split_groups(),
+        ):
+            return False
+        trace_path("stream.batch_states")
+        return True
 
     def _joins_below(self, index: Int) -> Bool:
         """Whether a join sits under `index` along its left inputs, through
@@ -4412,15 +4459,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if _counts_distinct(expressions):
                 eager = True
             elif len(keys) > 0:
-                if _filters(operations):
-                    eager = True
-                else:
-                    var frame = self._nodes[cursor].offset
-                    var sampled = self._sampled_groups(keys, frame)
-                    var sample = min(self._frames[frame].height(), 4096)
-                    eager = (
-                        sampled < 0 or sampled <= 192 or 2 * sampled > sample
-                    )
+                eager = _filters(operations) or not self._batch_states_win(
+                    keys, self._nodes[cursor].offset, batch_size
+                )
         if eager:
             # Over a frame already in memory, filtered or projected at most,
             # batches save no memory, and most grouped aggregations run
@@ -4432,18 +4473,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             #   where every batch state holds and merges its groups again:
             #   non-empty SearchPhrase counts take 66 ms against 358
             #   streamed, and q39's five keys 99 against 371.
-            # - Keys made by an earlier step, which the sample cannot read:
-            #   q18's (UserID, minute, SearchPhrase) take 354 ms against
-            #   1,645 streamed.
-            # - Few groups (at most 192 in the sample) take 33 ms against
-            #   64; ResolutionWidth (134 in the sample) 35 against 67.
-            # - Many groups (more than half the sample) are encoded once by
-            #   hash partition, where every batch state would hold most of
-            #   them: on 1M rows URL takes 40 ms against 63 streamed.
-            # Unfiltered keys in between keep streaming, which is faster
-            # there: RegionID (364 in the sample) takes 75 ms against 99,
-            # and SearchPhrase (574, one dominant value) 353 against 375,
-            # or on 1M rows (212) 8 against 13.
+            # - Unfiltered, the eager group-by wins unless its keys would be
+            #   hash-partitioned while the batches keep states of their own
+            #   (`_batch_states_win`).
             # Ungrouped reductions stream, as do plans with a join, whose
             # batched probes beat the eager join.
             return None
@@ -5484,12 +5516,22 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         plan._unique_as_aggregate()
         plan._split_filters()
         plan._filter_shared_subplans()
-        plan._push_predicates()
-        plan._merge_filters()
-        plan._push_slices()
-        plan._fuse_top_k()
-        plan._eliminate_common_subexpressions()
-        plan._push_projections()
+        # From predicate to projection pushdown, a node keeps the schema it
+        # derived across renumbering and the passes between, as Polars' IR
+        # nodes keep theirs: those passes change no node's output, and
+        # forget the nodes they rewrite.
+        plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        try:
+            plan._push_predicates()
+            plan._merge_filters()
+            plan._push_slices()
+            plan._fuse_top_k()
+            plan._eliminate_common_subexpressions()
+            plan._push_projections()
+        except e:
+            plan._schema_memo = None
+            raise e^
+        plan._schema_memo = None
         return plan^
 
     def _eliminate_common_subexpressions(mut self) raises:
@@ -5552,6 +5594,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 _plan_node(WITH_COLUMNS, self._nodes[i].left, exprs=shared)
             )
             self._nodes[i].left = len(self._nodes) - 1
+            self._forget_schema(i)
             changed = True
         if changed:
             self._reorder()
@@ -5606,8 +5649,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         on the 11.7M-row joins below their date filters, and holding
         those doubled the query; Polars likewise drops a cache whose
         consumers filter differently)."""
-        var computed = self._subtree_signatures()
-        ref signatures = computed[0]
+        var computed = self._subplan_classes()
+        ref classes = computed[0]
         ref sizes = computed[1]
         ref reducing = computed[2]
         # Which nodes hold a join, and each node's parent.
@@ -5637,17 +5680,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if covered[i] or _pinned(self._nodes[i]):
                     continue
                 if not reducing[i] and not self._read_whole(
-                    i, signatures, parents, joining, covered
+                    i, classes, parents, joining, covered
                 ):
                     continue
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
                 for j in range(len(self._nodes)):
-                    if (
-                        j != i
-                        and not covered[j]
-                        and signatures[j] == signatures[i]
-                    ):
+                    if j != i and not covered[j] and classes[j] == classes[i]:
                         best = i
                         break
             if best < 0:
@@ -5673,7 +5712,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if origin > 0:
                 self._origin_rows[slot] = origin
             for j in range(len(self._nodes)):
-                if not covered[j] and signatures[j] == signatures[best]:
+                if not covered[j] and classes[j] == classes[best]:
                     self._cover(j, covered)
                     self._nodes[j] = _plan_node(SCAN_FRAME, offset=slot)
             shared = True
@@ -5684,7 +5723,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _read_whole(
         self,
         index: Int,
-        signatures: List[String],
+        classes: List[Int],
         parents: List[Int],
         joining: List[Bool],
         covered: List[Bool],
@@ -5700,7 +5739,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return False
         var copies = 0
         for j in range(len(self._nodes)):
-            if covered[j] or signatures[j] != signatures[index]:
+            if covered[j] or classes[j] != classes[index]:
                 continue
             var parent = parents[j]
             if parent < 0:
@@ -5730,52 +5769,94 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if child >= 0:
                     stack.append(child)
 
-    def _signature(
-        self, index: Int, below: List[String], canonical: List[Int]
-    ) -> String:
-        """What a node computes, as text: its kind and every setting, its
-        expressions node by node, and its inputs' signatures (already in
-        `below`, since children come before parents). A frame scan names
-        its slot through `canonical`."""
+    def _node_hash(
+        self, index: Int, classes: List[Int], canonical: List[Int]
+    ) -> UInt64:
+        """A hash of what node `index` computes: its kind and every setting,
+        its expressions node by node, and its inputs' classes (already in
+        `classes`, since children come before parents). Nodes that
+        `_same_node` calls equal hash alike; a collision only costs a
+        comparison."""
         ref node = self._nodes[index]
-        var text = String(node.kind)
-        # Free text (names, labels) goes in with its length, so no name
-        # can read as a delimiter: columns "a, b" and "a", "b" differ.
-        text += "|" + _field_list(node.names) + "|" + _field_list(node.names2)
+        var h = _mix(UInt64(0xCBF29CE484222325), UInt64(node.kind))
+        h = _mix_list(h, node.names)
+        h = _mix_list(h, node.names2)
         for flag in node.flags:
-            text += "1" if flag else "0"
+            h = _mix(h, UInt64(2) if flag else UInt64(1))
+        h = _mix_text(h, node.text)
+        h = _mix(h, UInt64(self._canonical_slot(index, canonical)))
+        h = _mix(h, UInt64(node.length))
+        h = _mix(h, UInt64(1) if node.maintain_order else UInt64(0))
+        h = _mix(h, UInt64(node.how))
+        h = _mix_list(h, node.right_keys)
+        h = _mix(h, UInt64(1) if node.coalesce else UInt64(0))
+        h = _mix_text(h, node.source_failure)
+        h = _mix(h, UInt64(len(node.window_keys)))
+        for e in node.exprs:
+            h = _mix_expr(h, e)
+        h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
+        h = _mix(h, UInt64(classes[node.right] + 1) if node.right >= 0 else 0)
+        return h
+
+    def _canonical_slot(self, index: Int, canonical: List[Int]) -> Int:
+        """A node's `offset`, except that a frame scan names the first slot
+        holding the same buffers (`canonical`)."""
+        ref node = self._nodes[index]
         var slot = node.offset
         if node.kind == SCAN_FRAME and slot >= 0 and slot < len(canonical):
             slot = canonical[slot]
-        text += "|" + _field(node.text) + "|" + String(slot)
-        text += "|" + String(node.length)
-        text += "|" + ("o" if node.maintain_order else "u")
-        text += "|" + String(node.how) + "|" + _field_list(node.right_keys)
-        text += "|" + ("c" if node.coalesce else "n")
-        if node.source_failure:
-            text += "|source-error" + _field(node.source_failure)
-        if node.asof_tolerance:
-            text += "|" + String(node.asof_tolerance.value())
-        for key in node.window_keys:
-            text += "|wk" + _field(key.name) + _field(key.dtype.name())
-            text += "s" if key.string_hash else "i"
-            for value in key.values[]:
-                text += ":" + String(value)
-        for e in node.exprs:
-            text += "|" + _expr_signature(e)
-        # Children by a hash of their text, so a signature stays short
-        # however deep the plan.
-        text += (
-            "|("
-            + (String(_text_hash(below[node.left])) if node.left >= 0 else "")
-            + ")"
-        )
-        text += (
-            "("
-            + (String(_text_hash(below[node.right])) if node.right >= 0 else "")
-            + ")"
-        )
-        return text^
+        return slot
+
+    def _same_node(
+        self, a: Int, b: Int, classes: List[Int], canonical: List[Int]
+    ) -> Bool:
+        """Whether nodes `a` and `b` compute the same thing: every setting
+        and expression equal, and inputs of the same classes (Polars'
+        `is_ir_equal_shallow` with equal child ids)."""
+        ref x = self._nodes[a]
+        ref y = self._nodes[b]
+        if (
+            x.kind != y.kind
+            or x.names != y.names
+            or x.names2 != y.names2
+            or x.flags != y.flags
+            or x.text != y.text
+            or self._canonical_slot(a, canonical)
+            != self._canonical_slot(b, canonical)
+            or x.length != y.length
+            or x.maintain_order != y.maintain_order
+            or x.how != y.how
+            or x.right_keys != y.right_keys
+            or x.coalesce != y.coalesce
+            or x.source_failure != y.source_failure
+            or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
+            or len(x.window_keys) != len(y.window_keys)
+            or len(x.exprs) != len(y.exprs)
+        ):
+            return False
+        for child in [(x.left, y.left), (x.right, y.right)]:
+            var p = child[0]
+            var q = child[1]
+            if (p < 0) != (q < 0) or (p >= 0 and classes[p] != classes[q]):
+                return False
+        if x.asof_tolerance and String(x.asof_tolerance.value()) != String(
+            y.asof_tolerance.value()
+        ):
+            return False
+        for k in range(len(x.window_keys)):
+            ref u = x.window_keys[k]
+            ref v = y.window_keys[k]
+            if (
+                u.name != v.name
+                or u.dtype.name() != v.dtype.name()
+                or u.string_hash != v.string_hash
+                or u.values[] != v.values[]
+            ):
+                return False
+        for k in range(len(x.exprs)):
+            if not _same_expr(x.exprs[k], y.exprs[k]):
+                return False
+        return True
 
     def _parents(self) -> List[Int]:
         var parents = List[Int](length=len(self._nodes), fill=-1)
@@ -5799,7 +5880,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         dropped again."""
         var count = len(self._nodes)
         var changed = False
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         for i in range(count):
             ref node = self._nodes[i]
             if node.kind != UNIQUE or node.left < 0:
@@ -5838,18 +5919,117 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 SELECT, len(self._nodes) - 1, exprs=shown
             )
             changed = True
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
         if changed:
             self._reorder()
 
-    def _subtree_signatures(
+    def _repeats_a_scan(self) -> Bool:
+        """Whether two scan nodes read the same source: the same file, or
+        frames holding the same buffers (plans joined carry their own copies
+        of a frame they both scan, in separate slots). Without one no subtree
+        can be written twice."""
+        var seen = List[Int]()
+        var files = List[String]()
+        for node in self._nodes:
+            if node.kind == SCAN_FRAME:
+                for f in seen:
+                    if f == node.offset or self._frames[f]._shares_buffers_with(
+                        self._frames[node.offset]
+                    ):
+                        return True
+                seen.append(node.offset)
+            elif node.kind == SCAN_CSV or node.kind == SCAN_PARQUET:
+                if node.text in files:
+                    return True
+                files.append(node.text)
+        return False
+
+    def _projection_visits(self) -> Tuple[List[Int], List[Int]]:
+        """The order projection pushdown visits nodes in, and for each node
+        the first node of the repeated subplan it is a copy of (-1 if
+        none). A subtree written in several places (a CTE read twice) is
+        one cached subplan to Polars (`comm_subplan_elim` puts an
+        `IR::Cache` on the topmost repeated node), and its projection
+        pushdown merges what every reader of the cache needs before
+        pushing down into it once. Here each copy is pruned to that union,
+        so the copies stay alike and `_share_subplans` still runs them
+        once: a node comes after every node above it, by height, and the
+        copies of one subplan, all of one height, come after all their
+        readers. Pruned per reader, TPC-DS q4's year totals ran six
+        times."""
+        var count = len(self._nodes)
+        var order = List[Int](capacity=count)
+        var copy_of = List[Int](length=count, fill=-1)
+        if not self._repeats_a_scan():
+            for reverse in range(count):
+                order.append(count - 1 - reverse)
+            return (order^, copy_of^)
+        var classes = self._subplan_classes()[0].copy()
+        var hits = Dict[Int, Int]()
+        for c in classes:
+            hits[c] = hits.get(c, 0) + 1
+        var parents = self._parents()
+        # The topmost repeated nodes: more copies than the node above
+        # them, and under no other such node (Polars caches the topmost
+        # and leaves the subplan below it whole).
+        var under = List[Bool](length=count, fill=False)
+        var first = Dict[Int, Int]()
+        var members = List[Int](length=count, fill=0)
+        for reverse in range(count):
+            var i = count - 1 - reverse
+            var parent = parents[i]
+            if parent >= 0:
+                under[i] = under[parent] or copy_of[parent] >= 0
+            var repeats = hits.get(classes[i], 0)
+            # A source read in two places is not run twice: each read
+            # keeps only its own columns.
+            if under[i] or repeats < 2 or _is_scan(self._nodes[i].kind):
+                continue
+            if parent >= 0 and hits.get(classes[parent], 0) >= repeats:
+                continue
+            var head = first.get(classes[i], i)
+            first[classes[i]] = head
+            copy_of[i] = head
+            members[head] += 1
+        for i in range(count):
+            if copy_of[i] >= 0 and members[copy_of[i]] < 2:
+                copy_of[i] = -1
+        # By height, highest first; within a height, by descending index
+        # as children precede their parents.
+        var heights = List[Int](capacity=count)
+        var tallest = 0
+        for i in range(count):
+            ref node = self._nodes[i]
+            var height = 0
+            if node.left >= 0:
+                height = heights[node.left] + 1
+            if node.right >= 0:
+                height = max(height, heights[node.right] + 1)
+            heights.append(height)
+            tallest = max(tallest, height)
+        var levels = List[List[Int]](length=tallest + 1, fill=List[Int]())
+        for reverse in range(count):
+            var i = count - 1 - reverse
+            levels[heights[i]].append(i)
+        for reverse in range(tallest + 1):
+            for i in levels[tallest - reverse]:
+                order.append(i)
+        return (order^, copy_of^)
+
+    def _subplan_classes(
         self,
-    ) -> Tuple[List[String], List[Int], List[Bool]]:
-        """Each node's `_signature`, its subtree's node count, and whether
-        the subtree holds an aggregation or a unique."""
+    ) -> Tuple[List[Int], List[Int], List[Bool]]:
+        """Each node's class, its subtree's node count, and whether the
+        subtree holds an aggregation or a unique. Two nodes share a class
+        exactly when their subtrees compute the same thing, as Polars'
+        `CanonicalIRMap` assigns ids: a node is hashed with its inputs'
+        classes, and compared only with the earlier nodes of its hash,
+        setting by setting (`_same_node`). A class is named by its first
+        node."""
         # Two plans joined carry their own copies of a frame they both
-        # scan, in separate slots: a scan's signature names the first slot
-        # holding the same buffers.
+        # scan, in separate slots: a scan names the first slot holding the
+        # same buffers.
         var canonical = List[Int](capacity=len(self._frames))
         for f in range(len(self._frames)):
             var first = f
@@ -5860,11 +6040,28 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     first = g
                     break
             canonical.append(first)
-        var signatures = List[String]()
-        var sizes = List[Int]()
-        var reducing = List[Bool]()
+        var classes = List[Int](capacity=len(self._nodes))
+        var sizes = List[Int](capacity=len(self._nodes))
+        var reducing = List[Bool](capacity=len(self._nodes))
+        # The first node of each class, by hash.
+        var firsts = Dict[UInt64, List[Int]]()
         for i in range(len(self._nodes)):
-            signatures.append(self._signature(i, signatures, canonical))
+            var h = self._node_hash(i, classes, canonical)
+            var found = i
+            var known = firsts.get(h)
+            if known:
+                for r in known.value():
+                    if self._same_node(i, r, classes, canonical):
+                        found = r
+                        break
+            if found == i:
+                if known:
+                    var heads = known.take()
+                    heads.append(i)
+                    firsts[h] = heads^
+                else:
+                    firsts[h] = [i]
+            classes.append(found)
             ref node = self._nodes[i]
             var size = 1
             var reduces = node.kind == AGG or node.kind == UNIQUE
@@ -5876,7 +6073,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 reduces = reduces or reducing[node.right]
             sizes.append(size)
             reducing.append(reduces)
-        return (signatures^, sizes^, reducing^)
+        return (classes^, sizes^, reducing^)
 
     def _filter_shared_subplans(mut self):
         """A subplan written in several places that `_share_subplans` will
@@ -5890,7 +6087,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         table of every channel and year."""
         # Copies need two aggregations alike in their kind, keys,
         # aggregate count and subtree size at least; most plans have none,
-        # and full signatures are not worth building for them (ClickBench
+        # and subplan classes are not worth finding for them (ClickBench
         # q29's ninety sums, TPC-DS q41's two small distincts).
         var subtree = List[Int](capacity=len(self._nodes))
         var shapes = Dict[String, Int]()
@@ -5920,8 +6117,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             shapes[shape] = i
         if not alike:
             return
-        var computed = self._subtree_signatures()
-        ref signatures = computed[0]
+        var computed = self._subplan_classes()
+        ref classes = computed[0]
         ref sizes = computed[1]
         ref reducing = computed[2]
         var parents = self._parents()
@@ -5939,18 +6136,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
                 for j in range(count):
-                    if (
-                        j != i
-                        and not covered[j]
-                        and signatures[j] == signatures[i]
-                    ):
+                    if j != i and not covered[j] and classes[j] == classes[i]:
                         best = i
                         break
             if best < 0:
                 break
             var copies = List[Int]()
             for j in range(count):
-                if not covered[j] and signatures[j] == signatures[best]:
+                if not covered[j] and classes[j] == classes[best]:
                     copies.append(j)
                     self._cover(j, covered)
             # Each copy's readers: the run of row-local filters above it.
@@ -6059,6 +6252,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 var child = below.left
                 self._nodes[i].exprs = [merged^]
                 self._nodes[i].left = child
+                self._forget_schema(i)
                 self._reorder()
                 changed = True
                 break
@@ -7738,39 +7932,36 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return False
         return True
 
-    def _remember_schemas(mut self):
-        """Keep each node's schema once derived, until the next rewrite."""
-        self._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
-
-    def _forget_schemas(mut self):
+    def _remember_schemas(mut self) -> Bool:
+        """Keep each node's schema once derived, until the pass ends. True
+        when this pass started remembering, and so ends it; False inside
+        passes that already remember (`_optimized`)."""
         if self._schema_memo:
-            self._schema_memo.value()[].clear()
+            return False
+        self._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        return True
 
-    def _forget_schemas_from(mut self, first: Int):
-        """Forget the schemas of nodes numbered `first` and after."""
-        if not self._schema_memo:
-            return
-        ref memo = self._schema_memo.value()[]
-        var stale = List[Int]()
-        for index in memo.keys():
-            if index >= first:
-                stale.append(index)
-        for index in stale:
+    def _forget_schema(mut self, index: Int):
+        """Forget one node's schema, after a rewrite of that node that
+        leaves its output as it was (the nodes above keep theirs)."""
+        if self._schema_memo:
             try:
-                _ = memo.pop(index)
+                _ = self._schema_memo.value()[].pop(index)
             except:
                 pass
 
     def _push_predicates(mut self) raises:
         """Swap each filter below operators that cannot change its result."""
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         try:
             self._push_predicates_now()
             self._drop_constant_filters()
         except e:
-            self._schema_memo = None
+            if owned:
+                self._schema_memo = None
             raise e^
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
 
     def _drop_constant_filters(mut self) raises:
         """A filter folded to true (`_fold_constants`) keeps every row
@@ -8082,21 +8273,36 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     pass
 
     def _reorder(mut self, root: Int = -1):
-        """Restore children-before-parents order after rewiring."""
-        self._forget_schemas()
+        """Restore children-before-parents order after rewiring. Nodes
+        move to their new places rather than being copied, and remembered
+        schemas move with them: renumbering changes no node's output, as
+        Polars' IR nodes keep their schemas wherever the arena holds them.
+        Unreachable nodes and their schemas are dropped."""
         var order = self._topological(root)
         var position = List[Int](length=len(self._nodes), fill=-1)
         for k in range(len(order)):
             position[order[k]] = k
-        var nodes = List[PlanNode]()
+        var nodes = List[PlanNode](capacity=len(order))
         for k in range(len(order)):
-            var node = self._nodes[order[k]].copy()
+            # Each node is reached once, so it is taken, not copied.
+            var node = _plan_node(SCAN_FRAME)
+            swap(node, self._nodes[order[k]])
             if node.left >= 0:
                 node.left = position[node.left]
             if node.right >= 0:
                 node.right = position[node.right]
             nodes.append(node^)
         self._nodes = nodes^
+        if self._schema_memo:
+            ref memo = self._schema_memo.value()[]
+            var moved = Dict[Int, DataFrame]()
+            for k in range(len(order)):
+                if order[k] in memo:
+                    try:
+                        moved[k] = memo.pop(order[k])
+                    except:
+                        pass
+            memo = moved^
 
     def _topological(self, root: Int = -1) -> List[Int]:
         """The nodes reachable from `root` (by default the last node no
@@ -8195,7 +8401,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         var all_needed = List[Bool](length=len(self._nodes), fill=False)
         all_needed[len(self._nodes) - 1] = True
-        self._remember_schemas()
+        var owned = self._remember_schemas()
         # (join index, right side?, columns) for join inputs to narrow.
         var narrow_joins = List[Int]()
         var narrow_sides = List[Bool]()
@@ -8203,22 +8409,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # Unions whose inputs must each supply exactly the wanted columns.
         var unions = List[Int]()
         var union_columns = List[List[String]]()
-        # A subtree written in several places (a CTE read twice) keeps
-        # every output of its projections in each copy, so the copies stay
-        # identical and `_share_subplans` still computes it once; Polars
-        # likewise prunes a cached subplan to what all its readers need.
-        # Pruned per reader, TPC-DS q4's year totals ran six times.
-        var signatures = self._subtree_signatures()[0].copy()
-        var copies = Dict[String, Int]()
-        for s in signatures:
-            copies[s] = copies.get(s, 0) + 1
-        for reverse in range(len(self._nodes)):
-            var i = len(self._nodes) - 1 - reverse
-            if (
-                not all_needed[i]
-                and needed[i]
-                and copies.get(signatures[i], 0) < 2
-            ):
+        # The copies of a repeated subplan are each pruned to what all
+        # their readers need (`_projection_visits`).
+        var visits = self._projection_visits()
+        ref copy_of = visits[1]
+        var merged_copies = Dict[Int, Bool]()
+        for i in visits[0]:
+            if copy_of[i] >= 0 and copy_of[i] not in merged_copies:
+                merged_copies[copy_of[i]] = True
+                self._share_copy_schemas(copy_of, copy_of[i])
+                _merge_copy_needs(copy_of, copy_of[i], needed, all_needed)
+            if not all_needed[i] and needed[i]:
                 self._prune_outputs(i, needed[i].value())
             ref node = self._nodes[i]
             if node.kind == JOIN and not all_needed[i] and needed[i]:
@@ -8322,7 +8523,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
         if aligned:
             self._reorder()
-        self._schema_memo = None
+        if owned:
+            self._schema_memo = None
 
     def _align_union_inputs(
         mut self, unions: List[Int], columns: List[List[String]]
@@ -8338,6 +8540,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         has a schema to read. True when a node was added; the caller
         renumbers the plan."""
         var added = False
+        var parents = self._parents()
         for r in range(len(unions)):
             var k = len(unions) - 1 - r
             var union = unions[k]
@@ -8366,9 +8569,66 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     self._nodes[union].right = len(self._nodes) - 1
                 else:
                     self._nodes[union].left = len(self._nodes) - 1
-                self._forget_schemas_from(union)
+                self._forget_schemas_above(union, parents)
                 added = True
         return added
+
+    def _forget_schemas_above(mut self, index: Int, parents: List[Int]):
+        """Forget the schemas of a node whose output changed and of the
+        nodes above it, derived from it. Only these: forgetting by node
+        number would leave the schemas of one copy of a repeated subplan
+        and drop another's, and the copies would then be narrowed
+        differently and no longer shared."""
+        if not self._schema_memo:
+            return
+        ref memo = self._schema_memo.value()[]
+        var at = index
+        while at >= 0:
+            try:
+                _ = memo.pop(at)
+            except:
+                pass
+            at = parents[at]
+
+    def _share_copy_schemas(mut self, copy_of: List[Int], head: Int):
+        """Give every copy of the repeated subplan `head` the schemas any
+        copy already derived, node for node. The copies are alike and none
+        of their nodes is pruned yet, so the schemas agree; a schema kept
+        above a node pruned later goes stale alike in every copy, and the
+        selections added after pruning (`_narrow_join_inputs`) agree, so
+        the copies stay alike and are still shared."""
+        if not self._schema_memo:
+            return
+        ref memo = self._schema_memo.value()[]
+        var stack = List[List[Int]]()
+        var copies = List[Int]()
+        for i in range(len(copy_of)):
+            if copy_of[i] == head:
+                copies.append(i)
+        stack.append(copies^)
+        while len(stack) > 0:
+            var nodes = stack.pop()
+            var known = -1
+            for n in nodes:
+                if n in memo:
+                    known = n
+                    break
+            if known >= 0:
+                for n in nodes:
+                    if n not in memo:
+                        try:
+                            memo[n] = memo[known].copy()
+                        except:
+                            pass
+            var left = List[Int]()
+            var right = List[Int]()
+            for n in nodes:
+                left.append(self._nodes[n].left)
+                right.append(self._nodes[n].right)
+            if left[0] >= 0:
+                stack.append(left^)
+            if right[0] >= 0:
+                stack.append(right^)
 
     def _prune_outputs(mut self, index: Int, wanted: List[String]):
         """Drop the expressions of a select or with_columns whose outputs
@@ -8473,6 +8733,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         produce. The selection is only added when it drops a column.
         """
         var added = False
+        var parents = self._parents()
         for k in range(len(joins)):
             var join = joins[k]
             var child = self._nodes[join].left
@@ -8487,10 +8748,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for name in columns[k]:
                 exprs.append(col(name))
             self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
-            # The join and the nodes above it (all numbered after it) may
-            # now produce fewer columns; the joins still to narrow come
-            # before it.
-            self._forget_schemas_from(join)
+            # The join and the nodes above it may now produce fewer
+            # columns.
+            self._forget_schemas_above(join, parents)
             if right_sides[k]:
                 self._nodes[join].right = len(self._nodes) - 1
             else:
@@ -8990,6 +9250,36 @@ def _row_order_step(kind: Int) -> Bool:
     return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
 
 
+def _merge_copy_needs(
+    copy_of: List[Int],
+    head: Int,
+    mut needed: List[Optional[List[String]]],
+    mut all_needed: List[Bool],
+):
+    """Give every copy of the repeated subplan `head` the union of what
+    its copies' readers need, as Polars' projection pushdown merges the
+    projections of every parent of a cache."""
+    var whole = False
+    var read = False
+    var union = List[String]()
+    for i in range(len(copy_of)):
+        if copy_of[i] != head:
+            continue
+        whole |= all_needed[i]
+        if needed[i]:
+            read = True
+            for name in needed[i].value():
+                if name not in union:
+                    union.append(name)
+    if not whole and not read:
+        return
+    for i in range(len(copy_of)):
+        if copy_of[i] != head:
+            continue
+        all_needed[i] = whole
+        needed[i] = union.copy()
+
+
 def _is_scan(kind: Int) -> Bool:
     return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
 
@@ -9036,12 +9326,75 @@ def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
     ).agg(node.exprs, batch_size=node.length)
 
 
-def _text_hash(text: String) -> UInt64:
-    """FNV-1a over the text's bytes."""
-    var h = UInt64(0xCBF29CE484222325)
+def _mix(h: UInt64, value: UInt64) -> UInt64:
+    """One step of a plan node's hash (`_node_hash`): FNV-1a over a word."""
+    return (h ^ value) * 0x100000001B3
+
+
+def _mix_text(h: UInt64, text: String) -> UInt64:
+    """`h` continued over the text's length and bytes, building no string."""
+    var out = _mix(h, UInt64(text.byte_length()))
     for b in text.as_bytes():
-        h = (h ^ UInt64(b)) * 0x100000001B3
-    return h
+        out = (out ^ UInt64(b)) * 0x100000001B3
+    return out
+
+
+def _mix_list(h: UInt64, items: List[String]) -> UInt64:
+    var out = _mix(h, UInt64(len(items)))
+    for item in items:
+        out = _mix_text(out, item)
+    return out
+
+
+def _mix_expr(h: UInt64, expr: Expr) -> UInt64:
+    """`h` continued over an expression node by node, the fields
+    `_same_expr` compares (dtypes by count only)."""
+    var out = _mix_text(h, expr._name)
+    out = _mix(out, UInt64(len(expr._nodes)))
+    for n in expr._nodes:
+        out = _mix(out, UInt64(n.op))
+        out = _mix(out, UInt64(n.left))
+        out = _mix(out, UInt64(n.right))
+        out = _mix_text(out, n.text)
+        out = _mix(out, UInt64(n.integer))
+        out = _mix(out, bitcast[DType.uint64](n.floating))
+        out = _mix(out, UInt64(n.min_count))
+        out = _mix(out, UInt64(n.extra))
+        out = _mix_text(out, n.text2)
+        out = _mix(out, UInt64(len(n.dtypes)))
+    return out
+
+
+def _same_expr(a: Expr, b: Expr) -> Bool:
+    """Whether two expressions are the same node by node: every field, and
+    dtypes by name (`_expr_signature`'s text equal)."""
+    if a._name != b._name or len(a._nodes) != len(b._nodes):
+        return False
+    for k in range(len(a._nodes)):
+        ref x = a._nodes[k]
+        ref y = b._nodes[k]
+        if (
+            x.op != y.op
+            or x.left != y.left
+            or x.right != y.right
+            or x.text != y.text
+            or x.integer != y.integer
+            or bitcast[DType.uint64](x.floating)
+            != bitcast[DType.uint64](y.floating)
+            or x.min_count != y.min_count
+            or x.extra != y.extra
+            or x.text2 != y.text2
+            or len(x.dtypes) != len(y.dtypes)
+        ):
+            return False
+        for d in range(len(x.dtypes)):
+            if Bool(x.dtypes[d]) != Bool(y.dtypes[d]):
+                return False
+            if x.dtypes[d] and (
+                x.dtypes[d].value().name() != y.dtypes[d].value().name()
+            ):
+                return False
+    return True
 
 
 def _field(text: String) -> String:

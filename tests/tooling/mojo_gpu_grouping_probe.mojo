@@ -11,7 +11,11 @@ from dataframe.accelerator.rows import (
 )
 from dataframe.aggregate import quantile_of
 from dataframe.expr import SUM, COUNT, VAR, ANY, ARG_MIN
-from dataframe.accelerator.gpu.ordering import order_init, order_merge
+from dataframe.accelerator.gpu.ordering import (
+    order_init,
+    order_merge,
+    merge_grid,
+)
 from dataframe.accelerator.gpu.grouping import (
     group_mark,
     group_offsets,
@@ -164,7 +168,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             UInt32(width),
             UInt32(0),
             dl.unsafe_ptr(),
-            grid_dim=blocks,
+            grid_dim=merge_grid(n, width),
             block_dim=256,
         )
         var previous = di^
@@ -360,5 +364,6 @@ def main() raises:
     check(257, True)
     check(257, False, True)
     print(
-        "PASS Mojo grouping: IEEE/mixed/null keys, stable starts, basic/stat reductions, local args, key errors"
+        "PASS Mojo grouping: IEEE/mixed/null keys, stable starts, basic/stat"
+        " reductions, local args, key errors"
     )
