@@ -341,7 +341,7 @@ def build_groups(
                 UInt32(width),
                 UInt32(matrix[].slots),
                 literals.unsafe_ptr(),
-                grid_dim=blocks,
+                grid_dim=ordering.merge_grid(rows, width),
                 block_dim=256,
             )
             var old = index^
@@ -378,7 +378,8 @@ def build_groups(
         scope.record_download(16)
         if shape[1]:
             raise data_fault(
-                "Mojo GPU group key failed: checked arithmetic overflow or strict cast failed"
+                "Mojo GPU group key failed: checked arithmetic overflow or"
+                " strict cast failed"
             )
         var groups = Int(shape[0])
         if groups < 1 or groups > rows:

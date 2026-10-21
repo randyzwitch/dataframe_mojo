@@ -623,8 +623,7 @@ def execute(
                     )
                     if left_rows != right_rows:
                         raise Error(
-                        "explode: columns have different element counts at"
-                        " row 0"
+                            "explode: columns have different element counts at row 0"
                         )
                 executed = joins.execute_plan(
                     task,
@@ -746,9 +745,7 @@ def execute(
                 raise Error(cut_failure)
             var region = executed[1].copy()
             if "native_input_conversion_bytes" not in region.columns():
-                region = _int_column(
-                    region, "native_input_conversion_bytes", 0
-                )
+                region = _int_column(region, "native_input_conversion_bytes", 0)
             var owned = executed[0].retained_bytes()
             var host_result_bytes = 0
             if index == dag.root:

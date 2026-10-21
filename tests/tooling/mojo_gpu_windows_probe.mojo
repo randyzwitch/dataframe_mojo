@@ -4,7 +4,11 @@ from std.memory import bitcast
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe.accelerator.rows import ROW_CUMULATIVE_KEY, ROW_SORT_KEY
-from dataframe.accelerator.gpu.ordering import order_init, order_merge
+from dataframe.accelerator.gpu.ordering import (
+    order_init,
+    order_merge,
+    merge_grid,
+)
 from dataframe.accelerator.gpu.windows import window_assign, window_check_errors
 from tests.tooling.mojo_gpu_order_probe import _value
 from tests.support.key_kernel_reference import KeyCell, cell_equal
@@ -280,7 +284,7 @@ def _case(kind: Int, n: Int, grouped: Bool) raises:
             UInt32(width),
             UInt32(0),
             dl.unsafe_ptr(),
-            grid_dim=blocks,
+            grid_dim=merge_grid(n, width),
             block_dim=256,
         )
         var previous = a^
@@ -359,5 +363,6 @@ def main() raises:
         _case(11, n, True)
     print(
         "PASS Mojo GPU windows: 26 layouts x19 variants, all scalar kinds,"
-        " cumulative directions, checked prefixes, extreme shifts and bounded fills"
+        " cumulative directions, checked prefixes, extreme shifts and bounded"
+        " fills"
     )

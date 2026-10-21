@@ -5,6 +5,7 @@ from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.key_kernel_reference import KeyCell, expected_order
+from dataframe.accelerator.gpu.ordering import merge_grid
 
 
 def _layout(source: Series, chunked: Bool) raises -> Series:
@@ -73,6 +74,22 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
         same(actual, query.collect(engine="cpu"))
         assert_equal(actual.column("x").dtype(), DataType.of(D))
         var expected = expected_order(reference, directions, null_placement)
+        for row in range(n):
+            assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
+    # Exercise the integer radix certificate itself, including repeated keys
+    # and stable null ties; the two-key cases above intentionally use merge.
+    var direct_reference = List[List[KeyCell]]()
+    for row in reference:
+        direct_reference.append([row[0].copy()])
+    for reverse in [False, True]:
+        var query = frame.lazy().sort(
+            ["x"], descending=reverse, nulls_last=not reverse
+        )
+        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+        same(actual, query.collect(engine="cpu"))
+        var expected = expected_order(
+            direct_reference, [reverse], [not reverse]
+        )
         for row in range(n):
             assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
 
@@ -267,6 +284,32 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
         chained.collect(accelerator=runtime, engine="accel"),
         chained.collect(engine="cpu"),
     )
+    var chained_radix = (
+        source.lazy().sort("x").sort("id", descending=True).select(["id", "x"])
+    )
+    var radix_actual = chained_radix.collect(
+        accelerator=runtime, engine="accel"
+    )
+    same(radix_actual, chained_radix.collect(engine="cpu"))
+    var radix_profile = chained_radix.profile(
+        accelerator=runtime, engine="accel"
+    )
+    var radix_peak = Int(
+        radix_profile[1].item(0, "peak_requested_bytes").int64()
+    )
+    assert_true(radix_profile[1].item(0, "kernel_launches").int64() >= 100)
+    with assert_raises(contains="budget"):
+        _ = chained_radix.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=radix_peak - 1),
+            engine="accel",
+        )
+    same(
+        chained_radix.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=radix_peak),
+            engine="accel",
+        ),
+        radix_actual,
+    )
     var no_rows = source.lazy().filter(col("x") < 0).sort("x")
     assert_equal(
         no_rows.collect(accelerator=runtime, engine="accel").height(), 0
@@ -310,4 +353,124 @@ def test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery() raises:
             accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
         ),
         actual,
+    )
+
+
+def _tiled_integer_boundary(rows: Int) raises:
+    var keys = List[Int64](length=rows, fill=0)
+    var secondary = List[Int32](length=rows, fill=0)
+    var valid = List[Bool](length=rows, fill=True)
+    var ids = List[Int64](length=rows, fill=0)
+    for row in range(rows):
+        # Many equal composite keys straddle run and output-tile boundaries.
+        keys[row] = Int64((rows - row + row // 13) % 19 - 9)
+        secondary[row] = Int32((row * 7 + row // 5) % 5)
+        valid[row] = row % 97 != 0
+        ids[row] = Int64(row)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int64](keys^, valid^)),
+            Series("secondary", Column[Int32](secondary^)),
+            Series("id", Column[Int64](ids^)),
+        ]
+    )
+    var query = frame.lazy().sort(
+        ["key", "secondary"],
+        descending=[True, False],
+        nulls_last=[True, False],
+    )
+    var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+    same(actual, query.collect(engine="cpu", streaming=False))
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings() raises:
+    assert_equal(merge_grid(1024, 512), 4)
+    assert_equal(merge_grid(1025, 1024), 1)
+    assert_equal(merge_grid(2047, 512), 8)
+    assert_equal(merge_grid(2048, 1024), 1)
+    assert_equal(merge_grid(4096, 2048), 2)
+    assert_equal(merge_grid(4097, 4096), 4)
+    for rows in [
+        1023,
+        1024,
+        1025,
+        2047,
+        2048,
+        2049,
+        4095,
+        4096,
+        4097,
+        8191,
+        8192,
+        8193,
+        16385,
+    ]:
+        _tiled_integer_boundary(rows)
+
+    # More than 256 radix tiles forces the recursive histogram-summary carry
+    # path. The dominant key deliberately creates long, skewed stable runs.
+    var radix_rows = 65_537
+    var radix_keys = List[Int16](length=radix_rows, fill=0)
+    var radix_valid = List[Bool](length=radix_rows, fill=True)
+    var radix_ids = List[Int64](length=radix_rows, fill=0)
+    for row in range(radix_rows):
+        radix_keys[row] = Int16(0 if row % 101 else (row % 7) - 3)
+        radix_valid[row] = row % 509 != 0
+        radix_ids[row] = Int64(row)
+    var radix_frame = DataFrame(
+        [
+            Series("key", Column[Int16](radix_keys^, radix_valid^)),
+            Series("id", Column[Int64](radix_ids^)),
+        ]
+    )
+    for reverse in [False, True]:
+        var query = radix_frame.lazy().sort(
+            ["key"], descending=reverse, nulls_last=not reverse
+        )
+        same(
+            query.collect(accelerator=MetalRuntime(), engine="accel"),
+            query.collect(engine="cpu", streaming=False),
+        )
+
+    var encodings: List[UInt64] = [
+        0,
+        0x8000000000000000,
+        0x3FF0000000000000,
+        0xBFF0000000000000,
+        0x7FF0000000000000,
+        0xFFF0000000000000,
+        0x7FF8000000000011,
+        0xFFF8000000000022,
+        1,
+        0x8000000000000001,
+        0x0010000000000000,
+        0x8010000000000000,
+    ]
+    var floats = List[Float64](length=4097, fill=0)
+    var secondary = List[Int16](length=4097, fill=0)
+    var valid = List[Bool](length=4097, fill=True)
+    var ids = List[Int64](length=4097, fill=0)
+    for row in range(4097):
+        floats[row] = bitcast[DType.float64](
+            encodings[(row * 5 + row // 7) % len(encodings)]
+        )
+        secondary[row] = Int16((row * 3 + row // 11) % 7)
+        valid[row] = row % 113 != 0
+        ids[row] = Int64(row)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Float64](floats^, valid^)),
+            Series("secondary", Column[Int16](secondary^)),
+            Series("id", Column[Int64](ids^)),
+        ]
+    )
+    var query = frame.lazy().sort(
+        ["key", "secondary"],
+        descending=[True, False],
+        nulls_last=[False, True],
+    )
+    same(
+        query.collect(accelerator=MetalRuntime(), engine="accel"),
+        query.collect(engine="cpu", streaming=False),
     )
