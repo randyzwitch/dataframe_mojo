@@ -32,7 +32,7 @@ because that would change which rows those operators see.
 """
 from std.os import getenv
 from std.time import perf_counter_ns
-from std.io import FileDescriptor
+from std.io import RawFileDescriptor
 from std.collections import Dict, Optional
 from std.memory import ArcPointer, bitcast
 from .io.csv_reader import _CsvBatches, _DecodeJob
@@ -3155,7 +3155,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         parts.append(cell.string())
                 print(
                     "dataframe-operator:\t" + String("\t").join(parts),
-                    file=FileDescriptor(2),
+                    file=RawFileDescriptor(2),
                 )
             return profiled[0].copy()
         var plan = self._optimized() if optimize else self.copy()

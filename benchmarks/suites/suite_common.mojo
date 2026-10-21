@@ -18,7 +18,7 @@ A query reports unsupported by raising an error that starts with
 "unsupported:"; any other error fails that query alone.
 """
 from std.collections import Dict
-from std.io import FileDescriptor
+from std.io import RawFileDescriptor
 from std.sys import argv
 from std.time import monotonic
 
@@ -113,7 +113,7 @@ def run[
     for part in names:
         var name = String(part)
         # Lets a trace (DATAFRAME_TRACE_PATHS) attribute paths to queries.
-        print("dataframe-query:", name, file=FileDescriptor(2))
+        print("dataframe-query:", name, file=RawFileDescriptor(2))
         try:
             var result = query(name, tables)
             for _ in range(reps):
