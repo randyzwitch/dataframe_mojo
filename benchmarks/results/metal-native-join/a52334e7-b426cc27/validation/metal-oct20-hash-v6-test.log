@@ -1,0 +1,14 @@
+PASS test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides
+PASS test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads
+PASS native Float32 NaN/zero/subnormal/null keys and payload bits
+PASS test_mojo_gpu_native_hash_join_float32_encodings_and_nulls
+PASS Mojo GPU native hash joins: null equality follows the keyed option for every join style
+PASS test_mojo_gpu_native_hash_join_null_equality_all_keyed_styles
+PASS Mojo GPU native hash join: probe exhaustion falls back with null-equal semantics
+PASS test_mojo_gpu_native_hash_join_collision_fallback_preserves_null_equal
+PASS native hash join empty/full profile launch counts
+PASS test_mojo_gpu_native_hash_join_empty_and_full_profile_launch_counts
+PASS native hash join mixed payload budgets and recovery
+PASS test_mojo_gpu_native_hash_join_mixed_payload_budget_and_recovery
+PASS test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget
+PASS native hash join styles, keys, nulls, fallback, profiles and budgets

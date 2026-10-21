@@ -1,0 +1,38 @@
+{
+  "source_sha256": "ea2c71432fc61f2e6ae6d8773dd89e261b5480963fccba137cc9561618fe9412",
+  "runner_sha256": "62c19a7446edd5f0ff3408a8cc498a5614a275621e94fc6b12d656795eba59c4",
+  "compiler_identity": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+  "compiler_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/gpu/bin/mojo",
+  "compiler_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+  "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+  "xcode": "Xcode 26.6\nBuild version 17F113",
+  "sdk_version": "26.5",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.5.2\nBuildVersion:\t\t25F84",
+  "hardware_model": "Macmini9,1",
+  "memory_bytes": "17179869184",
+  "compile_flags": [
+    "-O3",
+    "-I",
+    "."
+  ],
+  "primitive_only": true,
+  "binary_sha256": "33ab0e8f9ad313b9eefe7229e8153f62593541660ec2d46fe9ee680a3fe28ab1",
+  "build_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "compile_command": [
+    "/Users/randyzwitch/.pixi/bin/pixi",
+    "run",
+    "--manifest-path",
+    "/Users/randyzwitch/github/dataframe_mojo-metal-868/pixi.toml",
+    "--locked",
+    "-e",
+    "gpu",
+    "mojo",
+    "build",
+    "-O3",
+    "-I",
+    ".",
+    "/private/tmp/wrapped_host_readback_proposal/bench_wrapped_host_readback.mojo",
+    "-o",
+    "/private/tmp/wrapped_host_readback_proposal/probe"
+  ]
+}
