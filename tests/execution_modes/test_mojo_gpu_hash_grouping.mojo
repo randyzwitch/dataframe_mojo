@@ -19,7 +19,7 @@ def test_mojo_gpu_hash_grouping_boundaries_and_integer_states() raises:
             ids.append(Int64(row))
         var frame = DataFrame(
             [
-                Series("k", Column[Int64](keys^, valid^)),
+                Series("k", Column[Int64](keys^, valid)),
                 Series("id", Column[Int64](ids^)),
             ]
         )

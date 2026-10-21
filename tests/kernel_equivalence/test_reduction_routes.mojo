@@ -76,7 +76,7 @@ def _integer_sum[D: DType]() raises:
                     valid.append(present)
                     exact.append(value)
                     flags.append(present)
-                var column = Column[Scalar[D]](payload^, valid^).slice(
+                var column = Column[Scalar[D]](payload^, valid).slice(
                     offset, n
                 )
                 for grouped in [False, True]:
@@ -121,7 +121,7 @@ def _float_sum[D: DType]() raises:
                     valid.append(present)
                     values.append(value)
                     flags.append(present)
-                var column = Column[Scalar[D]](payload^, valid^).slice(
+                var column = Column[Scalar[D]](payload^, valid).slice(
                     offset, n
                 )
                 for grouped in [False, True]:
@@ -166,7 +166,7 @@ def _stats[D: DType]() raises:
                     valid.append(present)
                     values.append(value)
                     flags.append(present)
-                var column = Column[Scalar[D]](payload^, valid^).slice(
+                var column = Column[Scalar[D]](payload^, valid).slice(
                     offset, n
                 )
                 for start in [0, min(n, 1), min(n, 7)]:
@@ -313,7 +313,7 @@ def _indexed[D: DType]() raises:
                     values.append(value)
                     flags.append(present)
                 var source = Series(
-                    "x", Column[Scalar[D]](payload^, valid^).slice(offset, n)
+                    "x", Column[Scalar[D]](payload^, valid).slice(offset, n)
                 )
                 var columns: List[Series] = [source.copy()]
                 var rows = List[Int]()

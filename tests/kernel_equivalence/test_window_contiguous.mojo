@@ -65,8 +65,8 @@ def frame() raises -> DataFrame:
         same.append(0)
     return DataFrame(
         [
-            Series("x", Column[Int64](x^, xv^)),
-            Series("k", Column[String](k^, kv^)),
+            Series("x", Column[Int64](x^, xv)),
+            Series("k", Column[String](k^, kv)),
             Series("j", Column[Int64](j^)),
             Series("same", Column[Int64](same^)),
         ]

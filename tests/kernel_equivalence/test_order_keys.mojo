@@ -120,7 +120,7 @@ def integer_key_encoding[D: DType]() raises:
                         if physical >= offset:
                             rows.append([KeyCell(0, present, integer=value)])
                     var source = Series(
-                        "k", Column[Scalar[D]](data^, valid^)
+                        "k", Column[Scalar[D]](data^, valid)
                     ).slice(offset, n)
                     for layout in [0, 2]:
                         var actual_source = key_layout(source, layout)
@@ -202,7 +202,7 @@ def integer_sort_keys[D: DType]() raises:
                             [KeyCell(0, present, integer=pattern[physical % 7])]
                         )
                 var source = Series(
-                    "k", Column[Scalar[D]](values^, valid^)
+                    "k", Column[Scalar[D]](values^, valid)
                 ).slice(offset, n)
                 for layout in [0, 2]:
                     var keys: List[Series] = [key_layout(source, layout)]
@@ -271,7 +271,7 @@ def float_key_routes[D: DType]() raises:
                             ]
                         )
                 var source = Series(
-                    "f", Column[Scalar[D]](values^, valid^)
+                    "f", Column[Scalar[D]](values^, valid)
                 ).slice(offset, n)
                 for layout in [0, 2]:
                     var keys: List[Series] = [key_layout(source, layout)]
@@ -655,7 +655,7 @@ def categorical_fixture(n: Int, offset: Int, mode: Int) raises -> Series:
         codes.append(UInt32((row * 3 + 1) % 5) if present else UInt32.MAX)
         valid.append(present)
     return (
-        Series("cat", Column[UInt32](codes^, valid^))
+        Series("cat", Column[UInt32](codes^, valid))
         .with_dtype(DataType.categorical(dictionary^))
         .slice(offset, n)
     )

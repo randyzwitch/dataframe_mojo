@@ -102,7 +102,7 @@ def _numeric_distinct[D: DType](rows: Int) raises:
         valid.append(present)
         labels.append(row * 8191 % GROUPS)
         classes.append(cls if present else 4)
-    var source = Series("v", Column[Scalar[D]](payload^, valid^)).slice(7, rows)
+    var source = Series("v", Column[Scalar[D]](payload^, valid)).slice(7, rows)
     _assert_counts(source, labels, classes, GROUPS + 1)
     if rows > 65538:
         var chunked = Series._from_chunks(

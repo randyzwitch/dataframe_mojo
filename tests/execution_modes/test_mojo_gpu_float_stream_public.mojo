@@ -579,8 +579,8 @@ def test_public_float_stream_null_negative_keys_independent_partition_flush_and_
                     )
         var frame = DataFrame(
             [
-                Series("k", Column[Int32](keys^, key_valid^)),
-                Series("v", Column[Scalar[D]](values^, valid^)),
+                Series("k", Column[Int32](keys^, key_valid)),
+                Series("v", Column[Scalar[D]](values^, valid)),
             ]
         )
         var columns = List[Series]()

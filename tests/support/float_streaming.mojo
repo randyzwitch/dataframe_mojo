@@ -130,7 +130,7 @@ def source[
     return DataFrame(
         [
             Series("k", Column[Int32](keys^)),
-            Series("v", Column[Scalar[D]](values^, valid^)),
+            Series("v", Column[Scalar[D]](values^, valid)),
         ]
     )
 
@@ -154,7 +154,7 @@ def priority_source[
     return DataFrame(
         [
             Series("k", Column[Int32](keys^)),
-            Series("v", Column[Scalar[D]](values^, valid^)),
+            Series("v", Column[Scalar[D]](values^, valid)),
         ]
     )
 

@@ -253,8 +253,8 @@ def integer_row_kernels[D: DType, operation: Int]() raises:
                         )
                         av.append(left_valid)
                         bv.append(right_valid)
-                    var left = Column[Scalar[D]](a^, av^).slice(offset, n)
-                    var right = Column[Scalar[D]](b^, bv^).slice(offset, n)
+                    var left = Column[Scalar[D]](a^, av).slice(offset, n)
+                    var right = Column[Scalar[D]](b^, bv).slice(offset, n)
                     if broadcast == 1:
                         left = Column[Scalar[D]](
                             [Scalar[D](4 if operation == 1 else 2)]
@@ -369,7 +369,7 @@ def integer_overflow_and_poison[D: DType, operation: Int]() raises:
         var valid = List[Bool](length=33, fill=True)
         valid[at] = False
         var hidden = _numeric_int[op, D](
-            Column[Scalar[D]](a^, valid^), right, List[Bool]()
+            Column[Scalar[D]](a^, valid), right, List[Bool]()
         )
         assert_true(hidden.get(at).is_null())
         for row in range(33):
@@ -588,8 +588,8 @@ def float_special_rows[D: DType, op: Int, width: Int]() raises:
                     bv.append(row_valid(row + 1, mode))
                     a.append(Scalar[D](xs[row % 8]))
                     b.append(Scalar[D](ys[row % 8]))
-                var left = Column[Scalar[D]](a^, av^).slice(offset, n)
-                var right = Column[Scalar[D]](b^, bv^).slice(offset, n)
+                var left = Column[Scalar[D]](a^, av).slice(offset, n)
+                var right = Column[Scalar[D]](b^, bv).slice(offset, n)
                 var actual = binary[op, width](
                     Series("a", left.copy()), Series("b", right.copy())
                 )

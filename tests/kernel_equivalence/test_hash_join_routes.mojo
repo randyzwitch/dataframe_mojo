@@ -55,10 +55,10 @@ def numeric_probes[D: DType]() raises:
         padded_right.extend(right_values.copy())
         lv.extend(left_valid.copy())
         rv.extend(right_valid.copy())
-        var left = Series("k", Column[Scalar[D]](padded_left^, lv^)).slice(
+        var left = Series("k", Column[Scalar[D]](padded_left^, lv)).slice(
             offset, 7
         )
-        var right = Series("k", Column[Scalar[D]](padded_right^, rv^)).slice(
+        var right = Series("k", Column[Scalar[D]](padded_right^, rv)).slice(
             offset, 6
         )
         for chunked in [False, True]:

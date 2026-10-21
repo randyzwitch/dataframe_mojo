@@ -32,7 +32,7 @@ def native_intervals[D: DType]() raises:
                         )
                     valid.append(present)
                 var flat = Series(
-                    "v", Column[Scalar[D]](values^, valid^)
+                    "v", Column[Scalar[D]](values^, valid)
                 ).slice(offset, n)
                 for chunked in [False, True]:
                     var source = flat.copy()
