@@ -4618,15 +4618,16 @@ def main():
 
     elif engine == "duckdb":
         import duckdb
+        import polars as pl
 
         con = duckdb.connect()
         threads = os.environ.get("BENCH_THREADS")
         if threads:
             con.execute(f"SET threads = {int(threads)}")
         if suite == "pdsh":
-            con.execute("LOAD tpch")
+            con.execute("INSTALL tpch; LOAD tpch")
         if suite == "tpcds":
-            con.execute("LOAD tpcds")
+            con.execute("INSTALL tpcds; LOAD tpcds")
         for name, path in tables.items():
             con.execute(
                 f"CREATE TABLE {name} AS SELECT * FROM read_parquet('{path}')"
@@ -4640,7 +4641,7 @@ def main():
                 start = time.perf_counter_ns()
                 con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
                 times.append(time.perf_counter_ns() - start)
-            return times, con.execute("SELECT * FROM ans").pl()
+            return times, pl.from_arrow(con.table("ans").to_arrow_table())
 
     else:
         raise SystemExit(f"unknown engine {engine}")
