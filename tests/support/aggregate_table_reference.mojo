@@ -124,13 +124,13 @@ def aggregate_frame(rows: Int, groups: Int) raises -> DataFrame:
         yv.append(real_valid(row))
     return DataFrame(
         [
-            Series("s", Column[String](s^, sv^)),
-            Series("i", Column[Int64](i^, iv^)),
+            Series("s", Column[String](s^, sv)),
+            Series("i", Column[Int64](i^, iv)),
             Series("f", Column[Float64](f^)),
-            Series("b", BoolColumn(b^, bv^)),
-            Series("x", Column[Int32](x^, xv^)),
-            Series("w", Column[Int64](w^, wv^)),
-            Series("y", Column[Float64](y^, yv^)),
+            Series("b", BoolColumn(b^, bv)),
+            Series("x", Column[Int32](x^, xv)),
+            Series("w", Column[Int64](w^, wv)),
+            Series("y", Column[Float64](y^, yv)),
             Series("r", Column[Int64](r^)),
         ]
     )
