@@ -254,7 +254,7 @@ def test_native_metal_rank_dense_prefix_across_blocks() raises:
         valid.append(i % 19 != 0)
     var frame = DataFrame(
         [
-            Series("x", Column[Int64](values^, valid^)),
+            Series("x", Column[Int64](values^, valid)),
             Series("k", Column[Int32](keys^)),
         ]
     )

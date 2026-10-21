@@ -69,7 +69,7 @@ def test_mojo_gpu_rank_integer_widths_chunks_methods_and_partitions() raises:
         valid.append(row % 19 != 0)
     var frame = DataFrame(
         [
-            Series("x", Column[Int64](values^, valid^)),
+            Series("x", Column[Int64](values^, valid)),
             Series("k", Column[Int32](groups^)),
         ]
     )

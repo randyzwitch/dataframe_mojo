@@ -317,7 +317,7 @@ def _quantiles[
             output[group] = result.value()
             valid[group] = True
         start = end
-    return Series("", Column[Float64](output^, valid^))
+    return Series("", Column[Float64](output^, valid))
 
 
 def _canonical_int[D: DType](value: Scalar[D]) -> Int64:

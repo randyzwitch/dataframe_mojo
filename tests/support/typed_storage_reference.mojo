@@ -159,7 +159,7 @@ def exportable_storage(
         values.append(selection_tick(kind, row) if present else Int64(0))
         valid.append(present)
     return (
-        Series("x", Column[Int64](values^, valid^))
+        Series("x", Column[Int64](values^, valid))
         .with_dtype(DataType.DATE)
         .slice(offset, n)
     )

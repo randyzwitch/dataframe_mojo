@@ -363,7 +363,7 @@ def test_native_metal_shift_fill_partition_boundaries_and_nested_resident_consum
             valid.append(i % 11 == 3)
         var frame = DataFrame(
             [
-                Series("x", Column[Int64](values^, valid^)),
+                Series("x", Column[Int64](values^, valid)),
                 Series("k", Column[Float64](keys^, key_valid^)),
                 Series("j", StringColumn(strings^)),
             ]

@@ -146,7 +146,7 @@ def make_decimal_frame(n: Int, variant: String) raises -> DataFrame:
         values[i] = Int64(cents)
     return DataFrame(
         [
-            Series("x", Column[Int64](values^, valid^)).with_dtype(
+            Series("x", Column[Int64](values^, valid)).with_dtype(
                 DataType.decimal(15, 2, 64)
             )
         ]
@@ -186,7 +186,7 @@ def make_native64_frame(
             )
             valid[i] = i % 20 != 0
         values[i] = Int64(value)
-    return DataFrame([Series("x", Column[Int64](values^, valid^))])
+    return DataFrame([Series("x", Column[Int64](values^, valid))])
 
 
 def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:

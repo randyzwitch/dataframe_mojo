@@ -7667,7 +7667,7 @@ struct _StreamReduction(Movable):
             parts.append(self.keys.copy())
             for j in range(len(others)):
                 parts.append(others[j].keys.copy())
-            var combined = concat(parts^)
+            var combined = concat(parts)
             var groups = _encode_in_order(
                 combined._columns
             ) if parallel else encode_rows(combined._columns, nulls_equal=True)
@@ -7740,7 +7740,7 @@ struct _StreamReduction(Movable):
                 key_parts.append(other.keys.take(added))
             mappings.append(mapping^)
         if len(key_parts) > 1:
-            self.keys = concat(key_parts^)
+            self.keys = concat(key_parts)
             if self.keys._columns[0].n_chunks() > 64:
                 self.keys = self.keys.rechunk()
         var count = self.index.count()

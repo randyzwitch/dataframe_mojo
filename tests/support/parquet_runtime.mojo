@@ -31,7 +31,7 @@ def shell_quote(text: String) -> String:
             result += "'\\''"
         else:
             var one: List[UInt8] = [byte]
-            result += String(unsafe_from_utf8=one^)
+            result += String(unsafe_from_utf8=one)
     return result + "'"
 
 

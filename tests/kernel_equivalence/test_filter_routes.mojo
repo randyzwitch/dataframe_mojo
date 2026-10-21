@@ -256,7 +256,7 @@ def ordered_series(n: Int, base: Int, nullable: Bool = False) raises -> Series:
     for row in range(n):
         values.append(Int64(base + row // 3))
         valid.append(not nullable or row % 11 != 2)
-    return Series("x", Column[Int64](values^, valid^))
+    return Series("x", Column[Int64](values^, valid))
 
 
 def test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly() raises:

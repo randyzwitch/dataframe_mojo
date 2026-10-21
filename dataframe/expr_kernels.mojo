@@ -710,7 +710,7 @@ def _decimal_quotient(left: Series, right: Series) raises -> Series:
         if a._valid(ai) and b._valid(bi) and b._get(bi) != 0:
             values[i] = a._get(ai) / b._get(bi)
             valid[i] = True
-    return Series("", Column[Float64](values^, valid^))
+    return Series("", Column[Float64](values^, valid))
 
 
 def _decimal_mul(a: Int128, b: Int128) raises -> Int128:

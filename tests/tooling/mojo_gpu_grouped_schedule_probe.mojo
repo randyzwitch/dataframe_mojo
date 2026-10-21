@@ -281,7 +281,7 @@ def _resident_bucket_append() raises:
     var frame = DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("x", Column[Int64](values^, valid^)),
+            Series("x", Column[Int64](values^, valid)),
         ]
     )
     var scope = Scope()

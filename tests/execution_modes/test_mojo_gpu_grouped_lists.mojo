@@ -437,7 +437,7 @@ def test_mojo_gpu_grouped_implode_large_checked_cpu_bucket_and_heavy_fault_order
     var frame = DataFrame(
         [
             Series("k", Column[Int32](keys^)),
-            Series("x", Column[Int64](values^, valid^)),
+            Series("x", Column[Int64](values^, valid)),
         ]
     )
     var query = (
