@@ -27,13 +27,13 @@ def materialize_model(model: ReferenceTable) raises -> DataFrame:
             else:
                 raise Error("Unknown model field")
         if name == "i":
-            columns.append(Series(name, Column[Int64](integers^, valid^)))
+            columns.append(Series(name, Column[Int64](integers^, valid)))
         elif name == "f":
-            columns.append(Series(name, Column[Float64](floats^, valid^)))
+            columns.append(Series(name, Column[Float64](floats^, valid)))
         elif name == "s":
-            columns.append(Series(name, Column[String](strings^, valid^)))
+            columns.append(Series(name, Column[String](strings^, valid)))
         else:
-            columns.append(Series(name, Column[Bool](booleans^, valid^)))
+            columns.append(Series(name, Column[Bool](booleans^, valid)))
     return DataFrame(columns^, height=len(model.rows))
 
 

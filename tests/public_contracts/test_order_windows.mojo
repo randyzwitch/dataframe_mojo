@@ -25,7 +25,7 @@ def fixture(n: Int, null_mode: Int) -> WindowCells:
     for row in range(n):
         values.append(Float64((row * 7 + 3) % 13 - 6))
         valid.append(null_mode == 0 or (null_mode == 1 and row % 5 >= 2))
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def integer_frame(cells: WindowCells) raises -> DataFrame:
@@ -660,7 +660,7 @@ def test_partition_windows_reset_reassociate_and_group_aggregates_broadcast() ra
                         valid.append(cells.valid[row])
                         if cells.valid[row]:
                             total += Int64(cells.values[row])
-                var subset = WindowCells(values^, valid^)
+                var subset = WindowCells(values, valid)
                 var expected: List[WindowCells] = [
                     cumulative(subset, "sum", False),
                     cumulative(subset, "sum", True),

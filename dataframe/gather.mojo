@@ -363,7 +363,7 @@ def filter_range_int64_chunks(
         if len(pieces) == 0:
             output.append(columns[c].slice(0, 0))
         else:
-            output.append(Series._from_chunks(pieces^))
+            output.append(Series._from_chunks(pieces))
     return output^
 
 
@@ -435,7 +435,7 @@ struct _SortedChunkTakeJob(Job):
                     selected.append(chunk.take(local))
             next_row = low
             offset = end
-        self.result = Series._from_chunks(selected^)
+        self.result = Series._from_chunks(selected)
 
     def into_result(deinit self) -> Series:
         return self.result^
@@ -534,7 +534,7 @@ struct _SortedChunkPartJob(Job):
         if len(selected) == 0:
             self.result = self.source.slice(0, 0)
         else:
-            self.result = Series._from_chunks(selected^)
+            self.result = Series._from_chunks(selected)
 
 
 def _take_sorted_chunked_partitioned(
@@ -564,7 +564,7 @@ def _take_sorted_chunked_partitioned(
         if len(pieces) == 0:
             result.append(columns[c].slice(0, 0))
         else:
-            result.append(Series._from_chunks(pieces^))
+            result.append(Series._from_chunks(pieces))
     return result^
 
 
@@ -826,7 +826,7 @@ def take_parallel(
             run_jobs(rechunk)
         while len(rechunk) > 0:
             contiguous[positions.pop(0)] = rechunk.pop(0).into_result()
-        return take_parallel(contiguous^, indices^, workers, or_null)
+        return take_parallel(contiguous, indices^, workers, or_null)
     var m = len(indices)
     # Keep each gather job large enough to amortize pool scheduling and
     # string-view chunk assembly across columns.
@@ -895,7 +895,7 @@ def take_parallel(
             var pieces = List[Series](capacity=active_workers)
             for w in range(active_workers):
                 pieces.append(jobs[c * active_workers + w].piece.copy())
-            result.append(Series._from_chunks(pieces^))
+            result.append(Series._from_chunks(pieces))
             continue
         var output = outputs[c].copy()
         if share_validity and skip_validity[c]:

@@ -329,7 +329,7 @@ def execute(
             )
         # Publish only the dictionary entries that occurred. Taking source
         # rows would retain the original frame's large String/code buffers.
-        var keys = Series(key.name(), StringColumn(labels^, valid^))
+        var keys = Series(key.name(), StringColumn(labels, valid))
         keys._field_metadata = key._field_metadata
         var totals = Series(node.exprs[0]._name, Column[Int64](sums^))
         totals._field_metadata = schema.column(

@@ -4443,7 +4443,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 codes.append(Int64(groups.ids[r]))
                 valid.append(not nulls or not values.get(r).is_null())
             joins[b] = joins[b].with_column(
-                Series(name, Column[Int64](codes^, valid^))
+                Series(name, Column[Int64](codes^, valid))
             )
             late_values.append(values^)
             late_rows.append(groups.representatives.copy())
@@ -5350,7 +5350,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         descending=descending,
                         nulls_last=nulls_last,
                     )
-                    return source.select_exprs(node.exprs).take(order^)
+                    return source.select_exprs(node.exprs).take(order)
         # Filter each decoded CSV range before assembling the scan result.
         # A row limit and a whole-column predicate require the original
         # materialization order, so retain the eager path for those cases.
@@ -7234,10 +7234,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     JOIN,
                     node_of[left],
                     node_of[right],
-                    names=left_keys^,
+                    names=left_keys,
                     text="inner",
                     how=JOIN_INNER,
-                    right_keys=right_keys^,
+                    right_keys=right_keys,
                 )
                 join.names2 = ["_right"]
                 added.append(join^)

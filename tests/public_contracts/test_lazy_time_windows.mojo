@@ -23,7 +23,7 @@ def _source() raises -> DataFrame:
         [
             _times("t", [0, 0, HOUR, 2 * HOUR, 3 * HOUR, 5 * HOUR]),
             Series("g", Column[Int64]([0, 1, 0, 1, 0, 1])),
-            Series("x", Column[Int64](x^, valid^)),
+            Series("x", Column[Int64](x^, valid)),
             Series("unused", Column[Int64]([9, 9, 9, 9, 9, 9])),
         ]
     )

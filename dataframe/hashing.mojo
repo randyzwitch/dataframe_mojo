@@ -778,7 +778,7 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             var contiguous = List[Series](capacity=len(keys))
             for item in keys:
                 contiguous.append(item.rechunk())
-            return encode_rows(contiguous^, nulls_equal)
+            return encode_rows(contiguous, nulls_equal)
     var n = len(keys[0])
     for key in keys:
         if len(key) != n:

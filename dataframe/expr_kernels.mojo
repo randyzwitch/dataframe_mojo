@@ -233,7 +233,7 @@ def _numeric_float[
     for start in range(main, n):
         _float_block[op, 1, D](left, right, start, valid, values, predicates)
     comptime if predicate:
-        return Series("", BoolColumn(predicates^, valid))
+        return Series("", BoolColumn(predicates, valid))
     else:
         return Series("", Column[Scalar[D]](values^, valid))
 
@@ -468,7 +468,7 @@ def _numeric_int[
         else:
             predicates[i] = x != y
     comptime if predicate:
-        return Series("", BoolColumn(predicates^, valid))
+        return Series("", BoolColumn(predicates, valid))
     elif floating:
         return Series("", Column[Float64](floats^, valid))
     else:
@@ -500,7 +500,7 @@ def _compare_bools[
                 values[i] = x == y
             else:
                 values[i] = x != y
-    return Series("", BoolColumn(values^, valid))
+    return Series("", BoolColumn(values, valid))
 
 
 def _fill_null_bools(left: BoolColumn, right: BoolColumn) raises -> BoolColumn:
@@ -597,7 +597,7 @@ def _keep_nulls_bools(mask: List[Bool], right: BoolColumn) raises -> BoolColumn:
         var b = 0 if len(right) == 1 else i
         values.append(right._get(b))
         valid.append(mask[a] and right._valid(b))
-    return BoolColumn(values^, valid)
+    return BoolColumn(values, valid)
 
 
 def _choose_bools(
@@ -615,7 +615,7 @@ def _choose_bools(
             var b = 0 if len(other) == 1 else i
             values.append(other._get(b))
             valid.append(other._valid(b))
-    return BoolColumn(values^, valid)
+    return BoolColumn(values, valid)
 
 
 def _compare_strings[
@@ -650,7 +650,7 @@ def _compare_strings[
                 values[i] = x == y
             else:
                 values[i] = x != y
-    return Series("", BoolColumn(values^, valid))
+    return Series("", BoolColumn(values, valid))
 
 
 def _decimal_result(
@@ -677,7 +677,7 @@ def _decimal_output(
     if width == 128:
         if len(valid) == 0:
             return Series("", Column[Int128](values^)).with_dtype(dtype)
-        return Series("", Column[Int128](values^, valid^)).with_dtype(dtype)
+        return Series("", Column[Int128](values^, valid)).with_dtype(dtype)
     var n = len(values)
     if width == 64:
         var narrow = List[Int64](unsafe_uninit_length=n)
@@ -685,13 +685,13 @@ def _decimal_output(
             narrow[i] = Int64(values[i])
         if len(valid) == 0:
             return Series("", Column[Int64](narrow^)).with_dtype(dtype)
-        return Series("", Column[Int64](narrow^, valid^)).with_dtype(dtype)
+        return Series("", Column[Int64](narrow^, valid)).with_dtype(dtype)
     var narrow = List[Int32](unsafe_uninit_length=n)
     for i in range(n):
         narrow[i] = Int32(values[i])
     if len(valid) == 0:
         return Series("", Column[Int32](narrow^)).with_dtype(dtype)
-    return Series("", Column[Int32](narrow^, valid^)).with_dtype(dtype)
+    return Series("", Column[Int32](narrow^, valid)).with_dtype(dtype)
 
 
 def _decimal_quotient(left: Series, right: Series) raises -> Series:
@@ -1140,7 +1140,7 @@ def _decimal_binary[
                 raw = divide_half_even(raw, rescale)
             values[i] = check_limit(raw, limit, result_dtype)
     comptime if predicate:
-        return Series("", BoolColumn(predicates^, valid))
+        return Series("", BoolColumn(predicates, valid))
     else:
         return _decimal_output(values^, valid^, result_dtype)
 
@@ -1869,7 +1869,7 @@ def _logical[op: Int](left: BoolColumn, right: BoolColumn) raises -> Series:
         else:
             valid[i] = p and q
             values[i] = x != y
-    return Series("", BoolColumn(values^, valid))
+    return Series("", BoolColumn(values, valid))
 
 
 def _fill_null[
@@ -2077,7 +2077,7 @@ def _float_predicate[
                 values[i] = not isnan(x) and not isinf(x)
             else:
                 values[i] = isinf(x)
-    return Series("", BoolColumn(values^, valid))
+    return Series("", BoolColumn(values, valid))
 
 
 def unary[

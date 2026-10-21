@@ -150,7 +150,7 @@ def _read_c_string(address: Int) -> String:
     var bytes = List[UInt8](capacity=length)
     for i in range(length):
         bytes.append(_at[UInt8](address + i)[])
-    return String(unsafe_from_utf8=bytes^)
+    return String(unsafe_from_utf8=bytes)
 
 
 # ---------------------------------------------------------------------------

@@ -118,7 +118,7 @@ def _integer_operator[D: DType](op: Int) raises:
     var expected = DataFrame(
         [
             Series(
-                "result", Column[Scalar[D]](expected_payload^, expected_valid^)
+                "result", Column[Scalar[D]](expected_payload^, expected_valid)
             )
         ]
     )
@@ -321,7 +321,7 @@ def _integer_directions[D: DType]() raises:
                         Series(
                             "r",
                             Column[Scalar[D]](
-                                expected_values^, expected_valid^
+                                expected_values^, expected_valid
                             ),
                         )
                     ]
@@ -1690,11 +1690,11 @@ def power_anchors[D: DType]() raises -> Tuple[DataFrame, Series]:
     return (
         DataFrame(
             [
-                Series("x", Column[Scalar[D]](x^, xv^)),
-                Series("y", Column[Scalar[D]](y^, yv^)),
+                Series("x", Column[Scalar[D]](x^, xv)),
+                Series("y", Column[Scalar[D]](y^, yv)),
             ]
         ),
-        Series("p", Column[Scalar[D]](p^, valid^)),
+        Series("p", Column[Scalar[D]](p^, valid)),
     )
 
 

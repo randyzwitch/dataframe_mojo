@@ -25,7 +25,7 @@ def _query(transport: Int) raises -> LazyFrame:
     ]
     if transport == 1:
         var bytes: List[List[UInt8]] = [[255, 0, 128]]
-        columns.append(Series.binary("unused", bytes^))
+        columns.append(Series.binary("unused", bytes))
     elif transport == 2:
         var fields: List[Series] = [Series("n", Column[Int64]([3]))]
         columns.append(Series("unused", StructColumn(fields^)))

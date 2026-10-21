@@ -12,7 +12,7 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
     for row in range(n + 6):
         values.append(Scalar[D](row % 11 + 1))
         valid.append(row % 7 != 0)
-    var source = Series("x", Column[Scalar[D]](values^, valid^)).slice(3, n)
+    var source = Series("x", Column[Scalar[D]](values^, valid)).slice(3, n)
     if chunked:
         source = Series._from_chunks(
             [

@@ -72,7 +72,7 @@ def _key(domain: Int, values: List[Int64], valid: List[Bool]) raises -> Series:
         var text = List[String]()
         for value in values:
             text.append("k" + String(value))
-        return Series("k", StringColumn(text^, valid))
+        return Series("k", StringColumn(text, valid))
     var rows = List[List[UInt8]]()
     for value in values:
         var bytes = List[UInt8]()
@@ -86,7 +86,7 @@ def _key(domain: Int, values: List[Int64], valid: List[Bool]) raises -> Series:
         if domain == GEOMETRY:
             bytes.extend(List[UInt8](length=8, fill=0))
         rows.append(bytes^)
-    var key = Series.binary("k", rows^, valid)
+    var key = Series.binary("k", rows, valid)
     return from_wkb(key, '{"crs":"EPSG:4326"}') if domain == GEOMETRY else key^
 
 

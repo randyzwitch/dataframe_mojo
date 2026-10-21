@@ -2245,7 +2245,7 @@ struct DataFrame(Copyable, Sized, Writable):
                             ordered_chunks = False
                     if ordered_chunks:
                         columns = take_sorted_chunked(
-                            columns^,
+                            columns,
                             left_rows^,
                             workers,
                             allow_repeats=True,
@@ -7362,7 +7362,7 @@ def _finish_parts(var parts: List[_StreamReduction]) raises -> DataFrame:
         else:
             heap_key[0] = firsts[part][cursor[part]]
         sift_down(heap_part, heap_key, size, 0)
-    return concat(frames^).rechunk().take(order^)
+    return concat(frames).rechunk().take(order)
 
 
 def table_specs(template: _StreamReduction) -> List[ReducerSpec]:
@@ -7687,7 +7687,7 @@ struct _StreamReduction(Movable):
             for r in groups.representatives:
                 kept.append(firsts[r])
             self.firsts = kept^
-            self.keys = combined.take(groups.representatives^)
+            self.keys = combined.take(groups.representatives)
         else:
             for _ in range(len(others)):
                 mappings.append(List[Int]())
@@ -7864,7 +7864,7 @@ struct _StreamReduction(Movable):
             for r in groups.representatives:
                 kept.append(firsts[r])
             self.firsts = kept^
-            self.keys = combined.take(groups.representatives^)
+            self.keys = combined.take(groups.representatives)
         self.rows += other.rows
         for i in range(len(self.states)):
             self.states[i].grow(count)
