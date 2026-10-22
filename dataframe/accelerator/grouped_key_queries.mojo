@@ -10,37 +10,9 @@ from dataframe.expr import COL, COUNT, NULL_COUNT, LIST_LEN, LIST_GET, IMPLODE
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG, SELECT, SLICE
 from .metadata import schema_frame
 from .memory import checked_add
-from .window_keys import WindowKey
-from .grouped_key_domains import KeyDomain, reservation, FIXED
-
-
-@fieldwise_init
-struct KeyQuery(Deinitable, Movable):
-    var query: LazyFrame
-    var schema: DataFrame
-    var domains: List[KeyDomain]
-    var names: List[String]
-    var rows: Int
-    var staging_bytes: Int
-    var key_outputs: List[Int]
-
-    def __deinit__(deinit self):
-        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
-        # documentation trait inference cycles. Owned fields clean up
-        # automatically after this body; no owner is released manually.
-        pass
-
-    def __init__(out self, *, deinit move: Self):
-        # Spell the move explicitly to break LazyFrame/PlanNode/KeyQuery's
-        # generated trait inference cycle. The immutable source buffers and
-        # Arc owners remain shared; only query metadata is copied.
-        self.query = move.query.copy()
-        self.schema = move.schema^
-        self.domains = move.domains^
-        self.names = move.names^
-        self.rows = move.rows
-        self.staging_bytes = move.staging_bytes
-        self.key_outputs = move.key_outputs^
+from dataframe.plan_types import WindowKey
+from dataframe.key_domains import KeyDomain, reservation, FIXED
+from dataframe.key_query import KeyQuery
 
 
 def _shape(query: LazyFrame) raises -> Tuple[LazyFrame, Int, Int]:

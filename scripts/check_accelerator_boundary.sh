@@ -28,18 +28,11 @@ provider_importers=(
   dataframe/execution_backend.mojo  # installed(), for engine="accel"
 )
 
-# KNOWN VIOLATION, recorded rather than hidden. lazy.mojo imports these
-# accelerator modules directly (plan-estimate and key-query value types that
-# the AcceleratorBackend trait and the planner use). Each entry is
-# "file module". The migration plan (step 2) moves these types out of the
-# backend package; remove the entries then. Do not add to this list.
-known_core_imports=(
-  "dataframe/lazy.mojo accelerator.cost"
-  "dataframe/lazy.mojo accelerator.window_keys"
-  "dataframe/lazy.mojo accelerator.grouped_key_queries"
-  "dataframe/lazy.mojo accelerator.opaque_dictionary"
-  "dataframe/lazy.mojo accelerator.code_domains"
-)
+# Recorded exceptions: core files that import a backend module directly. Each
+# entry is "file module". The list is empty since the planner-owned types
+# moved into core (dataframe/plan_types.mojo and friends). Do not add to this
+# list.
+known_core_imports=()
 
 failures=0
 fail() {
