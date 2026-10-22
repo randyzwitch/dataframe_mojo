@@ -2,6 +2,7 @@
 from std.collections import Dict
 from dataframe import DataFrame, DataType, Expr, Series
 from dataframe.binding import bind, ROWS
+from dataframe.expr import node_children
 from dataframe.expr import COL, CAST, LIST_LEN, LIST_GET, Node, col
 from dataframe.lazy import LazyFrame, SCAN_FRAME, SELECT
 from .metadata import schema_frame
@@ -183,7 +184,7 @@ def lower_source_lists(query: LazyFrame) raises -> SourceLists:
                     )
                 node = col(consumers[found].name)._nodes[0].copy()
             else:
-                for child in [node.left, node.right, node.extra]:
+                for child in node_children(node):
                     if child >= 0 and roots[child] < 0:
                         raise Error(
                             "Metal unsupported [source list]: bare or intermediate List consumer"

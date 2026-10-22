@@ -9,6 +9,7 @@ from dataframe import Column, DataFrame, DataType, Series, StringColumn
 from dataframe.binding import bind
 from dataframe.string_view import StringView
 from dataframe.expr import (
+    node_children,
     COL,
     LIT_INT,
     LIT_STRING,
@@ -117,7 +118,7 @@ def _literal_values(query: LazyFrame) raises -> List[String]:
             for index in range(len(bound.expr._nodes)):
                 ref node = bound.expr._nodes[index]
                 var opaque = bound.dtypes[index]._is_bytes()
-                for child in [node.left, node.right, node.extra]:
+                for child in node_children(node):
                     opaque |= child >= 0 and bound.dtypes[child]._is_bytes()
                 if opaque and not _allowed(node.op):
                     raise Error(

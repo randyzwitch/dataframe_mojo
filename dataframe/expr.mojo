@@ -2,6 +2,7 @@
 from std.collections import Dict, Optional
 from std.memory import bitcast
 from .dtype import DataType
+from .value import AnyValue
 
 # Node text of an untyped numeric literal; the binder replaces it with the
 # adopted dtype name.
@@ -320,6 +321,29 @@ comptime STR_TO_INTEGER = 239
 # the last field keeps the remainder (splitn).
 comptime STR_SPLIT_FIELDS = 240
 
+# Additional temporal operations (#794). Multi-input operations consume a
+# STRUCT_PACK so ordinary expression traversal handles every dependency.
+comptime DT_QUARTER = 260
+comptime DT_WEEK = 261
+comptime DT_ISO_YEAR = 262
+comptime DT_MILLISECOND = 263
+comptime DT_MICROSECOND = 264
+comptime DT_CENTURY = 265
+comptime DT_MILLENNIUM = 266
+comptime DT_EPOCH = 267
+comptime DT_MONTH_START = 268
+comptime DT_MONTH_END = 269
+comptime DT_DAYS_IN_MONTH = 270
+comptime DT_IS_LEAP_YEAR = 271
+comptime DT_ROUND = 272
+comptime DT_WITH_TIME_UNIT = 273
+comptime DT_BUILD = 274
+comptime DT_REPLACE = 275
+comptime DT_COMBINE = 276
+comptime DT_IS_BUSINESS_DAY = 277
+comptime DT_ADD_BUSINESS_DAYS = 278
+comptime DT_BUSINESS_DAY_COUNT = 279
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -431,6 +455,7 @@ def is_dt_op(op: Int) -> Bool:
         (op >= DT_YEAR and op <= DT_STRPTIME)
         or op == DT_REPLACE_TZ
         or op == DT_CONVERT_TZ
+        or (op >= DT_QUARTER and op <= DT_BUSINESS_DAY_COUNT)
     )
 
 
@@ -1877,12 +1902,10 @@ struct Expr(Copyable):
 def _append_shifted(mut nodes: List[Node], other: List[Node], offset: Int):
     for node in other:
         var copied = node.copy()
-        if copied.left >= 0:
-            copied.left += offset
-        if copied.right >= 0:
-            copied.right += offset
-        if copied.extra >= 0:
-            copied.extra += offset
+        var children = node_children(copied)
+        for k in range(len(children)):
+            children[k] += offset
+        _set_node_children(copied, children)
         nodes.append(copied^)
 
 
@@ -2036,6 +2059,34 @@ def lit(value: Bool) -> Expr:
 
 def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
+
+
+def lit(value: Int64, dtype: DataType) raises -> Expr:
+    """A date/datetime/time/duration literal from its stored integer ticks."""
+    if not dtype.is_temporal():
+        raise Error("typed temporal lit requires a temporal dtype")
+    if dtype.is_time() and (value < 0 or value >= 86400000000000):
+        raise Error("time of day out of range")
+    return Expr(
+        [
+            _node(
+                LIT_INT,
+                integer=value,
+                text=dtype.name(),
+                dtypes=[Optional(dtype)],
+            )
+        ],
+        "literal",
+    )
+
+
+def lit(value: AnyValue) raises -> Expr:
+    """A typed temporal scalar, including typed temporal nulls."""
+    if not value.dtype().is_temporal():
+        raise Error("lit(AnyValue) requires a temporal scalar")
+    if value.is_null():
+        return null(value.dtype().name())
+    return lit(value.to_physical(), value.dtype())
 
 
 def _no_default() -> Expr:
@@ -2686,24 +2737,18 @@ def subtree(expr: Expr, root: Int) -> Expr:
         if not keep[i]:
             continue
         ref node = expr._nodes[i]
-        if node.left >= 0:
-            keep[node.left] = True
-        if node.right >= 0:
-            keep[node.right] = True
-        if node.extra >= 0:
-            keep[node.extra] = True
+        for child in node_children(node):
+            keep[child] = True
     var position = List[Int](length=root + 1, fill=-1)
     var nodes = List[Node]()
     for i in range(root + 1):
         if keep[i]:
             position[i] = len(nodes)
             var copied = expr._nodes[i].copy()
-            if copied.left >= 0:
-                copied.left = position[copied.left]
-            if copied.right >= 0:
-                copied.right = position[copied.right]
-            if copied.extra >= 0:
-                copied.extra = position[copied.extra]
+            var children = node_children(copied)
+            for k in range(len(children)):
+                children[k] = position[children[k]]
+            _set_node_children(copied, children)
             nodes.append(copied^)
     return Expr(nodes^, expr._name)
 
@@ -2725,6 +2770,144 @@ struct DtNamespace(Copyable):
         var nodes = self._expr._nodes.copy()
         nodes.append(_node(op, len(nodes) - 1, text=text, text2=text2))
         return Expr(nodes^, self._expr._name)
+
+    def quarter(self) -> Expr:
+        """Quarter, 1 through 4."""
+        return self._op(DT_QUARTER)
+
+    def week(self) -> Expr:
+        """ISO week, 1 through 53; Monday starts the week."""
+        return self._op(DT_WEEK)
+
+    def iso_year(self) -> Expr:
+        """ISO week-numbering year."""
+        return self._op(DT_ISO_YEAR)
+
+    def millisecond(self) -> Expr:
+        """Milliseconds within the second."""
+        return self._op(DT_MILLISECOND)
+
+    def microsecond(self) -> Expr:
+        """Microseconds within the second."""
+        return self._op(DT_MICROSECOND)
+
+    def century(self) -> Expr:
+        """Century, with years 1 through 100 in century 1."""
+        return self._op(DT_CENTURY)
+
+    def millennium(self) -> Expr:
+        """Millennium, with years 1 through 1000 in millennium 1."""
+        return self._op(DT_MILLENNIUM)
+
+    def month_start(self) -> Expr:
+        """First day of the month, preserving the time of day."""
+        return self._op(DT_MONTH_START)
+
+    def month_end(self) -> Expr:
+        """Last day of the month, preserving the time of day."""
+        return self._op(DT_MONTH_END)
+
+    def days_in_month(self) -> Expr:
+        """Number of days in the local calendar month."""
+        return self._op(DT_DAYS_IN_MONTH)
+
+    def is_leap_year(self) -> Expr:
+        """Whether the local calendar year is a leap year."""
+        return self._op(DT_IS_LEAP_YEAR)
+
+    def epoch(self, time_unit: String = "us") -> Expr:
+        """UTC ticks since 1970 in d, s, ms, us or ns; floors negatives."""
+        return self._op(DT_EPOCH, time_unit)
+
+    def timestamp(self, time_unit: String = "us") -> Expr:
+        """UTC timestamp in ms, us or ns."""
+        return self._op(DT_EPOCH, time_unit, "timestamp")
+
+    def round(self, every: String) -> Expr:
+        """Round local time as in Polars: shift by half the interval, then
+        truncate. Calendar months use a 28-day estimate; fixed-unit ties
+        round forward.
+        """
+        return self._op(DT_ROUND, every)
+
+    def with_time_unit(self, time_unit: String) -> Expr:
+        """Retag datetime/duration ticks without rescaling them."""
+        return self._op(DT_WITH_TIME_UNIT, time_unit)
+
+    def combine(self, time: Expr, time_unit: String = "us") raises -> Expr:
+        """Combine a local date with a time, retaining a datetime's zone."""
+        return _temporal_pack(
+            [self._expr.alias("base"), time.alias("time")],
+            DT_COMBINE,
+            time_unit,
+        ).alias(self._expr._name)
+
+    def replace(
+        self,
+        year: Expr = _no_default(),
+        month: Expr = _no_default(),
+        day: Expr = _no_default(),
+        hour: Expr = _no_default(),
+        minute: Expr = _no_default(),
+        second: Expr = _no_default(),
+        microsecond: Expr = _no_default(),
+        ambiguous: String = "raise",
+    ) raises -> Expr:
+        """Replace selected local fields with scalars or expressions.
+
+        Invalid dates and nonexistent local times raise. Ambiguous local
+        times accept raise, earliest, latest or null.
+        """
+        var fields: List[Expr] = [self._expr.alias("base")]
+        var names: List[String] = [
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "second",
+            "microsecond",
+        ]
+        var supplied: List[Expr] = [
+            year.copy(),
+            month.copy(),
+            day.copy(),
+            hour.copy(),
+            minute.copy(),
+            second.copy(),
+            microsecond.copy(),
+        ]
+        for i in range(len(supplied)):
+            if len(supplied[i]._nodes):
+                fields.append(supplied[i].cast(DataType.INT64).alias(names[i]))
+        return _temporal_pack(fields, DT_REPLACE, ambiguous).alias(
+            self._expr._name
+        )
+
+    def is_business_day(
+        self,
+        week_mask: List[Bool] = [True, True, True, True, True, False, False],
+        holidays: List[String] = List[String](),
+    ) raises -> Expr:
+        """Business-day membership; holidays are ISO date strings."""
+        return self._op(
+            DT_IS_BUSINESS_DAY, "", _business_options(week_mask, holidays)
+        )
+
+    def add_business_days(
+        self,
+        n: Expr,
+        week_mask: List[Bool] = [True, True, True, True, True, False, False],
+        holidays: List[String] = List[String](),
+        roll: String = "raise",
+    ) raises -> Expr:
+        """Offset local dates, preserving time. Roll: raise/forward/backward."""
+        return _temporal_pack(
+            [self._expr.alias("base"), n.cast(DataType.INT64).alias("n")],
+            DT_ADD_BUSINESS_DAYS,
+            roll,
+            _business_options(week_mask, holidays),
+        ).alias(self._expr._name)
 
     def year(self) -> Expr:
         return self._op(DT_YEAR)
@@ -2858,3 +3041,176 @@ def struct_pack_children(node: Node) -> List[Int]:
 
 def struct_pack_names(node: Node) -> List[String]:
     return split_names(node.text)
+
+
+def _temporal_pack(
+    fields: List[Expr], op: Int, text: String = "", text2: String = ""
+) raises -> Expr:
+    return DtNamespace(as_struct(fields))._op(op, text, text2)
+
+
+def date(year: Expr, month: Expr, day: Expr) raises -> Expr:
+    """Construct dates from scalar or expression calendar fields."""
+    return _temporal_pack(
+        [
+            year.cast(DataType.INT64).alias("year"),
+            month.cast(DataType.INT64).alias("month"),
+            day.cast(DataType.INT64).alias("day"),
+        ],
+        DT_BUILD,
+        "date",
+    ).alias("date")
+
+
+def datetime(
+    year: Expr,
+    month: Expr,
+    day: Expr,
+    hour: Expr = 0,
+    minute: Expr = 0,
+    second: Expr = 0,
+    microsecond: Expr = 0,
+    time_unit: String = "us",
+    time_zone: String = "",
+) raises -> Expr:
+    """Construct datetimes from local fields, raising for DST ambiguity."""
+    return _temporal_pack(
+        [
+            year.cast(DataType.INT64).alias("year"),
+            month.cast(DataType.INT64).alias("month"),
+            day.cast(DataType.INT64).alias("day"),
+            hour.cast(DataType.INT64).alias("hour"),
+            minute.cast(DataType.INT64).alias("minute"),
+            second.cast(DataType.INT64).alias("second"),
+            microsecond.cast(DataType.INT64).alias("microsecond"),
+        ],
+        DT_BUILD,
+        DataType.datetime(time_unit, time_zone).name(),
+    ).alias("datetime")
+
+
+def time(
+    hour: Expr = 0, minute: Expr = 0, second: Expr = 0, microsecond: Expr = 0
+) raises -> Expr:
+    """Construct nanosecond times from scalar or expression fields."""
+    return _temporal_pack(
+        [
+            hour.cast(DataType.INT64).alias("hour"),
+            minute.cast(DataType.INT64).alias("minute"),
+            second.cast(DataType.INT64).alias("second"),
+            microsecond.cast(DataType.INT64).alias("microsecond"),
+        ],
+        DT_BUILD,
+        "time",
+    ).alias("time")
+
+
+def duration(
+    weeks: Expr = 0,
+    days: Expr = 0,
+    hours: Expr = 0,
+    minutes: Expr = 0,
+    seconds: Expr = 0,
+    milliseconds: Expr = 0,
+    microseconds: Expr = 0,
+    nanoseconds: Expr = 0,
+    time_unit: String = "us",
+) raises -> Expr:
+    """Fixed elapsed duration; calendar days are exactly 24 hours.
+
+    Components finer than the unit truncate toward zero. Overflow raises.
+    """
+    var names: List[String] = [
+        "weeks",
+        "days",
+        "hours",
+        "minutes",
+        "seconds",
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+    ]
+    var values: List[Expr] = [
+        weeks.copy(),
+        days.copy(),
+        hours.copy(),
+        minutes.copy(),
+        seconds.copy(),
+        milliseconds.copy(),
+        microseconds.copy(),
+        nanoseconds.copy(),
+    ]
+    var fields = List[Expr]()
+    for i in range(len(values)):
+        fields.append(values[i].cast(DataType.INT64).alias(names[i]))
+    return _temporal_pack(
+        fields, DT_BUILD, DataType.duration(time_unit).name()
+    ).alias("duration")
+
+
+def _business_options(
+    week_mask: List[Bool], holidays: List[String]
+) raises -> String:
+    if len(week_mask) != 7:
+        raise Error("week_mask must contain seven days, Monday first")
+    var options = String()
+    var any_day = False
+    for enabled in week_mask:
+        options += "1" if enabled else "0"
+        any_day = any_day or enabled
+    if not any_day:
+        raise Error("week_mask must enable at least one day")
+    for holiday in holidays:
+        options += SEP + holiday
+    return options^
+
+
+def business_day_count(
+    start: Expr,
+    end: Expr,
+    week_mask: List[Bool] = [True, True, True, True, True, False, False],
+    holidays: List[String] = List[String](),
+) raises -> Expr:
+    """Count business dates, excluding end in either direction."""
+    return _temporal_pack(
+        [start.alias("base"), end.alias("end")],
+        DT_BUSINESS_DAY_COUNT,
+        "",
+        _business_options(week_mask, holidays),
+    ).alias("business_day_count")
+
+
+def _set_struct_pack_children(mut node: Node, children: List[Int]):
+    node.left = children[0]
+    node.text2 = String()
+    for k in range(len(children)):
+        if k:
+            node.text2 += SEP
+        node.text2 += String(children[k])
+
+
+def node_children(node: Node) -> List[Int]:
+    """Every expression dependency, in operand order, including packed fields."""
+    if node.op == STRUCT_PACK:
+        return struct_pack_children(node)
+    var children = List[Int]()
+    for child in [node.left, node.right, node.extra]:
+        if child >= 0:
+            children.append(child)
+    return children^
+
+
+def _set_node_children(mut node: Node, children: List[Int]):
+    """Replace dependencies in node_children order after an IR rewrite."""
+    if node.op == STRUCT_PACK:
+        _set_struct_pack_children(node, children)
+        return
+    var k = 0
+    if node.left >= 0:
+        node.left = children[k]
+        k += 1
+    if node.right >= 0:
+        node.right = children[k]
+        k += 1
+    if node.extra >= 0:
+        node.extra = children[k]
