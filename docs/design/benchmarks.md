@@ -255,6 +255,36 @@ single cells, and confirm a single-query change on the full tier.
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
 this size), `dev` (1M rows, scale factor 0.1), `default` (10M) or `large` (100M).
 
+## Apple CPU and Metal checkpoint report
+
+Nothing is scheduled or published. Every few PRs, run the CPU against forced
+Metal comparison by hand on an idle Apple silicon Mac, with a clean
+`dataframe/` tree and no `mojo` process running:
+
+```bash
+pixi run -e native build-dfparquet                      # once
+pixi run -e oracle report-apple                         # dev scale, 3 rounds
+pixi run -e oracle report-apple-quick                   # smoke scale, 1 round
+```
+
+The task runs the existing steps into `build/reports/apple/`: the exact
+CPU/Metal answer receipt (`coverage.json`, from `bench_metal_suites.py`), the
+timing driver's prepare, build and run steps (`performance.json`, from
+`bench_apple_performance.py`), then `results.html`
+(`apple_performance_html.py`). Settings come from environment variables:
+`APPLE_SCALE` (smoke, dev, default or large), `APPLE_SUITES`, `APPLE_QUERIES`,
+`APPLE_ROUNDS`, `APPLE_REPS`, `APPLE_WARMUPS`, `APPLE_THREADS` and
+`APPLE_OUT`. Builds take several minutes per suite; start it with `nohup`.
+
+Every query runs in fresh worker processes, once per engine per round. Only
+cases with a matching exact receipt and DuckDB summary check enter the
+CPU / Metal ratios; the report lists the rest with their reason (unsupported,
+wrong answer, hybrid or unverified audit, CPU data-fault adjudication).
+
+Keep a report by copying `results.html`, `performance.json` and
+`coverage.json` to `$HOME/dataframe-reports/apple/<date>-<sha>/`. Nothing from
+a run is committed to the repository.
+
 ## Keeping holdouts useful
 
 The practical boundary is tuning versus validation. Use development workloads
