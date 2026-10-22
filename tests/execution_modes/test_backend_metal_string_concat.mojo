@@ -13,6 +13,7 @@ from dataframe import (
     concat_str,
 )
 from dataframe.accelerator.dictionaries import lower_dictionary_operations
+from dataframe.accelerator.observed_concat import has_markers
 from dataframe.metal import MetalRuntime
 from dataframe.lazy import LazyFrame
 
@@ -46,7 +47,8 @@ def concat_frame() raises -> DataFrame:
 def compare_concat(query: LazyFrame) raises:
     var expected = query.collect(engine="cpu")
     var lowered = lower_dictionary_operations(query)
-    assert_true(lowered[0].collect(engine="cpu").equals(expected))
+    if not has_markers(lowered[0]):
+        assert_true(lowered[0].collect(engine="cpu").equals(expected))
     assert_true(lowered[1] >= 0)
     assert_true(lowered[2] > 0)
     assert_true(query.collect(accelerator=MetalRuntime()).equals(expected))
@@ -188,8 +190,8 @@ def test_native_metal_concat_dictionary_pair_capacity_byte_budget_and_recovery()
         var large = frame.lazy().select(
             concat_str([col("a"), col("b")]).alias("value")
         )
-        with assert_raises(contains="capacity"):
-            _ = lower_dictionary_operations(large)
+        assert_true(has_markers(lower_dictionary_operations(large)[0]))
+        compare_concat(large)
     compare_concat(query)
     var runtime = MetalRuntime()
     var measured = query.profile(accelerator=runtime)

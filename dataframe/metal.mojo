@@ -53,6 +53,7 @@ from .accelerator.memory import checked_add
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.code_domains import TextQuery
 from .accelerator.qcuts import has_default_qcuts
+from .accelerator.observed_concat import has_markers as has_observed_concats
 from std.memory import ArcPointer
 from .accelerator.sources import (
     file_source_nodes,
@@ -1103,6 +1104,7 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var dynamic_text = (
                 has_default_qcuts(staged_query)
+                or has_observed_concats(staged_query)
                 or has_category_transport(staged_query)
                 or has_grouped_key_owners(staged_query)
             )
@@ -1417,7 +1419,8 @@ struct MetalRuntime(AcceleratorBackend):
                 var encoded = encode_query(
                     staged_query,
                     dictionary,
-                    dynamic_text=has_grouped_key_owners(staged_query),
+                    dynamic_text=has_grouped_key_owners(staged_query)
+                    or has_observed_concats(staged_query),
                 )
                 return "Metal ordered dictionary staging; " + self._describe(
                     encoded, False

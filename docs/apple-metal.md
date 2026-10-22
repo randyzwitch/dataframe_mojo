@@ -204,6 +204,17 @@ those tables through GPU row/join operations. Profiles report dictionary staging
 and restoration separately; they do not imply that string transformation code
 executes on the GPU.
 
+Concatenations whose possible dictionary pairs exceed the static lookup limits
+use the rows produced by upstream GPU operators instead. The GPU discovers
+and deduplicates operand-code pairs; the host constructs only those distinct
+labels, and the GPU maps resident rows to the resulting ordered dictionary.
+This preserves nulls and duplicate labels without allocating the Cartesian
+product. Scratch space scales with row count, with explicit payload-budget
+checks before allocation. Profiles identify this phase as
+`mojo_gpu_observed_text_pairs`. Further concatenations and ordinary relational
+consumers preserve the generated dictionary. Other string transformations
+consuming these dynamically generated labels remain explicitly unsupported.
+
 Categorical transport preserves original codes and dictionary owners through
 row, filter, sort, group, window, join and as-of operations. Duplicate category
 labels remain distinct codes. Temporary join dictionaries do not replace the
