@@ -121,7 +121,7 @@ def _at[T: AnyType](address: Int) -> Pointer[T, MutAnyOrigin]:
 
 def _leak[T: Movable](var value: T) -> Int:
     """Move value to the heap and return its address (see _reclaim)."""
-    var pointer = alloc(Layout[T](length=1)).unsafe_leak()
+    var pointer = alloc(Layout[T](count=1)).unsafe_leak()
     pointer.unsafe_write(value^)
     return Int(pointer)
 
@@ -130,7 +130,7 @@ def _reclaim[T: Movable](address: Int) -> T:
     """Take back a value leaked with _leak and free its memory."""
     var pointer = Pointer[T, MutUntrackedOrigin](unsafe_from_address=address)
     var value = pointer.unsafe_take_pointee()
-    dealloc(Allocation[T](unsafe_owned_ptr=pointer, layout=Layout[T](length=1)))
+    dealloc(Allocation[T](unsafe_owned_ptr=pointer, layout=Layout[T](count=1)))
     return value^
 
 
