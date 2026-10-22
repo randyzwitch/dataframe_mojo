@@ -49,6 +49,8 @@ jobs:
         run: bash scripts/check_no_evidence_files.sh
       - name: Check test reachability
         run: python3 scripts/check_test_reachability.py
+      - name: Check accelerator boundary
+        run: bash scripts/check_accelerator_boundary.sh
 
   native-linux:
     runs-on: ubuntu-latest

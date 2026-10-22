@@ -1,5 +1,8 @@
 # Accelerator backends
 
+The boundary between the core and a backend, and how a backend attaches, is
+specified in [accelerator-contract.md](accelerator-contract.md).
+
 Optional backends use the same `DataFrame`, expressions, binder, and lazy
 collection API as CPU execution. An explicit runtime implements
 `dataframe.lazy.AcceleratorBackend`; an optional distribution can register its
