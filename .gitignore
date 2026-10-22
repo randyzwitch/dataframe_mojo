@@ -23,3 +23,5 @@ perf.data*
 
 # Local benchmark runs (reports are never committed)
 /benchmarks/results/
+queue2.sh
+queue2.log
