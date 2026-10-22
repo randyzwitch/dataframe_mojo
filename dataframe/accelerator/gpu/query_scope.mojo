@@ -414,7 +414,7 @@ struct Scope(Copyable):
                         var acquired_context = acquired[0].copy()
                         state[].context = ContextCell(
                             rebind[DeviceContext if METAL_TARGET else Int](
-                                acquired_context^
+                                acquired_context
                             )
                         )
                         state[].cached_context_lease = cached_lease

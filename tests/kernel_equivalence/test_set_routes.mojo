@@ -68,10 +68,10 @@ def test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_na
             expected[set_signature(ic, fc, sc, bc)] = True
     var source = DataFrame(
         [
-            Series("i", Column[Int64](ints^, iv^)).slice(7, n),
-            Series("f", Column[Float64](floats^, fv^)).slice(7, n),
-            Series("s", Column[String](words^, sv^)).slice(7, n),
-            Series("b", Column[Bool](bools^, bv^)).slice(7, n),
+            Series("i", Column[Int64](ints^, iv)).slice(7, n),
+            Series("f", Column[Float64](floats^, fv)).slice(7, n),
+            Series("s", Column[String](words^, sv)).slice(7, n),
+            Series("b", Column[Bool](bools^, bv)).slice(7, n),
         ]
     )
     for chunked in [False, True]:
@@ -176,7 +176,7 @@ def test_parallel_subset_unique_keeps_input_order_and_exact_key_counts() raises:
         )
     var frame = DataFrame(
         [
-            Series("a", Column[Int64](a^, av^)),
+            Series("a", Column[Int64](a^, av)),
             Series("b", Column[String](b^)),
             Series("row", Column[Int64](ids^)),
         ]

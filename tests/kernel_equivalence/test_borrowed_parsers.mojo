@@ -183,7 +183,7 @@ def test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment() 
             for byte in range(256):
                 var bytes = List[UInt8](length=length, fill=49)
                 bytes[position] = UInt8(byte)
-                var text = String(unsafe_from_utf8=bytes^)
+                var text = String(unsafe_from_utf8=bytes)
                 _integer_field(text)
                 _integer_field("+" + text)
 

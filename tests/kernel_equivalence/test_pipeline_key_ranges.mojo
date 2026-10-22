@@ -55,7 +55,7 @@ def probe(dtype: DataType) raises -> DataFrame:
         [
             Series("id", Column[Int64](ids^)),
             Series("sk", Column[Int64](sorted^, valid.copy())),
-            Series("xk", Column[Int64](scattered^, valid^)),
+            Series("xk", Column[Int64](scattered^, valid)),
         ]
     )
     if dtype != DataType.INT64:

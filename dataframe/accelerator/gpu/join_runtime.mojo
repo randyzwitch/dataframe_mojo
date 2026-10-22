@@ -179,7 +179,7 @@ def execute_plan(
         for name in task.schema.columns():
             columns.append(col(name))
         var empty_plan = preflight_rows(
-            task.schema.clear().lazy().select_exprs(columns^)
+            task.schema.clear().lazy().select_exprs(columns)
         )
         var empty = execute_rows(
             empty_plan, scope, profiling=profiling, export_values=export_values

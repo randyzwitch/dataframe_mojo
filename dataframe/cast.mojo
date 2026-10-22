@@ -769,7 +769,7 @@ def cast_series(
                     + String(e)
                 )
     if target == DataType.BOOL:
-        return Series(input.name(), BoolColumn(targets^, valid))
+        return Series(input.name(), BoolColumn(targets, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if target == DataType.of(D):

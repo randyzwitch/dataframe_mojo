@@ -32,7 +32,7 @@ def test_order_windows_are_computed_over_whole_partitions_before_batch_evaluatio
         [
             Series("x", Column[Float64](payload.copy(), valid.copy())),
             Series("id", Column[Int64](ids^)),
-            Series("k", Column[Int64](keys^, key_valid^)),
+            Series("k", Column[Int64](keys^, key_valid)),
         ]
     )
     for layout in range(3):
@@ -80,7 +80,7 @@ def test_order_windows_are_computed_over_whole_partitions_before_batch_evaluatio
                             indices.append(row)
                             values.append(payload[row])
                             mask.append(valid[row])
-                    var cells = WindowCells(values^, mask^)
+                    var cells = WindowCells(values, mask)
                     var expected: List[WindowCells] = [
                         cumulative(cells, "sum", False),
                         cumulative(cells, "sum", True),

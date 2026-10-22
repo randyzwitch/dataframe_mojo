@@ -157,7 +157,7 @@ def _contains(lists: ListColumn, node: Node) raises -> Series:
                     found = True
                     break
             flags.append(found)
-        return Series("", BoolColumn(flags^, valid))
+        return Series("", BoolColumn(flags, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if child._data.isa[Column[Scalar[D]]]():
@@ -174,7 +174,7 @@ def _contains(lists: ListColumn, node: Node) raises -> Series:
                         found = True
                         break
                 flags.append(found)
-            return Series("", BoolColumn(flags^, valid))
+            return Series("", BoolColumn(flags, valid))
     raise Error("list.contains needs a string or numeric list")
 
 

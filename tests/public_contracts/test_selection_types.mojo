@@ -122,7 +122,7 @@ def test_filter_preserves_every_logical_payload_across_offsets_chunks_and_nulls(
                         if bits[len(bits) - 1] and valid[len(valid) - 1]:
                             rows.append(row)
                     assert_selected_frame(
-                        source.filter(Column[Bool](bits^, valid^)), rows, mode
+                        source.filter(Column[Bool](bits^, valid)), rows, mode
                     )
                 assert_selected_frame(
                     source.filter(lit(False)), List[Int](), mode

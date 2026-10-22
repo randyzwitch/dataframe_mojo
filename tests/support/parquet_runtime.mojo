@@ -31,7 +31,7 @@ def shell_quote(text: String) -> String:
             result += "'\\''"
         else:
             var one: List[UInt8] = [byte]
-            result += String(unsafe_from_utf8=one^)
+            result += String(unsafe_from_utf8=one)
     return result + "'"
 
 
@@ -126,7 +126,7 @@ struct Observer(Movable):
                 if character == 0:
                     break
                 bytes.append(UInt8(character))
-            result.append(String(unsafe_from_utf8=bytes^))
+            result.append(String(unsafe_from_utf8=bytes))
         return result^
 
     def last_stream(self, field: Int) -> Int64:
@@ -165,7 +165,7 @@ struct WorkingDirectory(Movable):
         var actual = List[UInt8]()
         for index in range(size):
             actual.append(bytes[index])
-        self.previous = String(unsafe_from_utf8=actual^)
+        self.previous = String(unsafe_from_utf8=actual)
         var target = path + "\0"
         assert_equal(
             external_call["chdir", Int32](target.unsafe_ptr()), Int32(0)

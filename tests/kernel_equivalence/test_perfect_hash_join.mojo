@@ -25,7 +25,7 @@ def probe() raises -> DataFrame:
         ids.append(Int64(row))
     return DataFrame(
         [
-            Series("k", Column[Int64](keys^, valid^)),
+            Series("k", Column[Int64](keys^, valid)),
             Series("id", Column[Int64](ids^)),
         ]
     )
