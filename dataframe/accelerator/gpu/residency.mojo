@@ -1019,7 +1019,6 @@ struct Table(Copyable):
                         schema._columns[output].dtype(),
                         queued,
                     )
-                    ^
                 )
             ctx.enqueue_copy(host_status.unsafe_ptr(), status)
             scope.record_download(4)
@@ -1998,7 +1997,7 @@ def _native_null_join_column(
         comptime D = NUMERIC_DTYPES[k]
         if logical.physical() == DataType.of(D):
             return NativeColumnAny(
-                _native_null_join_typed[D](scope, logical, rows, queued)^
+                _native_null_join_typed[D](scope, logical, rows, queued)
             )
     raise Error("Mojo GPU native join payload dtype is unsupported")
 
@@ -2065,7 +2064,6 @@ def _native_join_gather_column(
                     status,
                     queued,
                 )
-                ^
             )
     raise Error("Mojo GPU native join payload dtype is unsupported")
 
