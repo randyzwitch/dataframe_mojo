@@ -8,6 +8,7 @@ The MAX context is created lazily and always selects the Metal device API.
 
 from max.gpu import global_idx
 from max.gpu.host import DeviceBuffer
+from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
@@ -32,6 +33,58 @@ from .grouped_key_owner import GroupedKeyField
 from dataframe.accelerator.faults import data_fault
 
 comptime CELL_BYTES = 21
+comptime NATIVE_MISSING = UInt32.MAX
+
+
+@fieldwise_init
+struct NativeJoinField(Copyable):
+    """Output sources for a pair-map native gather.
+
+    `left` and `right` are source schema column indices, or -1 when absent.
+    `prefer_right` implements JoinField's coalescing precedence. The pair-map
+    certificate determines whether a single-sided output needs null extension.
+    The schema passed to `Table.gather_join` owns output names and metadata.
+    """
+
+    var left: Int
+    var right: Int
+    var prefer_right: Bool
+
+
+struct NativeRowMap(Copyable):
+    """A retained device row map plus its producer's range certificate.
+
+    `source_rows` and `may_be_missing` are shape facts from pair generation;
+    values are still range-checked on device before publishing the result.
+    """
+
+    var scope: Scope
+    var values: DeviceBuffer[DType.uint32]
+    var rows: Int
+    var source_rows: Int
+    var may_be_missing: Bool
+
+    def __init__(
+        out self,
+        scope: Scope,
+        var values: DeviceBuffer[DType.uint32],
+        rows: Int,
+        source_rows: Int,
+        may_be_missing: Bool,
+    ) raises:
+        if (
+            rows < 0
+            or rows > Int(Int32.MAX)
+            or source_rows < 0
+            or source_rows > Int(Int32.MAX)
+            or len(values) < rows
+        ):
+            raise Error("Mojo GPU native row map shape is invalid")
+        self.scope = scope.copy()
+        self.values = values^
+        self.rows = rows
+        self.source_rows = source_rows
+        self.may_be_missing = may_be_missing
 
 
 def raise_value_error(code: UInt32, message: String) raises:
@@ -157,6 +210,57 @@ def _output_bytes(schema: DataFrame, rows: Int) raises -> Int:
             bytes, checked_add(checked_mul(rows, width), (rows + 7) // 8)
         )
     return checked_add(bytes, checked_mul(rows, 4 if schema.width() else 0))
+
+
+def _native_join_output_bytes(
+    logical: DataType, rows: Int, validity: Bool, errors: Bool
+) raises -> Int:
+    if (
+        logical.is_decimal()
+        or logical.is_categorical()
+        or logical.is_nested()
+        or logical == DataType.BOOL
+    ):
+        raise Error("Mojo GPU native join payload dtype is unsupported")
+    var width = 0
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if logical.physical() == DataType.of(D):
+            width = size_of[Scalar[D]]()
+    if not width:
+        raise Error("Mojo GPU native join payload dtype is unsupported")
+    var bytes = checked_mul(rows, width)
+    if validity:
+        bytes = checked_add(bytes, checked_add(rows, 7) // 8)
+    if errors:
+        bytes = checked_add(bytes, checked_mul(rows, size_of[UInt32]()))
+    return bytes
+
+
+def _validate_native_join_source(
+    text: Bool,
+    category: Bool,
+    grouped_key: Bool,
+    column: NativeColumnAny,
+    logical: DataType,
+    offset: Int,
+    rows: Int,
+) raises:
+    if text or category or grouped_key:
+        raise Error("Mojo GPU native join cannot carry text metadata")
+    if (
+        column.logical != logical
+        or logical.is_decimal()
+        or logical.is_categorical()
+        or logical.is_nested()
+        or logical == DataType.BOOL
+        or not (logical.is_numeric() or logical.is_temporal())
+    ):
+        raise Error(
+            "Mojo GPU native join source dtype differs or is unsupported"
+        )
+    if offset > column.length or rows > column.length - offset:
+        raise Error("Mojo GPU native join source view is outside its owner")
 
 
 struct TextDomain(Movable):
@@ -653,6 +757,265 @@ struct Table(Copyable):
         _ = device_reservation^
         _ = host_reservation^
         return Self.native(self.schema.copy(), outputs^)
+
+    def gather_join(
+        self,
+        scope: Scope,
+        right: Self,
+        schema: DataFrame,
+        fields: List[NativeJoinField],
+        left_map: NativeRowMap,
+        right_map: NativeRowMap,
+    ) raises -> Self:
+        """Gather two resident inputs through validated device-side pair maps.
+
+        Pair maps remain UInt32 device owners throughout. All field gathers
+        enqueue against both source tables and maps, then share one small
+        status read and one final drain. `schema` is the caller's fully formed
+        output schema, including field metadata and coalesced-key choices.
+        """
+        if (
+            not len(self.native_columns)
+            or not len(right.native_columns)
+            or len(self.columns) != self.schema.width()
+            or len(right.columns) != right.schema.width()
+            or schema.height() != 0
+            or schema.width() == 0
+            or schema.width() != len(fields)
+            or self.rows > Int(Int32.MAX)
+            or right.rows > Int(Int32.MAX)
+            or left_map.rows != right_map.rows
+            or left_map.rows > Int(Int32.MAX)
+            or left_map.source_rows != self.rows
+            or right_map.source_rows != right.rows
+            or (left_map.rows > 0 and self.rows == 0 and right.rows == 0)
+        ):
+            raise Error("Mojo GPU native join gather shape is invalid")
+        if (
+            not self.native_columns[0].scope().same_query(scope)
+            or not right.native_columns[0].scope().same_query(scope)
+            or not left_map.scope.same_query(scope)
+            or not right_map.scope.same_query(scope)
+        ):
+            raise Error("Mojo GPU native join gather belongs to another query")
+
+        # Validate every source and calculate the exact output sidecars before
+        # the first output or status buffer is allocated.
+        var bytes = 0
+        for output in range(len(fields)):
+            ref field = fields[output]
+            ref output_field = schema._columns[output]
+            if (
+                field.left < -1
+                or field.left >= self.schema.width()
+                or field.right < -1
+                or field.right >= right.schema.width()
+                or (field.left < 0 and field.right < 0)
+            ):
+                raise Error("Mojo GPU native join output source is invalid")
+            if (
+                left_map.rows
+                and field.left >= 0
+                and field.right < 0
+                and (self.rows == 0 and not left_map.may_be_missing)
+            ):
+                raise Error("Mojo GPU native join left source cannot be empty")
+            if (
+                left_map.rows
+                and field.right >= 0
+                and field.left < 0
+                and (right.rows == 0 and not right_map.may_be_missing)
+            ):
+                raise Error("Mojo GPU native join right source cannot be empty")
+            var left_possible = field.left >= 0 and (
+                self.rows > 0
+                and (
+                    not field.prefer_right
+                    or field.right < 0
+                    or right_map.may_be_missing
+                )
+            )
+            var right_possible = field.right >= 0 and (
+                right.rows > 0
+                and (
+                    field.prefer_right
+                    or field.left < 0
+                    or left_map.may_be_missing
+                )
+            )
+            var valid_sidecar = False
+            var error_sidecar = False
+            if field.left >= 0:
+                var source = Int(self.columns[field.left])
+                if source < 0 or source >= len(self.native_columns):
+                    raise Error("Mojo GPU native join left owner is invalid")
+                ref column = self.native_columns[source]
+                _validate_native_join_source(
+                    Bool(self.text[field.left]),
+                    Bool(self.categories[field.left]),
+                    Bool(self.grouped_keys[field.left]),
+                    column,
+                    output_field.dtype(),
+                    self.offset,
+                    self.rows,
+                )
+                if left_possible and self.rows > 0:
+                    valid_sidecar |= column.has_validity()
+                    error_sidecar |= column.has_errors()
+            if field.right >= 0:
+                var source = Int(right.columns[field.right])
+                if source < 0 or source >= len(right.native_columns):
+                    raise Error("Mojo GPU native join right owner is invalid")
+                ref column = right.native_columns[source]
+                _validate_native_join_source(
+                    Bool(right.text[field.right]),
+                    Bool(right.categories[field.right]),
+                    Bool(right.grouped_keys[field.right]),
+                    column,
+                    output_field.dtype(),
+                    right.offset,
+                    right.rows,
+                )
+                if right_possible and right.rows > 0:
+                    valid_sidecar |= column.has_validity()
+                    error_sidecar |= column.has_errors()
+            var nullable = (
+                field.left >= 0 and field.right < 0 and left_map.may_be_missing
+            ) or (
+                field.right >= 0 and field.left < 0 and right_map.may_be_missing
+            )
+            bytes = checked_add(
+                bytes,
+                _native_join_output_bytes(
+                    output_field.dtype(),
+                    left_map.rows,
+                    valid_sidecar or nullable,
+                    error_sidecar,
+                ),
+            )
+        _ = scope.check(checked_add(bytes, 8 if left_map.rows else 0))
+
+        if not left_map.rows:
+            var empty = List[NativeColumnAny](capacity=len(fields))
+            for output in range(len(fields)):
+                ref field = fields[output]
+                var selected = (
+                    self.native_columns[
+                        Int(self.columns[field.left])
+                    ].copy() if field.left
+                    >= 0 else right.native_columns[
+                        Int(right.columns[field.right])
+                    ].copy()
+                )
+                empty.append(_empty_native_column(scope, selected))
+            return Self.native(schema.copy(), empty^)
+
+        # Four device bytes and four host control bytes live through the
+        # shared final status drain.
+        var status_reservation = _NativeReservation(scope, 8)
+        var ctx = scope.context()
+        var status = ctx.enqueue_create_buffer[DType.uint32](1)
+        var outputs = List[NativeColumnAny](capacity=len(fields))
+        var host_status = List[UInt32](length=1, fill=0)
+        var queued = True
+        try:
+            ctx.enqueue_memset(status, UInt32(0))
+            ctx.enqueue_function[validate_native_join_maps](
+                left_map.values.unsafe_ptr(),
+                right_map.values.unsafe_ptr(),
+                status.unsafe_ptr(),
+                UInt32(self.rows),
+                UInt32(right.rows),
+                UInt32(left_map.rows),
+                UInt8(left_map.may_be_missing),
+                UInt8(right_map.may_be_missing),
+                grid_dim=(left_map.rows + 255) // 256,
+                block_dim=256,
+            )
+            scope.record_launches()
+            for output in range(len(fields)):
+                ref field = fields[output]
+                var left_column = Optional[NativeColumnAny]()
+                var right_column = Optional[NativeColumnAny]()
+                if field.left >= 0:
+                    left_column = Optional[NativeColumnAny](
+                        self.native_columns[
+                            Int(self.columns[field.left])
+                        ].copy()
+                    )
+                if field.right >= 0:
+                    right_column = Optional[NativeColumnAny](
+                        right.native_columns[
+                            Int(right.columns[field.right])
+                        ].copy()
+                    )
+                var left_possible = field.left >= 0 and (
+                    self.rows > 0
+                    and (
+                        not field.prefer_right
+                        or field.right < 0
+                        or right_map.may_be_missing
+                    )
+                )
+                var right_possible = field.right >= 0 and (
+                    right.rows > 0
+                    and (
+                        field.prefer_right
+                        or field.left < 0
+                        or left_map.may_be_missing
+                    )
+                )
+                var nullable = (
+                    field.left >= 0
+                    and field.right < 0
+                    and left_map.may_be_missing
+                ) or (
+                    field.right >= 0
+                    and field.left < 0
+                    and right_map.may_be_missing
+                )
+                outputs.append(
+                    _native_join_gather_column(
+                        scope,
+                        left_column,
+                        right_column,
+                        field.prefer_right,
+                        left_possible,
+                        right_possible,
+                        nullable,
+                        self.offset,
+                        self.rows,
+                        right.offset,
+                        right.rows,
+                        left_map.values,
+                        right_map.values,
+                        left_map.rows,
+                        status,
+                        schema._columns[output].dtype(),
+                        queued,
+                    )
+                    ^
+                )
+            ctx.enqueue_copy(host_status.unsafe_ptr(), status)
+            scope.record_download(4)
+            scope.synchronize()
+            queued = False
+            if host_status[0] != 0:
+                raise Error(
+                    "Mojo GPU native join row map is outside its bounds"
+                )
+        except error:
+            if queued:
+                scope.synchronize()
+            _ = outputs^
+            _ = status^
+            _ = status_reservation^
+            _ = host_status^
+            raise error^
+        _ = host_status^
+        _ = status^
+        _ = status_reservation^
+        return Self.native(schema.copy(), outputs^)
 
     def observe_errors(
         self,
@@ -1281,6 +1644,405 @@ def _empty_native_column(
             allocate_native_column[DType.float32](scope, column.logical, 0)
         )
     return result^
+
+
+def validate_native_join_maps(
+    left: Pointer[UInt32, ImmutAnyOrigin],
+    right: Pointer[UInt32, ImmutAnyOrigin],
+    status: Pointer[UInt32, MutAnyOrigin],
+    left_rows: UInt32,
+    right_rows: UInt32,
+    rows: UInt32,
+    left_missing_allowed: UInt8,
+    right_missing_allowed: UInt8,
+):
+    var row = global_idx.x
+    if row >= Int(rows):
+        return
+    var l = left[unsafe_offset=row]
+    var r = right[unsafe_offset=row]
+    var fault = UInt32(0)
+    if l == NATIVE_MISSING:
+        if left_missing_allowed == 0:
+            fault = 1
+    elif l >= left_rows:
+        fault = 1
+    if r == NATIVE_MISSING:
+        if right_missing_allowed == 0:
+            fault = 1
+    elif r >= right_rows:
+        fault = 1
+    if l == NATIVE_MISSING and r == NATIVE_MISSING:
+        fault = 2
+    if fault:
+        Atomic[UInt32].max(status, fault)
+
+
+def native_join_gather_column[
+    dtype: DType
+](
+    left_values: Pointer[Scalar[dtype], ImmutAnyOrigin],
+    left_validity: Pointer[UInt8, ImmutAnyOrigin],
+    left_errors: Pointer[UInt32, ImmutAnyOrigin],
+    right_values: Pointer[Scalar[dtype], ImmutAnyOrigin],
+    right_validity: Pointer[UInt8, ImmutAnyOrigin],
+    right_errors: Pointer[UInt32, ImmutAnyOrigin],
+    left_indices: Pointer[UInt32, ImmutAnyOrigin],
+    right_indices: Pointer[UInt32, ImmutAnyOrigin],
+    status: Pointer[UInt32, MutAnyOrigin],
+    left_value_offset: UInt32,
+    left_validity_offset: UInt32,
+    left_error_offset: UInt32,
+    right_value_offset: UInt32,
+    right_validity_offset: UInt32,
+    right_error_offset: UInt32,
+    left_rows: UInt32,
+    right_rows: UInt32,
+    rows: UInt32,
+    flags: UInt32,
+    output_values: Pointer[Scalar[dtype], MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+):
+    """Coalesced typed gather; one lane packs one validity byte."""
+    # Pack mode bits to stay within Metal's buffer-argument limit.
+    var has_left = UInt8((flags >> 0) & 1)
+    var has_right = UInt8((flags >> 1) & 1)
+    var left_possible = UInt8((flags >> 2) & 1)
+    var right_possible = UInt8((flags >> 3) & 1)
+    var left_has_validity = UInt8((flags >> 4) & 1)
+    var right_has_validity = UInt8((flags >> 5) & 1)
+    var left_has_errors = UInt8((flags >> 6) & 1)
+    var right_has_errors = UInt8((flags >> 7) & 1)
+    var prefer_right = UInt8((flags >> 8) & 1)
+    var output_has_validity = UInt8((flags >> 9) & 1)
+    var output_has_errors = UInt8((flags >> 10) & 1)
+    var output_nullable = UInt8((flags >> 11) & 1)
+    var byte = global_idx.x
+    var bytes = (Int(rows) + 7) // 8
+    if byte >= bytes:
+        return
+    var mask = UInt8(0)
+    for bit in range(8):
+        var row = byte * 8 + bit
+        if row >= Int(rows):
+            break
+        var l = left_indices[unsafe_offset=row]
+        var r = right_indices[unsafe_offset=row]
+        var selected = NATIVE_MISSING
+        var use_right = False
+        if prefer_right != 0 and has_right != 0 and r != NATIVE_MISSING:
+            selected = r
+            use_right = True
+        elif has_left != 0 and l != NATIVE_MISSING:
+            selected = l
+        elif has_right != 0 and r != NATIVE_MISSING:
+            selected = r
+            use_right = True
+        if selected == NATIVE_MISSING:
+            if output_nullable == 0:
+                Atomic[UInt32].max(status, 2)
+        else:
+            var candidate_possible = (
+                right_possible != 0 if use_right else left_possible != 0
+            )
+            var limit = right_rows if use_right else left_rows
+            if not candidate_possible or selected >= limit:
+                Atomic[UInt32].max(status, 1)
+                selected = NATIVE_MISSING
+        var present = selected != NATIVE_MISSING
+        var valid = present
+        var error = UInt32(0)
+        var value = Scalar[dtype](0)
+        if present and use_right:
+            if right_has_validity != 0:
+                var source_bit = Int(right_validity_offset) + Int(selected)
+                valid = (
+                    (
+                        right_validity[unsafe_offset=source_bit // 8]
+                        >> UInt8(source_bit % 8)
+                    )
+                    & 1
+                ) != 0
+            if valid:
+                value = right_values[
+                    unsafe_offset=Int(right_value_offset) + Int(selected)
+                ]
+            if right_has_errors != 0:
+                error = right_errors[
+                    unsafe_offset=Int(right_error_offset) + Int(selected)
+                ]
+        elif present:
+            if left_has_validity != 0:
+                var source_bit = Int(left_validity_offset) + Int(selected)
+                valid = (
+                    (
+                        left_validity[unsafe_offset=source_bit // 8]
+                        >> UInt8(source_bit % 8)
+                    )
+                    & 1
+                ) != 0
+            if valid:
+                value = left_values[
+                    unsafe_offset=Int(left_value_offset) + Int(selected)
+                ]
+            if left_has_errors != 0:
+                error = left_errors[
+                    unsafe_offset=Int(left_error_offset) + Int(selected)
+                ]
+        output_values[unsafe_offset=row] = value
+        if output_has_errors != 0:
+            output_errors[unsafe_offset=row] = error
+        if valid:
+            mask |= UInt8(1) << UInt8(bit)
+    if output_has_validity != 0:
+        output_validity[unsafe_offset=byte] = mask
+
+
+def _native_join_gather_typed[
+    dtype: DType
+](
+    scope: Scope,
+    left: NativeColumn[dtype],
+    right: NativeColumn[dtype],
+    has_left: Bool,
+    has_right: Bool,
+    left_possible: Bool,
+    right_possible: Bool,
+    prefer_right: Bool,
+    nullable: Bool,
+    left_offset: Int,
+    left_rows: Int,
+    right_offset: Int,
+    right_rows: Int,
+    left_indices: DeviceBuffer[DType.uint32],
+    right_indices: DeviceBuffer[DType.uint32],
+    rows: Int,
+    status: DeviceBuffer[DType.uint32],
+    mut queued: Bool,
+) raises -> NativeColumn[dtype]:
+    var left_view = left.view(left_offset, left_rows)
+    var right_view = right.view(right_offset, right_rows)
+    var output_has_validity = (
+        nullable
+        or (left_possible and left_view.has_validity())
+        or (right_possible and right_view.has_validity())
+    )
+    var output_has_errors = (left_possible and left_view.has_errors()) or (
+        right_possible and right_view.has_errors()
+    )
+    var output = allocate_native_column[dtype](
+        scope,
+        left.logical,
+        rows,
+        with_validity=output_has_validity,
+        with_errors=output_has_errors,
+    )
+    var left_values = (
+        left_view.values() if left_view.length else right_view.values()
+    )
+    var right_values = (
+        right_view.values() if right_view.length else left_view.values()
+    )
+    var left_validity = left_values.create_sub_buffer[DType.uint8](0, 1)
+    var left_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+    if left_view.has_validity():
+        left_validity_buffer = left_view.validity()
+        left_validity = left_validity_buffer.value().copy()
+    var right_validity = right_values.create_sub_buffer[DType.uint8](0, 1)
+    var right_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+    if right_view.has_validity():
+        right_validity_buffer = right_view.validity()
+        right_validity = right_validity_buffer.value().copy()
+    var left_errors = status.create_sub_buffer[DType.uint32](0, 1)
+    var left_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+    if left_view.has_errors():
+        left_errors_buffer = left_view.errors()
+        left_errors = left_errors_buffer.value().copy()
+    var right_errors = status.create_sub_buffer[DType.uint32](0, 1)
+    var right_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+    if right_view.has_errors():
+        right_errors_buffer = right_view.errors()
+        right_errors = right_errors_buffer.value().copy()
+    var output_values = output.values()
+    var output_validity = output_values.create_sub_buffer[DType.uint8](0, 1)
+    var output_validity_buffer = output.validity()
+    if output_validity_buffer:
+        output_validity = output_validity_buffer.value().copy()
+    var output_errors = status.create_sub_buffer[DType.uint32](0, 1)
+    var output_errors_buffer = output.errors()
+    if output_errors_buffer:
+        output_errors = output_errors_buffer.value().copy()
+    var ctx = scope.context()
+    try:
+        # Float64 payloads move as bits; Metal cannot load native doubles.
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_function[native_join_gather_column[transport_dtype]](
+            left_values.create_sub_buffer[transport_dtype](0, len(left_values)),
+            left_validity,
+            left_errors,
+            right_values.create_sub_buffer[transport_dtype](
+                0, len(right_values)
+            ),
+            right_validity,
+            right_errors,
+            left_indices,
+            right_indices,
+            status,
+            UInt32(left_view.value_offset),
+            UInt32(left_view.validity_bit_offset),
+            UInt32(left_view.value_offset),
+            UInt32(right_view.value_offset),
+            UInt32(right_view.validity_bit_offset),
+            UInt32(right_view.value_offset),
+            UInt32(left_rows),
+            UInt32(right_rows),
+            UInt32(rows),
+            (UInt32(has_left) << 0)
+            | (UInt32(has_right) << 1)
+            | (UInt32(left_possible) << 2)
+            | (UInt32(right_possible) << 3)
+            | (UInt32(left_view.has_validity()) << 4)
+            | (UInt32(right_view.has_validity()) << 5)
+            | (UInt32(left_view.has_errors()) << 6)
+            | (UInt32(right_view.has_errors()) << 7)
+            | (UInt32(prefer_right) << 8)
+            | (UInt32(Bool(output_validity_buffer)) << 9)
+            | (UInt32(Bool(output_errors_buffer)) << 10)
+            | (UInt32(nullable) << 11),
+            output_values.create_sub_buffer[transport_dtype](
+                0, len(output_values)
+            ),
+            output_validity,
+            output_errors,
+            grid_dim=((rows + 7) // 8 + 127) // 128,
+            block_dim=128,
+        )
+        scope.record_launches()
+    except error:
+        # Keep the output and all source/map/status handles alive until any
+        # command submitted by this launch attempt has drained. The caller
+        # then knows this failure path already performed the one cleanup wait.
+        scope.synchronize()
+        queued = False
+        _ = output^
+        raise error^
+    return output^
+
+
+def _native_join_typed_source[
+    dtype: DType
+](column: NativeColumnAny,) raises -> NativeColumn[dtype]:
+    if column._storage.isa[NativeColumn[dtype]]():
+        return column._storage[NativeColumn[dtype]].copy()
+    raise Error("Mojo GPU native join physical dtype differs")
+
+
+def _native_null_join_typed[
+    dtype: DType
+](
+    scope: Scope, logical: DataType, rows: Int, mut queued: Bool
+) raises -> NativeColumn[dtype]:
+    var output = allocate_native_column[dtype](
+        scope, logical, rows, with_validity=True
+    )
+    var values = output.values()
+    var validity = output.validity().value()
+    var ctx = scope.context()
+    try:
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_memset(
+            values.create_sub_buffer[transport_dtype](0, len(values)),
+            Scalar[transport_dtype](0),
+        )
+        ctx.enqueue_memset(validity, UInt8(0))
+    except error:
+        # A partially submitted clear needs its owner alive through the drain.
+        # Tell the enclosing gather that this path already performed that wait.
+        scope.synchronize()
+        queued = False
+        _ = output^
+        raise error^
+    return output^
+
+
+def _native_null_join_column(
+    scope: Scope, logical: DataType, rows: Int, mut queued: Bool
+) raises -> NativeColumnAny:
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if logical.physical() == DataType.of(D):
+            return NativeColumnAny(
+                _native_null_join_typed[D](scope, logical, rows, queued)^
+            )
+    raise Error("Mojo GPU native join payload dtype is unsupported")
+
+
+def _native_join_gather_column(
+    scope: Scope,
+    left: Optional[NativeColumnAny],
+    right: Optional[NativeColumnAny],
+    prefer_right: Bool,
+    left_possible: Bool,
+    right_possible: Bool,
+    nullable: Bool,
+    left_offset: Int,
+    left_rows: Int,
+    right_offset: Int,
+    right_rows: Int,
+    left_indices: DeviceBuffer[DType.uint32],
+    right_indices: DeviceBuffer[DType.uint32],
+    rows: Int,
+    status: DeviceBuffer[DType.uint32],
+    logical: DataType,
+    mut queued: Bool,
+) raises -> NativeColumnAny:
+    var has_left = Bool(left)
+    var has_right = Bool(right)
+    if has_left and left_rows == 0 and not has_right:
+        return _native_null_join_column(scope, logical, rows, queued)
+    if has_right and right_rows == 0 and not has_left:
+        return _native_null_join_column(scope, logical, rows, queued)
+    var left_view_offset = left_offset if has_left else right_offset
+    var left_view_rows = left_rows if has_left else right_rows
+    var right_view_offset = right_offset if has_right else left_offset
+    var right_view_rows = right_rows if has_right else left_rows
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if logical.physical() == DataType.of(D):
+            var fallback = _native_join_typed_source[D](
+                left.value().copy() if left else right.value().copy()
+            )
+            var l = _native_join_typed_source[D](
+                left.value()
+            ) if left else fallback.copy()
+            var r = _native_join_typed_source[D](
+                right.value()
+            ) if right else fallback.copy()
+            return NativeColumnAny(
+                _native_join_gather_typed[D](
+                    scope,
+                    l,
+                    r,
+                    has_left,
+                    has_right,
+                    left_possible,
+                    right_possible,
+                    prefer_right,
+                    nullable,
+                    left_view_offset,
+                    left_view_rows,
+                    right_view_offset,
+                    right_view_rows,
+                    left_indices,
+                    right_indices,
+                    rows,
+                    status,
+                    queued,
+                )
+                ^
+            )
+    raise Error("Mojo GPU native join payload dtype is unsupported")
 
 
 def _gather_native_typed[
