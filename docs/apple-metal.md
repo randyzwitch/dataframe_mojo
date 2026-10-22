@@ -615,15 +615,16 @@ It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
-then runs the integrated query contracts and independent oracles, and reports
-every failed step at the end. Those last steps can also run alone, with the
-pinned environment:
+then runs the integrated query contracts, independent oracles and the hash
+and grouped integer programs, and reports every failed step at the end. Those
+last steps can also run alone, with the pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu
 pixi run --locked -e gpu test-mojo-gpu-floating
 pixi run --locked -e gpu test-mojo-gpu-decimal
 pixi run --locked -e gpu test-mojo-gpu-integer
+pixi run --locked -e gpu test-mojo-gpu-grouping
 ```
 
 The independent integer oracle uses Python arbitrary-precision arithmetic:
