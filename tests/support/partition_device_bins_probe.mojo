@@ -8,17 +8,20 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.categorical import decode
-from dataframe.accelerator.partition_operands import certificate, prepare
-from dataframe.accelerator.window_keys import WindowKey
-from dataframe.accelerator.gpu.residency import Scope, Table
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.partition_operands import certificate, prepare
+from dataframe.plan_types import WindowKey
+from dataframe_metal.accelerator.gpu.residency import Scope, Table
+from dataframe_metal.accelerator.gpu.runtime import (
     _preflight,
     execute_plan,
     materialize,
 )
-from dataframe.accelerator.gpu.partition_layout import KeyInput, build
-from dataframe.accelerator.gpu.partition_bins import execute_default, estimate
-from dataframe.accelerator.gpu.ranked_rows import evaluate
+from dataframe_metal.accelerator.gpu.partition_layout import KeyInput, build
+from dataframe_metal.accelerator.gpu.partition_bins import (
+    execute_default,
+    estimate,
+)
+from dataframe_metal.accelerator.gpu.ranked_rows import evaluate
 from tests.support.lifecycle_jobs import WorkerSetting
 
 

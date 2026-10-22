@@ -1,6 +1,8 @@
 """Stable global and partitioned ranks through the resident Metal API."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
@@ -17,9 +19,9 @@ from dataframe import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.categorical import encode
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.capabilities import RowCapabilities
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.capabilities import RowCapabilities
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 

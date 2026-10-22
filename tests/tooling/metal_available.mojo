@@ -6,8 +6,8 @@ one), and the devices found."""
 from std.io import RawFileDescriptor
 from std.sys import CompilationTarget
 from std.sys.info import _accelerator_arch
-from dataframe.accelerator.gpu.target import compiled_for_metal
-from dataframe.metal import MetalRuntime, metal_installed
+from dataframe_metal.accelerator.gpu.target import compiled_for_metal
+from dataframe_metal.metal import MetalRuntime, metal_installed
 
 
 def main() raises:

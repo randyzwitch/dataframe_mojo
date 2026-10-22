@@ -3,18 +3,18 @@
 # contract-group: public.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
-from dataframe.accelerator.cuts import (
+from dataframe_metal.accelerator.cuts import (
     has_cut_operations,
     has_cut_materializations,
     lower_cuts,
     control_failure,
     staging_bytes,
 )
-from dataframe.accelerator.metadata import schema_frame
+from dataframe_metal.accelerator.metadata import schema_frame
 from dataframe.expr import CUT, QCUT, CAST, POW, ADD, _node, _append_shifted
 from dataframe.parse import parse_int64
 from dataframe.binding import bind, ROWS
-from dataframe.accelerator.constants import has_literal_text_parsing
+from dataframe_metal.accelerator.constants import has_literal_text_parsing
 
 
 def _ordered_scalar_payload(

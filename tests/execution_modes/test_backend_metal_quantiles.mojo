@@ -1,14 +1,16 @@
 """Native binary64 order statistics preserve quantile interpolation semantics."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, LazyFrame, col, lit
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows, ROW_QUANTILE_LINEAR
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows, ROW_QUANTILE_LINEAR
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.execution_modes.test_backend_metal_decimal_casts import (

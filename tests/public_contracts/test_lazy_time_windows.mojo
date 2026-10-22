@@ -2,8 +2,8 @@
 # contract-group: lazy.time_windows
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
-from dataframe.accelerator.metadata import prune_projections, schema_frame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 
 comptime HOUR = 3600000

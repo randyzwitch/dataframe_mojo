@@ -5,11 +5,11 @@ from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Expr, Series, col
 from dataframe.binding import bind
-from dataframe.accelerator.rows import RowPlan
-from dataframe.accelerator.ordered_rows import occurrences
-from dataframe.accelerator.gpu.runtime import _preflight
-from dataframe.accelerator.gpu.ranked_rows import estimate, evaluate
-from dataframe.accelerator.gpu.residency import Scope, Table
+from dataframe_metal.accelerator.rows import RowPlan
+from dataframe_metal.accelerator.ordered_rows import occurrences
+from dataframe_metal.accelerator.gpu.runtime import _preflight
+from dataframe_metal.accelerator.gpu.ranked_rows import estimate, evaluate
+from dataframe_metal.accelerator.gpu.residency import Scope, Table
 
 
 def ranked_operand(expression: Expr, source: DataFrame) raises -> RowPlan:

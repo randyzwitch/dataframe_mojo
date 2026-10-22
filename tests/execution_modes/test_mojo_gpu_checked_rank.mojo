@@ -3,9 +3,9 @@
 # contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
-from dataframe.metal import MetalRuntime, _capabilities
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import estimate_resources
+from dataframe_metal.metal import MetalRuntime, _capabilities
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import estimate_resources
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.tooling.checked_rank_cpu_proofs import ordered_source

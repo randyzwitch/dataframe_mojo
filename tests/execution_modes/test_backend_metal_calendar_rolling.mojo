@@ -1,12 +1,14 @@
 """Calendar duration bounds clamp months and retain checked temporal semantics."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import (
     lower_rows,
     ROW_DURATION_KEY,
     ROW_DURATION_CALENDAR,

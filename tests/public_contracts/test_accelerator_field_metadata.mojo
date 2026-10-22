@@ -5,9 +5,9 @@ from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.lazy import LazyFrame
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.metadata import schema_frame
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.metadata import schema_frame
 
 
 def field_source() raises -> DataFrame:
@@ -193,7 +193,7 @@ def test_accelerator_field_metadata_group_keys_and_reductions_follow_cpu() raise
 
 
 def test_accelerator_field_metadata_dictionary_transport_and_computed_schema() raises:
-    from dataframe.accelerator.dictionaries import (
+    from dataframe_metal.accelerator.dictionaries import (
         DictionaryCodes,
         encode_query,
         restore_frame,

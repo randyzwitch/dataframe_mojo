@@ -5,13 +5,13 @@ from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.categorical import decode
 from dataframe.string_column import StringColumn, StringCodes
-from dataframe.accelerator.dictionaries import has_category_transport
-from dataframe.accelerator.code_domains import (
+from dataframe_metal.accelerator.dictionaries import has_category_transport
+from dataframe_metal.accelerator.code_domains import (
     CategoryOwner,
     CategoryField,
     TextField,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_mojo_gpu_categorical_transport import (
     _dtype,
     _cat,

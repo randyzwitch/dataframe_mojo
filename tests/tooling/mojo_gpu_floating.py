@@ -170,7 +170,8 @@ def main():
         ], check=True)
         subprocess.run([str(binary), str(corpus)], check=True)
         subprocess.run([
-            "mojo", "run", "-I", ".", "tests/tooling/mojo_gpu_floating.mojo", str(corpus)
+            "mojo", "run", "-I", ".",
+            "tests/tooling/mojo_gpu_floating.mojo", str(corpus)
         ], check=True)
 
 

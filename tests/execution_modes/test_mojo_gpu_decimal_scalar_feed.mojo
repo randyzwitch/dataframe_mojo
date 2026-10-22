@@ -13,20 +13,23 @@ from dataframe import (
     when,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator import decimal_scalar_feed
-from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.dictionaries import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator import decimal_scalar_feed
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.dictionaries import (
     lower_dictionary_operations,
     DictionaryCodes,
     encode_query,
 )
-from dataframe.accelerator.aggregates import lower_aggregate_compositions
-from dataframe.accelerator.decimal_prefix import prefix_infallible
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import capabilities, estimate_resources
-from dataframe.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.aggregates import lower_aggregate_compositions
+from dataframe_metal.accelerator.decimal_prefix import prefix_infallible
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities,
+    estimate_resources,
+)
+from dataframe_metal.accelerator.gpu.program import Program
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting

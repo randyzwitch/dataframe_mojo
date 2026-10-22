@@ -1,15 +1,17 @@
 """Compensated floating power preserves exceptional values and boundary accuracy."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.math import isnan, isfinite
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, LazyFrame, col, lit, when
 from dataframe.dtype import DataType
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.public_contracts.test_arithmetic import power_anchors
 from tests.execution_modes.test_backend_metal_interpolation import fixture

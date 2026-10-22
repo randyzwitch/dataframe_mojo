@@ -14,8 +14,8 @@ from dataframe import (
     nth,
     scan_csv,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.selectors import has_selectors, lower_selectors
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.selectors import has_selectors, lower_selectors
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_scalar_broadcasts import (
     check,

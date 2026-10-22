@@ -4,7 +4,10 @@ These tests require Apple Silicon macOS and a working MAX Metal device. Reports
 must identify the Mojo implementation and actual kernel submissions.
 """
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
 from std.memory import bitcast
 from std.sys import CompilationTarget
 from std.testing import assert_equal, assert_true
@@ -20,7 +23,7 @@ from dataframe import (
 )
 from dataframe.io.arrow import export_arrow_series
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed
+from dataframe_metal.metal import MetalRuntime, metal_installed
 from tests.support.lifecycle_stream import array_release, schema_release
 
 comptime NATIVE_NUMERIC = (

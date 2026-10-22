@@ -18,8 +18,11 @@ from dataframe import (
 )
 from dataframe.lazy import LazyFrame
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.sources import file_source_nodes, stage_file_sources
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.sources import (
+    file_source_nodes,
+    stage_file_sources,
+)
 from tests.support.coverage_compare import assert_frame
 from tests.tooling.contract_runner import (
     temporary_directory,

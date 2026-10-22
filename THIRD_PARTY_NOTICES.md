@@ -79,7 +79,7 @@ the JavaScript file. It renders the benchmark query explorer locally.
 
 ## Modular Mojo sort
 
-`dataframe/accelerator/gpu/quantile_selection.mojo` adapts the generic sort
+`dataframe_metal/accelerator/gpu/quantile_selection.mojo` adapts the generic sort
 partitioning and insertion algorithm in Modular's
 [`Mojo/stdlib/std/builtin/sort.mojo`](https://github.com/modular/modular/blob/0eeb9c145e2539cb5aab8a3085b4853d27440d26/Mojo/stdlib/std/builtin/sort.mojo),
 revision `0eeb9c145e2539cb5aab8a3085b4853d27440d26`. This project replaces

@@ -13,8 +13,8 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import _preflight
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import _preflight
 from tests.public_contracts.test_identity_column_metadata import (
     _source,
     _owner,

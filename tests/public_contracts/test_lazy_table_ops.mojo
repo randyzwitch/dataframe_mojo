@@ -11,7 +11,7 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.reference_model import generated_model, reference_groups
 from tests.support.reference_relations import nonnull_indices
 from tests.support.coverage_generators import frame_from_model, chunk_layout

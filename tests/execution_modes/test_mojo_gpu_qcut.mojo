@@ -4,7 +4,7 @@
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout
 

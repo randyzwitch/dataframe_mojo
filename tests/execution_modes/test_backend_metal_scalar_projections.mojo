@@ -12,11 +12,11 @@ from dataframe import (
     lit,
     null,
 )
-from dataframe.accelerator.scalars import (
+from dataframe_metal.accelerator.scalars import (
     has_scalar_projections,
     lower_scalar_projections,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_moments import near
 

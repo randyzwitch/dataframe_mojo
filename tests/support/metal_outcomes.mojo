@@ -2,7 +2,7 @@
 from std.testing import assert_raises, assert_true
 from dataframe import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 def same_outcome(query: LazyFrame) raises:

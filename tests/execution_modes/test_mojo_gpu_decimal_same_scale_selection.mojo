@@ -4,14 +4,14 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import BoundExpr, bind, ROWS
-from dataframe.accelerator import decimal_group_feed
-from dataframe.accelerator.grouped_feeds import has_checked_grouped_feeds
-from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.gpu.program import Program
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator import decimal_group_feed
+from dataframe_metal.accelerator.grouped_feeds import has_checked_grouped_feeds
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.coverage_generators import offset_layout, chunk_layout
 

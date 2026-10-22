@@ -1,13 +1,15 @@
 """Resident cardinality overrides are validated before creating a device."""
 from std.testing import assert_raises, assert_equal, assert_true
 from dataframe import DataFrame, DataType, Column, Series, col
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.gpu.runtime import (
     _preflight,
     capabilities,
     estimate_resources,
 )
-from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN
-from dataframe.accelerator.gpu.join_runtime import preflight as join_preflight
+from dataframe_metal.accelerator.joins import lower_join_dag, DAG_JOIN
+from dataframe_metal.accelerator.gpu.join_runtime import (
+    preflight as join_preflight,
+)
 
 
 # requires: mojo_gpu

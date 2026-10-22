@@ -3,7 +3,7 @@ from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal_decimal128 import (
     wide_fixture,

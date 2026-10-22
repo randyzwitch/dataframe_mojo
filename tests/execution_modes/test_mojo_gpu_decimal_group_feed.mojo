@@ -14,14 +14,17 @@ from dataframe import (
     when,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.accelerator import decimal_group_feed
-from dataframe.accelerator.decimal_prefix import prefix_infallible
-from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
+from dataframe_metal.accelerator import decimal_group_feed
+from dataframe_metal.accelerator.decimal_prefix import prefix_infallible
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    encode_query,
+)
 from dataframe.binding import bind
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.metal import MetalRuntime
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
@@ -584,9 +587,13 @@ def test_mojo_gpu_decimal_group_feed_budget_precedes_device() raises:
             batch_size=17,
         )
 
-    from dataframe.accelerator.rows import lower_rows
-    from dataframe.accelerator.gpu.runtime import execute_plan
-    from dataframe.accelerator.gpu.residency import Scope, HostMatrix, Table
+    from dataframe_metal.accelerator.rows import lower_rows
+    from dataframe_metal.accelerator.gpu.runtime import execute_plan
+    from dataframe_metal.accelerator.gpu.residency import (
+        Scope,
+        HostMatrix,
+        Table,
+    )
 
     var source = _source()
     var producer = (

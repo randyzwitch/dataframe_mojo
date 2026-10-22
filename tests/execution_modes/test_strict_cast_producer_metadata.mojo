@@ -3,7 +3,7 @@
 # contract-group: execution.strict_cast_producers
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
-from dataframe.accelerator.producer_phases import (
+from dataframe_metal.accelerator.producer_phases import (
     prepare_original,
     validate_prefix,
     bind_region,

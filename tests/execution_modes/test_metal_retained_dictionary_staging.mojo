@@ -5,7 +5,10 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.dtype import CategoricalDictionary
 from dataframe.string_column import StringCodes
-from dataframe.accelerator.dictionaries import DictionaryCodes, _staging_values
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    _staging_values,
+)
 from tests.support.coverage_compare import assert_frame
 from tests.execution_modes.test_backend_metal import require_metal
 

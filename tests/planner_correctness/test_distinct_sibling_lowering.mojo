@@ -3,13 +3,13 @@
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
-from dataframe.accelerator.distinct_counts import (
+from dataframe_metal.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe_metal.accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
 )
-from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN
-from dataframe.accelerator.sets import lower_set_operations
+from dataframe_metal.accelerator.joins import lower_join_dag, DAG_JOIN
+from dataframe_metal.accelerator.sets import lower_set_operations
 
 
 def test_distinct_siblings_metadata_and_shared_prefix() raises:

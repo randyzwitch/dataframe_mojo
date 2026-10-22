@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rule 2 in docs/design/benchmarks.md: a PR that changes the engine
-# (dataframe/)
+# (dataframe/, dataframe_metal/, dataframe_provider/, providers/)
 # must not also change what measures it (benchmarks/, which holds the
 # suites, the mechanism programs and their drivers in benchmarks/tools/),
 # unless a commit explains why in a "Benchmark-Change:" trailer.
@@ -12,7 +12,7 @@ base_ref="${1:-origin/main}"
 head_ref="${2:-HEAD}"
 base="$(git merge-base "$base_ref" "$head_ref")"
 changed="$(git diff --name-only "$base" "$head_ref")"
-engine="$(grep -E '^dataframe/' <<<"$changed" || true)"
+engine="$(grep -E '^(dataframe|dataframe_metal|dataframe_provider|providers)/' <<<"$changed" || true)"
 bench="$(grep -E '^benchmarks/' <<<"$changed" || true)"
 if [ -z "$engine" ] || [ -z "$bench" ]; then
     echo "benchmark separation: ok"

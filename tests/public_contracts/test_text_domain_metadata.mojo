@@ -11,7 +11,7 @@ from dataframe import (
     lit,
 )
 from dataframe.dtype import CategoricalDictionary
-from dataframe.accelerator.code_domains import (
+from dataframe_metal.accelerator.code_domains import (
     TextQuery,
     TEXT_LITERAL,
     code,
@@ -19,12 +19,15 @@ from dataframe.accelerator.code_domains import (
     same_dictionary,
     text_less,
 )
-from dataframe.accelerator.window_keys import WindowKey
-from dataframe.accelerator.text_key_domains import append_partition_values
-from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
+from dataframe.plan_types import WindowKey
+from dataframe_metal.accelerator.text_key_domains import append_partition_values
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    encode_query,
+)
 from dataframe.expr import LIT_INT
 from dataframe.lazy import SELECT
-from dataframe.accelerator.metadata import prune_projections
+from dataframe_metal.accelerator.metadata import prune_projections
 
 
 def _domain(values: List[String]) -> DataType:

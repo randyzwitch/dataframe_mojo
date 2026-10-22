@@ -4,8 +4,8 @@
 
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import _preflight
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import _preflight
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

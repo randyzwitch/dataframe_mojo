@@ -7,7 +7,7 @@ from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.categorical import decode
 from dataframe.dtype import CategoricalDictionary
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.support.lifecycle_jobs import WorkerSetting
 

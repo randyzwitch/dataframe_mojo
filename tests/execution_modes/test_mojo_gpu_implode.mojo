@@ -16,8 +16,8 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.lists import lower_terminal_implode
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.lists import lower_terminal_implode
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

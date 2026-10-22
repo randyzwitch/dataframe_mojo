@@ -3,12 +3,12 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Expr, Series, col, lit
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
-from dataframe.accelerator.joins import (
+from dataframe_metal.metal import MetalRuntime, _capabilities
+from dataframe_metal.accelerator.joins import (
     lower_join_dag,
     has_checked_integer_consumers,
 )
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.rows import lower_rows
 
 
 def _source(overflow: Bool = False) raises -> DataFrame:
@@ -185,8 +185,8 @@ def test_observed_integer_boundary_signatures_and_original_order() raises:
 # requires: mojo_gpu
 def test_integer_candidate_scan_preserves_deferred_cut_controls() raises:
     from dataframe import when
-    from dataframe.accelerator.cuts import lower_cuts
-    from dataframe.accelerator.joins import _integer_producer
+    from dataframe_metal.accelerator.cuts import lower_cuts
+    from dataframe_metal.accelerator.joins import _integer_producer
 
     var source = _source(True)
     for quantiles in [False, True]:

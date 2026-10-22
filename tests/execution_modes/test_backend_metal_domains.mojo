@@ -4,13 +4,15 @@ Public tests require the real Metal capability. CPU model verification is a
 separate callable fixture audit; it is never reported as native execution.
 """
 # contract-group: execution.backends
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import capabilities as gpu_capabilities
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as gpu_capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import (
     require_metal,
     NATIVE_NUMERIC,

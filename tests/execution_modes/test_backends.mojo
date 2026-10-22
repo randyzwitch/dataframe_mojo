@@ -7,8 +7,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit, scan_csv
 from dataframe._accel_provider import installed
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.target import compiled_for_metal
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.target import compiled_for_metal
 from tests.support.backend_reference import (
     BackendTrace,
     CountedBackend,

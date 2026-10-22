@@ -4,14 +4,14 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.joins import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.joins import (
     lower_join_dag,
     DAG_GROUPED_FIELDS,
     DAG_EXPLODE,
 )
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.gpu.dag_runtime import execute as execute_dag
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.gpu.dag_runtime import execute as execute_dag
 from tests.support.resident_grouped_publication_reference import (
     _source,
     _expressions,

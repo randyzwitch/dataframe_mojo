@@ -14,7 +14,7 @@ from dataframe import (
     when,
     lit,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.calendar import days_from_civil
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.execution_modes.test_mojo_gpu_timezone_conversion import (

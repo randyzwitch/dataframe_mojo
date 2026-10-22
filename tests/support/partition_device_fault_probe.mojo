@@ -1,8 +1,8 @@
 """Literal run/state/batch/AST/control-order proof, independent of categories."""
 from max.gpu.host import DeviceContext
 from std.testing import assert_equal
-from dataframe.accelerator.gpu.ordered_faults import pack
-from dataframe.accelerator.gpu.partition_faults import (
+from dataframe_metal.accelerator.gpu.ordered_faults import pack
+from dataframe_metal.accelerator.gpu.partition_faults import (
     operand_partials,
     control_partials,
     finish,

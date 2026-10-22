@@ -12,9 +12,9 @@ from dataframe import (
     lit,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.calibration import estimate
-from dataframe.accelerator.gpu.runtime import _preflight
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.calibration import estimate
+from dataframe_metal.accelerator.gpu.runtime import _preflight
 
 
 def _query(transport: Int) raises -> LazyFrame:

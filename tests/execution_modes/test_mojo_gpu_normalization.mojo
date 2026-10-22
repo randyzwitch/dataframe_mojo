@@ -15,9 +15,12 @@ from dataframe import (
     nth,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
-from dataframe.accelerator.metadata import schema_frame
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    encode_query,
+)
+from dataframe_metal.accelerator.metadata import schema_frame
 from tests.support.coverage_compare import assert_frame
 
 

@@ -2,8 +2,8 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, Series
-from dataframe.accelerator.gpu.query_scope import Scope
-from dataframe.accelerator.gpu.typed_storage import (
+from dataframe_metal.accelerator.gpu.query_scope import Scope
+from dataframe_metal.accelerator.gpu.typed_storage import (
     native_column_bytes,
     check_native_column_capacity,
     upload_float32,

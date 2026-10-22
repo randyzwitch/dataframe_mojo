@@ -3,7 +3,7 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_mojo_gpu_opaque_bytes import (
     _binary,
     _assert_bytes,

@@ -2,7 +2,7 @@
 # contract-group: execution.apple_parity
 # contract-group: execution.backends
 from dataframe import col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.public_contracts.test_decimal_arg_extrema import (
     fixture,
     expressions,

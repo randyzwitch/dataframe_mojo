@@ -3,7 +3,7 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.public_contracts.test_grouped_feed_error_order import (
     decimal_feed_frame,

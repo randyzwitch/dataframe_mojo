@@ -3,13 +3,13 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.lazy import LazyFrame
-from dataframe.accelerator.gpu.residency import Scope, Table, HostMatrix
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.gpu.residency import Scope, Table, HostMatrix
+from dataframe_metal.accelerator.gpu.runtime import (
     _preflight,
     execute_plan,
     materialize,
 )
-from dataframe.accelerator.gpu.target import METAL_TARGET
+from dataframe_metal.accelerator.gpu.target import METAL_TARGET
 from tests.execution_modes.test_mojo_gpu_residency import _source
 from tests.support.coverage_compare import assert_frame
 

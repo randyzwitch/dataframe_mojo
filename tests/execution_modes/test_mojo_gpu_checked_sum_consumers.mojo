@@ -4,10 +4,13 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
-from dataframe.accelerator.joins import lower_join_dag, _checked_scalar_sum
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.aggregates import lower_aggregate_compositions
+from dataframe_metal.metal import MetalRuntime, _capabilities
+from dataframe_metal.accelerator.joins import (
+    lower_join_dag,
+    _checked_scalar_sum,
+)
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.aggregates import lower_aggregate_compositions
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

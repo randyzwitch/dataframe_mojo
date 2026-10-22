@@ -4,8 +4,8 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import BoundExpr, bind
-from dataframe.accelerator.decimal_scalar_feed import eligible
-from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.decimal_scalar_feed import eligible
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
 from dataframe.expr import LIT_INT, MUL, SUB
 from tests.execution_modes.test_conditional_decimal_aggregate_planning import (
     source,

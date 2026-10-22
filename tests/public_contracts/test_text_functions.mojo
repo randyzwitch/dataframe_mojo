@@ -21,8 +21,8 @@ from dataframe import (
     lit,
     concat_str,
 )
-from dataframe.accelerator.dictionaries import lower_dictionary_operations
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.dictionaries import lower_dictionary_operations
+from dataframe_metal.accelerator.rows import lower_rows
 from dataframe.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_frame

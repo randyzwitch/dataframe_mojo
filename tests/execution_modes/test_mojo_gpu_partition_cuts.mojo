@@ -15,7 +15,7 @@ from dataframe import (
     when,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import (
     require_metal,
     assert_native_report,

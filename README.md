@@ -9,7 +9,7 @@ backend facade. The API is provisional.
 
 Calendar-aware rolling and dynamic grouping are described in
 [Time windows](docs/time-windows.md).
-The Metal backend on Apple silicon is covered in [Apple Metal](docs/apple-metal.md), which explains how to enable it.
+The Metal backend on Apple silicon is included (see [Apple Metal](docs/apple-metal.md)).
 
 ## Install
 
@@ -344,9 +344,12 @@ adapter. Build input columns in memory for this first version.
 
 ## Using the package
 
-`pixi run package` precompiles `dist/dataframe.mojoc`; put its directory on the
-import path (`mojo run -I dist app.mojo`). Tagged releases attach the package
-and a generated [API reference](docs/api.md) (`pixi run docs`). See the
+`pixi run package` precompiles the package for the platform you build on. On
+macOS arm64 `dist/` holds `dataframe.mojoc`, `dataframe_provider.mojoc` and
+`dataframe_metal.mojoc`; on Linux it holds `dataframe.mojoc` and the CPU-only
+`dataframe_provider.mojoc`, since Metal cannot run there. There is one artifact
+per platform. Put the directory on the import path (`mojo run -I dist app.mojo`).
+Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).
 

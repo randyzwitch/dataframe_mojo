@@ -2,15 +2,15 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
-from dataframe.accelerator.grouped_lists import prepare
-from dataframe.accelerator.gpu.grouped_lists_producer import produce
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.grouped_lists import prepare
+from dataframe_metal.accelerator.gpu.grouped_lists_producer import produce
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.runtime import (
     execute_plan,
     materialize,
     _preflight,
 )
-from dataframe.accelerator.gpu.explode import execute as explode
+from dataframe_metal.accelerator.gpu.explode import execute as explode
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

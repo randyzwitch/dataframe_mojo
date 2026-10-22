@@ -2,8 +2,8 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, StringColumn, col, lit
-from dataframe.accelerator.source_projection import project_sources
-from dataframe.accelerator.dictionaries import (
+from dataframe_metal.accelerator.source_projection import project_sources
+from dataframe_metal.accelerator.dictionaries import (
     DictionaryCodes,
     lower_dictionary_operations,
 )

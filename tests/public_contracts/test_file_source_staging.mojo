@@ -21,8 +21,8 @@ from dataframe import (
 from dataframe.dtype import CategoricalDictionary, NUMERIC_DTYPES
 from dataframe.lazy import LazyFrame, SELECT, _plan_node
 from dataframe.string_column import StringCodes
-from dataframe.accelerator.source_compaction import compact_source
-from dataframe.accelerator.sources import (
+from dataframe_metal.accelerator.source_compaction import compact_source
+from dataframe_metal.accelerator.sources import (
     file_source_nodes,
     source_payload_bytes,
     stage_file_sources,

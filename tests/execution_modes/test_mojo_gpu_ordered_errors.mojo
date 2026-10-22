@@ -5,12 +5,15 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.expr import ADD, COL, WHEN, _node, _append_shifted
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.coverage_generators import offset_layout, chunk_layout
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
-from dataframe.accelerator.gpu.calibration import estimate
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
+from dataframe_metal.accelerator.gpu.calibration import estimate
 
 
 def _source(ticks: List[Int64], integers: List[Int64]) raises -> DataFrame:

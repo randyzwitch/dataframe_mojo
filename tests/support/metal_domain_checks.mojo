@@ -2,7 +2,7 @@
 from std.testing import assert_true, assert_equal
 from dataframe import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_value
 from tests.execution_modes.test_backend_metal import assert_native_report
 from tests.support.lifecycle_jobs import WorkerSetting

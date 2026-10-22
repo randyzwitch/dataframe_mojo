@@ -14,8 +14,8 @@ from dataframe import (
 )
 from dataframe.binding import bind, ROWS, SCALAR
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT, LIT_BOOL, LIT_NULL
-from dataframe.accelerator.constants import has_literal_text_parsing
-from dataframe.accelerator.partition_operands import (
+from dataframe_metal.accelerator.constants import has_literal_text_parsing
+from dataframe_metal.accelerator.partition_operands import (
     certificate,
     lift_literals,
     prepare,

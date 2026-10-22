@@ -2,25 +2,30 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, ListColumn, Series, col, lit
-from dataframe.accelerator.gpu.residency import Scope, Table
-from dataframe.accelerator.gpu.host_list_reference import stage_child, list_ref
-from dataframe.accelerator.gpu.device_lists import (
+from dataframe_metal.accelerator.gpu.residency import Scope, Table
+from dataframe_metal.accelerator.gpu.host_list_reference import (
+    stage_child,
+    list_ref,
+)
+from dataframe_metal.accelerator.gpu.device_lists import (
     stage_descriptors,
     empty_grouped,
 )
-from dataframe.accelerator.gpu.resident_fields import (
+from dataframe_metal.accelerator.gpu.resident_fields import (
     ResidentField,
     ResidentFrame,
 )
-from dataframe.accelerator.gpu.explode import execute as explode
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.gpu.explode import execute as explode
+from dataframe_metal.accelerator.gpu.runtime import (
     _preflight,
     execute_plan,
     materialize,
 )
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.gpu.join_runtime import execute_plan as execute_join
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.gpu.join_runtime import (
+    execute_plan as execute_join,
+)
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

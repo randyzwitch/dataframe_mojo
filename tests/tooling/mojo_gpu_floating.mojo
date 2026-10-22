@@ -4,7 +4,7 @@ from max.gpu.host import DeviceContext
 from std.memory import Pointer
 from std.sys import argv
 from std.testing import assert_equal, assert_true
-from dataframe.accelerator.gpu import floating as f
+from dataframe_metal.accelerator.gpu import floating as f
 
 comptime OPERATIONS = 41
 comptime RECORD = OPERATIONS + 2

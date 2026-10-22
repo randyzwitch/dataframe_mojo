@@ -15,7 +15,7 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.accelerator.metadata import prune_projections, schema_frame
+from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
 from tests.support.coverage_compare import assert_frame
 
 

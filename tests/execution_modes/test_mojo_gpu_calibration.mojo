@@ -1,14 +1,17 @@
 """Mojo cost metadata, native-curve isolation and complete measured execution."""
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.cost import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.cost import (
     CalibrationKey,
     select_auto as select_cost,
 )
-from dataframe.accelerator.gpu.calibration import estimate, measure
-from dataframe.accelerator.gpu.identity import key
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
+from dataframe_metal.accelerator.gpu.calibration import estimate, measure
+from dataframe_metal.accelerator.gpu.identity import key
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
 from tests.support.calibration_fixture import (
     calibration_record,
     calibration_table,

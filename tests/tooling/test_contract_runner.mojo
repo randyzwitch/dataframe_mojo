@@ -581,6 +581,20 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
             ),
             policy,
         )
+    with assert_raises(contains="Unknown provider"):
+        _ = execute_suite(
+            RunnerOptions(
+                root.copy(),
+                ["public"],
+                List[String](),
+                "areas",
+                root + "/output",
+                compiler.copy(),
+                List[String](),
+                "nowhere",
+            ),
+            policy,
+        )
 
 
 def test_mapping_probe_rejects_mapped_pages_and_observes_each_unmap() raises:

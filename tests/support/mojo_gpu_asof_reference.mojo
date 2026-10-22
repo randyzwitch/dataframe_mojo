@@ -4,9 +4,9 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_raises
 from dataframe import AnyValue, Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.accelerator.gpu.program import kind
-from dataframe.accelerator.gpu import asof as gpu
-from dataframe.accelerator.gpu.joins import join_init, join_merge, MISSING
+from dataframe_metal.accelerator.gpu.program import kind
+from dataframe_metal.accelerator.gpu import asof as gpu
+from dataframe_metal.accelerator.gpu.joins import join_init, join_merge, MISSING
 
 
 def _append(

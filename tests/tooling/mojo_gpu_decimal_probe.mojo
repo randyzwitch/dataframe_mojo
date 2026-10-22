@@ -8,7 +8,7 @@ from max.gpu.host import DeviceContext
 from std.memory import Pointer
 from std.sys import argv
 from std.testing import assert_equal, assert_true
-from dataframe.accelerator.gpu import decimal as d
+from dataframe_metal.accelerator.gpu import decimal as d
 
 comptime INPUTS = 10
 comptime OUTPUTS = 4

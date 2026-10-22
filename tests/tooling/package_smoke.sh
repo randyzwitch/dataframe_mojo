@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Build the precompiled package and run an example from outside the source
-# tree, so only dist/dataframe.mojoc can satisfy `import dataframe`.
+# tree, so only dist/*.mojoc can satisfy `import dataframe`.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 mkdir -p dist
 python3 scripts/build_package.py --output dist
+# The routing contracts below use the Metal backend, so they need a package
+# that holds it, whatever the platform's default artifact is.
+python3 scripts/build_package.py --provider metal --output dist-metal
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cp examples/sales.mojo "$work/"
@@ -18,4 +21,4 @@ if [[ "$output" != $'east 90.0\nwest 180.0' ]]; then
 fi
 
 cd "$root"
-mojo run -I . tests/tooling/package_contracts.mojo "$root/dist" "$@"
+mojo run -I . tests/tooling/package_contracts.mojo "$root/dist-metal" "$@"

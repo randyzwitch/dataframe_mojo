@@ -12,8 +12,8 @@ from dataframe import (
     col,
     scan_csv,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.sources import prepare_file_sources
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.sources import prepare_file_sources
 from tests.execution_modes.test_mojo_gpu_file_sources import (
     _source_order_left,
     _source_order_error,

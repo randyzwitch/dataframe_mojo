@@ -2,7 +2,7 @@
 # contract-group: execution.backends
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import (
     require_metal,
     assert_native_report,

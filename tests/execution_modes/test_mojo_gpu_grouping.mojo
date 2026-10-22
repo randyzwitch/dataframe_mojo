@@ -14,9 +14,9 @@ from dataframe import (
     corr,
     lit,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import ROW_GROUP_HEADER
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import ROW_GROUP_HEADER
+from dataframe_metal.accelerator.gpu.runtime import (
     _grouped_integer_partial_nodes,
     _preflight,
 )

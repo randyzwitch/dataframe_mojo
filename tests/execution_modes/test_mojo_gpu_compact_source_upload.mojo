@@ -2,7 +2,10 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.accelerator.gpu.runtime import _preflight, _source_high_words
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    _source_high_words,
+)
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.coverage_compare import assert_frame
 

@@ -4,7 +4,7 @@ from max.gpu.host import DeviceContext
 from std.memory import bitcast
 from std.testing import assert_equal
 from dataframe.expr import COUNT, VAR, STD, SKEW, KURTOSIS, COV, CORR
-from dataframe.accelerator.gpu.statistics import (
+from dataframe_metal.accelerator.gpu.statistics import (
     State,
     supported,
     empty_result,

@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.expr import SUM, WHEN
-from dataframe.accelerator.aggregates import (
+from dataframe_metal.accelerator.aggregates import (
     _conditional_reductions,
     lower_aggregate_compositions,
 )

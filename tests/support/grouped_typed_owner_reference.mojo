@@ -2,11 +2,11 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe import Column, DataFrame, Series, col
-from dataframe.accelerator.grouped_key_queries import prepare_keys
-from dataframe.accelerator.grouped_lists import prepare
-from dataframe.accelerator.gpu.residency import Scope, Table
-from dataframe.accelerator.gpu.device_lists import HostReservation
-from dataframe.accelerator.gpu.grouped_key_owner import (
+from dataframe_metal.accelerator.grouped_key_queries import prepare_keys
+from dataframe_metal.accelerator.grouped_lists import prepare
+from dataframe_metal.accelerator.gpu.residency import Scope, Table
+from dataframe_metal.accelerator.gpu.device_lists import HostReservation
+from dataframe_metal.accelerator.gpu.grouped_key_owner import (
     GroupedKeyOwner,
     GroupedKeyField,
 )

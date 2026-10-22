@@ -1,7 +1,7 @@
 """Coverage-only wrapper that preserves Metal execution and reports adjudication."""
 from dataframe import DataFrame
 from dataframe.lazy import AcceleratorBackend, LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 def _adjudication(report: DataFrame) raises -> String:

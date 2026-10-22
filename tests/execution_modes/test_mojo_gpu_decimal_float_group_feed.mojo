@@ -6,12 +6,12 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.binding import bind, BoundExpr
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator import decimal_group_feed
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator import decimal_group_feed
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting

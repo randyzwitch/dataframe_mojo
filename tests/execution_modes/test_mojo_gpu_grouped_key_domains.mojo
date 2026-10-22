@@ -13,18 +13,20 @@ from dataframe import (
     col,
 )
 from dataframe.dtype import CategoricalDictionary
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.grouped_key_domains import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe.key_domains import (
     KeyDomain,
     STRING,
     GEOMETRY,
     coded_string_dtype,
 )
-from dataframe.accelerator.gpu.calibration import estimate
-from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.grouped_schedule import build as build_schedule
-from dataframe.accelerator.window_keys import WindowKey
+from dataframe_metal.accelerator.gpu.calibration import estimate
+from dataframe_metal.accelerator.gpu.runtime import _preflight, execute_plan
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.grouped_schedule import (
+    build as build_schedule,
+)
+from dataframe.plan_types import WindowKey
 from dataframe.partition import _hash_column
 from tests.public_contracts.test_grouped_key_domains import _key, _coded
 from tests.support.coverage_generators import offset_layout, chunk_layout

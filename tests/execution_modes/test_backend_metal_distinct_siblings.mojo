@@ -1,16 +1,18 @@
 """Distinct counts reuse resident grouping, including null categories."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.distinct_counts import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
 )
-from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN
-from dataframe.accelerator.sets import lower_set_operations
+from dataframe_metal.accelerator.joins import lower_join_dag, DAG_JOIN
+from dataframe_metal.accelerator.sets import lower_set_operations
 
 
 from tests.execution_modes.test_backend_metal import require_metal

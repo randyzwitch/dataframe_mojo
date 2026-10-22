@@ -11,10 +11,13 @@ from dataframe import (
     col,
     scan_csv,
 )
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.calibration import estimate
-from dataframe.accelerator.sources import prepare_file_sources
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.calibration import estimate
+from dataframe_metal.accelerator.sources import prepare_file_sources
 from dataframe.lazy import SCAN_FRAME
 from tests.tooling.contract_runner import temporary_directory, write_text
 

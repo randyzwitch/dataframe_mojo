@@ -3,13 +3,13 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_raises, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import _preflight
-from dataframe.accelerator.constants import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import _preflight
+from dataframe_metal.accelerator.constants import (
     has_literal_text_parsing,
     fold_literal_text_parsing,
 )
-from dataframe.accelerator.gpu.temporal_descriptors import (
+from dataframe_metal.accelerator.gpu.temporal_descriptors import (
     ROW_TEMPORAL_CAST,
     ROW_TEMPORAL_BINARY,
 )

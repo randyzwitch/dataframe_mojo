@@ -11,7 +11,7 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.metal_domain_checks import check_domain
 from tests.support.metal_domain_reference import (

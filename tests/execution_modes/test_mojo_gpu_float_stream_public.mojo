@@ -4,8 +4,8 @@
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, Expr, col
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.grouped_stream_routes import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.grouped_stream_routes import (
     capture,
     terminal_family,
     BASIC,
@@ -346,7 +346,9 @@ def test_public_float_stream_all_null_and_large_min_count() raises:
 
 def test_public_float_capture_geometry_and_construction_budget() raises:
     from dataframe.pipeline import _morsel_ranges
-    from dataframe.accelerator.grouped_stream_routes import _capture_ranges
+    from dataframe_metal.accelerator.grouped_stream_routes import (
+        _capture_ranges,
+    )
     from tests.support.float_streaming import capture_source
 
     for chunked in [False, True]:

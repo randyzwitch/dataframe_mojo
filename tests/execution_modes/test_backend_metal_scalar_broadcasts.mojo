@@ -1,21 +1,23 @@
 """Scalar reductions broadcast through resident GPU branches into row expressions."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.gpu.runtime import (
     capabilities as _capabilities,
     estimate_resources,
 )
-from dataframe.accelerator.gpu.join_runtime import preflight as join_layout
-from dataframe.accelerator.gpu.joins import METADATA_WORDS
+from dataframe_metal.accelerator.gpu.join_runtime import (
+    preflight as join_layout,
+)
+from dataframe_metal.accelerator.gpu.joins import METADATA_WORDS
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, when, scan_csv
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.aggregates import lower_aggregate_compositions
-from dataframe.accelerator.joins import lower_join_dag, DAG_ROWS, DAG_JOIN
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.aggregates import lower_aggregate_compositions
+from dataframe_metal.accelerator.joins import lower_join_dag, DAG_ROWS, DAG_JOIN
+from dataframe_metal.accelerator.rows import lower_rows
 
 
 def fixture() raises -> DataFrame:

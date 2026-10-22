@@ -2,10 +2,10 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, scan_csv
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.lazy import LazyFrame
-from dataframe.accelerator.cost import PlanEstimate, cost_feature_names
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.cost import PlanEstimate, cost_feature_names
+from dataframe_metal.accelerator.rows import lower_rows
 from dataframe._build_identity import CPU_BUILD_ID
 from tests.execution_modes.test_backend_metal import (
     require_metal,

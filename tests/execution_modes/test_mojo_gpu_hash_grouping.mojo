@@ -2,7 +2,7 @@
 from std.testing import assert_true, assert_equal, assert_raises
 from std.memory import bitcast
 from dataframe import Column, DataFrame, Series, StringColumn, col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.partition import _mix, _combine
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,

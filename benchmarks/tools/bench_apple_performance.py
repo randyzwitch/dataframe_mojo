@@ -38,10 +38,10 @@ def command(argv, cwd=ROOT):
 
 
 def engine_identity(tree):
-    paths = command(["git", "ls-files", "dataframe"], tree).splitlines()
+    paths = command(["git", "ls-files", "dataframe", "dataframe_metal", "dataframe_provider", "providers"], tree).splitlines()
     return {
         "revision": command(["git", "rev-parse", "HEAD"], tree),
-        "status": command(["git", "status", "--porcelain", "--", "dataframe"], tree),
+        "status": command(["git", "status", "--porcelain", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"], tree),
         "package_sha256": {path: sha(tree / path) for path in paths},
     }
 
