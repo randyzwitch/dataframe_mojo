@@ -37,6 +37,8 @@ AREA_DIRECTORIES = [
 ]
 IMPORT_LINE = re.compile(r"^\s*(import|from)\s")
 CHECKED_SUFFIXES = {".mojo", ".py", ".sh"}
+# A concrete program path as a task, script or workflow would spell it.
+DANGLING = re.compile(r"tests/[A-Za-z0-9_./-]+\.(?:mojo|py|sh)")
 
 
 def tracked(*prefixes):
@@ -127,11 +129,27 @@ def main():
                 reference_text += read(path) + "\n"
     offenders = pending
 
+    # The reverse failure: a pixi task, script or workflow naming a program
+    # under tests/ that no longer exists (PR #920 deleted probes that #916
+    # had just wired into the Mac script, and nothing caught it).
+    dangling = []
+    for ref in REFERENCE_PATHS:
+        for path in tracked(ref):
+            for match in sorted(set(DANGLING.findall(read(path)))):
+                if not (ROOT / match).exists():
+                    dangling.append((path, match))
+
     if offenders:
         print("Programs under tests/ that nothing runs or imports:")
         for path in offenders:
             print("  " + path)
         print("Delete them, or run them from CI, a pixi task or a script.")
+    if dangling:
+        print("References to programs under tests/ that do not exist:")
+        for path, match in dangling:
+            print("  " + path + " -> " + match)
+        print("Restore the program or remove the reference.")
+    if offenders or dangling:
         return 1
     print("Every program under tests/ is reachable.")
     return 0
