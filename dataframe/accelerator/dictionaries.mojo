@@ -676,7 +676,7 @@ def lower_dictionary_operations(
                             _plan_node(
                                 WITH_COLUMNS,
                                 operation.left,
-                                exprs=operands^,
+                                exprs=operands,
                                 text="metal_window_materialization",
                             )
                         )
