@@ -183,7 +183,7 @@ def test_implode_field_metadata_grouped_over_full_and_worker_accumulators() rais
         var part = job^.into_result()
         _owner(part.list_column().child(), owner)
         pieces.append(part^)
-    var combined = Series._from_chunks(pieces^)
+    var combined = Series._from_chunks(pieces)
     _owner(combined.rechunk().list_column().child(), owner)
     assert_true(combined.equals(aligned.renamed("")))
 

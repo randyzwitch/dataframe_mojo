@@ -52,7 +52,7 @@ def fused_dtype[D: DType]() raises:
                     )
                     valid.append(present)
                 var column = Series(
-                    "x", Column[Scalar[D]](values^, valid^)
+                    "x", Column[Scalar[D]](values^, valid)
                 ).slice(offset, n)
                 var columns: List[Series] = [column.copy()]
                 var constant = lit(Scalar[D](5))
@@ -117,8 +117,8 @@ def test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_c
     var source = DataFrame(
         [
             Series("x", Column[Int32](numbers^, valid.copy())).slice(7, n),
-            Series("y", Column[Int32](others^, valid^)).slice(7, n),
-            Series("s", Column[String](strings^, string_valid^)).slice(7, n),
+            Series("y", Column[Int32](others^, valid)).slice(7, n),
+            Series("s", Column[String](strings^, string_valid)).slice(7, n),
         ]
     )
     for chunked in [False, True]:
@@ -200,11 +200,9 @@ def test_selection_trees_narrow_kept_rows_with_and_or_comparisons_and_null_tests
         code_valid.append(row % 11 != 5)
     var frame = DataFrame(
         [
-            Series("q", Column[Int64](quantities^, quantity_valid^)).slice(
-                7, n
-            ),
-            Series("a", Column[Float64](prices^, price_valid^)).slice(7, n),
-            Series("b", Column[Int32](codes^, code_valid^)).slice(7, n),
+            Series("q", Column[Int64](quantities^, quantity_valid)).slice(7, n),
+            Series("a", Column[Float64](prices^, price_valid)).slice(7, n),
+            Series("b", Column[Int32](codes^, code_valid)).slice(7, n),
         ]
     )
     var band = (
@@ -256,7 +254,7 @@ def ordered_series(n: Int, base: Int, nullable: Bool = False) raises -> Series:
     for row in range(n):
         values.append(Int64(base + row // 3))
         valid.append(not nullable or row % 11 != 2)
-    return Series("x", Column[Int64](values^, valid^))
+    return Series("x", Column[Int64](values^, valid))
 
 
 def test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly() raises:

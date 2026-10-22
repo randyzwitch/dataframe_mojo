@@ -333,7 +333,7 @@ def selection_frame(
         predicate_valid.append(row % 5 != 2)
     columns.append(Series("id", Column[Int64](ids^)).slice(offset, n))
     columns.append(
-        Series("predicate", Column[Bool](predicates^, predicate_valid^)).slice(
+        Series("predicate", Column[Bool](predicates^, predicate_valid)).slice(
             offset, n
         )
     )

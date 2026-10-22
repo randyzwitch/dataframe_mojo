@@ -1,0 +1,219 @@
+{
+  "format": "dataframe-metal-numerical-policy-v1",
+  "rtol": 1e-09,
+  "atol": 1e-12,
+  "comparison": "abs(a-b) <= max(atol, rtol * max(abs(a), abs(b)))",
+  "scope": "Named aggregate/arithmetic Float64 result fields only. All other fields, including source attributes and group keys, remain exact. Decimal and integer variants of named fields remain exact. Row order follows the existing row-multiset coverage policy.",
+  "source_sha256": {
+    "benchmarks/suites/h2o.mojo": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+    "benchmarks/suites/pdsh.mojo": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+    "benchmarks/suites/tpcds.mojo": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68"
+  },
+  "cases": {
+    "h2o_groupby/q3": [
+      "v3"
+    ],
+    "h2o_groupby/q4": [
+      "v1",
+      "v2",
+      "v3"
+    ],
+    "h2o_groupby/q5": [
+      "v3"
+    ],
+    "h2o_groupby/q6": [
+      "median_v3",
+      "sd_v3"
+    ],
+    "h2o_groupby/q9": [
+      "r2"
+    ],
+    "pdsh/q1": [
+      "avg_disc",
+      "avg_price",
+      "avg_qty",
+      "sum_base_price",
+      "sum_charge",
+      "sum_disc_price",
+      "sum_qty"
+    ],
+    "pdsh/q10": [
+      "revenue"
+    ],
+    "pdsh/q15": [
+      "total_revenue"
+    ],
+    "pdsh/q17": [
+      "avg_yearly"
+    ],
+    "pdsh/q5": [
+      "revenue"
+    ],
+    "pdsh/q6": [
+      "revenue"
+    ],
+    "pdsh/q7": [
+      "revenue"
+    ],
+    "pdsh/q8": [
+      "mkt_share"
+    ],
+    "pdsh/q9": [
+      "sum_profit"
+    ],
+    "tpcds/q12": [
+      "itemrevenue",
+      "revenueratio"
+    ],
+    "tpcds/q19": [
+      "ext_price"
+    ],
+    "tpcds/q20": [
+      "itemrevenue",
+      "revenueratio"
+    ],
+    "tpcds/q26": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4"
+    ],
+    "tpcds/q27": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4"
+    ],
+    "tpcds/q28": [
+      "B1_LP",
+      "B2_LP",
+      "B3_LP",
+      "B4_LP",
+      "B5_LP",
+      "B6_LP"
+    ],
+    "tpcds/q31": [
+      "store_q1_q2_increase",
+      "store_q2_q3_increase",
+      "web_q1_q2_increase",
+      "web_q2_q3_increase"
+    ],
+    "tpcds/q33": [
+      "total_sales"
+    ],
+    "tpcds/q42": [
+      "total"
+    ],
+    "tpcds/q43": [
+      "fri_sales",
+      "mon_sales",
+      "sat_sales",
+      "sun_sales",
+      "thu_sales",
+      "tue_sales",
+      "wed_sales"
+    ],
+    "tpcds/q47": [
+      "avg_monthly_sales",
+      "nsum",
+      "psum",
+      "sum_sales"
+    ],
+    "tpcds/q52": [
+      "ext_price"
+    ],
+    "tpcds/q53": [
+      "avg_quarterly_sales",
+      "sum_sales"
+    ],
+    "tpcds/q55": [
+      "ext_price"
+    ],
+    "tpcds/q56": [
+      "total_sales"
+    ],
+    "tpcds/q57": [
+      "avg_monthly_sales",
+      "nsum",
+      "psum",
+      "sum_sales"
+    ],
+    "tpcds/q59": [
+      "fri_sales_ratio",
+      "mon_sales_ratio",
+      "sat_sales_ratio",
+      "sun_sales_ratio",
+      "thu_sales_ratio",
+      "tue_sales_ratio",
+      "wed_sales_ratio"
+    ],
+    "tpcds/q60": [
+      "total_sales"
+    ],
+    "tpcds/q61": [
+      "promotions",
+      "share",
+      "total"
+    ],
+    "tpcds/q63": [
+      "avg_monthly_sales",
+      "sum_sales"
+    ],
+    "tpcds/q66": [
+      "apr_net",
+      "apr_sales",
+      "apr_sales_per_sq_foot",
+      "aug_net",
+      "aug_sales",
+      "aug_sales_per_sq_foot",
+      "dec_net",
+      "dec_sales",
+      "dec_sales_per_sq_foot",
+      "feb_net",
+      "feb_sales",
+      "feb_sales_per_sq_foot",
+      "jan_net",
+      "jan_sales",
+      "jan_sales_per_sq_foot",
+      "jul_net",
+      "jul_sales",
+      "jul_sales_per_sq_foot",
+      "jun_net",
+      "jun_sales",
+      "jun_sales_per_sq_foot",
+      "mar_net",
+      "mar_sales",
+      "mar_sales_per_sq_foot",
+      "may_net",
+      "may_sales",
+      "may_sales_per_sq_foot",
+      "nov_net",
+      "nov_sales",
+      "nov_sales_per_sq_foot",
+      "oct_net",
+      "oct_sales",
+      "oct_sales_per_sq_foot",
+      "sep_net",
+      "sep_sales",
+      "sep_sales_per_sq_foot"
+    ],
+    "tpcds/q75": [
+      "sales_amt_diff"
+    ],
+    "tpcds/q89": [
+      "avg_monthly_sales",
+      "sum_sales"
+    ],
+    "tpcds/q9": [
+      "bucket1",
+      "bucket2",
+      "bucket3",
+      "bucket4",
+      "bucket5"
+    ],
+    "tpcds/q98": [
+      "itemrevenue",
+      "revenueratio"
+    ]
+  }
+}

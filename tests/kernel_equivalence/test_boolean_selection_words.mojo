@@ -36,7 +36,7 @@ def test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_
                                 "number", Column[Int64](integers^, valid.copy())
                             ).slice(lo, ln)
                             var text = Series(
-                                "text", Column[String](strings^, valid^)
+                                "text", Column[String](strings^, valid)
                             ).slice(lo, ln)
                             var numeric_keep = _keep_nulls_bits(numeric, right)
                             # A scalar nonnumeric validity fallback does not
@@ -49,7 +49,7 @@ def test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_
                             var mask = List[Bool]()
                             for i in range(ln):
                                 mask.append(truth_state(lo + i, lm, 0) >= 0)
-                            var scalar_keep = _keep_nulls_bools(mask^, right)
+                            var scalar_keep = _keep_nulls_bools(mask, right)
                             for i in range(n):
                                 var a = truth_state(
                                     lo + (0 if broadcast == 1 else i), lm, 0

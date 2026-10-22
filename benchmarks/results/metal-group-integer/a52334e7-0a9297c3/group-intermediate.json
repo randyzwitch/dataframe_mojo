@@ -1,0 +1,11 @@
+{
+  "engine_pin": "158285f7cf225276493efd354454a5d278050fef",
+  "measurement_pin": "f758ce9a067cd3ddf67b0c3393f5d26d684ddeb0",
+  "local": "/tmp/metal-paired-group-intermediate",
+  "remote": "dataframe_mojo-metal-paired-group-intermediate-v2",
+  "workloads": [
+    "group_hash",
+    "group_high",
+    "group_skew"
+  ]
+}

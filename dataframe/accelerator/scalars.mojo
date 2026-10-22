@@ -99,7 +99,7 @@ def lower_scalar_projections(query: LazyFrame) raises -> LazyFrame:
                 name += "_"
             names[name] = True
             counts.append(col(column.name()).count().alias(name))
-        result._nodes.append(_plan_node(SELECT, operation.left, exprs=counts^))
+        result._nodes.append(_plan_node(SELECT, operation.left, exprs=counts))
         result._nodes.append(
             _plan_node(
                 WITH_COLUMNS, len(result._nodes) - 1, exprs=operation.exprs
@@ -109,7 +109,7 @@ def lower_scalar_projections(query: LazyFrame) raises -> LazyFrame:
         for name in expected.columns():
             projected.append(col(name))
         result._nodes.append(
-            _plan_node(SELECT, len(result._nodes) - 1, exprs=projected^)
+            _plan_node(SELECT, len(result._nodes) - 1, exprs=projected)
         )
         roots.append(len(result._nodes) - 1)
     return result^

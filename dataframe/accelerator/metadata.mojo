@@ -21,6 +21,7 @@ from dataframe.lazy import (
     HCONCAT,
     GATHER,
     _is_scan,
+    _merge_copy_needs,
     _is_time_window,
     _time_window_reads,
     _plan_node,
@@ -100,8 +101,15 @@ def prune_projections(mut query: LazyFrame) raises:
     var narrow_joins = List[Int]()
     var narrow_sides = List[Bool]()
     var narrow_columns = List[List[String]]()
-    for reverse in range(len(query._nodes)):
-        var i = len(query._nodes) - 1 - reverse
+    # Copies of a repeated subplan get the union of their readers' needs,
+    # as `LazyFrame._push_projections` gives them.
+    var visits = query._projection_visits()
+    ref copy_of = visits[1]
+    var merged_copies = Dict[Int, Bool]()
+    for i in visits[0]:
+        if copy_of[i] >= 0 and copy_of[i] not in merged_copies:
+            merged_copies[copy_of[i]] = True
+            _merge_copy_needs(copy_of, copy_of[i], needed, all_needed)
         ref node = query._nodes[i]
         if not all_needed[i] and not needed[i]:
             continue
@@ -231,7 +239,7 @@ def _narrow_projection_inputs(
                 child,
                 exprs=exprs,
                 code_domain=query._nodes[child].code_domain,
-                text_fields=fields^,
+                text_fields=fields,
             )
         )
         if right_sides[k]:

@@ -58,7 +58,7 @@ def dimension() raises -> DataFrame:
     return DataFrame(
         [
             Series("d", Column[Int32](keys^)),
-            Series("name", Column[String](names^, valid^)),
+            Series("name", Column[String](names^, valid)),
             Series("grp", Column[Int64](classes^)),
         ]
     )

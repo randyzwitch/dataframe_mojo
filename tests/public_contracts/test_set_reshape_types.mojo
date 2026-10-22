@@ -477,7 +477,7 @@ def dictionary_series(
     var dictionary = CategoricalDictionary()
     for label in labels:
         dictionary.append(label)
-    return Series("x", Column[UInt32](codes^, valid^)).with_dtype(
+    return Series("x", Column[UInt32](codes^, valid)).with_dtype(
         DataType.categorical(dictionary^)
     )
 

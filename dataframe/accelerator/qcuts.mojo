@@ -107,9 +107,9 @@ def stage_custom(
         _plan_node(
             WITH_COLUMNS,
             left,
-            exprs=expressions^,
+            exprs=expressions,
             text="metal_window_materialization",
-            names2=metadata^,
+            names2=metadata,
         )
     )
     if flags & 2:

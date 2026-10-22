@@ -68,7 +68,7 @@ def _inputs() raises -> DataFrame:
         [
             Series("f", Column[Float64](floats^, valid.copy())),
             Series("i", Column[Int64](ints^, valid.copy())),
-            Series("f32", Column[Float32](singles^, valid^)),
+            Series("f32", Column[Float32](singles^, valid)),
         ]
     )
 

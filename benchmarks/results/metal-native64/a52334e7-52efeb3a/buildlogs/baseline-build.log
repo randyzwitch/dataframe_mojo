@@ -1,0 +1,12 @@
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-868/build/metal-native64-paired-fixed-52efeb3a/worktrees/baseline/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:329:
+Included from ./dataframe/accelerator/gpu/runtime.mojo:280:
+Included from ./dataframe/accelerator/decimal_sum_receipts.mojo:54:
+./dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-868/build/metal-native64-paired-fixed-52efeb3a/worktrees/baseline/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:329:
+./dataframe/accelerator/gpu/runtime.mojo:3119:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^

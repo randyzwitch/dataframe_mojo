@@ -62,9 +62,7 @@ def test_top_bound_literal_thresholds_keep_null_nan_equal_keys_and_decline_unsup
                     Float64(0) / Float64(0),
                     Float64.MAX,
                 ]
-                frame = DataFrame(
-                    [Series("key", Column[Float64](raw^, valid^))]
-                )
+                frame = DataFrame([Series("key", Column[Float64](raw^, valid))])
                 expected = [0, 1, 2, 3, 5, 6] if not descending else [
                     2,
                     3,
@@ -119,9 +117,7 @@ def test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_s
                 "key", Column[Int64](integers^, valid.copy())
             ).slice(7, n)
             if floating:
-                key = Series("key", Column[Float64](floats^, valid^)).slice(
-                    7, n
-                )
+                key = Series("key", Column[Float64](floats^, valid)).slice(7, n)
             var frame = DataFrame(
                 [
                     key^,

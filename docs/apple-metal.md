@@ -268,6 +268,15 @@ readback lists. Multi-output, grouped and other unconverted regions still use
 the legacy representation. This Float32 kernel still interprets a bounded
 expression program; it is not the interpreter-free fused reduction path.
 
+A certified one-column Float32 row producer can also retain native storage
+when its only consumer is a join in the same query. This includes supported
+stable filters, but excludes limited producers and other consumer families.
+The join converts values and packed validity directly into its existing
+generic device buffers, with no intermediate host export. Profiles report
+the native producer's retained bytes and `native_input_conversion_bytes`
+(21 bytes per converted row). The join itself still uses the generic matrix
+and performs a conservative synchronization at this conversion boundary.
+
 The first precompiled reduction family accepts one Int32 input, an optional
 `x > Int32(threshold)` filter, optional checked `(x + addend) * factor`, an
 explicit Int64 cast, and terminal SUM. It preserves the filter boundary and
@@ -500,6 +509,9 @@ separate proofs. Distribution expressions require equal output cardinalities;
 ordinary scalars broadcast, while differing distribution lengths raise.
 
 ## Engine performance overhaul
+
+The current replacement status and the retirement gates are tracked in the
+[Metal replacement-coverage matrix](apple-metal-replacement-coverage.md).
 
 The CPU and Metal engines should select the same families of algorithms,
 with implementations appropriate to their hardware. The CPU already has

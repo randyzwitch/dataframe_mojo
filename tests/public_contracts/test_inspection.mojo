@@ -624,7 +624,7 @@ def test_describe_numeric_nonfinite_values_distinguish_nan_from_null() raises:
         elif mode == 3:
             values = [-0.0, 0.0, nan, 999]
         var valid: List[Bool] = [True, True, mode != 3, False]
-        var source = DataFrame([Series("x", Column[Float64](values^, valid^))])
+        var source = DataFrame([Series("x", Column[Float64](values^, valid))])
         for layout in range(3):
             var frame = (
                 source.copy() if layout

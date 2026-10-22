@@ -146,6 +146,12 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
+The [completed M1 forced-Metal development baseline](../benchmarks/results/metal-development-baseline/50137ecc-m1-20261020/)
+retains 1,812 worker records across 302 cases, exact correctness receipts, raw
+logs and a hash verifier. Only 210 cases qualify for CPU/Metal timing ratios;
+unsupported and unverified cases remain visible. This is development-scale
+evidence for #869, not a full-scale headline or a GPU-only execution certificate.
+
 `benchmarks/tools/bench_metal_suites.py` separately checks exact CPU/Apple
 query results with every query `collect` forced onto Metal. Summarize one or
 more immutable receipt files with
@@ -177,6 +183,55 @@ for each mechanism. Profile phase fields are retained when supplied by the
 runtime. Host phase values may overlap and are reported separately; the report
 does not derive GPU-only or pipeline compilation time when the runtime does not
 provide it.
+
+Four optional SUM cases cover native Int64 and UInt64 inputs: `int64_sum`,
+`uint64_sum`, `int64_affine_sum`, and `int64_wide_sum16`. The signed inputs are
+`i % 17 - 8`, unsigned inputs are `i % 17`; sorted variants distribute those
+same ranges monotonically, and null variants use
+`UInt32` wrapping of `1664525*i + 1013904223` before taking `% 17` (then
+subtract 8 for signed values), with every twentieth row null. The affine case
+sums `(x + 3) * 2`, bounded to magnitude 22 per row. The wide case returns
+16 separately named sums over one Int64 source column. Each output is checked
+against the CPU executor's result; that check validates execution but is not an
+independent oracle. These names are selectable through `--workloads` and are
+excluded from the default workload list. The new `--warmups` setting defaults
+to the existing two extra collections per engine. For paired runs, the driver
+requires verified receipts with matching benchmark source, driver, lockfile,
+compile flags, compiler identity and executable hash, build platform, SDK, and
+Xcode version. Engine commit and engine-source hashes may differ. This guard
+checks those recorded identity fields; host hardware and runtime conditions
+remain separate recorded context.
+
+The paired native Int64/UInt64 run is archived at
+[`benchmarks/results/metal-native64/a52334e7-52efeb3a/`](../benchmarks/results/metal-native64/a52334e7-52efeb3a/).
+It compares baseline engine `a52334e758b7138c547883eb776d744442a1a0db` with
+candidate `52efeb3ab784c8949366870b7cd6b007b3bf77f9`, using benchmark and driver
+file contents matching commit
+`3447f6026a4a9d3745d56040ae4b93bc157de477`. The run contains
+144 validated baseline/candidate run keys across two row counts, four SUM
+workloads and three input variants. At 1,048,576 rows, baseline-to-candidate
+Metal median ratios range from 3.07× to 8.08× across the four workloads and
+their variants. Candidate CPU warm medians are lower than candidate Metal in
+all 24 workload/size/variant cells, so these are implementation comparisons,
+not evidence of a general GPU advantage. The package retains raw samples,
+source and binary receipts, and qualification logs. The archived prior
+full-gate log records four failures: selector expansion, categorical grouped
+row count and qcut whole-DAG synchronization parity were independently
+reproduced on baseline; an ordered profile/resource-estimate failure was
+followed by focused resource-bound fixes whose tests passed. The full gate was
+not rerun as all-green. See `summary.md` for the paired table and `validation/`
+for qualification details.
+
+The grouped integer candidate comparison is archived at
+[`benchmarks/results/metal-group-integer/a52334e7-0a9297c3/`](../benchmarks/results/metal-group-integer/a52334e7-0a9297c3/).
+It retains 234 validated workers across frozen-baseline and #865-intermediate
+comparisons. The candidate improves all warm cases over the frozen baseline,
+but is about 7% slower than #865 on two large non-null uniform cases while
+improving large skewed cases by 4.75–4.89×. Reported peak allocation increases,
+and CPU remains faster throughout. These results require a scheduling revision;
+they do not establish universal improvement or grouping replacement completion.
+The archive preserves both comparisons, first-use regressions, raw logs,
+shared harness bytes, build receipts and the focused correctness gate.
 
 The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
 prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
@@ -371,3 +426,61 @@ the measured alignment or hybrid classification. The CPU-only literal entry
 `tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo` validates diagnostic
 behavior independently of GPU execution (include `-I benchmarks`). Collection
 durations remain diagnostic and are not performance measurements.
+
+For ClickBench q11, q17, q18, q30–q32 and q38–q40, an independent ordering
+audit can distinguish a valid unordered selection from a wrong result:
+
+```sh
+pixi run -e oracle python benchmarks/tools/metal_ordering_oracle.py \
+  --coverage /path/to/coverage/coverage.json \
+  --answer-root /path/to/coverage/answers \
+  --input-root /path/to/benchdata \
+  --output /path/to/ordering-audit.json
+```
+
+The audit requires exported answers and the original input files. It verifies
+their receipt hashes and schemas, then uses DuckDB to calculate each complete
+grouped relation. Every selected row must belong to that relation with the
+correct multiplicity and aggregate values. Sorted queries must also return the
+requested descending rank sequence, including the slice offset. This permits
+different rows at tied boundaries only when both selections satisfy the query;
+q17 permits any valid subset of up to ten rows because its group order is unspecified.
+The reference definitions accept only the reviewed suite-source hash and fail
+closed on unhandled null or nonfinite values. Numerical differences are not
+tolerated by this audit.
+
+The resulting `selection_valid` evidence is separate from the retained
+`strict_status`. It does not rewrite coverage receipts, qualify timing pairs,
+or certify GPU-only execution. Other queries require their own independent
+references; a matching rank sequence alone never establishes correctness.
+
+Float64 aggregate and arithmetic results use a separate numerical comparison
+policy with relative tolerance `1e-9` and absolute tolerance `1e-12`:
+
+```text
+abs(actual - expected) <= max(1e-12, 1e-9 * max(abs(actual), abs(expected)))
+```
+
+The absolute threshold applies in the output column's units near zero; the
+relative threshold scales with the result's magnitude. These are comparison
+tolerances, not rounding of the computed results. Source-pinned entries in
+`benchmarks/tools/metal_numerical_policy.json` identify eligible result fields.
+Group keys, copied source attributes, integers, decimals, schemas and row
+multiplicities remain exact. Nulls match only nulls, NaNs match only NaNs, and
+infinities require the same sign. Signed zeros follow `DataFrame.equals`.
+
+```sh
+pixi run -e oracle python benchmarks/tools/metal_numerical_audit.py \
+  --coverage /path/to/coverage/coverage.json \
+  --answer-root /path/to/coverage/answers \
+  --output /path/to/numerical-audit.json
+```
+
+This compares complete retained CPU and Metal row multisets. Exact fields
+partition the rows; a one-to-one matching of the remaining fields preserves
+duplicate counts without relying on a greedy pairing of approximately equal
+values. If the comparison exceeds its candidate-pair limit, it reports
+`unverified`. The original strict status remains available alongside the
+numerical result. Agreement with CPU under this policy is not an independent
+query oracle or a certificate of output ordering, and does not itself change
+performance admission.

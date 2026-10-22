@@ -87,6 +87,6 @@ def test_false_or_null_at_any_bitmap_position_disables_all_rows_shortcut() raise
                 else:
                     payloads[excluded] = False
                 assert_model(
-                    frame.filter(Column[Bool](payloads^, valid^)),
+                    frame.filter(Column[Bool](payloads^, valid)),
                     model.take(kept),
                 )

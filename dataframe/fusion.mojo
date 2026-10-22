@@ -153,7 +153,7 @@ def fused[
                     local_offsets[source], segment_length
                 )
             var piece = fused[width](
-                bound, local_columns^, root, 0, segment_length
+                bound, local_columns, root, 0, segment_length
             )
             if cursor == offset and segment_end == end:
                 return piece^

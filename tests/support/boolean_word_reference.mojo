@@ -17,4 +17,4 @@ def truth_column(
         var state = truth_state(row, mode, side)
         values.append(state != 0)  # Poison true under null.
         valid.append(state >= 0)
-    return BoolColumn(values^, valid^).slice(offset, n)
+    return BoolColumn(values, valid).slice(offset, n)

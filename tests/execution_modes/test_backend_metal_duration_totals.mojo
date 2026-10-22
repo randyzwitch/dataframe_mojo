@@ -76,7 +76,7 @@ def fixture(unit: String) raises -> DataFrame:
         keys.append(Int32(i % 3))
     return DataFrame(
         [
-            Series("d", Column[Int64](raw^, valid^)).with_dtype(
+            Series("d", Column[Int64](raw^, valid)).with_dtype(
                 DataType.duration(unit)
             ),
             Series("k", Column[Int32](keys^)),
@@ -111,7 +111,7 @@ def expected(frame: DataFrame) raises -> DataFrame:
             )
             var low = UInt64(exact & Int128(UInt64.MAX))
             values.append(bitcast[DType.int64](low))
-        columns.append(Series(names[unit], Column[Int64](values^, valid^)))
+        columns.append(Series(names[unit], Column[Int64](values^, valid)))
     return DataFrame(columns^)
 
 

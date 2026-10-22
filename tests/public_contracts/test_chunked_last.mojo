@@ -12,7 +12,7 @@ def _offset_chunks[D: DType](n: Int) raises -> DataFrame:
         values.append(Scalar[D](row % 11 + 1))
         valid.append(row % 7 != 0)
         rows.append(Int64(row))
-    var source = Series("x", Column[Scalar[D]](values^, valid^)).slice(3, n)
+    var source = Series("x", Column[Scalar[D]](values^, valid)).slice(3, n)
     var position = Series("row", Column[Int64](rows^)).slice(3, n)
     var columns = List[Series]()
     for column in [source^, position^]:

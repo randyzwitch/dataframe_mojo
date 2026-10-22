@@ -70,7 +70,7 @@ def probe() raises -> DataFrame:
         s.append(text_of(row))
     return DataFrame(
         [
-            Series("k", Column[Int64](keys^, valid^)),
+            Series("k", Column[Int64](keys^, valid)),
             Series("a", Column[Int64](a^)),
             Series("s", Column[String](s^)),
         ]

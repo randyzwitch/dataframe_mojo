@@ -844,7 +844,7 @@ struct DataFrame(Copyable, Sized, Writable):
                         values.append(0)
                         valid.append(False)
                 columns.append(
-                    Series(column.name(), Column[Float64](values^, valid^))
+                    Series(column.name(), Column[Float64](values^, valid))
                 )
                 continue
             var texts = List[String](capacity=rows)
@@ -864,7 +864,7 @@ struct DataFrame(Copyable, Sized, Writable):
                             ) if key.startswith("q") else value.int64()
                         )
                 var formatted = (
-                    Series("", Column[Int64](ticks^, ticks_valid^))
+                    Series("", Column[Int64](ticks^, ticks_valid))
                     .with_dtype(dtype)
                     .cast(DataType.STRING)
                 )
@@ -1151,7 +1151,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 take_sorted_chunked(self._columns, rows^, worker_count(count)),
                 height=count,
             )
-        return self.take(rows^)
+        return self.take(rows)
 
     def with_column(self, var column: Series) raises -> Self:
         """Replace by name or append; the input dataframe is unchanged."""
@@ -2031,7 +2031,7 @@ struct DataFrame(Copyable, Sized, Writable):
             swap(right_rows, pairs[1])
             if not identity:
                 columns = take_parallel(
-                    columns^, left_rows^, lanes, or_null=False
+                    columns, left_rows^, lanes, or_null=False
                 )
             var right_sources = List[Series]()
             for c in right_output:
@@ -2073,14 +2073,14 @@ struct DataFrame(Copyable, Sized, Writable):
                             ordered_chunks = False
                     if ordered_chunks:
                         columns = take_sorted_chunked(
-                            columns^,
+                            columns,
                             left_rows^,
                             workers,
                             allow_repeats=True,
                         )
                     else:
                         columns = take_parallel(
-                            columns^, left_rows^, workers, or_null=False
+                            columns, left_rows^, workers, or_null=False
                         )
                 var right_sources = List[Series]()
                 for c in right_output:
@@ -2245,14 +2245,14 @@ struct DataFrame(Copyable, Sized, Writable):
                             ordered_chunks = False
                     if ordered_chunks:
                         columns = take_sorted_chunked(
-                            columns^,
+                            columns,
                             left_rows^,
                             workers,
                             allow_repeats=True,
                         )
                     else:
                         columns = take_parallel(
-                            columns^, left_rows^, workers, or_null=False
+                            columns, left_rows^, workers, or_null=False
                         )
                 var right_output_sources = List[Series]()
                 for c in right_output:
@@ -2442,7 +2442,7 @@ struct DataFrame(Copyable, Sized, Writable):
             for c in range(self.width()):
                 left_sources.append(self._columns[c].copy())
             var columns = take_parallel(
-                left_sources^, left_rows.copy(), gather_workers, or_null=True
+                left_sources, left_rows.copy(), gather_workers, or_null=True
             )
             var right_sources = List[Series]()
             for c in right_output:
@@ -2471,7 +2471,7 @@ struct DataFrame(Copyable, Sized, Writable):
             var left_gathered = left_sources^
             if not left_identity:
                 left_gathered = take_parallel(
-                    left_gathered^,
+                    left_gathered,
                     left_rows.copy(),
                     gather_workers,
                     or_null=True,
@@ -2527,7 +2527,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var columns = left_sources^
         if not left_identity:
             columns = take_parallel(
-                columns^,
+                columns,
                 left_rows.copy(),
                 gather_workers,
                 or_null=sides_mixed,
@@ -2913,7 +2913,7 @@ struct DataFrame(Copyable, Sized, Writable):
             elif len(pieces) == 1:
                 output.append(pieces[0].copy())
             else:
-                output.append(Series._from_chunks(pieces^))
+                output.append(Series._from_chunks(pieces))
         return Self(output^)
 
     def _predicate_mask(
@@ -3337,7 +3337,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var flags = List[Bool](capacity=self._height)
         for id in keyed[0]:
             flags.append(keyed[1][id] > 1)
-        return Series("is_duplicated", BoolColumn(flags^))
+        return Series("is_duplicated", BoolColumn(flags))
 
     def is_unique(self, subset: List[String] = List[String]()) raises -> Series:
         """True for every row whose key occurs exactly once."""
@@ -3345,7 +3345,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var flags = List[Bool](capacity=self._height)
         for id in keyed[0]:
             flags.append(keyed[1][id] == 1)
-        return Series("is_unique", BoolColumn(flags^))
+        return Series("is_unique", BoolColumn(flags))
 
     def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
         """Keep rows with no null in subset (default: every column)."""
@@ -7362,7 +7362,7 @@ def _finish_parts(var parts: List[_StreamReduction]) raises -> DataFrame:
         else:
             heap_key[0] = firsts[part][cursor[part]]
         sift_down(heap_part, heap_key, size, 0)
-    return concat(frames^).rechunk().take(order^)
+    return concat(frames).rechunk().take(order)
 
 
 def table_specs(template: _StreamReduction) -> List[ReducerSpec]:
@@ -7667,7 +7667,7 @@ struct _StreamReduction(Movable):
             parts.append(self.keys.copy())
             for j in range(len(others)):
                 parts.append(others[j].keys.copy())
-            var combined = concat(parts^)
+            var combined = concat(parts)
             var groups = _encode_in_order(
                 combined._columns
             ) if parallel else encode_rows(combined._columns, nulls_equal=True)
@@ -7687,7 +7687,7 @@ struct _StreamReduction(Movable):
             for r in groups.representatives:
                 kept.append(firsts[r])
             self.firsts = kept^
-            self.keys = combined.take(groups.representatives^)
+            self.keys = combined.take(groups.representatives)
         else:
             for _ in range(len(others)):
                 mappings.append(List[Int]())
@@ -7740,7 +7740,7 @@ struct _StreamReduction(Movable):
                 key_parts.append(other.keys.take(added))
             mappings.append(mapping^)
         if len(key_parts) > 1:
-            self.keys = concat(key_parts^)
+            self.keys = concat(key_parts)
             if self.keys._columns[0].n_chunks() > 64:
                 self.keys = self.keys.rechunk()
         var count = self.index.count()
@@ -7864,7 +7864,7 @@ struct _StreamReduction(Movable):
             for r in groups.representatives:
                 kept.append(firsts[r])
             self.firsts = kept^
-            self.keys = combined.take(groups.representatives^)
+            self.keys = combined.take(groups.representatives)
         self.rows += other.rows
         for i in range(len(self.states)):
             self.states[i].grow(count)

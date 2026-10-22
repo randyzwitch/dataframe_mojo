@@ -26,7 +26,7 @@ def cancellation(nullable: Bool) raises -> DataFrame:
     return DataFrame(
         [
             Series("x", Column[Float64](x^, valid.copy())),
-            Series("y", Column[Float64](y^, valid^)),
+            Series("y", Column[Float64](y^, valid)),
         ]
     )
 
@@ -50,7 +50,7 @@ def nan_payloads[D: DType](nullable: Bool) raises -> DataFrame:
     return DataFrame(
         [
             Series("x", Column[Scalar[D]](x^, valid.copy())),
-            Series("y", Column[Scalar[D]](y^, valid^)),
+            Series("y", Column[Scalar[D]](y^, valid)),
         ]
     )
 

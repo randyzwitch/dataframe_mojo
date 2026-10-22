@@ -24,7 +24,7 @@ def test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_dup
     for row in range(n):
         values.append(Int64(row % domain))
         valid.append(row % 97 != 2)
-    var build = Series("k", Column[Int64](values^, valid^))
+    var build = Series("k", Column[Int64](values^, valid))
     assert_true(worker_count(n) > 1)
     var selected_workers = _parallel_range_build_workers(n, domain)
     assert_true(selected_workers >= 1 and selected_workers <= 4)
@@ -98,7 +98,7 @@ def test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_dup
     for row in range(rows + 7):
         keys.append(Int64((row % 6 - 2) * 60))
         bits.append(row % 29 != 2)
-    var flat = Series("k", Column[Int64](keys^, bits^)).slice(7, rows)
+    var flat = Series("k", Column[Int64](keys^, bits)).slice(7, rows)
     var progression = Series("k", Column[Int64]([-120, -60, 0, 60]))
     for chunked in [False, True]:
         var source = flat.copy()
@@ -138,7 +138,7 @@ def test_equal_output_height_does_not_imply_identity_gather_and_parallel_full_jo
         key_chunks.append(key.slice(chunk * (n // 16), n // 16))
         id_chunks.append(id.slice(chunk * (n // 16), n // 16))
     var left = DataFrame(
-        [Series._from_chunks(key_chunks^), Series._from_chunks(id_chunks^)]
+        [Series._from_chunks(key_chunks), Series._from_chunks(id_chunks)]
     )
     var right = DataFrame(
         [

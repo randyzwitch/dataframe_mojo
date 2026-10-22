@@ -311,6 +311,6 @@ def test_csv_unsupported_binary_input_and_writer_types_reject_even_empty_columns
         var values = List[List[UInt8]]()
         if n:
             values.append([0, 255])
-        var frame = DataFrame([Series.binary("v", values^)])
+        var frame = DataFrame([Series.binary("v", values)])
         with assert_raises(contains="binary"):
             _ = to_csv_string(frame)

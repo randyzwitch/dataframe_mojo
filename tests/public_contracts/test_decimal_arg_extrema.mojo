@@ -33,7 +33,7 @@ def fixture(width: Int, scale: Int) raises -> DataFrame:
         True,
         False,
     ]
-    var source = Series("x", Column[Int128](values^, valid^)).with_dtype(
+    var source = Series("x", Column[Int128](values^, valid)).with_dtype(
         DataType.decimal(38, scale)
     )
     if width != 128:
