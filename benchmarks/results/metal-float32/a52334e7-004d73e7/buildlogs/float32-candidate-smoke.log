@@ -1,0 +1,46 @@
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:332:
+Included from ./dataframe/accelerator/gpu/runtime.mojo:288:
+Included from ./dataframe/accelerator/decimal_sum_receipts.mojo:54:
+./dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:333:
+./dataframe/accelerator/gpu/dag_runtime.mojo:677:39: warning: assignment to 'readback_ns' was never used; assign to '_' instead?
+                    var readback_ns = 0
+                                      ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:333:
+./dataframe/accelerator/gpu/dag_runtime.mojo:678:37: warning: assignment to 'result_ns' was never used; assign to '_' instead?
+                    var result_ns = 0
+                                    ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:332:
+./dataframe/accelerator/gpu/runtime.mojo:3485:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:332:
+Included from ./dataframe/accelerator/gpu/runtime.mojo:1652:
+./dataframe/accelerator/gpu/typed_runtime.mojo:163:22: warning: assignment to 'staging_ns' was never used; assign to '_' instead?
+    var staging_ns = 0
+                     ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:332:
+Included from ./dataframe/accelerator/gpu/runtime.mojo:1652:
+./dataframe/accelerator/gpu/typed_runtime.mojo:164:21: warning: assignment to 'submit_ns' was never used; assign to '_' instead?
+    var submit_ns = 0
+                    ^
+Included from /Users/randyzwitch/github/dataframe_mojo-metal-paired-float32/benchmarks/bench_metal.mojo:16:
+Included from ./dataframe/metal.mojo:332:
+Included from ./dataframe/accelerator/gpu/runtime.mojo:1438:
+./dataframe/accelerator/gpu/wide_integer_runtime.mojo:258:22: warning: assignment to 'offset' was never used; assign to '_' instead?
+        var offset = 0
+                     ^
+0-mojo-4097-float32_affine_sum-base ok
+0-mojo-4097-float32_affine_sum-sorted ok
+0-mojo-4097-float32_affine_sum-nulls ok
+0-mojo-4097-filtered_float32_affine_sum-base ok
+0-mojo-4097-filtered_float32_affine_sum-sorted ok
+0-mojo-4097-filtered_float32_affine_sum-nulls ok

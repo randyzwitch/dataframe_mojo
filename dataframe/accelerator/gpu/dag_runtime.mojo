@@ -42,7 +42,8 @@ from . import partition_runtime as partition_cuts
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
-from .residency import Scope, Table
+from .query_scope import DeviceService, Scope
+from .residency import Table
 from .resident_fields import ResidentFrame
 from . import source_fields
 from .producer_phases_runtime import MetadataReservation
@@ -163,6 +164,17 @@ def _int_column(
     )
 
 
+def _float_column(
+    report: DataFrame, name: String, value: Float64
+) raises -> DataFrame:
+    return report.with_column(
+        Series(
+            name,
+            Column[Float64](List[Float64](length=report.height(), fill=value)),
+        )
+    )
+
+
 def _profile_phases(report: DataFrame) raises -> DataFrame:
     """Keep measured row timings when other region types have no attribution."""
     var result = report.copy()
@@ -242,6 +254,7 @@ def execute(
     text_context: Optional[ArcPointer[TextQuery]] = None,
     ordered_source: Bool = False,
     eager_feed: Bool = False,
+    device_service: Optional[DeviceService] = None,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
     var dag = preflight(
@@ -251,7 +264,12 @@ def execute(
         eager_feed=eager_feed,
     )
     var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
-    var scope = Scope(device_id, budget, profiling=profiling)
+    var scope = Scope(
+        device_id,
+        budget,
+        profiling=profiling,
+        service=device_service,
+    )
     var producer_metadata = MetadataReservation(scope, dag)
     var partition_context = ArcPointer(partition_cuts.StateContext())
     var base_domain = Optional[ArcPointer[TextDomain]]()
@@ -272,6 +290,7 @@ def execute(
     var report = DataFrame(List[Series]())
     var result = DataFrame(List[Series]())
     var query_host_result_bytes = 0
+    var service_drain_done = False
     for index in range(len(dag.tasks)):
         var task = dag.tasks[index].copy()
         if (
@@ -299,6 +318,7 @@ def execute(
             raise Error(task.query._nodes[0].source_failure)
         var live_before = scope.info()[0]
         var traffic_before = scope.transfers()
+        var region_sync_before = scope.timing_ns()[1]
         var region_started = Int(perf_counter_ns())
         if task.kind == DAG_SOURCE_FIELDS or task.kind == DAG_GROUPED_FIELDS:
             var fields: ResidentFrame
@@ -355,6 +375,9 @@ def execute(
                 0,
                 owned,
             )
+            if device_service and index == dag.root and scope.initialized():
+                scope.synchronize()
+                service_drain_done = True
             var after = scope.transfers()
             region = _int_column(
                 region, "upload_bytes", after[0] - traffic_before[0]
@@ -381,6 +404,11 @@ def execute(
             )
             if profiling:
                 region = _profile_phases(region)
+                region = _float_column(
+                    region,
+                    "synchronization_ms",
+                    Float64(scope.timing_ns()[1] - region_sync_before) / 1e6,
+                )
             report = region^ if report.width() == 0 else report.vstack(
                 region.select(report.columns())
             )
@@ -712,6 +740,9 @@ def execute(
         query_host_result_bytes = (
             host_result_bytes if index == dag.root else query_host_result_bytes
         )
+        if device_service and index == dag.root and scope.initialized():
+            scope.synchronize()
+            service_drain_done = True
         if task.kind == DAG_EXPLODE:
             # Its storage report precedes the common final readback. Include
             # that region's compact host matrix and typed export envelope.
@@ -751,6 +782,11 @@ def execute(
         )
         if profiling:
             region = _profile_phases(region)
+            region = _float_column(
+                region,
+                "synchronization_ms",
+                Float64(scope.timing_ns()[1] - region_sync_before) / 1e6,
+            )
         report = region^ if report.width() == 0 else report.vstack(
             region.select(report.columns())
         )
@@ -766,6 +802,8 @@ def execute(
             if uses[task.right] == 0:
                 values[task.right] = None
                 nested[task.right] = None
+    if device_service and not service_drain_done and scope.initialized():
+        scope.synchronize()
     if profiling:
         report = report.with_column(
             Series(
@@ -796,7 +834,45 @@ def execute(
             ),
         )
     )
+    if profiling:
+        report = _float_column(
+            report,
+            "query_synchronization_ms",
+            Float64(scope.timing_ns()[1]) / 1e6,
+        )
+    if device_service and profiling:
+        var scratch_cache = device_service.value().scratch_info()
+        var pipeline_cache = device_service.value().pipeline_info()
+        for field in List[Tuple[String, Int]](
+            [
+                (
+                    "service_context_generations",
+                    device_service.value().cached_generations(),
+                ),
+                ("service_idle_scratch_bytes", scratch_cache[0]),
+                ("service_idle_scratch_entries", scratch_cache[1]),
+                ("service_scratch_hits", scratch_cache[2]),
+                ("service_scratch_misses", scratch_cache[3]),
+                ("service_pipeline_entries", pipeline_cache[0]),
+                ("service_pipeline_hits", pipeline_cache[1]),
+                ("service_pipeline_misses", pipeline_cache[2]),
+                ("service_pipeline_clears", pipeline_cache[3]),
+                ("service_pipeline_capacity", 9),
+            ]
+        ):
+            report = report.with_column(
+                Series(
+                    field[0],
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(field[1])
+                        )
+                    ),
+                )
+            )
     _ = producer_metadata^
+    if device_service:
+        scope.mark_success()
     return (result^, report^)
 
 

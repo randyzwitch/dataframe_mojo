@@ -6157,10 +6157,7 @@ struct GroupBy(Copyable):
         # ClickBench q40 (35K groups) encoded whole on one thread took
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
-        var workers = max(
-            worker_count(height),
-            min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
-        )
+        var workers = group_by_workers(height)
         if _stream_reductions(expressions) and not self._many_distinct(
             expressions
         ):
@@ -6898,6 +6895,23 @@ comptime SELECTIVE_FILTER_ROWS = 4096
 # Rows a worker in the hash-partitioned group-by: about 1 ms of work each.
 comptime _PARTITION_ROWS_PER_WORKER = 16384
 """Frames shorter than this evaluate an AND filter whole."""
+
+
+def group_by_workers(height: Int) -> Int:
+    """Workers the eager group-by (`GroupBy.agg`) divides `height` rows
+    among: the shared floor, or one per `_PARTITION_ROWS_PER_WORKER` rows
+    of hashing and encoding."""
+    return max(
+        worker_count(height),
+        min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
+    )
+
+
+def range_states(keys: List[Series]) raises -> Bool:
+    """Whether the eager group-by keeps groups of `keys` in each worker's
+    private state over its own rows (the whole-frame and range routes, by
+    their sampled tests) rather than hash-partitioning every row first."""
+    return low_cardinality(keys) or small_key_product(keys)
 
 
 def _rows_mask(
@@ -7768,7 +7782,10 @@ struct _StreamReduction(Movable):
                 source.text,
                 source.logical,
             )
-            state.merge(source, sources=order)
+            if source.finished:
+                state.finished = source.finished.value().take(order)
+            else:
+                state.merge(source, sources=order)
             states.append(state^)
         self.keys = self.keys.take(order)
         self.firsts = firsts^
