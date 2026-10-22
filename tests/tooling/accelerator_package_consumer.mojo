@@ -4,12 +4,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit
 from dataframe import DataType
 from dataframe._build_identity import CPU_BUILD_ID
-from dataframe._accel_provider import (
-    calibration_key,
-    calibration_runtime,
-    estimate_auto,
-    select_auto,
-)
+from dataframe._accel_provider import select_auto
+from dataframe.metal import calibration_key, calibration_runtime, estimate_auto
 from dataframe.lazy import LazyFrame
 from dataframe.json_value import json_quote
 

@@ -154,11 +154,9 @@ from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
 from .binding import AGGREGATE, ROWS, bind
-from .accelerator.cost import PlanEstimate
-from .accelerator.window_keys import WindowKey
-from .accelerator.grouped_key_queries import KeyQuery
-from .accelerator.opaque_dictionary import ByteDomain
-from .accelerator.code_domains import TextField
+from .plan_types import PlanEstimate, WindowKey, TextField
+from .key_query import KeyQuery
+from .byte_domain import ByteDomain
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
 from .producer_origin import ProducerOrigin, RegionProof

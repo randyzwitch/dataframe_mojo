@@ -12,6 +12,12 @@ Writes `<site>/cpu/<YYYY-MM-DD>-<shortsha>[-<label>]/index.html`,
 Publishing the same report twice replaces its directory, so reruns are safe.
 The history is local; nothing here goes in the repository or is published.
 
+With `--kind apple`, `--results` is the Apple timing receipt
+(`performance.json`) and `--coverage` its exact CPU/Metal receipt
+(`coverage.json`); the report files under `<site>/apple/<date>-<shortsha>/` and
+the index gets its own table of Metal / CPU geometric means (below 1 means
+Metal was faster), per suite and overall.
+
 The summary (geometric mean of this library's time over the other engine's,
 per suite) comes from the same code that renders the report. It needs the
 oracle environment; without it the summary is left empty and the index still
@@ -69,6 +75,56 @@ def summarize(result):
     return out
 
 
+def summarize_apple(results, coverage):
+    """Metal / CPU geometric means over admitted cases, from the renderer."""
+    sys.path.insert(0, str(TOOLS))
+    import apple_performance_html as apple
+
+    metadata = apple.read(TOOLS / "metal_case_metadata.json")
+    receipt = dict(apple.read(coverage), receipt_sha256=apple.sha(coverage))
+    analysis = apple.analyze(apple.read(results), [receipt], metadata)
+    return {
+        "overall": analysis["policy_geometric_mean"],
+        "suites": analysis["suite_policy_geometric_means"],
+        "admitted": analysis["admitted_cases"],
+        "planned": analysis["planned_cases"],
+    }
+
+
+def publish_apple(results, page, site, coverage, label="", summary=None):
+    result = json.loads(Path(results).read_text())
+    info = result["provenance"]
+    name = report_id(
+        {
+            "utc": info.get("recorded_at_utc", ""),
+            "revision": info.get("engine", {}).get("revision", ""),
+        },
+        label,
+    )
+    target = Path(site) / "apple" / name
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    shutil.copyfile(page, target / "index.html")
+    shutil.copyfile(results, target / "performance.json")
+    shutil.copyfile(coverage, target / "coverage.json")
+    if summary is None:
+        summary = summarize_apple(results, coverage)
+    meta = {
+        "id": name,
+        "date": info.get("recorded_at_utc", "")[:10],
+        "utc": info.get("recorded_at_utc", ""),
+        "revision": info.get("engine", {}).get("revision", ""),
+        "scale": info.get("scale", ""),
+        "mojo": info.get("mojo", "").split(" (")[0],
+        "platform": info.get("platform", ""),
+        "summary": summary,
+    }
+    (target / "summary.json").write_text(json.dumps(meta, indent=1))
+    write_index(site)
+    return target
+
+
 def publish(results, page, site, label="", summary=None):
     result = json.loads(Path(results).read_text())
     info = result["provenance"]
@@ -113,6 +169,43 @@ def write_index(site):
         except ValueError:
             continue
     reports.sort(key=lambda r: (r["utc"], r["id"]), reverse=True)
+    apple_reports = []
+    for path in sorted((site / "apple").glob("*/summary.json")):
+        try:
+            apple_reports.append(json.loads(path.read_text()))
+        except ValueError:
+            continue
+    apple_reports.sort(key=lambda r: (r["utc"], r["id"]), reverse=True)
+    apple_rows = []
+    for r in apple_reports:
+        s = r["summary"]
+        suites = ", ".join(
+            f"<b>{html.escape(k)}</b> {_ratio(dict(geomean=v))}"
+            for k, v in s["suites"].items()
+        )
+        apple_rows.append(
+            "<tr>"
+            f"<td>{html.escape(r['date'])}</td>"
+            f"<td><code>{html.escape(r['revision'][:10])}</code></td>"
+            f"<td>{html.escape(r['scale'])}</td>"
+            f"<td>{html.escape(r['mojo'])}; {html.escape(r['platform'])}</td>"
+            f"<td>{_ratio(dict(geomean=s['overall']))} over "
+            f"{s['admitted']} of {s['planned']} cases<br>{suites}</td>"
+            f'<td><a href="apple/{html.escape(r["id"])}/">report</a></td>'
+            "</tr>"
+        )
+    apple_section = ""
+    if apple_rows:
+        apple_section = f"""<h2>Apple CPU and Metal reports</h2>
+<p>Forced Metal time divided by CPU time, geometric mean over the admitted
+cases; below 1 means Metal was faster.</p>
+<div class="scroll"><table>
+<thead><tr><th>Date</th><th>Commit</th><th>Scale</th><th>Toolchain</th>
+<th>Metal / CPU geometric mean</th><th>Report</th></tr></thead>
+<tbody>
+{chr(10).join(apple_rows)}
+</tbody></table></div>
+"""
     rows = []
     for r in reports:
         engines = ", ".join(
@@ -161,7 +254,7 @@ engine's; below 1 is faster.</p>
 <tbody>
 {chr(10).join(rows)}
 </tbody></table></div>
-</body></html>
+{apple_section}</body></html>
 """
     (site / "index.html").write_text(page)
 
@@ -174,8 +267,19 @@ def main():
         "--site", type=Path, default=Path.home() / "dataframe-reports"
     )
     parser.add_argument("--label", default="")
+    parser.add_argument("--kind", choices=("cpu", "apple"), default="cpu")
+    parser.add_argument(
+        "--coverage", type=Path, help="exact receipt; required for --kind apple"
+    )
     args = parser.parse_args()
-    target = publish(args.results, args.html, args.site, args.label)
+    if args.kind == "apple":
+        if args.coverage is None:
+            parser.error("--kind apple needs --coverage")
+        target = publish_apple(
+            args.results, args.html, args.site, args.coverage, args.label
+        )
+    else:
+        target = publish(args.results, args.html, args.site, args.label)
     print(f"published {target}", file=sys.stderr)
 
 

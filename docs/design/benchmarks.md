@@ -277,6 +277,48 @@ every report there, newest first, with versions and per-suite geometric
 means. Open that file in a browser. Re-running it for the same report
 replaces that report. Nothing from a run is committed to the repository.
 Every report ends with the queries-per-path table, as every report here must.
+## Apple CPU and Metal checkpoint report
+
+Nothing is scheduled or published. Every few PRs, run the CPU against forced
+Metal comparison by hand on an idle Apple silicon Mac, with a clean
+`dataframe/` tree and no `mojo` process running:
+
+```bash
+pixi run -e native build-dfparquet                      # once
+pixi run -e oracle report-apple                         # dev scale, 3 rounds
+pixi run -e oracle report-apple-quick                   # smoke scale, 1 round
+```
+
+The task runs the existing steps into `build/reports/apple/`: the exact
+CPU/Metal answer receipt (`coverage.json`, from `bench_metal_suites.py`), the
+timing driver's prepare, build and run steps (`performance.json`, from
+`bench_apple_performance.py`), then `results.html`
+(`apple_performance_html.py`). Settings come from environment variables:
+`APPLE_SCALE` (smoke, dev, default or large), `APPLE_SUITES`, `APPLE_QUERIES`,
+`APPLE_ROUNDS`, `APPLE_REPS`, `APPLE_WARMUPS`, `APPLE_THREADS` and
+`APPLE_OUT`. Builds take several minutes per suite; start it with `nohup`.
+
+Every query runs in fresh worker processes, once per engine per round.
+`results.html` has the layout of the CPU report: a header, one table per suite
+(`cpu ms`, `metal ms`, `vs cpu`, `worst vs cpu (variant)`, status), a summary,
+the excluded cases grouped by reason, and the provenance last. Ratios are
+Metal divided by CPU, so below 1 means Metal is faster. Only cases with a
+matching exact receipt and DuckDB summary check are admitted and get a ratio;
+the others are marked wrong answer, unsupported or unverified. The raw
+samples stay in `performance.json`.
+
+Keep a report in the local history, next to the CPU reports:
+
+```bash
+pixi run -e oracle python3 benchmarks/tools/publish_report.py --kind apple \
+    --results build/reports/apple/performance.json \
+    --coverage build/reports/apple/coverage.json \
+    --html build/reports/apple/results.html
+```
+
+It files the report under `$HOME/dataframe-reports/apple/<date>-<shortsha>/`
+and adds a row to `$HOME/dataframe-reports/index.html` with the Metal / CPU
+geometric means per suite. Nothing from a run is committed to the repository.
 
 ## Keeping holdouts useful
 

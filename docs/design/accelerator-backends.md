@@ -95,8 +95,7 @@ or application syntax.
 Providers implement `estimate_auto(plan) -> PlanEstimate`: two feature vectors,
 peak requested bytes, dtype family, and candidate placement. Estimation binds
 metadata without reading source values or submitting device work. Runtime
-backends can expose the same method; the optional registered provider slot
-exports it for calibration. Existing third-party providers inherit a rejecting
+backends can expose the same method; the backend exports it for calibration. Existing third-party providers inherit a rejecting
 estimate and keep their CPU default.
 
 The ordered `COST_FEATURES` schema covers fixed overhead, rows, source bytes,
@@ -129,7 +128,8 @@ identity before substituting their registration slot.
 
 The provider-neutral `benchmarks/bench_accelerator_cost.mojo` runner requires
 `calibration_runtime`, `calibration_key` and `estimate_auto` hooks from the
-registered provider. `benchmarks/tools/bench_accelerator_cost.py` writes a generated-plan
+backend (`dataframe.metal` for Metal). They are not part of the core's provider
+contract. `benchmarks/tools/bench_accelerator_cost.py` writes a generated-plan
 manifest by default; `--collect --binary /path/to/runner` explicitly measures.
 Compile the runner against identified packages outside the source import path.
 The matrix varies 1–61 expression nodes, pipeline stages, dtype, filter

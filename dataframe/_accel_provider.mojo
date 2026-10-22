@@ -1,13 +1,13 @@
 """Default provider slot with context-free Mojo Metal availability.
 
+The provider surface is six functions whose signatures mention only core
+types. Calibration is backend-specific and is imported from the backend.
 Presence checks do not open a driver. CPU collection never initializes Metal.
 The optional NVIDIA package builder can replace this module in its staged tree.
 """
-from .accelerator.cost import PlanEstimate, CalibrationKey
 from .frame import DataFrame
 from .lazy import LazyFrame
-from std.os import getenv
-from .metal import MetalRuntime, metal_installed
+from .metal import MetalRuntime, default_runtime, metal_installed
 
 
 def installed() -> Bool:
@@ -15,19 +15,7 @@ def installed() -> Bool:
 
 
 def _runtime() raises -> MetalRuntime:
-    var device = 0
-    var limit = -1
-    var configured_device = getenv("DATAFRAME_ACCEL_DEVICE")
-    var configured_limit = getenv("DATAFRAME_ACCEL_MEMORY_LIMIT")
-    if configured_device:
-        device = Int(configured_device)
-        if device < 0:
-            raise Error("DATAFRAME_ACCEL_DEVICE must be nonnegative")
-    if configured_limit:
-        limit = Int(configured_limit)
-        if limit < 0:
-            raise Error("DATAFRAME_ACCEL_MEMORY_LIMIT must be nonnegative")
-    return MetalRuntime(device, memory_limit_bytes=limit)
+    return default_runtime()
 
 
 def execute(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
@@ -51,23 +39,6 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     if installed():
         return _runtime().execute_profiled(plan)
     return execute(plan)
-
-
-def calibration_runtime() raises -> MetalRuntime:
-    """Explicit runtime factory for the provider-neutral benchmark driver."""
-    return _runtime()
-
-
-def calibration_key(
-    optimize: Bool, streaming: Bool, batch_size: Int
-) raises -> CalibrationKey:
-    """Provider metadata for the common calibration harness; no submission."""
-    return _runtime().calibration_key(optimize, streaming, batch_size)
-
-
-def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
-    """Plan-time facts required by the provider-neutral calibration runner."""
-    return _runtime().estimate_auto(plan)
 
 
 def select_auto(
