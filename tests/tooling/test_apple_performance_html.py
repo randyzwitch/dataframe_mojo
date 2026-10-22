@@ -154,8 +154,8 @@ class ApplePerformanceHTML(unittest.TestCase):
         self.assertEqual(proof["status"], "complete")
         self.assertEqual(proof["cpu_adjudicated_calls"], 0)
         self.assertEqual(proof["no_cpu_adjudication_marker_calls"], 3)
-        self.assertAlmostEqual(result["geometric_mean"], math.sqrt(120 / 65))
-        self.assertAlmostEqual(result["policy_geometric_mean"], math.sqrt(2))
+        self.assertAlmostEqual(result["geometric_mean"], math.sqrt(65 / 120))
+        self.assertAlmostEqual(result["policy_geometric_mean"], 1 / math.sqrt(2))
         row = result["rows"][0]
         self.assertEqual(row["times"]["cpu"]["warm"]["median_round_minimum_ns"], 110)
         self.assertEqual(row["times"]["cpu"]["warm"]["median_ns"], 120)
@@ -163,6 +163,24 @@ class ApplePerformanceHTML(unittest.TestCase):
         self.assertEqual(row["times"]["cpu"]["warm"]["maximum_ns"], 140)
         self.assertEqual(row["times"]["cpu"]["cold"]["median_ns"], 330)
         self.assertEqual(result["worst_variants"][0]["variant"], "k10")
+        self.assertAlmostEqual(
+            result["suite_geometric_means"]["h2o_groupby"], math.sqrt(65 / 120)
+        )
+        # Below 1 means Metal was faster; the worst variant is the highest.
+        self.assertAlmostEqual(result["worst_variants"][0]["ratio"], 1)
+        self.assertLess(result["rows"][0]["ratio"], 1)
+        page = report.render(data, result, receipt_path="x", receipt_sha="y")
+        self.assertIn("Metal / CPU geometric mean", page)
+        # Round-minimum geometric mean in the table, raw median in the text.
+        self.assertIn("0.71", page)
+        self.assertIn("0.736", page)
+        for header in ("cpu ms", "metal ms", "vs cpu", "worst vs cpu (variant)", "Status"):
+            self.assertIn(header, page)
+        # Tables come before the provenance detail, and the page stays small.
+        self.assertLess(page.index('id="h2o_groupby"'), page.index('id="excluded"'))
+        self.assertLess(page.index('id="excluded"'), page.index('id="provenance"'))
+        self.assertLess(len(page), 200_000)
+        self.assertNotIn("CPU / Metal", page)
         self.assertEqual(result["catalog_cases"], 345)
         self.assertEqual(len(result["unplanned_cases"]), 343)
 
@@ -298,11 +316,11 @@ class ApplePerformanceHTML(unittest.TestCase):
         self.assertNotIn("<script>alert", rendered)
         self.assertIn("&lt;script&gt;", rendered)
         self.assertIn("SYNTHETIC TEST FIXTURE", rendered)
-        self.assertIn("CPU cold", rendered)
-        self.assertIn("raw median", rendered)
-        self.assertIn("process_failed", rendered)
+        self.assertIn("cpu ms", rendered)
+        self.assertIn("Metal / CPU geometric mean", rendered)
+        self.assertIn("unverified", rendered)
+        self.assertIn("Excluded cases", rendered)
         self.assertIn("Unmeasured / receipt not supplied", rendered)
-        self.assertIn("1 / 5", rendered)
         self.assertNotIn("https://", rendered)
 
     def test_coverage_counts_keep_variants_and_empty_separate(self):
@@ -449,7 +467,7 @@ class ApplePerformanceHTML(unittest.TestCase):
             )
             self.assertEqual(good.returncode, 0, good.stderr)
             self.assertIn("0 admitted pairs", good.stdout)
-            self.assertIn("unavailable CPU / forced-Metal", output.read_text())
+            self.assertIn("Metal / CPU geometric mean", output.read_text())
 
 
 if __name__ == "__main__":

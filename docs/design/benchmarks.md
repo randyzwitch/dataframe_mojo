@@ -298,14 +298,27 @@ timing driver's prepare, build and run steps (`performance.json`, from
 `APPLE_ROUNDS`, `APPLE_REPS`, `APPLE_WARMUPS`, `APPLE_THREADS` and
 `APPLE_OUT`. Builds take several minutes per suite; start it with `nohup`.
 
-Every query runs in fresh worker processes, once per engine per round. Only
-cases with a matching exact receipt and DuckDB summary check enter the
-CPU / Metal ratios; the report lists the rest with their reason (unsupported,
-wrong answer, hybrid or unverified audit, CPU data-fault adjudication).
+Every query runs in fresh worker processes, once per engine per round.
+`results.html` has the layout of the CPU report: a header, one table per suite
+(`cpu ms`, `metal ms`, `vs cpu`, `worst vs cpu (variant)`, status), a summary,
+the excluded cases grouped by reason, and the provenance last. Ratios are
+Metal divided by CPU, so below 1 means Metal is faster. Only cases with a
+matching exact receipt and DuckDB summary check are admitted and get a ratio;
+the others are marked wrong answer, unsupported or unverified. The raw
+samples stay in `performance.json`.
 
-Keep a report by copying `results.html`, `performance.json` and
-`coverage.json` to `$HOME/dataframe-reports/apple/<date>-<sha>/`. Nothing from
-a run is committed to the repository.
+Keep a report in the local history, next to the CPU reports:
+
+```bash
+pixi run -e oracle python3 benchmarks/tools/publish_report.py --kind apple \
+    --results build/reports/apple/performance.json \
+    --coverage build/reports/apple/coverage.json \
+    --html build/reports/apple/results.html
+```
+
+It files the report under `$HOME/dataframe-reports/apple/<date>-<shortsha>/`
+and adds a row to `$HOME/dataframe-reports/index.html` with the Metal / CPU
+geometric means per suite. Nothing from a run is committed to the repository.
 
 ## Keeping holdouts useful
 
