@@ -1869,22 +1869,22 @@ def _native_join_gather_typed[
         right_view.values() if right_view.length else left_view.values()
     )
     var left_validity = left_values.create_sub_buffer[DType.uint8](0, 1)
-    var left_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+    var left_validity_buffer: Optional[DeviceBuffer[DType.uint8]]
     if left_view.has_validity():
         left_validity_buffer = left_view.validity()
         left_validity = left_validity_buffer.value().copy()
     var right_validity = right_values.create_sub_buffer[DType.uint8](0, 1)
-    var right_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+    var right_validity_buffer: Optional[DeviceBuffer[DType.uint8]]
     if right_view.has_validity():
         right_validity_buffer = right_view.validity()
         right_validity = right_validity_buffer.value().copy()
     var left_errors = status.create_sub_buffer[DType.uint32](0, 1)
-    var left_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+    var left_errors_buffer: Optional[DeviceBuffer[DType.uint32]]
     if left_view.has_errors():
         left_errors_buffer = left_view.errors()
         left_errors = left_errors_buffer.value().copy()
     var right_errors = status.create_sub_buffer[DType.uint32](0, 1)
-    var right_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+    var right_errors_buffer: Optional[DeviceBuffer[DType.uint32]]
     if right_view.has_errors():
         right_errors_buffer = right_view.errors()
         right_errors = right_errors_buffer.value().copy()
@@ -2311,12 +2311,12 @@ def _copy_native_to_matrix[
         native.value_offset, rows
     )
     var source_validity = values.create_sub_buffer[DType.uint8](0, 1)
-    var validity = Optional[DeviceBuffer[DType.uint8]]()
+    var validity: Optional[DeviceBuffer[DType.uint8]]
     if native.has_validity():
         validity = native.validity()
         source_validity = validity.value().copy()
     var source_errors = target_errors
-    var errors = Optional[DeviceBuffer[DType.uint32]]()
+    var errors: Optional[DeviceBuffer[DType.uint32]]
     if native.has_errors():
         errors = native.errors()
         source_errors = errors.value().copy()

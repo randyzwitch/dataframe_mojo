@@ -4053,7 +4053,6 @@ def execute_plan(
                     if not fault_zeroed:
                         ctx.enqueue_copy(fault_word, fault_host.unsafe_ptr())
                         uploaded += 4
-                        fault_zeroed = True
                     ctx.enqueue_function[observe_slot](
                         result_errors.unsafe_ptr(),
                         fault_word.unsafe_ptr(),

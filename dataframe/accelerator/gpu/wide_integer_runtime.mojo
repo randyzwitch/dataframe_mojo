@@ -255,7 +255,7 @@ def execute(
     var bitmap = checked_add(rows, 7) // 8 if nullable else 0
     var source_bytes = checked_add(checked_mul(rows, 8), bitmap)
     if nullable and len(chunks) == 1:
-        var offset = 0
+        var offset: Int
         if chunks[0].dtype() == DataType.INT64:
             offset = chunks[0]._data[Column[Int64]].validity_offset() % 8
         else:

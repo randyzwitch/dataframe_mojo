@@ -84,7 +84,7 @@ def pack_key[
         != 0
     )
     var value = values[unsafe_offset=Int(value_offset) + row]
-    var bits = UInt32(0)
+    var bits: UInt32
     comptime if dtype == DType.float32 or dtype == DType.int32:
         bits = bitcast[DType.uint32](value)
     else:
@@ -659,7 +659,7 @@ def try_execute(
         left_table.offset,
         left_table.rows,
     )
-    var right_key_optional = Optional[PackedKey]()
+    var right_key_optional: Optional[PackedKey]
     try:
         right_key_optional = Optional[PackedKey](
             _pack_key_column(
@@ -872,6 +872,7 @@ def try_execute(
         ctx.enqueue_copy(host_status.unsafe_ptr(), status)
         scope.record_download(j.METADATA_WORDS * 8 + 4)
         scope.synchronize()
+        _ = members_b^
         if host_status[0] != 0:
             # Probe exhaustion is the only runtime condition that may switch
             # to the established sorted join. All hash commands have drained.
