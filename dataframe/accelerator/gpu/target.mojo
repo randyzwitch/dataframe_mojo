@@ -1,5 +1,5 @@
 """Compile-time Metal eligibility without instantiating an unknown GPU target."""
-from max.gpu.host import default_accelerator
+from std.sys import default_accelerator
 from std.sys.info import _accelerator_arch
 
 
