@@ -34,13 +34,9 @@ jobs:
         run: bash scripts/check_benchmark_separation.sh "$BASE_REF" "$HEAD_REF"
       - name: Check benchmark report provenance and coverage
         run: |
-          pixi run -e oracle python3 tests/tooling/test_bench_reports.py
-          pixi run -e oracle python3 tests/tooling/test_accelerator_cost_driver.py
-          pixi run -e oracle python3 tests/tooling/test_metal_suite_driver.py
-          pixi run -e oracle python3 tests/tooling/test_metal_benchmark_driver.py
-          pixi run -e oracle python3 tests/tooling/test_apple_performance_collector.py
-          pixi run -e oracle python3 tests/tooling/test_apple_performance_html.py
-          pixi run -e oracle python3 tests/tooling/test_query_diagrams.py
+          for t in tests/tooling/test_*.py; do
+            pixi run -e oracle python3 "$t"
+          done
       - name: Check Mojo test runner
         run: pixi run mojo run -I . tests/tooling/test_contract_runner.mojo
       - name: Check dtype literals
@@ -51,6 +47,8 @@ jobs:
           git diff --exit-code docs/api.md
       - name: Check no evidence files
         run: bash scripts/check_no_evidence_files.sh
+      - name: Check test reachability
+        run: python3 scripts/check_test_reachability.py
 
   native-linux:
     runs-on: ubuntu-latest

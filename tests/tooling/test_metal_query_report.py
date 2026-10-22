@@ -65,7 +65,7 @@ class MetalQueryReport(unittest.TestCase):
         catalog = report.catalog()
         self.assertEqual(sum(len(d["queries"]) for d in catalog.values()), 179)
         self.assertEqual(
-            sum(len(d["translated_queries"]) for d in catalog.values()), 168
+            sum(len(d["translated_queries"]) for d in catalog.values()), 169
         )
         self.assertEqual(
             sum(
@@ -73,7 +73,7 @@ class MetalQueryReport(unittest.TestCase):
             ),
             345,
         )
-        self.assertNotIn("q28", catalog["clickbench"]["translated_queries"])
+        self.assertIn("q28", catalog["clickbench"]["translated_queries"])
         self.assertEqual(
             set(catalog["tpcds"]["queries"])
             - set(catalog["tpcds"]["translated_queries"]),
