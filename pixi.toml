@@ -82,6 +82,8 @@ pyproj = ">=3.5,<4"
 
 [feature.oracle.tasks]
 bench-suites = "python3 benchmarks/tools/bench_suites.py"
+report-apple = "bash benchmarks/tools/report_apple.sh"
+report-apple-quick = { cmd = "bash benchmarks/tools/report_apple.sh", env = { APPLE_SCALE = "smoke", APPLE_ROUNDS = "1" } }
 report-cpu = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier full --all-suites --output build/reports/cpu/results.json"
 report-cpu-quick = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier quick --output build/reports/cpu/results.json"
 

@@ -78,6 +78,51 @@ class PublishReport(unittest.TestCase):
             names, ["2026-10-18-aaaaaaa", "2026-10-18-aaaaaaa-quick-run"]
         )
 
+    def test_apple_reports_file_separately_with_metal_over_cpu_means(self):
+        results = self.root / "performance.json"
+        results.write_text(
+            json.dumps(
+                {
+                    "provenance": {
+                        "recorded_at_utc": "2026-10-22T15:00:00+00:00",
+                        "engine": {"revision": "c" * 40},
+                        "scale": "smoke",
+                        "mojo": "Mojo 1.2.0 (abc)",
+                        "platform": "macOS-arm64",
+                    }
+                }
+            )
+        )
+        page = self.root / "results.html"
+        page.write_text("<p>apple</p>")
+        coverage = self.root / "coverage.json"
+        coverage.write_text("{}")
+        summary = {
+            "overall": 34.4,
+            "suites": {"pdsh": 41.96},
+            "admitted": 230,
+            "planned": 302,
+        }
+        self.add("2026-10-18", "a")
+        target = publish_report.publish_apple(
+            results, page, self.site, coverage, summary=summary
+        )
+        self.assertEqual(target.name, "2026-10-22-ccccccc")
+        self.assertEqual(target.parent.name, "apple")
+        for name in ("index.html", "performance.json", "coverage.json", "summary.json"):
+            self.assertTrue((target / name).exists(), name)
+        index = (self.site / "index.html").read_text()
+        self.assertIn("cpu/2026-10-18-aaaaaaa/", index)
+        self.assertIn("apple/2026-10-22-ccccccc/", index)
+        self.assertIn("Metal / CPU geometric mean", index)
+        self.assertIn("34.40 over 230 of 302 cases", index)
+        self.assertIn("pdsh</b> 41.96", index)
+        # Republishing replaces the report rather than adding a second.
+        publish_report.publish_apple(
+            results, page, self.site, coverage, summary=summary
+        )
+        self.assertEqual(len(list((self.site / "apple").iterdir())), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

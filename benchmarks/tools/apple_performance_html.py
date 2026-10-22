@@ -17,6 +17,7 @@ TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parents[1]
 sys.path.insert(0, str(TOOLS))
 import bench_apple_performance as collector
+import bench_html
 import bench_suites as suites
 import metal_query_report as coverage
 
@@ -245,16 +246,16 @@ def analyze(data, strict_receipts, metadata):
         if basis.startswith("eligible"):
             cpu = row["times"]["cpu"]["warm"]
             metal = row["times"]["metal"]["warm"]
-            row["ratio"] = cpu["median_ns"] / metal["median_ns"]
+            row["ratio"] = metal["median_ns"] / cpu["median_ns"]
             row["policy_ratio"] = (
-                cpu["median_round_minimum_ns"] / metal["median_round_minimum_ns"]
+                metal["median_round_minimum_ns"] / cpu["median_round_minimum_ns"]
             )
         rows.append(row)
     admitted = [r for r in rows if r["ratio"] is not None]
     worst = {}
     for row in admitted:
         key = (row["suite"], row["query"])
-        if key not in worst or row["ratio"] < worst[key]["ratio"]:
+        if key not in worst or row["ratio"] > worst[key]["ratio"]:
             worst[key] = row
     catalog = {
         (s, v, q)
@@ -269,7 +270,19 @@ def analyze(data, strict_receipts, metadata):
         admitted_query_ids=len(worst),
         geometric_mean=geomean([r["ratio"] for r in admitted]),
         policy_geometric_mean=geomean([r["policy_ratio"] for r in admitted]),
-        worst_variants=sorted(worst.values(), key=lambda r: r["ratio"]),
+        worst_variants=sorted(
+            worst.values(), key=lambda r: r["ratio"], reverse=True
+        ),
+        suite_policy_geometric_means={
+            suite: geomean(
+                [r["policy_ratio"] for r in admitted if r["suite"] == suite]
+            )
+            for suite in sorted({r["suite"] for r in admitted})
+        },
+        suite_geometric_means={
+            suite: geomean([r["ratio"] for r in admitted if r["suite"] == suite])
+            for suite in sorted({r["suite"] for r in admitted})
+        },
         planned_cases=len(rows),
         planned_query_ids=len({(r["suite"], r["query"]) for r in rows}),
         catalog_cases=len(catalog),
@@ -371,22 +384,6 @@ def e(value):
     return html.escape(str(value), quote=True)
 
 
-def milliseconds(value):
-    return f"{value / 1e6:.4g} ms"
-
-
-def timing_cell(stats, phase):
-    if stats is None:
-        return "<span class='muted'>unmeasured</span>"
-    headline = stats["median_ns"]
-    policy = (
-        "median of round minima "
-        + milliseconds(stats["median_round_minimum_ns"])
-        + "<br>"
-    ) if phase == "warm" else ""
-    return f"<strong>raw median {milliseconds(headline)}</strong><small>{policy}range {milliseconds(stats['minimum_ns'])}–{milliseconds(stats['maximum_ns'])}<br>{stats['samples']} samples / {stats['observed_rounds']} observed rounds</small>"
-
-
 def coverage_section(title, item):
     if item is None:
         return f"<section><h2>{e(title)}</h2><p>Unmeasured / receipt not supplied.</p></section>"
@@ -444,136 +441,235 @@ def coverage_section(title, item):
     return f"<section><h2>{e(title)}</h2><table>{rows}</table><details><summary>Exact coverage cases, reasons and provenance</summary><pre>{e(details)}</pre></details></section>"
 
 
+def classify(row):
+    """Short status word and reason for one case: ok, wrong answer,
+    unsupported or unverified."""
+    if row["ratio"] is not None:
+        return "ok", ""
+    strict = row.get("confirmed_strict_basis", {})
+    measured = strict.get("status", "unmeasured")
+    reasons = [
+        r.get("reason", "")
+        for r in row["runs"]
+        if r.get("status") != "ok" and r.get("reason")
+    ]
+    detail = basis_label(row["ratio_basis"])
+    if reasons:
+        detail += "; " + reasons[0]
+    if measured in ("unsupported", "reference_unsupported") or any(
+        r.get("status") == "unsupported" for r in row["runs"]
+    ):
+        return "unsupported", detail
+    if (
+        measured == "wrong_answer"
+        or row["ratio_basis"] == "external_answer_policy_not_verified"
+        or any(r.get("status") == "answer_failed" for r in row["runs"])
+    ):
+        return "wrong answer", detail + f" (exact receipt: {measured})"
+    return "unverified", detail + f" (exact receipt: {measured})"
+
+
+def _ms(stats):
+    if not stats:
+        return '<span class="muted">—</span>'
+    ms = stats["median_round_minimum_ns"] / 1e6
+    return f"{ms:,.1f}" if ms < 10_000 else f"{ms:,.0f}"
+
+
+def _suite_section(suite, rows):
+    variants = [v for v in suites.VARIANTS[suite] if any(r["variant"] == v for r in rows)]
+    base = variants[0]
+    by = collections.defaultdict(dict)
+    for r in rows:
+        by[r["query"]][r["variant"]] = r
+    counts = collections.Counter(classify(r)[0] for r in rows)
+    body, base_ratios, worst_ratios = [], [], []
+    for query in suites.SUITES[suite]["queries"]:
+        if query not in by:
+            continue
+        cases = by[query]
+        main = cases.get(base)
+        if main is None:
+            continue
+        status, reason = classify(main)
+        cpu = main["times"]["cpu"]["warm"]
+        metal = main["times"]["metal"]["warm"]
+        ratio = main["policy_ratio"]
+        if ratio is not None:
+            base_ratios.append(ratio)
+        worst = None
+        for variant, case in cases.items():
+            if case["policy_ratio"] is not None and (
+                worst is None or case["policy_ratio"] > worst[0]
+            ):
+                worst = (case["policy_ratio"], variant)
+        if worst:
+            worst_ratios.append(worst[0])
+        others = [
+            f"{v} {classify(c)[0]}"
+            for v, c in cases.items()
+            if v != base and classify(c)[0] != "ok"
+        ]
+        note = status if status == "ok" else status
+        title = e(reason) if reason else ""
+        small = f"<small>{e('; '.join(others))}</small>" if others else ""
+        worst_cell = (
+            "<td>" + bench_html._chip(worst[0], worst[1]) + "</td>"
+            if len(variants) > 1 and worst
+            else '<td><span class="muted">—</span></td>'
+        )
+        body.append(
+            f'<tr><td class="q">{e(query)}</td>'
+            f'<td class="num">{_ms(cpu)}</td>'
+            f'<td class="num">{_ms(metal) if status == "ok" else "<span class=muted>—</span>"}</td>'
+            f"<td>{bench_html._chip(ratio)}</td>"
+            + (worst_cell if len(variants) > 1 else "")
+            + f'<td class="status" title="{title}">{e(note)}{small}</td></tr>'
+        )
+    head = (
+        '<th>Query</th><th class="num">cpu ms</th><th class="num">metal ms</th>'
+        "<th>vs cpu</th>"
+        + ("<th>worst vs cpu (variant)</th>" if len(variants) > 1 else "")
+        + "<th>Status</th>"
+    )
+    mean = bench_html._geomean(base_ratios)
+    worst_mean = bench_html._geomean(worst_ratios)
+    all_mean = bench_html._geomean([r["policy_ratio"] for r in rows if r["policy_ratio"]])
+    summary = (
+        f"Metal / CPU geometric mean {bench_html._chip(mean)} over {len(base_ratios)} "
+        f"queries in <code>{e(base)}</code>"
+        + (f"; worst variant per query {bench_html._chip(worst_mean)}" if len(variants) > 1 and worst_mean else "")
+        + (f"; all {len(rows)} cases {bench_html._chip(all_mean)}" if len(variants) > 1 and all_mean else "")
+        + f". Cases: {counts['ok']} admitted, {counts['wrong answer']} wrong answer, "
+        f"{counts['unsupported']} unsupported, {counts['unverified']} unverified."
+    )
+    spec = suites.SUITES[suite]
+    return (
+        f'<section id="{e(suite)}">'
+        f'<div class="eyebrow">{"development" if spec.get("role") == "dev" else "held out"}</div>'
+        f"<h2>{e(suite)}</h2>"
+        f'<p class="muted">{e(spec.get("source", ""))}. Data variants: {e(", ".join(variants))}; '
+        f"the table shows <code>{e(base)}</code>"
+        + (", and the worst variant beside it" if len(variants) > 1 else "")
+        + f".</p><p>{summary}</p>"
+        '<div class="scroll"><table><thead><tr>' + head + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table></div></section>"
+    )
+
+
 def render(data, analysis, before=None, after=None, receipt_path="", receipt_sha="", timing_coverage=()):
     p = data["provenance"]
-    ratio = (
-        "unavailable" if analysis["geometric_mean"]
-        is None else f"{analysis['geometric_mean']:.3g}×"
+    rows = analysis["rows"]
+    present = [s for s in suites.SUITES if any(r["suite"] == s for r in rows)]
+    memory = p.get("physical_memory_bytes")
+    memory_label = f"{memory / (1024 ** 3):.0f} GiB" if positive(memory) else "unavailable"
+    oracle_version = p.get("oracle_runtime", {}).get("duckdb_version", "unavailable")
+    measured = p.get("recorded_at_utc", "unavailable")
+    if measured[:4].isdigit():
+        measured = measured[:16].replace("T", " ") + " UTC"
+    prov = "".join(
+        f"<span>{e(k)} <b>{e(v)}</b></span>"
+        for k, v in [
+            ("revision", p["engine"]["revision"][:10]),
+            ("scale", p["scale"]),
+            ("threads", p["threads"]),
+            ("rounds × runs", f"{p['rounds']} × {p['repetitions']} (+{p['warmups']} warmup)"),
+            ("Mojo", p["mojo"].split(" (")[0]),
+            ("machine", p.get("platform", "unavailable")),
+            ("memory", memory_label),
+            ("DuckDB", oracle_version),
+            ("measured", measured),
+        ]
     )
-    policy_ratio = (
-        "unavailable" if analysis["policy_geometric_mean"]
-        is None else f"{analysis['policy_geometric_mean']:.3g}×"
-    )
-    rows = []
-    for row in analysis["rows"]:
-        key = "/".join(coverage.key(row))
-        statuses = {
-            engine: dict(
-                collections.Counter(
-                    r["status"] for r in row["runs"] if r["engine"] == engine
+    groups = collections.defaultdict(list)
+    summary_rows = []
+    for suite in present:
+        suite_rows = [r for r in rows if r["suite"] == suite]
+        classes = [classify(r) for r in suite_rows]
+        counts = collections.Counter(c[0] for c in classes)
+        for r, (status, reason) in zip(suite_rows, classes):
+            if status != "ok":
+                groups[(status, reason.split(" (")[0])].append(
+                    f"{r['suite']}/{r['variant']}/{r['query']}"
                 )
-            )
-            for engine in collector.ENGINES
-        }
-        status_text = "; ".join(
-            engine
-            + ": "
-            + (
-                json.dumps(statuses[engine], sort_keys=True) if statuses[
-                    engine
-                ] else "unmeasured"
-            )
-            for engine in collector.ENGINES
+        admitted = [r for r in suite_rows if r["policy_ratio"] is not None]
+        worst = {}
+        for r in admitted:
+            if r["query"] not in worst or r["policy_ratio"] > worst[r["query"]]:
+                worst[r["query"]] = r["policy_ratio"]
+        spec = suites.SUITES[suite]
+        summary_rows.append(
+            f'<tr><td class="q"><a href="#{e(suite)}">{e(suite)}</a></td>'
+            f"<td>{'development' if spec.get('role') == 'dev' else 'held out'}</td>"
+            f'<td class="num">{len(suite_rows)}</td>'
+            f"<td>{counts['ok']} admitted, {counts['wrong answer']} wrong answer, "
+            f"{counts['unsupported']} unsupported, {counts['unverified']} unverified</td>"
+            f"<td>{bench_html._chip(bench_html._geomean([r['policy_ratio'] for r in admitted]))}</td>"
+            f"<td>{bench_html._chip(bench_html._geomean(list(worst.values())))}</td></tr>"
         )
-        strict = row.get("confirmed_strict_basis", {})
-        peaks = {
-            engine: max(
-                (
-                    r.get("peak_rss_bytes") or 0
-                    for r in row["runs"]
-                    if r["engine"] == engine
-                ),
-                default=0,
-            )
-            for engine in collector.ENGINES
-        }
-        memory_text = "; ".join(
-            engine
-            + " peak RSS "
-            + (f"{value / (1024 ** 3):.3g} GiB" if value else "unavailable")
-            for engine, value in peaks.items()
-        )
-        reasons = "\n".join(
-            f"{r['engine']} round {r['round']}: {r['status']} {r.get('reason', '')} | log {r.get('log', 'unavailable')}"
-            for r in row["runs"]
-        )
-        details = json.dumps(
-            dict(
-                recorded_strict_basis=row.get("strict_basis", {}),
-                confirmed_strict_basis=strict,
-                ratio_basis=row["ratio_basis"],
-                runs=row["runs"],
-            ),
-            indent=2,
-        )
-        search = (
-            key
-            + " "
-            + status_text
-            + " "
-            + row["ratio_basis"]
-            + " "
-            + str(strict.get("status", "unmeasured"))
-        )
-        cells = "".join(
-            "<td>" + timing_cell(row["times"][engine][phase], phase) + "</td>"
-            for phase in ("cold", "warm")
-            for engine in collector.ENGINES
-        )
-        value = (
-            "excluded" if row["ratio"]
-            is None else f"{row['ratio']:.3g}×<small>round-minimum policy {row['policy_ratio']:.3g}×</small>"
-        )
-        rows.append(
-            f"<tr data-search='{e(search.lower())}'><th>{e(key)}</th>{cells}<td>{value}</td><td>{e(status_text)}<small>exact basis: {e(strict.get('status', 'unmeasured'))}<br>{e(basis_label(row['ratio_basis']))}<br>{e(memory_text)}</small><details><summary>Evidence / failures</summary><pre>{e(reasons)}</pre><pre>{e(details)}</pre></details></td></tr>"
-        )
-    worst = "".join(
-        f"<tr><td>{e(r['suite'] + '/' + r['query'])}</td><td>{e(r['variant'])}</td><td>{r['ratio']:.3g}×</td><td>{sum(x['suite'] == r['suite'] and x['query'] == r['query'] and x['ratio'] is not None for x in analysis['rows'])} / {len(suites.VARIANTS[r['suite']])}</td></tr>"
-        for r in analysis["worst_variants"]
-    )
-    if not worst:
-        worst = "<tr><td colspan='4'>No admitted paired cases.</td></tr>"
+    total = collections.Counter(classify(r)[0] for r in rows)
+    overall = analysis["policy_geometric_mean"]
+    raw = analysis["geometric_mean"]
+    excluded = "".join(
+        f"<details><summary><b>{e(status)}</b>: {e(reason)} — {len(cases)} cases</summary>"
+        f"<p class='status'>{e(', '.join(cases))}</p></details>"
+        for (status, reason), cases in sorted(groups.items(), key=lambda kv: (kv[0][0], -len(kv[1])))
+    ) or "<p class='muted'>None.</p>"
     provenance = json.dumps(
         dict(
             receipt=dict(path=str(receipt_path), sha256=receipt_sha),
             supplied_timing_coverage_receipts=timing_coverage,
-            provenance=p,
+            engine=p["engine"]["revision"],
+            harness_revision=p.get("harness_revision"),
+            harness_status=p.get("harness_status"),
+            harness_sha256=p.get("harness_sha256"),
+            mojo=p["mojo"],
+            platform=p.get("platform"),
+            binaries_sha256=p.get("binaries_sha256"),
+            case_metadata_sha256=p.get("case_metadata_sha256"),
+            timing_scope=p.get("timing_scope"),
+            metal_execution_policy=p.get("metal_execution_policy"),
+            oracle_policy=p.get("oracle_policy"),
+            query_environment=p.get("query_environment"),
+            worker_outcomes=analysis["worker_statuses"],
             final_engine_input_checks={
                 k: data.get(k, "unavailable")
                 for k in ("engine_unchanged_after", "inputs_unchanged_after")
             },
+            aborted=data.get("aborted"),
         ),
         indent=2,
     )
-    memory = p.get("physical_memory_bytes")
-    memory_label = f"{memory / (1024 ** 3):.2f} GiB" if positive(
-        memory
-    ) else "unavailable"
-    oracle_version = p.get("oracle_runtime", {}).get(
-        "duckdb_version", "unavailable / not recorded"
-    )
     return f"""<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Apple CPU and forced-Metal query report</title>
-<style>
-body{{font:16px/1.5 system-ui,sans-serif;margin:0;color:#162436;background:#f4f6f9}}main{{max-width:1500px;margin:auto;padding:28px}}h1,h2{{line-height:1.2}}section,.intro{{background:white;padding:22px;margin:20px 0;border:1px solid #dce2ea;border-radius:8px}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{text-align:left;vertical-align:top;border-bottom:1px solid #e0e5ec;padding:10px}}thead th{{background:#eaf0f7;position:sticky;top:0}}small{{display:block;color:#566477;margin-top:5px}}.scroll{{overflow:auto}}.muted{{color:#657286}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:#f1f4f8;padding:12px;max-height:500px;overflow:auto}}input{{font:inherit;padding:8px;width:min(90%,500px)}}.metric{{font-size:28px;font-weight:700}}details{{margin:10px 0}}summary{{cursor:pointer}}code{{overflow-wrap:anywhere}}@media print{{input{{display:none}}thead th{{position:static}}body{{background:white}}main{{padding:0}}}}
-</style><main>
-<h1>Apple CPU and forced-Metal query report</h1>
-<div class="intro"><p>Recorded engine <code>{e(p['engine']['revision'])}</code>; scale <strong>{e(p['scale'])}</strong>, {p['threads']} threads, {p['rounds']} rounds × {p['repetitions']} warm repetitions, {p['warmups']} extra warmup(s). {e('Full/default-tier attempt.' if p.get('headline_full_tier_attempt') else 'Supplemental or partial-tier attempt; not a replacement for the full tier.')}</p>
-<p><strong>SDK:</strong> {e(p['mojo'])}<br><strong>Machine:</strong> {e(p.get('platform', 'unavailable'))}; physical memory {memory_label}<br><strong>DuckDB:</strong> {e(oracle_version)}<br><strong>Recorded:</strong> {e(p.get('recorded_at_utc', 'unavailable'))}</p>
-<p class="metric">{ratio} CPU / forced-Metal warm raw-median geometric mean</p><p>Median-of-round-minima policy geometric mean on the same admitted pairs: <strong>{policy_ratio}</strong>.</p>
-<p>Only {analysis['admitted_cases']} admitted paired variant cases across {analysis['admitted_query_ids']} distinct query IDs enter this figure. A ratio above 1 means Metal was faster; below 1 means CPU was faster. No ratio is computed for wrong, unverified, hybrid, failed, incomplete or contaminated evidence.</p>
-<p>Warm headline: median of all recorded warm samples, with raw ranges. The existing benchmark policy statistic—the median of each round's fastest complete collection—is labeled separately, including its ratio on the same admitted pairs. Cold: median of first query invocations in fresh workers after untimed table loading; filesystem/driver/compiler caches are not claimed cold. Warmups stay in raw evidence and never enter ratios. Timings displayed for excluded cases are observations, not validated speedups.</p>
-<p><strong>Backend timing:</strong> Metal measurements cover the complete requested backend path. When the engine uses CPU data-fault adjudication, a query may rerun on CPU and that time is included. These figures are not isolated GPU-kernel timings or a certificate of GPU-only execution.</p>
-<p>Separate exact CPU/GPU receipts and the existing DuckDB summary/CHECKS policy remain distinct. The external policy cannot turn a strict mismatch into a pass. Forced collect boundaries do not certify every query operation runs on GPU; source boundary audits remain attached. Load/compiler snapshots do not certify absence of all competing work. Per-worker peak RSS includes table loading and untimed summaries; it is not a GPU-only allocation peak.</p></div>
-<section><h2>Measurement coverage</h2><p>Retained catalog: {analysis['catalog_query_ids']} query IDs / {analysis['catalog_cases']} variant cases. Planned here: {analysis['planned_query_ids']} IDs / {analysis['planned_cases']} cases. Worker outcomes: {e(json.dumps(analysis['worker_statuses'], sort_keys=True))}.</p>
-<p>{e(data.get('aborted', 'No collector abort recorded.'))} All scheduled workers attempted: {e(data.get('all_scheduled_workers_attempted', 'unavailable'))}.</p><details><summary>{len(analysis['unplanned_cases'])} catalog cases not planned in this receipt</summary><pre>{e(chr(10).join('/'.join(k) for k in analysis['unplanned_cases']))}</pre></details></section>
-<section><h2>Baseline and final exact coverage</h2><p>{e(coverage_comparison(before, after))}</p><p>Coverage collection_ns values are not used in any performance statistic.</p></section>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dataframe_mojo Metal against CPU</title>
+<style>{bench_html.STYLE}
+details{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 14px}}
+summary{{cursor:pointer}} pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.75rem;max-height:480px;overflow:auto}}
+td.status small{{display:block}} p.status{{color:var(--muted);font-size:0.8rem;overflow-wrap:anywhere;max-width:none}}
+</style></head><body><main>
+<header>
+<div class="eyebrow">Apple silicon, external benchmark suites</div>
+<h1>dataframe_mojo: forced Metal against CPU</h1>
+<div class="prov">{prov}</div>
+<p class="muted">Times are medians over rounds of the fastest run, in milliseconds, for the complete query call returning a host DataFrame (loading excluded). A ratio is Metal's time divided by CPU's: below 1 means Metal is faster. Metal here is forced for every collect, not chosen by a cost model, and may rerun on CPU after a data fault.</p>
+<div class="legend">{''.join(f'<span class="chip {name}">{label}</span>' for _, name, label in bench_html.BANDS)}</div>
+</header>
+<div class="note"><b>Admitted</b> means the case matches an exact CPU/Metal receipt (full schema and row multiset), agrees with DuckDB, ran every round on a quiet host and has a verified runtime audit. Only admitted cases have a ratio. Status words: <b>ok</b> admitted; <b>wrong answer</b> Metal's result differed; <b>unsupported</b> no Metal translation or the query was rejected; <b>unverified</b> the evidence is incomplete or hybrid. Hover a status for its reason.</div>
+<nav>{''.join(f'<a href="#{e(s)}">{e(s)}</a>' for s in present)}<a href="#excluded">excluded cases</a><a href="#provenance">provenance</a></nav>
+<section><h2>Summary</h2>
+<p>Overall Metal / CPU geometric mean {bench_html._chip(overall)} over {analysis['admitted_cases']} admitted cases ({analysis['admitted_query_ids']} query IDs) of {len(rows)} planned: {total['ok']} admitted, {total['wrong answer']} wrong answer, {total['unsupported']} unsupported, {total['unverified']} unverified. On the raw median of all warm samples the figure is {'unavailable' if raw is None else f'{raw:.3g}'}.</p>
+<div class="scroll"><table><thead><tr><th>Suite</th><th>Role</th><th class="num">Cases</th><th>Outcome</th><th>Metal / CPU</th><th>Worst variant</th></tr></thead><tbody>{''.join(summary_rows)}</tbody></table></div></section>
+{''.join(_suite_section(s, [r for r in rows if r['suite'] == s]) for s in present)}
+<section id="excluded"><h2>Excluded cases</h2><p class="muted">Cases without a ratio, grouped by status and reason. Their raw timings are in <code>performance.json</code>.</p>{excluded}</section>
+<section id="provenance"><h2>Provenance and audit detail</h2>
+<p>{e(data.get('aborted', 'No collector abort recorded.'))} All scheduled workers attempted: {e(data.get('all_scheduled_workers_attempted', 'unavailable'))}. Catalog: {analysis['catalog_query_ids']} query IDs / {analysis['catalog_cases']} cases; planned here {analysis['planned_query_ids']} / {analysis['planned_cases']}.</p>
+<p class="muted">{e(coverage_comparison(before, after))}</p>
 {coverage_section('Baseline exact coverage', before)}{coverage_section('Final exact coverage', after)}
-<section><h2>Complete collection timings and exclusions</h2><label>Filter case or outcome <input id="filter" type="search" placeholder="e.g. h2o_groupby/q3, unsupported, wrong_answer"></label><small>Filtering changes visible rows only; report metrics keep their original denominator.</small><div class="scroll"><table id="cases"><thead><tr><th>Suite / variant / query</th><th>CPU cold</th><th>Metal cold</th><th>CPU warm</th><th>Metal warm</th><th>CPU / Metal</th><th>Outcomes and admission basis</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
-<section><h2>Worst admitted variant per query</h2><p>The minimum raw-median speedup among admitted variants is shown. Excluded or unmeasured variants are not silently treated as passing; the coverage column exposes how many variants entered.</p><table><thead><tr><th>Suite / query ID</th><th>Worst admitted variant</th><th>CPU / Metal warm</th><th>Admitted / catalog variants</th></tr></thead><tbody>{worst}</tbody></table></section>
-<section><h2>Workload, machine, SDK and provenance</h2><p>No historical timing is invented or imported from coverage durations. Engine package identity and measurement-harness identity are recorded separately; changed adapters require a same-harness baseline cross-run.</p><details><summary>Full recorded provenance</summary><pre>{e(provenance)}</pre></details></section>
-</main><script>document.getElementById('filter').addEventListener('input',function(){{let text=this.value.toLowerCase();document.querySelectorAll('#cases tbody tr').forEach(row=>{{row.hidden=!row.dataset.search.includes(text)}})}});</script></html>"""
+<details><summary>Recorded identities, hashes and policies</summary><pre>{e(provenance)}</pre></details>
+<p class="foot">Generated by <code>benchmarks/tools/apple_performance_html.py</code>. The raw samples, host observations and per-run evidence are in <code>performance.json</code> beside this page.</p></section>
+</main></body></html>"""
 
 
 def main():

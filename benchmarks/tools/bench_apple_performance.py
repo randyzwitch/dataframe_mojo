@@ -586,6 +586,9 @@ def main():
                 ]
                 # Store finite/nonfinite summary values as strings in strict JSON.
                 if "summary" in parsed:
+                    # The workers' answer lines carry no neighbouring-column
+                    # sums, and they can be NaN, which strict JSON rejects.
+                    parsed["summary"].pop("pairs", None)
                     parsed["summary"]["values"] = [
                         str(v) for v in parsed["summary"]["values"]
                     ]
