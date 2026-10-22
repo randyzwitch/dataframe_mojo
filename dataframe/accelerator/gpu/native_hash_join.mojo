@@ -712,7 +712,6 @@ def try_execute(
                 right_table.offset,
                 right_table.rows,
             )
-            ^
         )
     except error:
         scope.synchronize()
@@ -996,7 +995,7 @@ def try_execute(
             scope,
             right_table,
             task.schema.copy(),
-            output_fields^,
+            output_fields,
             left_map,
             right_map,
         )
