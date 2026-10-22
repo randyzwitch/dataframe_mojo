@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rule 2 in docs/benchmarks.md: a PR that changes the engine
+# Rule 2 in docs/design/benchmarks.md: a PR that changes the engine
 # (dataframe/)
 # must not also change what measures it (benchmarks/, which holds the
 # suites, the mechanism programs and their drivers in benchmarks/tools/),
@@ -26,6 +26,6 @@ fi
 echo "This PR changes both the engine and the benchmarks that measure it:" >&2
 echo "$engine" | sed 's/^/  engine:    /' >&2
 echo "$bench" | sed 's/^/  benchmark: /' >&2
-echo "Split them into separate PRs (docs/benchmarks.md, rule 2), or explain" >&2
+echo "Split them into separate PRs (docs/design/benchmarks.md, rule 2), or explain" >&2
 echo "why they must land together in a 'Benchmark-Change:' commit trailer." >&2
 exit 1

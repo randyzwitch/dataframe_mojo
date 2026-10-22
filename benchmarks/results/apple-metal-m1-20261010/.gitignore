@@ -1,3 +1,0 @@
-# Full process stdout stays with the measuring checkout; samples and profiles
-# are retained in results.json.
-results/

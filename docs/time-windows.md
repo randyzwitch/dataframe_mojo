@@ -72,4 +72,4 @@ Mojo contracts use independent civil-calendar arithmetic and explicit interval
 membership for irregular/duplicate timestamps, endpoint options, periods,
 offsets and partitioned windows. Explicit timezone transitions and two-pass
 rolling moments anchor their respective semantics. See the
-[coverage guide](test-coverage-plan.md) for reference and dimension requirements.
+[coverage guide](design/test-coverage-plan.md) for reference and dimension requirements.

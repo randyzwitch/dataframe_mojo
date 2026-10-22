@@ -1,6 +1,0 @@
-PASS normal grouped plan certificate
-PASS mixed keys, reducers and nullable layouts
-PASS key representatives and compositions
-PASS exact wide totals, argument positions and overflow
-stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`
-Unhandled exception caught during execution: Unknown column: grouped_int_max_qualifying_hash_group_rows

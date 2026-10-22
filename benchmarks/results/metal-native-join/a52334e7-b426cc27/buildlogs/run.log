@@ -1,6 +1,0 @@
-START join-baseline-smoke
-STATUS join-baseline-smoke 0
-START join-candidate-smoke
-STATUS join-candidate-smoke 0
-START join-paired
-STATUS join-paired 0

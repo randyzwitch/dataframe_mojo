@@ -145,7 +145,7 @@ boundaries; joins distinguish their probe and build behavior.
 reports the operator's execution capability: an upstream materialization
 boundary still has to complete before downstream batches can run.
 
-See [the streaming measurements](lazy-streaming.md) for peak RSS, timings,
+See [the streaming measurements](design/lazy-streaming.md) for peak RSS, timings,
 raw samples and reproduction commands.
 
 ## Optimizations

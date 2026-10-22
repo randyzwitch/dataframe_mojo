@@ -1,1 +1,0 @@
-coverage	q67	reference_unsupported	unsupported: not translated

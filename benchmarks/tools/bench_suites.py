@@ -1,6 +1,6 @@
 """Run the external benchmark suites against Polars and DuckDB.
 
-See docs/benchmarks.md for the rules these measurements serve. Run under the
+See docs/design/benchmarks.md for the rules these measurements serve. Run under the
 oracle environment, after building libdfparquet (pixi run -e native
 build-dfparquet):
 
@@ -115,7 +115,7 @@ SCALES = {
     },
 }
 
-# Two tiers (docs/benchmarks.md). `quick` is for checking a code change in
+# Two tiers (docs/design/benchmarks.md). `quick` is for checking a code change in
 # minutes: development suites at the "dev" scale (H2O at 1M rows, PDS-H and
 # TPC-DS at scale factor 0.1), every data variant, three rounds, and
 # Polars/DuckDB outcomes reused from the reference cache, since their code
@@ -140,7 +140,7 @@ TIERS = {
 }
 
 # Data variants that every measurement runs; the report shows each query's
-# worst variant beside its base result (docs/benchmarks.md, rule 4). The
+# worst variant beside its base result (docs/design/benchmarks.md, rule 4). The
 # H2O set follows db-benchmark's own axes: group cardinality, nulls, order.
 VARIANTS = {
     "h2o_groupby": {
@@ -390,7 +390,7 @@ def operator_reports(stderr):
 
 def _wait_quiet(limit=3600):
     """Block until no compiler runs; other work on a shared host must not
-    overlap timing (docs/benchmarks.md)."""
+    overlap timing (docs/design/benchmarks.md)."""
     waited = 0
     while compiler_processes():
         if waited >= limit:
@@ -1131,7 +1131,7 @@ def _coverage(trace):
         "Specialized paths each query took (DATAFRAME_TRACE_PATHS). A path "
         "that only one query exercises is a candidate for a benchmark-shaped "
         "fast path; check that its trigger is a data property with real "
-        "examples (docs/benchmarks.md, rule 5).",
+        "examples (docs/design/benchmarks.md, rule 5).",
         "",
         "| Path | Distinct queries | Query/variant cases | Examples |",
         "|---|---:|---:|---|",

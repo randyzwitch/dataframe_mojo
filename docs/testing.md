@@ -1,7 +1,7 @@
 # Testing
 
 The suite starts from public dataframe contracts and independent expected values.
-[The coverage guide](test-coverage-plan.md) describes the contracts, independent
+[The coverage guide](design/test-coverage-plan.md) describes the contracts, independent
 models and adversarial dimensions to maintain. Physical layout, planner settings
 and execution modes vary independently of the logical input.
 The full suite requires `libdfparquet`; build it with
@@ -78,7 +78,7 @@ Native calibration and execution checks additionally require a provisioned devic
 ## Benchmarks
 
 Headline performance comes from the external suites run by
-`benchmarks/tools/bench_suites.py`; [benchmarks.md](benchmarks.md) states the rules
+`benchmarks/tools/bench_suites.py`; [benchmarks.md](design/benchmarks.md) states the rules
 and describes the suites, their data variants and the answer checks. The
 in-repo `benchmarks/bench_*.mojo` programs below measure one mechanism at a
 time and are development tools, not evidence of general performance.
@@ -89,7 +89,7 @@ needs sizes between the benchmark points: a cutoff chosen by comparing 1M
 with 10M rows can sit anywhere between them.
 
 The join/gather cutoffs and bounded-table budgets have a reproducible
-[measurement report](join-cutoffs.md), including density, cardinality,
+[measurement report](design/join-cutoffs.md), including density, cardinality,
 ordered-input and chunked-input counterexamples. Its sweeps are retired;
 check out revision `8a50a95` to rerun them before changing those guards, and
 record the machine and the losing side of a crossover.
@@ -101,18 +101,18 @@ retired. The H2O join suite, PDS-H and TPC-DS now compare joins with both
 engines through `benchmarks/tools/bench_suites.py`; check out revision `8a50a95` to
 rerun the old matrix.
 
-[worker-calibration.md](worker-calibration.md) records 4/8/16-worker sweeps
+[worker-calibration.md](design/worker-calibration.md) records 4/8/16-worker sweeps
 on Threadripper and Apple M1, plus isolated worker-policy experiments.
 
-The [Parquet streaming report](parquet-streaming.md) records paired read-time
+The [Parquet streaming report](design/parquet-streaming.md) records paired read-time
 and peak-RSS measurements, raw samples, and reproduction commands.
 
-The [lazy streaming report](lazy-streaming.md) compares the materializing
+The [lazy streaming report](design/lazy-streaming.md) compares the materializing
 executor with ordered batch pipelines at 1M and 10M rows, including peak RSS
 on a CSV larger than 1 GB.
 
 Sort bucket calibration and reproducible sweeps are recorded in
-[sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
+[sort-cutoffs.md](design/sort-cutoffs.md), including fast-path misses and Mac validation.
 
 ## CI checks and feedback
 

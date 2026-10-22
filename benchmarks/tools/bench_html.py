@@ -372,7 +372,7 @@ def render(result, cells, suites, variants_of, instrumented):
         + "".join(body) + "</tbody></table></div>",
         '<p class="muted">Tune on the development suites. Use held-out results '
         'to validate the completed change; do not use their per-query timings '
-        'to choose optimizations or tune thresholds (docs/benchmarks.md).</p>',
+        'to choose optimizations or tune thresholds (docs/design/benchmarks.md).</p>',
         "</section>",
     ]
     for suite in present:

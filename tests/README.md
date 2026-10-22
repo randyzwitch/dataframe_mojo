@@ -1,7 +1,7 @@
 # Dataframe contract suite
 
 Tests start from observable dataframe behavior and independent reference
-semantics. The [coverage guide](../docs/test-coverage-plan.md) describes the
+semantics. The [coverage guide](../docs/design/test-coverage-plan.md) describes the
 contracts, adversarial dimensions and evidence to maintain.
 
 | Directory | Responsibility |
@@ -55,3 +55,7 @@ limited to independent external format adapters and tests of Python benchmark,
 calibration and diagram tools. After the full suite,
 `pixi run -e oracle test-interchange-oracles` checks actual writer artifacts with
 independent consumers; CI runs this separately.
+
+Every program under `tests/` must be run by the contract runner, CI, a pixi task
+or a documented script. `scripts/check_test_reachability.py` fails CI for any
+file in `tooling/`, `support/` or `tests/*.mojo` that nothing runs or imports.
