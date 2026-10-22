@@ -39,9 +39,11 @@ Two phases, as there:
    in a table sized for them, folding a repeated group's states into its
    first row. Consecutive runs holding an equal share of the rows per
    worker form a job, on its own thread, whose groups are one chunk of
-   the result. Its states then load into `Reducer`s,
-   which finish them as every other route does, and its keys are read
-   back out of the rows. A run holding one worker's rows, from a table
+   the result. Its groups are then scanned out a vector of rows at a time
+   (DuckDB's `Scan` and `FinalizeStates`): counts, sums and means written
+   straight into their result columns, other states loaded into
+   `Reducer`s that finish them as every other route does, and the keys
+   read back out of the rows, so each row is read once. A run holding one worker's rows, from a table
    that never cleared its entries, has each group once already: its rows
    are copied as they are (DuckDB's `single_ht`). Groups come out by
    partition at the most bits the workers could reach (none for one
@@ -60,7 +62,7 @@ from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
-from .aggregate import Reducer, float_key
+from .aggregate import Reducer, _from_canonical, float_key
 from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
 from .column import Column, _count_set, _pack_bits, _validity_at
@@ -668,16 +670,17 @@ def _combine(slots: List[_Slot], into: Int, other: Int) raises:
                 a[unsafe_offset=w + 1] |= 1
 
 
-def _unload(slot: _Slot, groups: _Groups, spec: ReducerSpec) raises -> Reducer:
-    """A reduction's states of every group, from their rows into a
-    `Reducer`, which finishes them as every other route does."""
-    var n = groups.count()
-    var reducer = spec.make(n)
+def _unload(
+    slot: _Slot, groups: _Groups, mut reducer: Reducer, lo: Int, hi: Int
+) raises:
+    """A reduction's states of groups [lo, hi), from their rows into a
+    `Reducer` sized for every group, which finishes them as every other
+    route does."""
     var at = groups.rows.unsafe_ptr()
     var stride = groups.stride
     var w0 = groups.states_at + slot.offset
     var kind = slot.kind
-    for g in range(n):
+    for g in range(lo, hi):
         var w = g * stride + w0
         if kind <= _K_NULLS:
             reducer.counts[g] = bitcast[DType.int64](at[unsafe_offset=w])
@@ -725,7 +728,220 @@ def _unload(slot: _Slot, groups: _Groups, spec: ReducerSpec) raises -> Reducer:
                 reducer.floats[g] = bitcast[DType.float64](at[unsafe_offset=w])
             else:
                 reducer.ints[g] = bitcast[DType.int64](at[unsafe_offset=w])
-    return reducer^
+
+
+# How a reduction's result is made from its group rows (`_Finalizer`):
+# its states unloaded into a `Reducer` that finishes them; nothing (top
+# rows, read separately); or the result column written straight from the
+# rows: counts, an integer or float sum, a mean.
+comptime _F_STATES = 0
+comptime _F_SKIP = 1
+comptime _F_COUNTS = 2
+comptime _F_INT_SUM = 3
+comptime _F_FLOAT_SUM = 4
+comptime _F_MEAN = 5
+
+
+def _finalize_mode(slot: _Slot, template: Reducer) -> Int:
+    """The `_F_` mode of a reduction whose state is `slot`: a result
+    written from the rows where it is the one `template.finish` makes from
+    the same state (counts, Int64 or narrow integer sums, float sums,
+    means), else its states unloaded."""
+    var kind = slot.kind
+    if kind == _K_TOP_ROWS:
+        return _F_SKIP
+    if kind == _K_LEN or kind == _K_COUNT or kind == _K_NULLS:
+        return _F_COUNTS
+    var summed = (
+        kind == _K_INT_SUM or kind == _K_NARROW_SUM or kind == _K_FLOAT_SUM
+    )
+    if template.op == MEAN and summed:
+        return _F_MEAN
+    if template.op != SUM:
+        return _F_STATES
+    if kind == _K_FLOAT_SUM:
+        return _F_FLOAT_SUM
+    # A narrow sum's total fits Int64; a wide one only when its input is
+    # Int64 (a UInt64 total may not).
+    if kind == _K_NARROW_SUM or (
+        kind == _K_INT_SUM and template.input == DataType.INT64
+    ):
+        return _F_INT_SUM
+    return _F_STATES
+
+
+struct _Finalizer(Movable):
+    """One reduction's result over a finish job's groups, made a vector of
+    group rows at a time (DuckDB's `RowOperations::FinalizeStates` over a
+    scanned chunk): straight into its result column where its mode allows,
+    with no per-group state lists to fill and read back, else through a
+    `Reducer`."""
+
+    var slot: _Slot
+    var mode: Int
+    var min_count: Int64
+    var state: Reducer
+    var ints: List[Int64]
+    var floats: List[Float64]
+    var valid: List[Bool]
+    var nulls: Bool
+
+    def __init__(out self, slot: _Slot, spec: ReducerSpec, n: Int):
+        self.slot = slot.copy()
+        var template = spec.make(0)
+        self.mode = _finalize_mode(slot, template)
+        self.min_count = Int64(template.min_count)
+        var direct = self.mode >= _F_COUNTS
+        var integer = self.mode == _F_COUNTS or self.mode == _F_INT_SUM
+        self.ints = List[Int64](
+            unsafe_uninit_length=n if direct and integer else 0
+        )
+        self.floats = List[Float64](
+            unsafe_uninit_length=n if direct and not integer else 0
+        )
+        self.valid = List[Bool](
+            unsafe_uninit_length=n if direct and self.mode != _F_COUNTS else 0
+        )
+        self.nulls = False
+        if self.mode == _F_STATES:
+            self.state = spec.make(n)
+        else:
+            self.state = template^
+
+    def scan(mut self, groups: _Groups, lo: Int, hi: Int) raises:
+        """Groups [lo, hi)'s results from their rows."""
+        if self.mode == _F_SKIP:
+            return
+        if self.mode == _F_STATES:
+            _unload(self.slot, groups, self.state, lo, hi)
+            return
+        var at = groups.rows.unsafe_ptr()
+        var stride = groups.stride
+        var w0 = groups.states_at + self.slot.offset
+        var kind = self.slot.kind
+        var ints = self.ints.unsafe_ptr()
+        var floats = self.floats.unsafe_ptr()
+        var valid = self.valid.unsafe_ptr()
+        var nulls = False
+        if self.mode == _F_COUNTS:
+            for g in range(lo, hi):
+                ints[unsafe_offset=g] = bitcast[DType.int64](
+                    at[unsafe_offset=g * stride + w0]
+                )
+        elif self.mode == _F_FLOAT_SUM:
+            for g in range(lo, hi):
+                var w = g * stride + w0
+                var ok = (
+                    bitcast[DType.int64](at[unsafe_offset=w + 1])
+                    >= self.min_count
+                )
+                valid[unsafe_offset=g] = ok
+                nulls = nulls or not ok
+                floats[unsafe_offset=g] = bitcast[DType.float64](
+                    at[unsafe_offset=w]
+                ) if ok else 0
+        elif self.mode == _F_MEAN:
+            for g in range(lo, hi):
+                var w = g * stride + w0
+                var count: Int64
+                var total: Float64
+                if kind == _K_FLOAT_SUM:
+                    count = bitcast[DType.int64](at[unsafe_offset=w + 1])
+                    total = bitcast[DType.float64](at[unsafe_offset=w])
+                elif kind == _K_NARROW_SUM:
+                    count = bitcast[DType.int64](at[unsafe_offset=w + 1])
+                    total = (
+                        bitcast[DType.int64](at[unsafe_offset=w])
+                        .cast[DType.int128]()
+                        .cast[DType.float64]()
+                    )
+                else:
+                    count = bitcast[DType.int64](at[unsafe_offset=w + 2])
+                    total = bitcast[DType.int128](
+                        (UInt128(at[unsafe_offset=w + 1]) << 64)
+                        | UInt128(at[unsafe_offset=w])
+                    ).cast[DType.float64]()
+                var ok = count > 0
+                valid[unsafe_offset=g] = ok
+                nulls = nulls or not ok
+                floats[unsafe_offset=g] = total / Float64(count) if ok else 0
+        else:
+            for g in range(lo, hi):
+                var w = g * stride + w0
+                var count: Int64
+                var total: Int64
+                if kind == _K_NARROW_SUM:
+                    count = bitcast[DType.int64](at[unsafe_offset=w + 1])
+                    total = bitcast[DType.int64](at[unsafe_offset=w])
+                else:
+                    count = bitcast[DType.int64](at[unsafe_offset=w + 2])
+                    var wide = bitcast[DType.int128](
+                        (UInt128(at[unsafe_offset=w + 1]) << 64)
+                        | UInt128(at[unsafe_offset=w])
+                    )
+                    var ok = count >= self.min_count
+                    if ok and (
+                        wide > Int64.MAX.cast[DType.int128]()
+                        or wide < Int64.MIN.cast[DType.int128]()
+                    ):
+                        raise Error("Int64 expression sum overflow")
+                    total = wide.cast[DType.int64]()
+                var ok = count >= self.min_count
+                valid[unsafe_offset=g] = ok
+                nulls = nulls or not ok
+                ints[unsafe_offset=g] = total if ok else 0
+        self.nulls = self.nulls or nulls
+
+    def reducer(deinit self) raises -> Reducer:
+        """The reduction's `Reducer`: its unloaded states, or one holding
+        the finished column, of the type and validity its `finish` gives
+        (an integer sum in its input's sum type, a Float32 sum as Float32)."""
+        if self.mode < _F_COUNTS:
+            return self.state^
+        var state = self.state^
+        var bits = _pack_bits(self.valid) if self.nulls else List[UInt8]()
+        var result: Series
+        if self.mode == _F_COUNTS:
+            result = Series("", Column[Int64](self.ints^))
+        elif self.mode == _F_INT_SUM:
+            result = _sum_typed(self.ints^, bits^, state.input)
+        else:
+            result = Series(
+                "", Column[Float64](values=self.floats^, bits=bits^)
+            )
+            if self.mode == _F_FLOAT_SUM and state.input != DataType.FLOAT64:
+                result = _from_canonical(result, state.input)
+        state.finished = result^
+        return state^
+
+
+def _sum_typed(
+    var totals: List[Int64], var bits: List[UInt8], input: DataType
+) raises -> Series:
+    """Integer sums as their input's sum type (`Reducer._integer_sum`):
+    Int64 for Int64 and 8- or 16-bit inputs, else the input's own type,
+    which every total must fit."""
+    var target = input.sum_type()
+    if input == DataType.INT64 or target == DataType.INT64:
+        return Series("", Column[Int64](values=totals^, bits=bits^))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if target == DataType.of(D):
+                var output = List[Scalar[D]](unsafe_uninit_length=len(totals))
+                var at = output.unsafe_ptr()
+                for g in range(len(totals)):
+                    var total = totals[g]
+                    if (
+                        total.cast[DType.int128]()
+                        > Scalar[D].MAX.cast[DType.int128]()
+                        or total.cast[DType.int128]()
+                        < Scalar[D].MIN.cast[DType.int128]()
+                    ):
+                        raise Error(target.name() + " expression sum overflow")
+                    at[unsafe_offset=g] = total.cast[D]()
+                return Series("", Column[Scalar[D]](values=output^, bits=bits^))
+    raise Error("Unsupported sum type " + target.name())
 
 
 def key_supported(column: Series) -> Bool:
@@ -2322,39 +2538,53 @@ struct _FinishJob(Job):
             # The old groups stay alive until their rows are copied.
             swap(final, into)
             _ = into^
+        # The groups are scanned out a vector of rows at a time (DuckDB's
+        # `Scan`: each chunk of rows gathered into every output column, its
+        # states finalized), so each group's row is read from memory once,
+        # not once per reduction and key.
+        var count = final.count()
+        var outputs = List[_Finalizer](capacity=len(self.templates))
         for s in range(len(self.templates)):
             if self.slots[s].kind == _K_TOP_ROWS:
                 var w0 = final.states_at + self.slots[s].offset
                 var words = final.rows.unsafe_ptr()
-                for g in range(final.count()):
+                for g in range(count):
                     var w = g * final.stride + w0
                     for p in range(Int(words[unsafe_offset=w])):
                         self.top_rows.append(
                             Int(words[unsafe_offset=w + 2 + 2 * p])
                         )
-                self.states.append(self.templates[s].make(0))
-                continue
-            self.states.append(_unload(self.slots[s], final, self.templates[s]))
-        # Keys scanned out of the stored words (DuckDB's gather from its
-        # rows), not gathered from the input.
+            outputs.append(_Finalizer(self.slots[s], self.templates[s], count))
+        ref held = Pointer[_HeldBuffers, MutAnyOrigin](
+            unsafe_from_address=self.held
+        )[]
+        var key_columns = List[_KeyColumn](capacity=len(self.key_templates))
         var w = 0
         for c in range(len(self.key_templates)):
-            self.keys.append(
-                _key_column(
+            key_columns.append(
+                _KeyColumn(
                     self.key_templates[c],
                     w,
                     UInt64(1) << UInt64(c),
-                    final,
-                    Pointer[_HeldBuffers, MutAnyOrigin](
-                        unsafe_from_address=self.held
-                    )[],
+                    count,
+                    held,
                 )
             )
             w += _width(self.key_templates[c])
-        var count = final.count()
-        self.firsts = List[Int](capacity=count)
-        for g in range(count):
-            self.firsts.append(final.first(g))
+        self.firsts = List[Int](unsafe_uninit_length=count)
+        var firsts = self.firsts.unsafe_ptr()
+        for lo in range(0, count, _BATCH):
+            var hi = min(count, lo + _BATCH)
+            for s in range(len(outputs)):
+                outputs[s].scan(final, lo, hi)
+            for c in range(len(key_columns)):
+                key_columns[c].scan(final, lo, hi, held)
+            for g in range(lo, hi):
+                firsts[unsafe_offset=g] = final.first(g)
+        while len(outputs) > 0:
+            self.states.append(outputs.pop(0).reducer())
+        while len(key_columns) > 0:
+            self.keys.append(key_columns.pop(0).column())
 
 
 struct _HeldBuffers(Movable):
@@ -2426,143 +2656,243 @@ struct _HeldBuffers(Movable):
         return (self.index[r], address - self.starts[r])
 
 
-def _string_keys(
-    w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
-) -> StringColumn:
-    """A string key column of finished groups as Arrow views, from each
-    group's words: a key up to twelve bytes is its two words exactly (the
-    view's length, prefix and inline bytes, zero past the end); a longer
-    one is its first word and the buffer and offset its address falls in.
-    A key held in no shared buffer (a dictionary's entry) is copied."""
-    var n = groups.count()
-    var views = List[StringView](capacity=n)
-    var valid = List[Bool](capacity=n)
-    var nulls = False
-    var buffers = List[ArcPointer[List[UInt8]]]()
+# What a `_KeyColumn` builds: strings as views, Booleans, 128-bit values,
+# or (from 0) a number of type NUMERIC_DTYPES[kind].
+comptime _KEY_STRING = -1
+comptime _KEY_BOOL = -2
+comptime _KEY_WIDE = -3
+
+
+struct _KeyColumn(Movable):
+    """One key column of a finish job's groups, built from their stored key
+    words a vector of group rows at a time, as the states are (DuckDB's
+    gather of scanned rows into vectors): a number or 128-bit value written
+    in place in its result buffer, as the template's type (temporal,
+    decimal and categorical keys keep theirs); a string as an Arrow view,
+    a key up to twelve bytes its two words exactly (the view's length,
+    prefix and inline bytes, zero past the end), a longer one its first
+    word and the held buffer and offset its address falls in, so no
+    group's bytes are copied or even read, as Polars gathers a BinaryView
+    column and DuckDB's `string_t` points into its heap. A key held in no
+    shared buffer (a dictionary's entry) is copied."""
+
+    var name: String
+    var dtype: DataType
+    var kind: Int
+    var w: Int
+    var bit: UInt64
+    var n: Int
+    # A number's or 128-bit value's result, written through `values`.
+    var series: Series
+    var values: Int
+    var valid: List[Bool]
+    var nulls: Bool
+    var bools: List[Bool]
+    var views: List[StringView]
+    var buffers: List[ArcPointer[List[UInt8]]]
     # Each held buffer's place among this column's, once it is used.
-    var local = List[Int](length=len(held.buffers), fill=-1)
-    var spill = List[UInt8]()
-    var spill_at = -1
-    var buffer_bytes = 0
-    for g in range(n):
-        if groups.null(g) & bit != 0:
-            views.append(StringView(0, 0, 0, 0))
-            valid.append(False)
-            nulls = True
-            continue
-        valid.append(True)
-        var head = groups.word(g, w)
-        var tail = groups.word(g, w + 1)
-        var length = Int(head & 0xFFFFFFFF)
-        if length <= STRING_VIEW_INLINE_BYTES:
-            views.append(
-                StringView(
+    var local: List[Int]
+    var spill: List[UInt8]
+    var spill_at: Int
+    var buffer_bytes: Int
+
+    def __init__(
+        out self,
+        template: Series,
+        w: Int,
+        bit: UInt64,
+        n: Int,
+        held: _HeldBuffers,
+    ) raises:
+        self.name = template.name()
+        self.dtype = template.dtype()
+        self.w = w
+        self.bit = bit
+        self.n = n
+        self.valid = List[Bool](unsafe_uninit_length=n)
+        self.nulls = False
+        self.bools = List[Bool]()
+        self.views = List[StringView]()
+        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.local = List[Int]()
+        self.spill = List[UInt8]()
+        self.spill_at = -1
+        self.buffer_bytes = 0
+        self.series = Series(self.name, Column[Int64](List[Int64]()))
+        self.values = 0
+        var part = template.chunks()[0].copy() if template.is_chunked() else (
+            template.copy()
+        )
+        if part._data.isa[StringColumn]():
+            self.kind = _KEY_STRING
+            self.views = List[StringView](unsafe_uninit_length=n)
+            self.local = List[Int](length=len(held.buffers), fill=-1)
+            return
+        if part._data.isa[BoolColumn]():
+            self.kind = _KEY_BOOL
+            self.bools = List[Bool](unsafe_uninit_length=n)
+            return
+        if part._data.isa[Column[Int128]]():
+            self.kind = _KEY_WIDE
+            var column = Column[Int128](List[Int128](unsafe_uninit_length=n))
+            self.values = Int(column._ptr())
+            self.series = Series(self.name, column^)
+            return
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if part._data.isa[Column[Scalar[D]]]():
+                self.kind = d
+                var column = Column[Scalar[D]](
+                    List[Scalar[D]](unsafe_uninit_length=n)
+                )
+                self.values = Int(column._ptr())
+                self.series = Series(self.name, column^)
+                return
+        raise Error("aggregate table: unsupported key storage")
+
+    def scan(mut self, groups: _Groups, lo: Int, hi: Int, held: _HeldBuffers):
+        """Groups [lo, hi)'s keys from their rows."""
+        var at = groups.rows.unsafe_ptr()
+        var stride = groups.stride
+        var w0 = _HEAD + self.w
+        var valid = self.valid.unsafe_ptr()
+        var nulls = False
+        for g in range(lo, hi):
+            var ok = at[unsafe_offset=g * stride + 1] & self.bit == 0
+            valid[unsafe_offset=g] = ok
+            nulls = nulls or not ok
+        self.nulls = self.nulls or nulls
+        if self.kind == _KEY_STRING:
+            self._strings(groups, lo, hi, held)
+            return
+        if self.kind == _KEY_BOOL:
+            var bools = self.bools.unsafe_ptr()
+            for g in range(lo, hi):
+                bools[unsafe_offset=g] = at[unsafe_offset=g * stride + w0] == 1
+            return
+        if self.kind == _KEY_WIDE:
+            var into = Pointer[Int128, MutAnyOrigin](
+                unsafe_from_address=self.values
+            )
+            for g in range(lo, hi):
+                var row = g * stride + w0
+                into[unsafe_offset=g] = bitcast[DType.int128](
+                    (UInt128(at[unsafe_offset=row + 1]) << 64)
+                    | UInt128(at[unsafe_offset=row])
+                )
+            return
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if self.kind == d:
+                var into = Pointer[Scalar[D], MutAnyOrigin](
+                    unsafe_from_address=self.values
+                )
+                for g in range(lo, hi):
+                    var word = at[unsafe_offset=g * stride + w0]
+                    comptime if D.is_floating_point():
+                        into[unsafe_offset=g] = Scalar[D](
+                            bitcast[DType.float64](word)
+                        )
+                    elif D.is_unsigned():
+                        into[unsafe_offset=g] = Scalar[D](word)
+                    else:
+                        into[unsafe_offset=g] = Scalar[D](
+                            bitcast[DType.int64](word)
+                        )
+                return
+
+    def _strings(
+        mut self, groups: _Groups, lo: Int, hi: Int, held: _HeldBuffers
+    ):
+        var at = groups.rows.unsafe_ptr()
+        var stride = groups.stride
+        var w0 = _HEAD + self.w
+        var views = self.views.unsafe_ptr()
+        var valid = self.valid.unsafe_ptr()
+        for g in range(lo, hi):
+            if not valid[unsafe_offset=g]:
+                views[unsafe_offset=g] = StringView(0, 0, 0, 0)
+                continue
+            var head = at[unsafe_offset=g * stride + w0]
+            var tail = at[unsafe_offset=g * stride + w0 + 1]
+            var length = Int(head & 0xFFFFFFFF)
+            if length <= STRING_VIEW_INLINE_BYTES:
+                views[unsafe_offset=g] = StringView(
                     UInt32(head & 0xFFFFFFFF),
                     UInt32(head >> 32),
                     UInt32(tail & 0xFFFFFFFF),
                     UInt32(tail >> 32),
                 )
-            )
-            continue
-        buffer_bytes += length
-        var found = held.find(Int(tail), length)
-        var b: Int
-        var offset = found[1]
-        if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
-            b = local[found[0]]
-            if b < 0:
-                b = len(buffers)
-                local[found[0]] = b
-                buffers.append(held.buffers[found[0]].copy())
-        else:
-            if spill_at >= 0 and (
-                len(spill) + length > _STRING_VIEW_BUFFER_LIMIT
-            ):
-                buffers[spill_at] = ArcPointer(spill^)
-                spill = List[UInt8]()
-                spill_at = -1
-            if spill_at < 0:
-                spill_at = len(buffers)
-                buffers.append(ArcPointer(List[UInt8]()))
-            b = spill_at
-            offset = len(spill)
-            spill.extend(
-                Span[UInt8, ImmutAnyOrigin](
-                    unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                        unsafe_from_address=Int(tail)
-                    ),
-                    length=length,
+                continue
+            self.buffer_bytes += length
+            var found = held.find(Int(tail), length)
+            var b: Int
+            var offset = found[1]
+            if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
+                b = self.local[found[0]]
+                if b < 0:
+                    b = len(self.buffers)
+                    self.local[found[0]] = b
+                    self.buffers.append(held.buffers[found[0]].copy())
+            else:
+                if self.spill_at >= 0 and (
+                    len(self.spill) + length > _STRING_VIEW_BUFFER_LIMIT
+                ):
+                    var full = List[UInt8]()
+                    swap(full, self.spill)
+                    self.buffers[self.spill_at] = ArcPointer(full^)
+                    self.spill_at = -1
+                if self.spill_at < 0:
+                    self.spill_at = len(self.buffers)
+                    self.buffers.append(ArcPointer(List[UInt8]()))
+                b = self.spill_at
+                offset = len(self.spill)
+                self.spill.extend(
+                    Span[UInt8, ImmutAnyOrigin](
+                        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=Int(tail)
+                        ),
+                        length=length,
+                    )
                 )
-            )
-        views.append(
-            StringView(
+            views[unsafe_offset=g] = StringView(
                 UInt32(head & 0xFFFFFFFF),
                 UInt32(head >> 32),
                 UInt32(b),
                 UInt32(offset),
             )
-        )
-    if spill_at >= 0:
-        buffers[spill_at] = ArcPointer(spill^)
-    var bits = _pack_bits(valid) if nulls else List[UInt8]()
-    return StringColumn(
-        StringViewStorage(views^, buffers^, bits^, n, buffer_bytes)
-    )
 
-
-def _key_column(
-    template: Series, w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
-) raises -> Series:
-    """One key column of a partition's final groups, built from the words
-    of each group's first sight: strings as views (`_string_keys`), a
-    number from its value, as the template's type (temporal, decimal and
-    categorical keys keep theirs)."""
-    var n = groups.count()
-    var name = template.name()
-    var dtype = template.dtype()
-    var part = template.chunks()[0].copy() if template.is_chunked() else (
-        template.copy()
-    )
-    if part._data.isa[StringColumn]():
-        return Series(name, _string_keys(w, bit, groups, held)).with_dtype(
-            dtype
-        )
-    var valid = List[Bool](capacity=n)
-    if part._data.isa[BoolColumn]():
-        var values = List[Bool](capacity=n)
-        for f in range(n):
-            var g = f
-            valid.append(groups.null(g) & bit == 0)
-            values.append(groups.word(g, w) == 1)
-        return Series(name, BoolColumn(values, valid))
-    if part._data.isa[Column[Int128]]():
-        var values = List[Int128](capacity=n)
-        for f in range(n):
-            var g = f
-            valid.append(groups.null(g) & bit == 0)
-            var wide = (UInt128(groups.word(g, w + 1)) << 64) | UInt128(
-                groups.word(g, w)
-            )
-            values.append(bitcast[DType.int128](wide))
-        return Series(name, Column[Int128](values^, valid)).with_dtype(dtype)
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
-        if part._data.isa[Column[Scalar[D]]]():
-            var values = List[Scalar[D]](capacity=n)
-            for f in range(n):
-                var g = f
-                valid.append(groups.null(g) & bit == 0)
-                var word = groups.word(g, w)
-                comptime if D.is_floating_point():
-                    values.append(Scalar[D](bitcast[DType.float64](word)))
-                elif D.is_unsigned():
-                    values.append(Scalar[D](word))
-                else:
-                    values.append(Scalar[D](bitcast[DType.int64](word)))
-            return Series(name, Column[Scalar[D]](values^, valid)).with_dtype(
-                dtype
-            )
-    raise Error("aggregate table: unsupported key storage")
+    def column(deinit self) raises -> Series:
+        """The finished key column."""
+        var bits = _pack_bits(self.valid) if self.nulls else List[UInt8]()
+        if self.kind == _KEY_STRING:
+            if self.spill_at >= 0:
+                self.buffers[self.spill_at] = ArcPointer(self.spill^)
+            return Series(
+                self.name,
+                StringColumn(
+                    StringViewStorage(
+                        self.views^,
+                        self.buffers^,
+                        bits^,
+                        self.n,
+                        self.buffer_bytes,
+                    )
+                ),
+            ).with_dtype(self.dtype)
+        if self.kind == _KEY_BOOL:
+            return Series(self.name, BoolColumn(self.bools, self.valid))
+        var series = self.series^
+        if self.nulls:
+            var shared = ArcPointer(bits^)
+            if self.kind == _KEY_WIDE:
+                series._data[Column[Int128]]._bits = shared
+            else:
+                comptime for d in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[d]
+                    if self.kind == d:
+                        series._data[Column[Scalar[D]]]._bits = shared.copy()
+        return series.with_dtype(self.dtype)
 
 
 def aggregate_table(
