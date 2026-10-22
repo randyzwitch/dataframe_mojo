@@ -284,6 +284,7 @@ def test_reporting_local_month_edges_round_replace_and_dst() raises:
                 col("t").dt().round("1h").alias("rounded"),
                 col("t").dt().replace(day=1, hour=1).alias("replace"),
                 col("t").dt().combine(time(0, 30)).alias("combine"),
+                col("t").dt().combine(time(12, 30), "ns").alias("combine_ns"),
             ],
             mode,
         )
@@ -299,8 +300,12 @@ def test_reporting_local_month_edges_round_replace_and_dst() raises:
         assert_ticks(
             result, "replace", dtype, [parse("2024-03-01 01:30:00", dtype)]
         )
+        assert_ticks(result, "combine", dtype, [1710048600000000])
         assert_ticks(
-            result, "combine", DataType.datetime("us"), [1710030600000000]
+            result,
+            "combine_ns",
+            DataType.datetime("ns", "America/New_York"),
+            [1710088200000000000],
         )
     var dates = DataFrame(
         [tagged("d", DataType.DATE, [19737, 19739, 19740, -1])]
@@ -530,3 +535,52 @@ def test_reporting_rounding_checks_boundaries_without_wrapping() raises:
             )
             with assert_raises(contains="overflows"):
                 _ = reporting_select(frame, [col("t").dt().round("1s")], mode)
+
+
+def test_reporting_filters_read_every_constructor_field() raises:
+    # Only the later packed fields read columns: these are row predicates,
+    # never constants that may be bound without the frame's columns.
+    var frame = DataFrame(
+        [
+            tagged(
+                "d", DataType.DATE, [19723, 19754, 19782, 19783, 19814, 19844]
+            ),
+            Series(
+                "m",
+                Column[Int64](
+                    [1, 3, 2, 3, 5, Int64.MAX],
+                    [True, True, True, True, True, False],
+                ),
+            ),
+            Series(
+                "day",
+                Column[Int64](
+                    [1, 1, 29, 1, 1, Int64.MAX],
+                    [True, True, True, True, True, False],
+                ),
+            ),
+        ]
+    )
+    for layout in range(3):
+        var source = (
+            frame.copy() if layout
+            == 0 else offset_layout(frame) if layout
+            == 1 else chunk_layout(frame)
+        )
+        for predicate in [
+            col("d") >= date(2024, col("m"), 1),
+            col("d") >= date(2024, col("m"), col("day")),
+        ]:
+            for mode in range(3):
+                var actual = source.filter(
+                    predicate
+                ) if mode == 0 else source.lazy().filter(predicate).collect(
+                    engine="cpu", streaming=mode == 2
+                )
+                assert_ticks(actual, "d", DataType.DATE, [19723, 19782, 19783])
+    # An extra comparison exercises the fused conjunction path, while d
+    # itself is sorted and non-null to exercise sorted-range admission.
+    var actual = frame.filter(
+        (col("d") >= date(2024, col("m"), 1)) & (col("d") < date(2024, 5, 1))
+    )
+    assert_ticks(actual, "d", DataType.DATE, [19723, 19782, 19783])

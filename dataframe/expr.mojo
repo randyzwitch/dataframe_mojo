@@ -1902,21 +1902,10 @@ struct Expr(Copyable):
 def _append_shifted(mut nodes: List[Node], other: List[Node], offset: Int):
     for node in other:
         var copied = node.copy()
-        if copied.left >= 0:
-            copied.left += offset
-        if copied.right >= 0:
-            copied.right += offset
-        if copied.extra >= 0:
-            copied.extra += offset
-        if copied.op == STRUCT_PACK:
-            var roots = List[String]()
-            for child in struct_pack_children(copied):
-                roots.append(String(child + offset))
-            copied.text2 = String()
-            for k in range(len(roots)):
-                if k:
-                    copied.text2 += SEP
-                copied.text2 += roots[k]
+        var children = node_children(copied)
+        for k in range(len(children)):
+            children[k] += offset
+        _set_node_children(copied, children)
         nodes.append(copied^)
 
 
@@ -2748,32 +2737,18 @@ def subtree(expr: Expr, root: Int) -> Expr:
         if not keep[i]:
             continue
         ref node = expr._nodes[i]
-        if node.left >= 0:
-            keep[node.left] = True
-        if node.right >= 0:
-            keep[node.right] = True
-        if node.extra >= 0:
-            keep[node.extra] = True
-        if node.op == STRUCT_PACK:
-            for child in struct_pack_children(node):
-                keep[child] = True
+        for child in node_children(node):
+            keep[child] = True
     var position = List[Int](length=root + 1, fill=-1)
     var nodes = List[Node]()
     for i in range(root + 1):
         if keep[i]:
             position[i] = len(nodes)
             var copied = expr._nodes[i].copy()
-            if copied.left >= 0:
-                copied.left = position[copied.left]
-            if copied.right >= 0:
-                copied.right = position[copied.right]
-            if copied.extra >= 0:
-                copied.extra = position[copied.extra]
-            if copied.op == STRUCT_PACK:
-                var children = struct_pack_children(copied)
-                for k in range(len(children)):
-                    children[k] = position[children[k]]
-                _set_struct_pack_children(copied, children)
+            var children = node_children(copied)
+            for k in range(len(children)):
+                children[k] = position[children[k]]
+            _set_node_children(copied, children)
             nodes.append(copied^)
     return Expr(nodes^, expr._name)
 
@@ -2860,7 +2835,7 @@ struct DtNamespace(Copyable):
         return self._op(DT_WITH_TIME_UNIT, time_unit)
 
     def combine(self, time: Expr, time_unit: String = "us") raises -> Expr:
-        """Combine a local date with a time into a naive datetime."""
+        """Combine a local date with a time, retaining a datetime's zone."""
         return _temporal_pack(
             [self._expr.alias("base"), time.alias("time")],
             DT_COMBINE,
@@ -3212,3 +3187,30 @@ def _set_struct_pack_children(mut node: Node, children: List[Int]):
         if k:
             node.text2 += SEP
         node.text2 += String(children[k])
+
+
+def node_children(node: Node) -> List[Int]:
+    """Every expression dependency, in operand order, including packed fields."""
+    if node.op == STRUCT_PACK:
+        return struct_pack_children(node)
+    var children = List[Int]()
+    for child in [node.left, node.right, node.extra]:
+        if child >= 0:
+            children.append(child)
+    return children^
+
+
+def _set_node_children(mut node: Node, children: List[Int]):
+    """Replace dependencies in node_children order after an IR rewrite."""
+    if node.op == STRUCT_PACK:
+        _set_struct_pack_children(node, children)
+        return
+    var k = 0
+    if node.left >= 0:
+        node.left = children[k]
+        k += 1
+    if node.right >= 0:
+        node.right = children[k]
+        k += 1
+    if node.extra >= 0:
+        node.extra = children[k]

@@ -43,6 +43,7 @@ from .expr import (
     is_reduction,
     is_window,
     subtree,
+    node_children,
     conjuncts,
     OVER,
     MIN,
@@ -7038,9 +7039,8 @@ def _stream_reductions(expressions: List[Expr]) -> Bool:
                 continue
             if node.op == COL:
                 return False
-            for child in [node.left, node.right, node.extra]:
-                if child >= 0:
-                    reachable[child] = True
+            for child in node_children(node):
+                reachable[child] = True
         if not saw_reduction:
             return False
     return True

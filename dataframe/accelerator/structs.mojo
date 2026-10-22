@@ -16,7 +16,7 @@ from dataframe.expr import (
     Expr,
     null,
     subtree,
-    struct_pack_children,
+    node_children,
 )
 from dataframe.lazy import LazyFrame, SELECT, SCAN_FRAME
 from dataframe.nested_column import StructColumn
@@ -122,7 +122,7 @@ def lower_terminal_structs(query: LazyFrame) raises -> StructOutputs:
                     "Metal unsupported [struct]: nullable source struct transport"
                 )
             packed = True
-            for child in struct_pack_children(bound.expr._nodes[top]):
+            for child in node_children(bound.expr._nodes[top]):
                 if bound.dtypes[child].is_nested():
                     raise Error(
                         "Metal unsupported [struct]: nested child fields"

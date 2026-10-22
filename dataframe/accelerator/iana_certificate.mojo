@@ -7,6 +7,7 @@ is consequently a separate phase from selecting the WHEN output.
 """
 from dataframe.binding import BoundExpr, SCALAR
 from dataframe.expr import (
+    node_children,
     WHEN,
     ADD,
     SUB,
@@ -140,7 +141,7 @@ def prepare(bound: BoundExpr, max_nodes: Int = 128) raises -> Certificate:
                 scopes.extend([UInt64(node.left), UInt64(scope), UInt64(0)])
                 pending.append((node.extra, other_scope))
         else:
-            for child in [node.left, node.right, node.extra]:
+            for child in node_children(node):
                 if child >= 0:
                     pending.append((child, scope))
     var words = List[UInt64]()

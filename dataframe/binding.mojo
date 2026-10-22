@@ -156,7 +156,7 @@ from .expr import (
     is_nested_op,
     IMPLODE,
     STRUCT_PACK,
-    struct_pack_children,
+    node_children,
     struct_pack_names,
     HORIZONTAL,
     HORIZONTAL_ARGS,
@@ -633,9 +633,8 @@ def _reaches(nodes: List[Node], root: Int, op: Int) -> Bool:
         ref node = nodes[index]
         if node.op == op:
             return True
-        pending.append(node.left)
-        pending.append(node.right)
-        pending.append(node.extra)
+        for child in node_children(node):
+            pending.append(child)
     return False
 
 
@@ -793,7 +792,7 @@ def _dt_dtype(node: Node, input: DataType) raises -> DataType:
         if op == DT_COMBINE:
             if not input.field_dtype(1).is_time():
                 raise Error("combine requires a time expression")
-            return DataType.datetime(node.text)
+            return DataType.datetime(node.text, base.time_zone())
         if op == DT_BUSINESS_DAY_COUNT:
             if not base.is_date() or not input.field_dtype(1).is_date():
                 raise Error("business_day_count requires dates")
@@ -1671,7 +1670,7 @@ def bind(
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif node.op == STRUCT_PACK:
-            var children = struct_pack_children(node)
+            var children = node_children(node)
             var names = struct_pack_names(node)
             if len(children) == 0 or len(children) != len(names):
                 raise Error("Invalid struct expression")

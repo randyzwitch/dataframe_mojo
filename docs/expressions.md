@@ -239,7 +239,9 @@ var same_cutoff = lit(AnyValue.temporal(DataType.DATE, 19723))
 ```
 
 `dt().combine(time_expr, time_unit="us")` combines the local date of a
-Date/Datetime with a Time expression, producing a naive datetime.
+Date/Datetime with a Time expression. Datetime input retains its time zone;
+Date input produces a naive datetime. Ambiguous or nonexistent combined
+local times raise.
 `dt().replace(year=..., month=..., day=..., hour=..., minute=..., second=...,
 microsecond=..., ambiguous="raise")` changes only supplied local fields.
 Fields accept scalars or expressions; invalid dates and nonexistent local

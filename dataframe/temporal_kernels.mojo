@@ -516,7 +516,7 @@ def _packed_temporal(
         node.text
     ) if op == DT_BUILD else dtype.field_dtype(0)
     if op == DT_COMBINE:
-        target = DataType.datetime(node.text)
+        target = DataType.datetime(node.text, dtype.field_dtype(0).time_zone())
     if op == DT_BUSINESS_DAY_COUNT:
         target = DataType.INT64
     var zone = zone_of(target)

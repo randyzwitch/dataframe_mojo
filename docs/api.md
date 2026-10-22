@@ -626,7 +626,7 @@ propagate.
 - `def with_time_unit(self, time_unit: String) -> Expr`
   Retag datetime/duration ticks without rescaling them.
 - `def combine(self, time: Expr, time_unit: String = "us") -> Expr`
-  Combine a local date with a time into a naive datetime.
+  Combine a local date with a time, retaining a datetime's zone.
 - `def replace(self, year: Expr = _no_default(), month: Expr = _no_default(), day: Expr = _no_default(), hour: Expr = _no_default(), minute: Expr = _no_default(), second: Expr = _no_default(), microsecond: Expr = _no_default(), ambiguous: String = "raise") -> Expr`
   Replace selected local fields with scalars or expressions.
 - `def is_business_day(self, week_mask: List[Bool] = List(True, True, True, True, True, False, False, __list_literal__=NoneType(None)), holidays: List[String] = List()) -> Expr`
