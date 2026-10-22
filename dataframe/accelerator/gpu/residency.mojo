@@ -8,13 +8,18 @@ The MAX context is created lazily and always selects the Metal device API.
 
 from max.gpu import global_idx
 from max.gpu.host import DeviceBuffer
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from .target import METAL_TARGET
 from .query_scope import DeviceService, Scope, checked_add, checked_mul
-from .typed_storage import NativeColumn
+from .typed_storage import (
+    NativeColumn,
+    NativeColumnAny,
+    _NativeReservation,
+    allocate_native_column,
+)
 from dataframe.accelerator.code_domains import (
     TextField,
     CategoryField,
@@ -209,7 +214,7 @@ struct CategoryLease(Movable):
 struct Table(Copyable):
     var storage: Optional[ArcPointer[Matrix]]
     var identity_storage: Optional[ArcPointer[_Identity]]
-    var native_columns: List[NativeColumn[DType.float32]]
+    var native_columns: List[NativeColumnAny]
     var schema: DataFrame
     var columns: List[Int64]
     var rows: Int
@@ -242,7 +247,7 @@ struct Table(Copyable):
                 )
         self.storage = ArcPointer(matrix^)
         self.identity_storage = None
-        self.native_columns = List[NativeColumn[DType.float32]]()
+        self.native_columns = List[NativeColumnAny]()
         self.schema = schema^
         self.columns = columns^
         self.rows = rows
@@ -266,7 +271,7 @@ struct Table(Copyable):
             )
         self.storage = None
         self.identity_storage = None
-        self.native_columns = List[NativeColumn[DType.float32]]()
+        self.native_columns = List[NativeColumnAny]()
         self.schema = schema^
         self.columns = List[Int64]()
         self.rows = 0
@@ -288,28 +293,38 @@ struct Table(Copyable):
         return Self(schema^)
 
     @staticmethod
-    def native_float32(
+    def native(
         var schema: DataFrame,
-        var columns: List[NativeColumn[DType.float32]],
+        var columns: List[NativeColumnAny],
     ) raises -> Self:
         if not len(columns) or schema.width() != len(columns):
-            raise Error("Mojo GPU typed table requires matching columns")
+            raise Error("Mojo GPU native table requires matching columns")
         var rows = columns[0].length
         var scope = columns[0].scope()
         for i in range(len(columns)):
             if (
                 columns[i].length != rows
-                or columns[i].logical != DataType.FLOAT32
-                or schema._columns[i].dtype() != DataType.FLOAT32
+                or schema._columns[i].dtype() != columns[i].logical
                 or not scope.same_query(columns[i].scope())
             ):
-                raise Error("Mojo GPU typed table column mismatch")
+                raise Error("Mojo GPU native table column mismatch")
         var result = Self(schema^)
         result.rows = rows
         result.native_columns = columns^
         for i in range(len(result.native_columns)):
             result.columns.append(Int64(i))
         return result^
+
+    @staticmethod
+    def native_float32(
+        var schema: DataFrame,
+        var columns: List[NativeColumn[DType.float32]],
+    ) raises -> Self:
+        """Compatibility constructor for the original Float32 row route."""
+        var erased = List[NativeColumnAny](capacity=len(columns))
+        for column in columns:
+            erased.append(NativeColumnAny(column))
+        return Self.native(schema^, erased^)
 
     @staticmethod
     def rows_only(scope: Scope, rows: Int) raises -> Self:
@@ -363,7 +378,8 @@ struct Table(Copyable):
                 and not field.dtype.is_categorical()
             ):
                 raise Error(
-                    "Private text field must retain original String/categorical dtype"
+                    "Private text field must retain original String/categorical"
+                    " dtype"
                 )
             var index = -1
             for column in range(self.schema.width()):
@@ -414,9 +430,9 @@ struct Table(Copyable):
         for i in range(len(self.native_columns)):
             var duplicate = False
             for j in range(i):
-                duplicate |= Int(
-                    Pointer(to=self.native_columns[i]._owner[])
-                ) == Int(Pointer(to=self.native_columns[j]._owner[]))
+                duplicate |= self.native_columns[i].owner_identity() == (
+                    self.native_columns[j].owner_identity()
+                )
             if not duplicate:
                 payload += self.native_columns[i].retained_bytes()
         # Domains are already charged exactly once by their scoped Arc owner.
@@ -453,8 +469,8 @@ struct Table(Copyable):
             if len(self.native_columns) != len(other.native_columns):
                 return False
             for i in range(len(self.native_columns)):
-                if Int(Pointer(to=self.native_columns[i]._owner[])) != Int(
-                    Pointer(to=other.native_columns[i]._owner[])
+                if self.native_columns[i].owner_identity() != (
+                    other.native_columns[i].owner_identity()
                 ):
                     return False
             return True
@@ -535,6 +551,108 @@ struct Table(Copyable):
             result.categories.append(self.categories[input].copy())
             result.grouped_keys.append(self.grouped_keys[input].copy())
         return result^
+
+    def gather(
+        self,
+        scope: Scope,
+        indices: List[Int],
+        *,
+        allow_missing: Bool = False,
+    ) raises -> Self:
+        """Gather native columns with one shared uploaded row map.
+
+        This materializes each output column once. It is not a lazy selection:
+        the result owns fresh typed buffers, validity and error sidecars. The
+        shared index map and all source owners remain live until the one final
+        scope drain.
+        """
+        if (
+            not len(self.native_columns)
+            or len(self.columns) != self.schema.width()
+            or self.rows > Int(Int32.MAX)
+            or len(indices) > Int(Int32.MAX)
+        ):
+            raise Error("Mojo GPU native gather requires a fixed-width table")
+        if not self.native_columns[0].scope().same_query(scope):
+            raise Error("Mojo GPU native gather belongs to another query")
+        for row in indices:
+            if row == -1 and allow_missing:
+                continue
+            if row < 0 or row >= self.rows:
+                raise Error("Mojo GPU native gather index is outside its table")
+
+        var index_bytes = checked_mul(len(indices), size_of[Int32]())
+        var payload = checked_add(index_bytes, index_bytes)
+        for output in range(self.schema.width()):
+            var source = Int(self.columns[output])
+            if source < 0 or source >= len(self.native_columns):
+                raise Error("Mojo GPU native gather owner mapping is invalid")
+            ref column = self.native_columns[source]
+            if column.logical == DataType.BOOL:
+                raise Error("Native Bool gather is not implemented")
+            if (
+                self.text[output]
+                or self.categories[output]
+                or self.grouped_keys[output]
+            ):
+                raise Error("Mojo GPU native gather cannot carry text metadata")
+            payload = checked_add(
+                payload, column.gather_bytes(len(indices), allow_missing)
+            )
+        _ = scope.check(payload)
+
+        var host_reservation = _NativeReservation(scope, index_bytes)
+        var device_reservation = _NativeReservation(scope, index_bytes)
+        var host_indices = List[Int32](capacity=len(indices))
+        for row in indices:
+            host_indices.append(Int32(row))
+        var device_indices = Optional[DeviceBuffer[DType.int32]]()
+        if len(indices):
+            device_indices = Optional[DeviceBuffer[DType.int32]](
+                scope.context().enqueue_create_buffer[DType.int32](len(indices))
+            )
+        var outputs = List[NativeColumnAny](capacity=self.schema.width())
+        var queued = False
+        try:
+            if len(indices):
+                scope.context().enqueue_copy(
+                    device_indices.value(), host_indices.unsafe_ptr()
+                )
+                scope.record_upload(index_bytes)
+                queued = True
+                for output in range(self.schema.width()):
+                    var source = Int(self.columns[output])
+                    ref column = self.native_columns[source]
+                    var destination = _gather_native_column(
+                        scope,
+                        column,
+                        self.offset,
+                        self.rows,
+                        device_indices.value(),
+                        len(indices),
+                        allow_missing,
+                    )
+                    outputs.append(destination^)
+                scope.synchronize()
+            else:
+                for output in range(self.schema.width()):
+                    ref column = self.native_columns[Int(self.columns[output])]
+                    var destination = _empty_native_column(scope, column)
+                    outputs.append(destination^)
+        except error:
+            if queued:
+                scope.synchronize()
+            _ = outputs^
+            _ = device_indices^
+            _ = host_indices^
+            _ = device_reservation^
+            _ = host_reservation^
+            raise error^
+        _ = device_indices^
+        _ = host_indices^
+        _ = device_reservation^
+        _ = host_reservation^
+        return Self.native(self.schema.copy(), outputs^)
 
     def observe_errors(
         self,
@@ -626,7 +744,10 @@ struct Table(Copyable):
                     if errors[target]:
                         raise_value_error(
                             errors[target],
-                            "Mojo GPU resident arithmetic overflow, strict cast failed or input expression failure",
+                            (
+                                "Mojo GPU resident arithmetic overflow, strict"
+                                " cast failed or input expression failure"
+                            ),
                         )
             return HostMatrix(
                 self.schema.copy(), self.rows, words^, validity^, errors^
@@ -690,7 +811,10 @@ struct Table(Copyable):
             if error:
                 raise_value_error(
                     error,
-                    "Mojo GPU resident arithmetic overflow, strict cast failed or input expression failure",
+                    (
+                        "Mojo GPU resident arithmetic overflow, strict cast"
+                        " failed or input expression failure"
+                    ),
                 )
         return HostMatrix(
             self.schema.copy(), self.rows, words^, validity^, errors^
@@ -707,8 +831,6 @@ struct Table(Copyable):
         mapping: List[Int64],
         target_start: Int = 0,
     ) raises -> Int:
-        if len(self.native_columns):
-            raise Error("Mojo GPU native input requires a typed consumer")
         var target_cells = checked_mul(capacity, slots)
         if (
             capacity < self.rows
@@ -724,6 +846,181 @@ struct Table(Copyable):
                 raise Error("Mojo GPU resident input column mapping is invalid")
         if not self.rows or not len(mapping):
             return 0
+        if len(self.native_columns):
+            if self.schema.width() != len(self.columns):
+                raise Error("Mojo GPU native table column mapping is invalid")
+            var target_words = words.copy()
+            try:
+                # One table call shares the row selection and drains once. The
+                # table keeps every native source owner alive across all
+                # queued column conversions.
+                for output in range(len(mapping)):
+                    var source = Int(mapping[output])
+                    if source < 0 or source >= self.schema.width():
+                        raise Error(
+                            "Mojo GPU native input column mapping is invalid"
+                        )
+                    var index = Int(self.columns[source])
+                    if index < 0 or index >= len(self.native_columns):
+                        raise Error("Mojo GPU native owner mapping is invalid")
+                    ref column = self.native_columns[index]
+                    if (
+                        self.text[source]
+                        or self.categories[source]
+                        or self.grouped_keys[source]
+                    ):
+                        raise Error(
+                            "Mojo GPU native input cannot carry text metadata"
+                        )
+                    if column._storage.isa[NativeColumn[DType.bool]]():
+                        raise Error("Native Bool transport is not implemented")
+                    if column._storage.isa[NativeColumn[DType.int64]]():
+                        _copy_native_to_matrix[DType.int64](
+                            scope,
+                            column._storage[NativeColumn[DType.int64]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.float64]]():
+                        _copy_native_to_matrix[DType.float64](
+                            scope,
+                            column._storage[NativeColumn[DType.float64]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.int8]]():
+                        _copy_native_to_matrix[DType.int8](
+                            scope,
+                            column._storage[NativeColumn[DType.int8]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.int16]]():
+                        _copy_native_to_matrix[DType.int16](
+                            scope,
+                            column._storage[NativeColumn[DType.int16]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.int32]]():
+                        _copy_native_to_matrix[DType.int32](
+                            scope,
+                            column._storage[NativeColumn[DType.int32]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.uint8]]():
+                        _copy_native_to_matrix[DType.uint8](
+                            scope,
+                            column._storage[NativeColumn[DType.uint8]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.uint16]]():
+                        _copy_native_to_matrix[DType.uint16](
+                            scope,
+                            column._storage[NativeColumn[DType.uint16]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.uint32]]():
+                        _copy_native_to_matrix[DType.uint32](
+                            scope,
+                            column._storage[NativeColumn[DType.uint32]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    elif column._storage.isa[NativeColumn[DType.uint64]]():
+                        _copy_native_to_matrix[DType.uint64](
+                            scope,
+                            column._storage[NativeColumn[DType.uint64]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                    else:
+                        _copy_native_to_matrix[DType.float32](
+                            scope,
+                            column._storage[NativeColumn[DType.float32]],
+                            self.offset,
+                            self.rows,
+                            target_start + output,
+                            capacity,
+                            slots,
+                            target_cells,
+                            target_words,
+                            validity,
+                            errors,
+                        )
+                scope.synchronize()
+            except error:
+                scope.synchronize()
+                _ = target_words^
+                raise error^
+            _ = target_words^
+            return checked_mul(checked_mul(self.rows, len(mapping)), CELL_BYTES)
         if self.identity_storage:
             var owner = self.identity_storage.value().copy()
             if not owner[].scope.same_query(scope):
@@ -838,6 +1135,495 @@ struct Table(Copyable):
         # Raw copy pointers do not retain the source List across queued work.
         _ = descriptors^
         return 1
+
+
+def copy_native_column[
+    dtype: DType, nullable: Bool, has_errors: Bool
+](
+    values: Pointer[Scalar[dtype], ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    error_offset: UInt32,
+    validity_offset: UInt32,
+    rows: UInt32,
+    low: Pointer[UInt64, MutAnyOrigin],
+    high: Pointer[UInt64, MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+):
+    var row = global_idx.x
+    if row >= Int(rows):
+        return
+    var present = True
+    comptime if nullable:
+        var bit = Int(validity_offset) + row
+        present = (validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1 != 0
+    var word = UInt64(0)
+    if present:
+        comptime if dtype == DType.float64:
+            word = bitcast[DType.uint64](values[unsafe_offset=row])
+        elif dtype == DType.float32:
+            word = UInt64(bitcast[DType.uint32](values[unsafe_offset=row]))
+        else:
+            word = values[unsafe_offset=row].cast[DType.uint64]()
+    low[unsafe_offset=row] = word
+    high[unsafe_offset=row] = 0
+    output_validity[unsafe_offset=row] = UInt8(present)
+    comptime if has_errors:
+        output_errors[unsafe_offset=row] = errors[
+            unsafe_offset=Int(error_offset) + row
+        ]
+    else:
+        output_errors[unsafe_offset=row] = 0
+
+
+def gather_native_column[
+    dtype: DType
+](
+    source: Pointer[Scalar[dtype], ImmutAnyOrigin],
+    source_validity: Pointer[UInt8, ImmutAnyOrigin],
+    source_errors: Pointer[UInt32, ImmutAnyOrigin],
+    indices: Pointer[Int32, ImmutAnyOrigin],
+    source_offset: UInt32,
+    validity_offset: UInt32,
+    error_offset: UInt32,
+    source_has_validity: UInt8,
+    source_has_errors: UInt8,
+    output_has_validity: UInt8,
+    rows: UInt32,
+    output: Pointer[Scalar[dtype], MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+):
+    """Gather eight output rows per lane, packing output validity once."""
+    var byte = global_idx.x
+    var bytes = (Int(rows) + 7) // 8
+    if byte >= bytes:
+        return
+    var mask = UInt8(0)
+    for bit in range(8):
+        var row = byte * 8 + bit
+        if row >= Int(rows):
+            break
+        var selected = indices[unsafe_offset=row]
+        var present = selected >= 0
+        if present and source_has_validity != 0:
+            var source_bit = Int(validity_offset) + Int(selected)
+            present = (
+                (
+                    source_validity[unsafe_offset=source_bit // 8]
+                    >> UInt8(source_bit % 8)
+                )
+                & 1
+            ) != 0
+        if selected >= 0:
+            output[unsafe_offset=row] = source[
+                unsafe_offset=Int(source_offset) + Int(selected)
+            ] if present else Scalar[dtype](0)
+        else:
+            output[unsafe_offset=row] = Scalar[dtype](0)
+        if present:
+            mask |= UInt8(1) << UInt8(bit)
+        if source_has_errors != 0:
+            output_errors[unsafe_offset=row] = source_errors[
+                unsafe_offset=Int(error_offset) + Int(selected)
+            ] if selected >= 0 else UInt32(0)
+    if output_has_validity != 0:
+        output_validity[unsafe_offset=byte] = mask
+
+
+def _empty_native_column(
+    scope: Scope, column: NativeColumnAny
+) raises -> NativeColumnAny:
+    var result: NativeColumnAny
+    if column._storage.isa[NativeColumn[DType.int64]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.int64](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.float64]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.float64](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.bool]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.bool](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.int8]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.int8](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.int16]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.int16](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.int32]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.int32](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.uint8]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.uint8](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.uint16]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.uint16](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.uint32]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.uint32](scope, column.logical, 0)
+        )
+    elif column._storage.isa[NativeColumn[DType.uint64]]():
+        result = NativeColumnAny(
+            allocate_native_column[DType.uint64](scope, column.logical, 0)
+        )
+    else:
+        result = NativeColumnAny(
+            allocate_native_column[DType.float32](scope, column.logical, 0)
+        )
+    return result^
+
+
+def _gather_native_typed[
+    dtype: DType
+](
+    scope: Scope,
+    source: NativeColumn[dtype],
+    offset: Int,
+    source_rows: Int,
+    indices: DeviceBuffer[DType.int32],
+    rows: Int,
+    allow_missing: Bool,
+) raises -> NativeColumn[dtype]:
+    var input = source.view(offset, source_rows)
+    var output_has_validity = input.has_validity() or allow_missing
+    var output = allocate_native_column[dtype](
+        scope,
+        input.logical,
+        rows,
+        with_validity=output_has_validity,
+        with_errors=input.has_errors(),
+    )
+    if not rows:
+        return output^
+    var source_values = input.values()
+    var source_validity = indices.create_sub_buffer[DType.uint8](0, 1)
+    var source_validity_buffer = Optional[DeviceBuffer[DType.uint8]]()
+    if input.has_validity():
+        source_validity_buffer = input.validity()
+        source_validity = source_validity_buffer.value().copy()
+    var source_errors = indices.create_sub_buffer[DType.uint32](0, 1)
+    var source_errors_buffer = Optional[DeviceBuffer[DType.uint32]]()
+    if input.has_errors():
+        source_errors_buffer = input.errors()
+        source_errors = source_errors_buffer.value().copy()
+    var output_values = output.values()
+    var output_validity = indices.create_sub_buffer[DType.uint8](0, 1)
+    var output_validity_buffer = output.validity()
+    if output_validity_buffer:
+        output_validity = output_validity_buffer.value().copy()
+    var output_errors = indices.create_sub_buffer[DType.uint32](0, 1)
+    var output_errors_buffer = output.errors()
+    if output_errors_buffer:
+        output_errors = output_errors_buffer.value().copy()
+    var ctx = scope.context()
+    try:
+        # Float64 payloads move as bits; Metal cannot load native doubles.
+        comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+        ctx.enqueue_function[gather_native_column[transport_dtype]](
+            source_values.create_sub_buffer[transport_dtype](
+                0, len(source_values)
+            ),
+            source_validity,
+            source_errors,
+            indices,
+            UInt32(input.value_offset),
+            UInt32(input.validity_bit_offset),
+            UInt32(input.value_offset),
+            UInt8(input.has_validity()),
+            UInt8(input.has_errors()),
+            UInt8(Bool(output_validity_buffer)),
+            UInt32(rows),
+            output_values.create_sub_buffer[transport_dtype](
+                0, len(output_values)
+            ),
+            output_validity,
+            output_errors,
+            grid_dim=((rows + 7) // 8 + 127) // 128,
+            block_dim=128,
+        )
+        scope.record_launches()
+    except error:
+        # The destination and all sub-buffer handles are local to this helper.
+        # Drain while they and the source/index owners still exist; only then
+        # unwind to Table.gather's aggregate cleanup path.
+        scope.synchronize()
+        _ = output^
+        _ = input^
+        raise error^
+    return output^
+
+
+def _gather_native_column(
+    scope: Scope,
+    column: NativeColumnAny,
+    offset: Int,
+    source_rows: Int,
+    indices: DeviceBuffer[DType.int32],
+    rows: Int,
+    allow_missing: Bool,
+) raises -> NativeColumnAny:
+    if column._storage.isa[NativeColumn[DType.int64]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.int64](
+                scope,
+                column._storage[NativeColumn[DType.int64]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.float64]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.float64](
+                scope,
+                column._storage[NativeColumn[DType.float64]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.int8]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.int8](
+                scope,
+                column._storage[NativeColumn[DType.int8]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.int16]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.int16](
+                scope,
+                column._storage[NativeColumn[DType.int16]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.int32]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.int32](
+                scope,
+                column._storage[NativeColumn[DType.int32]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.uint8]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.uint8](
+                scope,
+                column._storage[NativeColumn[DType.uint8]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.uint16]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.uint16](
+                scope,
+                column._storage[NativeColumn[DType.uint16]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.uint32]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.uint32](
+                scope,
+                column._storage[NativeColumn[DType.uint32]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    if column._storage.isa[NativeColumn[DType.uint64]]():
+        return NativeColumnAny(
+            _gather_native_typed[DType.uint64](
+                scope,
+                column._storage[NativeColumn[DType.uint64]],
+                offset,
+                source_rows,
+                indices,
+                rows,
+                allow_missing,
+            )
+            ^
+        )
+    return NativeColumnAny(
+        _gather_native_typed[DType.float32](
+            scope,
+            column._storage[NativeColumn[DType.float32]],
+            offset,
+            source_rows,
+            indices,
+            rows,
+            allow_missing,
+        )
+        ^
+    )
+
+
+def _copy_native_to_matrix[
+    dtype: DType
+](
+    scope: Scope,
+    column: NativeColumn[dtype],
+    offset: Int,
+    rows: Int,
+    output_column: Int,
+    capacity: Int,
+    slots: Int,
+    target_cells: Int,
+    target_words: DeviceBuffer[DType.uint64],
+    target_validity: DeviceBuffer[DType.uint8],
+    target_errors: DeviceBuffer[DType.uint32],
+) raises:
+    var native = column.view(offset, rows)
+    if not native.scope().same_query(scope):
+        raise Error("Mojo GPU native input belongs to another query context")
+    var values = native.values()
+    var source_values = values.create_sub_buffer[dtype](
+        native.value_offset, rows
+    )
+    var source_validity = values.create_sub_buffer[DType.uint8](0, 1)
+    var validity = Optional[DeviceBuffer[DType.uint8]]()
+    if native.has_validity():
+        validity = native.validity()
+        source_validity = validity.value().copy()
+    var source_errors = target_errors
+    var errors = Optional[DeviceBuffer[DType.uint32]]()
+    if native.has_errors():
+        errors = native.errors()
+        source_errors = errors.value().copy()
+    var target = checked_mul(output_column, capacity)
+    var high_target = checked_add(target_cells, target)
+    var low = target_words.create_sub_buffer[DType.uint64](target, rows)
+    var high = target_words.create_sub_buffer[DType.uint64](high_target, rows)
+    var valid_out = target_validity.create_sub_buffer[DType.uint8](target, rows)
+    var error_out = target_errors.create_sub_buffer[DType.uint32](target, rows)
+    comptime transport_dtype = DType.uint64 if dtype == DType.float64 else dtype
+    var transport_values = source_values.create_sub_buffer[transport_dtype](
+        0, len(source_values)
+    )
+    var ctx = scope.context()
+    try:
+        if native.has_validity():
+            if native.has_errors():
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, True]
+                ](
+                    transport_values,
+                    source_validity,
+                    source_errors,
+                    UInt32(native.value_offset),
+                    UInt32(native.validity_bit_offset),
+                    UInt32(rows),
+                    low,
+                    high,
+                    valid_out,
+                    error_out,
+                    grid_dim=(rows + 255) // 256,
+                    block_dim=256,
+                )
+            else:
+                ctx.enqueue_function[
+                    copy_native_column[transport_dtype, True, False]
+                ](
+                    transport_values,
+                    source_validity,
+                    source_errors,
+                    UInt32(native.value_offset),
+                    UInt32(native.validity_bit_offset),
+                    UInt32(rows),
+                    low,
+                    high,
+                    valid_out,
+                    error_out,
+                    grid_dim=(rows + 255) // 256,
+                    block_dim=256,
+                )
+        elif native.has_errors():
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, True]
+            ](
+                transport_values,
+                source_validity,
+                source_errors,
+                UInt32(native.value_offset),
+                UInt32(0),
+                UInt32(rows),
+                low,
+                high,
+                valid_out,
+                error_out,
+                grid_dim=(rows + 255) // 256,
+                block_dim=256,
+            )
+        else:
+            ctx.enqueue_function[
+                copy_native_column[transport_dtype, False, False]
+            ](
+                transport_values,
+                source_validity,
+                source_errors,
+                UInt32(native.value_offset),
+                UInt32(0),
+                UInt32(rows),
+                low,
+                high,
+                valid_out,
+                error_out,
+                grid_dim=(rows + 255) // 256,
+                block_dim=256,
+            )
+        scope.record_launches()
+    except error:
+        # Keep the source owner, destination and all local sub-buffer handles
+        # alive until partially submitted work has drained.
+        scope.synchronize()
+        raise error^
+    # The caller drains once after all source columns have been enqueued.
+    # `column` and its underlying owner stay alive in the Table until then.
 
 
 def copy_columns(

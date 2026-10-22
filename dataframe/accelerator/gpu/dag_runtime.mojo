@@ -33,6 +33,7 @@ from dataframe.accelerator.joins import (
     lower_join_dag,
 )
 from . import runtime as rows
+from . import typed_rows
 from . import qcut_runtime as qcuts
 from dataframe.accelerator.qcuts import is_qcut_marker
 from dataframe.accelerator.partition_cuts import (
@@ -119,7 +120,8 @@ def preflight(
             if task.source >= 0:
                 if plan.ordered_mode == 2:
                     raise Error(
-                        "Metal unsupported [ordered rows]: resident producer provenance is not proved"
+                        "Metal unsupported [ordered rows]: resident producer"
+                        " provenance is not proved"
                     )
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
@@ -129,11 +131,56 @@ def preflight(
                         and not capabilities.adjudicated_faults
                     ):
                         raise Error(
-                            "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
+                            "Metal unsupported [temporal]: prototype requires a"
+                            " direct scan before DAG submission"
                         )
         else:
             raise Error("Mojo GPU unexpected execution DAG task")
     return dag^
+
+
+def _native_float32_join_inputs(dag: JoinDag) raises -> List[Bool]:
+    """Plan the narrow typed-row representation before any device setup.
+
+    Only an original one-column Float32 row region with exactly one JOIN
+    consumer may use native storage. The JOIN's `Table.copy_to` boundary has
+    an explicit device-side conversion into its preallocated generic matrix.
+    Every other producer remains in the established MATRIX representation.
+    """
+    var uses = List[Int](length=len(dag.tasks), fill=0)
+    var consumer = List[Int](length=len(dag.tasks), fill=-1)
+    for index in range(len(dag.tasks)):
+        ref task = dag.tasks[index]
+        if task.source >= 0:
+            uses[task.source] += 1
+            consumer[task.source] = index
+        if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
+            uses[task.right] += 1
+            consumer[task.right] = index
+    var native = List[Bool](length=len(dag.tasks), fill=False)
+    for index in range(len(dag.tasks)):
+        ref task = dag.tasks[index]
+        if (
+            task.kind != DAG_ROWS
+            or task.source >= 0
+            or len(task.query._nodes) <= 1
+            or uses[index] != 1
+            or consumer[index] < 0
+            or dag.tasks[consumer[index]].kind != DAG_JOIN
+            or task.schema.width() != 1
+            or task.schema._columns[0].dtype() != DataType.FLOAT32
+        ):
+            continue
+        var plan = rows._preflight(task.query, terminal_boundary=task.terminal)
+        if (
+            len(plan.steps) > 0
+            and plan.limit < 0
+            and plan.source.width() == 1
+            and plan.source._columns[0].dtype() == DataType.FLOAT32
+            and typed_rows.supports(plan)
+        ):
+            native[index] = True
+    return native^
 
 
 def _frame(
@@ -263,6 +310,9 @@ def execute(
         ordered_source=ordered_source,
         eager_feed=eager_feed,
     )
+    # Representation is selected from the complete task/use graph and exact
+    # row certificate before creating the query Scope or a device context.
+    var native_outputs = _native_float32_join_inputs(dag)
     var preflight_ns = Int(perf_counter_ns()) - started if profiling else 0
     var scope = Scope(
         device_id,
@@ -661,14 +711,21 @@ def execute(
                         scope,
                         resident_input=resident,
                         profiling=profiling,
-                        native_output=task.terminal
-                        and index == dag.root
-                        and not observation_only,
+                        native_output=(
+                            (
+                                task.terminal
+                                and index == dag.root
+                                and not observation_only
+                            )
+                            or native_outputs[index]
+                        ),
                         terminal_boundary=task.terminal,
                         export_values=not (
                             observation_only and index == dag.root
                         ),
-                        text_domain=target_domain,
+                        text_domain=None if native_outputs[
+                            index
+                        ] else target_domain,
                     )
             if target_domain and (
                 task.kind == DAG_JOIN or task.kind == DAG_ASOF
@@ -687,6 +744,8 @@ def execute(
                     executed[0].observe_errors()
                 raise Error(cut_failure)
             var region = executed[1].copy()
+            if "native_input_conversion_bytes" not in region.columns():
+                region = _int_column(region, "native_input_conversion_bytes", 0)
             var owned = executed[0].retained_bytes()
             var host_result_bytes = 0
             if index == dag.root:
@@ -942,12 +1001,19 @@ def describe(
             ordered_source=ordered_source,
             eager_feed=eager_feed,
         )
+        var native_outputs = _native_float32_join_inputs(dag)
+        var native_count = 0
+        for selected in native_outputs:
+            native_count += Int(selected)
         return (
             "ENGINE accel: Mojo GPU joins and row regions; "
             + String(dag.joins)
             + " joins, "
             + String(len(dag.tasks))
-            + " regions; immutable Mojo GPU resident tables; final CPU export\n"
+            + " regions; "
+            + String(native_count)
+            + " certified native Float32 JOIN input(s); immutable Mojo GPU"
+            " resident tables; final CPU export\n"
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"

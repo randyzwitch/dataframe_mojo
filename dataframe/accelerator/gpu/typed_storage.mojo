@@ -6,8 +6,9 @@ UInt32 code per retained row. This module depends only on query_scope, so it
 can be used by kernels and materializers without a residency cycle.
 """
 from max.gpu.host import DeviceBuffer
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from std.sys import size_of
+from std.utils import Variant
 from dataframe import Column, DataType, Series
 from dataframe.column import _append_bits, _copy_bits
 from dataframe.accelerator.faults import data_fault
@@ -104,6 +105,13 @@ struct _NativeColumnOwner[dtype: DType](Movable):
         _ = self.reservation^
 
 
+def _native_logical_dtype_matches[dtype: DType](logical: DataType) -> Bool:
+    comptime if dtype == DType.bool:
+        return logical == DataType.BOOL
+    else:
+        return logical.physical() == DataType.of(dtype)
+
+
 struct NativeColumn[dtype: DType](Copyable):
     """Immutable row view over an Arc-owned typed device allocation."""
 
@@ -125,7 +133,7 @@ struct NativeColumn[dtype: DType](Copyable):
         validity_bit_offset: Int = 0,
         var reservation: Optional[_NativeReservation] = None,
     ) raises:
-        if logical.physical() != DataType.of(Self.dtype):
+        if not _native_logical_dtype_matches[Self.dtype](logical):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
@@ -166,7 +174,7 @@ struct NativeColumn[dtype: DType](Copyable):
         self.validity_bit_offset = validity_bit_offset
 
     def __init__(out self, scope: Scope, logical: DataType, length: Int) raises:
-        if logical.physical() != DataType.of(Self.dtype):
+        if not _native_logical_dtype_matches[Self.dtype](logical):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
@@ -188,7 +196,7 @@ struct NativeColumn[dtype: DType](Copyable):
         value_offset: Int,
         validity_bit_offset: Int,
     ) raises:
-        if logical.physical() != DataType.of(Self.dtype):
+        if not _native_logical_dtype_matches[Self.dtype](logical):
             raise Error(
                 "Mojo GPU typed column logical and physical dtypes differ"
             )
@@ -295,6 +303,396 @@ struct NativeColumn[dtype: DType](Copyable):
         return self._owner[].retained
 
 
+# A table cannot put `NativeColumn[dtype]` in one List for a runtime dtype.
+# Keep each allocation in the existing generic owner and erase only the
+# compile-time dtype at the resident-table boundary. This mirrors Series.Storage:
+# one active Variant arm owns one column; the inactive arms own nothing.
+comptime NativeStorage = Variant[
+    NativeColumn[DType.int64],
+    NativeColumn[DType.float64],
+    NativeColumn[DType.bool],
+    NativeColumn[DType.int8],
+    NativeColumn[DType.int16],
+    NativeColumn[DType.int32],
+    NativeColumn[DType.uint8],
+    NativeColumn[DType.uint16],
+    NativeColumn[DType.uint32],
+    NativeColumn[DType.uint64],
+    NativeColumn[DType.float32],
+]
+
+
+struct NativeColumnAny(Copyable):
+    """Runtime-tagged view that retains one typed native allocation."""
+
+    var _storage: NativeStorage
+    var logical: DataType
+    var length: Int
+    var value_offset: Int
+    var validity_bit_offset: Int
+
+    def __init__[dtype: DType](out self, column: NativeColumn[dtype]) raises:
+        var logical = column.logical
+        if (
+            logical.is_decimal()
+            or logical.is_categorical()
+            or logical.is_nested()
+            or not (
+                logical.is_numeric()
+                or logical == DataType.BOOL
+                or logical.is_temporal()
+            )
+            or not _native_logical_dtype_matches[dtype](logical)
+        ):
+            raise Error(
+                "Native table column logical or physical dtype is unsupported"
+            )
+        self._storage = NativeStorage(column.copy())
+        self.logical = logical
+        self.length = column.length
+        self.value_offset = column.value_offset
+        self.validity_bit_offset = column.validity_bit_offset
+
+    def view(self, offset: Int, length: Int) raises -> Self:
+        if offset < 0 or length < 0 or offset > self.length:
+            raise Error("Mojo GPU typed column slice is invalid")
+        if length > self.length - offset:
+            raise Error("Mojo GPU typed column slice is outside its view")
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return Self(
+                self._storage[NativeColumn[DType.int64]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return Self(
+                self._storage[NativeColumn[DType.float64]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return Self(
+                self._storage[NativeColumn[DType.bool]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return Self(
+                self._storage[NativeColumn[DType.int8]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return Self(
+                self._storage[NativeColumn[DType.int16]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return Self(
+                self._storage[NativeColumn[DType.int32]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return Self(
+                self._storage[NativeColumn[DType.uint8]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return Self(
+                self._storage[NativeColumn[DType.uint16]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return Self(
+                self._storage[NativeColumn[DType.uint32]].view(offset, length)
+            )
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return Self(
+                self._storage[NativeColumn[DType.uint64]].view(offset, length)
+            )
+        return Self(
+            self._storage[NativeColumn[DType.float32]].view(offset, length)
+        )
+
+    def scope(self) -> Scope:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return self._storage[NativeColumn[DType.int64]].scope()
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return self._storage[NativeColumn[DType.float64]].scope()
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return self._storage[NativeColumn[DType.bool]].scope()
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return self._storage[NativeColumn[DType.int8]].scope()
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return self._storage[NativeColumn[DType.int16]].scope()
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return self._storage[NativeColumn[DType.int32]].scope()
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return self._storage[NativeColumn[DType.uint8]].scope()
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return self._storage[NativeColumn[DType.uint16]].scope()
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return self._storage[NativeColumn[DType.uint32]].scope()
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return self._storage[NativeColumn[DType.uint64]].scope()
+        return self._storage[NativeColumn[DType.float32]].scope()
+
+    def has_validity(self) -> Bool:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return self._storage[NativeColumn[DType.int64]].has_validity()
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return self._storage[NativeColumn[DType.float64]].has_validity()
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return self._storage[NativeColumn[DType.bool]].has_validity()
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return self._storage[NativeColumn[DType.int8]].has_validity()
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return self._storage[NativeColumn[DType.int16]].has_validity()
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return self._storage[NativeColumn[DType.int32]].has_validity()
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return self._storage[NativeColumn[DType.uint8]].has_validity()
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return self._storage[NativeColumn[DType.uint16]].has_validity()
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return self._storage[NativeColumn[DType.uint32]].has_validity()
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return self._storage[NativeColumn[DType.uint64]].has_validity()
+        return self._storage[NativeColumn[DType.float32]].has_validity()
+
+    def has_errors(self) -> Bool:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return self._storage[NativeColumn[DType.int64]].has_errors()
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return self._storage[NativeColumn[DType.float64]].has_errors()
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return self._storage[NativeColumn[DType.bool]].has_errors()
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return self._storage[NativeColumn[DType.int8]].has_errors()
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return self._storage[NativeColumn[DType.int16]].has_errors()
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return self._storage[NativeColumn[DType.int32]].has_errors()
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return self._storage[NativeColumn[DType.uint8]].has_errors()
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return self._storage[NativeColumn[DType.uint16]].has_errors()
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return self._storage[NativeColumn[DType.uint32]].has_errors()
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return self._storage[NativeColumn[DType.uint64]].has_errors()
+        return self._storage[NativeColumn[DType.float32]].has_errors()
+
+    def read_error_codes(self) raises -> List[UInt32]:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return self._storage[NativeColumn[DType.int64]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return self._storage[NativeColumn[DType.float64]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return self._storage[NativeColumn[DType.bool]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return self._storage[NativeColumn[DType.int8]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return self._storage[NativeColumn[DType.int16]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return self._storage[NativeColumn[DType.int32]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return self._storage[NativeColumn[DType.uint8]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return self._storage[NativeColumn[DType.uint16]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return self._storage[NativeColumn[DType.uint32]].read_error_codes()
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return self._storage[NativeColumn[DType.uint64]].read_error_codes()
+        return self._storage[NativeColumn[DType.float32]].read_error_codes()
+
+    def retained_bytes(self) -> Int:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return self._storage[NativeColumn[DType.int64]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return self._storage[NativeColumn[DType.float64]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return self._storage[NativeColumn[DType.bool]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return self._storage[NativeColumn[DType.int8]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return self._storage[NativeColumn[DType.int16]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return self._storage[NativeColumn[DType.int32]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return self._storage[NativeColumn[DType.uint8]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return self._storage[NativeColumn[DType.uint16]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return self._storage[NativeColumn[DType.uint32]].retained_bytes()
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return self._storage[NativeColumn[DType.uint64]].retained_bytes()
+        return self._storage[NativeColumn[DType.float32]].retained_bytes()
+
+    def readback_bytes(self) raises -> Int:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return _native_readback_bytes[DType.int64](
+                self._storage[NativeColumn[DType.int64]]
+            )
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return _native_readback_bytes[DType.float64](
+                self._storage[NativeColumn[DType.float64]]
+            )
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return _native_readback_bytes[DType.bool](
+                self._storage[NativeColumn[DType.bool]]
+            )
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return _native_readback_bytes[DType.int8](
+                self._storage[NativeColumn[DType.int8]]
+            )
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return _native_readback_bytes[DType.int16](
+                self._storage[NativeColumn[DType.int16]]
+            )
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return _native_readback_bytes[DType.int32](
+                self._storage[NativeColumn[DType.int32]]
+            )
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return _native_readback_bytes[DType.uint8](
+                self._storage[NativeColumn[DType.uint8]]
+            )
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return _native_readback_bytes[DType.uint16](
+                self._storage[NativeColumn[DType.uint16]]
+            )
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return _native_readback_bytes[DType.uint32](
+                self._storage[NativeColumn[DType.uint32]]
+            )
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return _native_readback_bytes[DType.uint64](
+                self._storage[NativeColumn[DType.uint64]]
+            )
+        return _native_readback_bytes[DType.float32](
+            self._storage[NativeColumn[DType.float32]]
+        )
+
+    def gather_bytes(self, rows: Int, allow_missing: Bool) raises -> Int:
+        var nullable = self.has_validity() or allow_missing
+        var error_rows = rows if self.has_errors() else 0
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return _native_gather_bytes[DType.int64](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return _native_gather_bytes[DType.float64](
+                rows, nullable, error_rows
+            )
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return _native_gather_bytes[DType.bool](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return _native_gather_bytes[DType.int8](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return _native_gather_bytes[DType.int16](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return _native_gather_bytes[DType.int32](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return _native_gather_bytes[DType.uint8](rows, nullable, error_rows)
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return _native_gather_bytes[DType.uint16](
+                rows, nullable, error_rows
+            )
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return _native_gather_bytes[DType.uint32](
+                rows, nullable, error_rows
+            )
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return _native_gather_bytes[DType.uint64](
+                rows, nullable, error_rows
+            )
+        return _native_gather_bytes[DType.float32](rows, nullable, error_rows)
+
+    def owner_identity(self) -> Int:
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int64]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.float64]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.float64]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.bool]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.bool]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.int8]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int8]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.int16]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int16]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.int32]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.int32]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.uint8]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint8]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.uint16]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint16]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.uint32]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint32]]._owner[])
+            )
+        if self._storage.isa[NativeColumn[DType.uint64]]():
+            return Int(
+                Pointer(to=self._storage[NativeColumn[DType.uint64]]._owner[])
+            )
+        return Int(
+            Pointer(to=self._storage[NativeColumn[DType.float32]]._owner[])
+        )
+
+    def readback_series(self, field: Series) raises -> Series:
+        """Materialize this typed view with the schema's logical metadata."""
+        if field.dtype() != self.logical:
+            raise Error("Native readback schema dtype differs from its owner")
+        # Bool values are bit-packed on the host. Until the bitmap-to-native
+        # upload and native-to-bitmap readback kernels are present, refuse the
+        # transport explicitly instead of expanding or repacking row by row.
+        if self.logical == DataType.BOOL:
+            raise Error("Native Bool transport is not implemented")
+        var result: Series
+        if self._storage.isa[NativeColumn[DType.int64]]():
+            result = _readback_series[DType.int64](
+                field, self._storage[NativeColumn[DType.int64]]
+            )
+        elif self._storage.isa[NativeColumn[DType.float64]]():
+            result = _readback_series[DType.float64](
+                field, self._storage[NativeColumn[DType.float64]]
+            )
+        elif self._storage.isa[NativeColumn[DType.int8]]():
+            result = _readback_series[DType.int8](
+                field, self._storage[NativeColumn[DType.int8]]
+            )
+        elif self._storage.isa[NativeColumn[DType.int16]]():
+            result = _readback_series[DType.int16](
+                field, self._storage[NativeColumn[DType.int16]]
+            )
+        elif self._storage.isa[NativeColumn[DType.int32]]():
+            result = _readback_series[DType.int32](
+                field, self._storage[NativeColumn[DType.int32]]
+            )
+        elif self._storage.isa[NativeColumn[DType.uint8]]():
+            result = _readback_series[DType.uint8](
+                field, self._storage[NativeColumn[DType.uint8]]
+            )
+        elif self._storage.isa[NativeColumn[DType.uint16]]():
+            result = _readback_series[DType.uint16](
+                field, self._storage[NativeColumn[DType.uint16]]
+            )
+        elif self._storage.isa[NativeColumn[DType.uint32]]():
+            result = _readback_series[DType.uint32](
+                field, self._storage[NativeColumn[DType.uint32]]
+            )
+        elif self._storage.isa[NativeColumn[DType.uint64]]():
+            result = _readback_series[DType.uint64](
+                field, self._storage[NativeColumn[DType.uint64]]
+            )
+        else:
+            result = _readback_series[DType.float32](
+                field, self._storage[NativeColumn[DType.float32]]
+            )
+        return result^
+
+
 def allocate_native_column[
     dtype: DType
 ](
@@ -347,14 +745,37 @@ def allocate_native_column[
 def upload_native[
     dtype: DType
 ](scope: Scope, series: Series) raises -> NativeColumn[dtype]:
+    """Upload supported primitive storage without instantiating packed Bool access."""
+    comptime if dtype == DType.bool:
+        raise Error("Native Bool upload is not implemented")
+    else:
+        return _upload_native_unpacked[dtype](scope, series)
+
+
+def _upload_native_unpacked[
+    dtype: DType
+](scope: Scope, series: Series) raises -> NativeColumn[dtype]:
     """Bulk-upload a native-width primitive Series, preserving slices and packed validity.
 
     Values always move at their physical width. A single nullable chunk retains the
     source bitmap's bit offset; multiple chunks repack only their bitmap to
     concatenate row ranges. Source chunks remain alive through synchronization.
     """
-    if series.dtype() != DataType.of(dtype):
-        raise Error("Native upload requires the exact logical dtype")
+    var logical = series.dtype()
+    if (
+        logical.is_decimal()
+        or logical.is_categorical()
+        or logical.is_nested()
+        or not (
+            logical.is_numeric()
+            or logical == DataType.BOOL
+            or logical.is_temporal()
+        )
+        or not _native_logical_dtype_matches[dtype](logical)
+    ):
+        raise Error("Native upload requires a supported fixed-width dtype")
+    if logical == DataType.BOOL:
+        raise Error("Native Bool upload is not implemented")
     var chunks = series.chunks()
     var rows = 0
     var has_validity = False
@@ -369,7 +790,7 @@ def upload_native[
         raise Error("Native upload chunk lengths differ from Series")
 
     if rows == 0:
-        return NativeColumn[dtype](scope, DataType.of(dtype), 0)
+        return NativeColumn[dtype](scope, logical, 0)
 
     var source_bit_offset = 0
     var validity_bytes = 0
@@ -465,7 +886,7 @@ def upload_native[
 
     return NativeColumn[dtype](
         scope,
-        DataType.of(dtype),
+        logical,
         rows,
         values^,
         validity^,
@@ -485,7 +906,48 @@ def upload_float32(
 def readback_float32(
     column: NativeColumn[DType.float32],
 ) raises -> Column[Float32]:
-    """Bulk-read a Float32 view and adopt values plus packed validity bits."""
+    """Compatibility helper for callers with a statically Float32 column."""
+    return readback_native[DType.float32](column)
+
+
+def _native_readback_bytes[
+    dtype: DType
+](column: NativeColumn[dtype]) raises -> Int:
+    var bytes = checked_mul(column.length, size_of[Scalar[dtype]]())
+    var validity = column.validity()
+    if validity:
+        bytes = checked_add(bytes, len(validity.value()))
+        var packed_bytes = checked_add(column.length, 7) // 8
+        if (
+            column.validity_bit_offset != 0
+            or len(validity.value()) != packed_bytes
+        ):
+            bytes = checked_add(bytes, packed_bytes)
+    var errors = column.errors()
+    if errors:
+        bytes = checked_add(
+            bytes, checked_mul(len(errors.value()), size_of[UInt32]())
+        )
+        bytes = checked_add(
+            bytes, checked_mul(column.length, size_of[UInt32]())
+        )
+    return bytes
+
+
+def _native_gather_bytes[
+    dtype: DType
+](rows: Int, nullable: Bool, error_rows: Int) raises -> Int:
+    return native_column_bytes[dtype](
+        rows,
+        checked_add(rows, 7) // 8 if nullable else 0,
+        error_rows,
+    )
+
+
+def readback_native[
+    dtype: DType
+](column: NativeColumn[dtype]) raises -> Column[Scalar[dtype]]:
+    """Bulk-read a native view and adopt values plus a compact validity bitmap."""
     var scope = column.scope()
     var validity = column.validity()
     var errors = column.errors()
@@ -495,30 +957,16 @@ def readback_float32(
         column.validity_bit_offset != 0
         or raw_validity_bytes != packed_validity_bytes
     )
-    var host_bytes = checked_mul(column.length, size_of[Float32]())
-    if validity:
-        host_bytes = checked_add(host_bytes, raw_validity_bytes)
-        if needs_repacked_validity:
-            host_bytes = checked_add(host_bytes, packed_validity_bytes)
-    if errors:
-        host_bytes = checked_add(
-            host_bytes,
-            checked_mul(len(errors.value()), size_of[UInt32]()),
-        )
-        host_bytes = checked_add(
-            host_bytes, checked_mul(column.length, size_of[UInt32]())
-        )
+    var host_bytes = _native_readback_bytes[dtype](column)
     # Includes all host readback/repack temporaries before any of them exist.
     _ = scope.check(host_bytes)
 
     var error_codes = column.read_error_codes()
     for code in error_codes:
         if code:
-            raise data_fault(
-                "Mojo GPU typed Float32 result reported a deferred error"
-            )
+            raise data_fault("Mojo GPU typed result reported a deferred error")
 
-    var values = List[Float32](length=column.length, fill=0)
+    var values = List[Scalar[dtype]](length=column.length, fill=0)
     var validity_bytes = List[UInt8]()
     if validity:
         validity_bytes = List[UInt8](length=raw_validity_bytes, fill=0)
@@ -528,12 +976,13 @@ def readback_float32(
         try:
             if column.length:
                 var device_values = column.values()
-                var source = device_values.create_sub_buffer[DType.float32](
+                var source = device_values.create_sub_buffer[dtype](
                     column.value_offset, column.length
                 )
                 ctx.enqueue_copy(values.unsafe_ptr(), source)
                 transferred = checked_add(
-                    transferred, checked_mul(column.length, size_of[Float32]())
+                    transferred,
+                    checked_mul(column.length, size_of[Scalar[dtype]]()),
                 )
             if len(validity_bytes):
                 ctx.enqueue_copy(validity_bytes.unsafe_ptr(), validity.value())
@@ -548,9 +997,19 @@ def readback_float32(
             raise error^
     if not validity:
         _ = error_codes^
-        return Column[Float32](values^)
+        return Column[Scalar[dtype]](values^)
     var bits = validity_bytes^
     if needs_repacked_validity:
         bits = _copy_bits(bits, column.validity_bit_offset, column.length)
     _ = error_codes^
-    return Column[Float32](values=values^, bits=bits^)
+    return Column[Scalar[dtype]](values=values^, bits=bits^)
+
+
+def _readback_series[
+    dtype: DType
+](field: Series, column: NativeColumn[dtype]) raises -> Series:
+    var result = Series(field.name(), readback_native[dtype](column))
+    if result.dtype() != field.dtype():
+        result = result.with_dtype(field.dtype())
+    result._field_metadata = field._field_metadata.copy()
+    return result^

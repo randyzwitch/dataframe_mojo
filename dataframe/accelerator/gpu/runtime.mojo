@@ -1349,44 +1349,31 @@ def materialize(table: Table) raises -> DataFrame:
     return _materialize_host(table, host)
 
 
-def _readback_native(table: Table) raises -> List[Column[Float32]]:
-    from .typed_storage import readback_float32
-
+def _readback_native(table: Table) raises -> List[Series]:
     var additional = 0
-    for slot in table.columns:
-        ref column = table.native_columns[Int(slot)]
-        additional = _checked_add(additional, _checked_mul(table.rows, 4))
-        var validity = column.validity()
-        if validity:
-            additional = _checked_add(additional, len(validity.value()))
-            additional = _checked_add(
-                additional, _checked_add(table.rows, 7) // 8
-            )
-        var errors = column.errors()
-        if errors:
-            additional = _checked_add(
-                additional, _checked_mul(len(errors.value()), 4)
-            )
+    for output in range(table.schema.width()):
+        var column = table.native_columns[Int(table.columns[output])].view(
+            table.offset, table.rows
+        )
+        additional = _checked_add(additional, column.readback_bytes())
     _ = table.native_columns[0].scope().check(additional)
-    var columns = List[Column[Float32]](capacity=table.schema.width())
-    for slot in table.columns:
+    var columns = List[Series](capacity=table.schema.width())
+    for output in range(table.schema.width()):
+        var index = Int(table.columns[output])
         columns.append(
-            readback_float32(
-                table.native_columns[Int(slot)].view(table.offset, table.rows)
-            )
+            table.native_columns[index]
+            .view(table.offset, table.rows)
+            .readback_series(table.schema._columns[output])
         )
     return columns^
 
 
 def _materialize_native_host(
-    table: Table, var host: List[Column[Float32]]
+    table: Table, var host: List[Series]
 ) raises -> DataFrame:
     var columns = List[Series](capacity=table.schema.width())
-    for i in range(table.schema.width()):
-        ref field = table.schema._columns[i]
-        var output = Series(field.name(), host[i].copy())
-        output._field_metadata = field._field_metadata
-        columns.append(output^)
+    for output in host:
+        columns.append(output.copy())
     return DataFrame(columns^, height=table.rows)
 
 
@@ -1699,13 +1686,12 @@ def execute_plan(
     """
     if plan.source_failure:
         raise Error(plan.source_failure)
-    # Native owners are currently published only at terminal row boundaries.
-    # Other region families retain their existing representation explicitly.
+    # Native output is selected by the DAG's preflighted representation plan,
+    # or by the existing direct terminal route. Other families retain MATRIX.
     from . import typed_rows, typed_runtime
 
     if (
         native_output
-        and terminal_boundary
         and export_values
         and not resident_input
         and not text_domain
