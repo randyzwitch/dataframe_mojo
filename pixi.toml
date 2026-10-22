@@ -40,19 +40,19 @@ name = "dataframe"
 path = "dataframe"
 
 [package.host-dependencies]
-mojo = ">=1.2.0.dev2026102105,<1.3"
-max-core = "==26.7.0.dev2026102105"
+mojo = ">=1.2.0,<1.3"
+max-core = "==26.7.0"
 
 [package.run-dependencies]
-mojo = ">=1.2.0.dev2026102105,<1.3"
-max-core = "==26.7.0.dev2026102105"
+mojo = ">=1.2.0,<1.3"
+max-core = "==26.7.0"
 
 [dependencies]
 # What CI runs, matching the package's host and run dependencies above.
-mojo = ">=1.2.0.dev2026102105,<1.3"
+mojo = ">=1.2.0,<1.3"
 # Mojo's GPU APIs live in max-core. Package/doc compilation resolves these
 # imports even for CPU execution, so every environment needs the matching SDK.
-max-core = "==26.7.0.dev2026102105"
+max-core = "==26.7.0"
 
 [tasks]
 test = "bash tests/run_tests.sh"
