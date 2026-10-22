@@ -363,7 +363,7 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
                     measured[1].item(row, "download_bytes").int64(),
                     Int64(0),
                 )
-            if algorithm == "mojo_gpu_sorted_join":
+            if algorithm == "mojo_gpu_native_hash_join":
                 bridge_bytes = Int(
                     measured[1]
                     .item(row, "native_input_conversion_bytes")
@@ -373,7 +373,7 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
         assert_true(native_rows >= 0)
         assert_equal(native_bytes, native_rows * 4 + (native_rows + 7) // 8)
         assert_true(join_seen)
-        assert_equal(bridge_bytes, native_rows * 21)
+        assert_equal(bridge_bytes, 0)
         assert_true(measured[0].equals(query.collect(engine="cpu")))
 
         var peak = Int(
@@ -390,9 +390,13 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
                 accelerator=MetalRuntime(memory_limit_bytes=peak - 1),
             )
 
-    # Exercise the right-hand target offset in the generic join matrix too.
+    # The native hash join declines Bool payloads, so this join converts the
+    # native producer at the generic matrix's right-hand target offset.
     var raw_left = DataFrame(
-        [Series("k", Column[Float32]([Float32(4), Float32(5)]))]
+        [
+            Series("k", Column[Float32]([Float32(4), Float32(5)])),
+            Series("flag", Column[Bool]([True, False])),
+        ]
     )
     var raw_right = DataFrame(
         [Series("source", Column[Float32]([Float32(3), Float32(4)]))]
@@ -418,9 +422,9 @@ def test_mojo_gpu_typed_float32_join_uses_narrow_native_input_bridge() raises:
 
 # requires: mojo_gpu
 def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filter() raises:
-    # The generic JOIN key semantics equate every NaN payload and both signed
-    # zeros, while null keys remain unmatched. The native bridge must preserve
-    # the Float32 encodings and expand validity with the same semantics.
+    # JOIN key semantics equate every NaN payload and both signed zeros, while
+    # null keys remain unmatched. The native hash join reads the retained
+    # Float32 encodings and validity directly, with the same semantics.
     var nan_left = bitcast[DType.float32](UInt32(0x7FC00035))
     var nan_right = bitcast[DType.float32](UInt32(0xFFC00002))
     var special_left = DataFrame(
@@ -470,15 +474,15 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
         var algorithm = special[1].item(row, "algorithm").string()
         if algorithm == "mojo_gpu_native_float32_rows":
             special_rows = Int(special[1].item(row, "output_rows").int64())
-        elif algorithm == "mojo_gpu_sorted_join":
+        elif algorithm == "mojo_gpu_native_hash_join":
             special_bridge_bytes = Int(
                 special[1].item(row, "native_input_conversion_bytes").int64()
             )
     assert_equal(special_rows, 5)
-    assert_equal(special_bridge_bytes, 5 * 21)
+    assert_equal(special_bridge_bytes, 0)
 
     # Empty computed input still gets a certified native table, and the JOIN
-    # conversion is a zero-byte no-op while the right side remains observable.
+    # reads it with no conversion while the right side remains observable.
     var empty = DataFrame([Series("k", Column[Float32]([]))])
     var empty_right = DataFrame(
         [Series("k", Column[Float32]([Float32(1), Float32(2)]))]
@@ -498,7 +502,7 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
             empty_native_rows = Int(
                 empty_measured[1].item(row, "output_rows").int64()
             )
-        elif algorithm == "mojo_gpu_sorted_join":
+        elif algorithm == "mojo_gpu_native_hash_join":
             empty_bridge_bytes = Int(
                 empty_measured[1]
                 .item(row, "native_input_conversion_bytes")
@@ -507,9 +511,9 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
     assert_equal(empty_native_rows, 0)
     assert_equal(empty_bridge_bytes, 0)
 
-    # The filter compacts more than one validity byte before the bridge. Null
-    # source rows are excluded by the filter, and the compacted table still
-    # traverses every output byte in the generic consumer conversion.
+    # The filter compacts more than one validity byte before the JOIN. Null
+    # source rows are excluded by the filter, and the JOIN reads the compacted
+    # native table directly.
     var many_values = List[Float32]()
     var many_valid = List[Bool]()
     for row in range(48):
@@ -540,7 +544,7 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
             compacted_native_bytes = Int(
                 compacted[1].item(row, "resident_output_bytes").int64()
             )
-        elif algorithm == "mojo_gpu_sorted_join":
+        elif algorithm == "mojo_gpu_native_hash_join":
             compacted_bridge_bytes = Int(
                 compacted[1].item(row, "native_input_conversion_bytes").int64()
             )
@@ -549,7 +553,7 @@ def test_mojo_gpu_typed_float32_join_bridge_float_keys_empty_and_compacted_filte
         compacted_native_bytes,
         compacted_native_rows * 4 + (compacted_native_rows + 7) // 8,
     )
-    assert_equal(compacted_bridge_bytes, compacted_native_rows * 21)
+    assert_equal(compacted_bridge_bytes, 0)
 
 
 # requires: mojo_gpu
@@ -628,9 +632,9 @@ def test_mojo_gpu_typed_float32_join_keeps_branched_producers_scoped() raises:
         var algorithm = measured[1].item(row, "algorithm").string()
         if algorithm == "mojo_gpu_native_float32_rows":
             typed_regions += 1
-        elif algorithm == "mojo_gpu_sorted_join":
+        elif algorithm == "mojo_gpu_native_hash_join":
             conversion_bytes = Int(
                 measured[1].item(row, "native_input_conversion_bytes").int64()
             )
     assert_equal(typed_regions, 2)
-    assert_equal(conversion_bytes, 2 * 3 * 21)
+    assert_equal(conversion_bytes, 0)

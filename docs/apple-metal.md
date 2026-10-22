@@ -282,11 +282,12 @@ expression program; it is not the interpreter-free fused reduction path.
 A certified one-column Float32 row producer can also retain native storage
 when its only consumer is a join in the same query. This includes supported
 stable filters, but excludes limited producers and other consumer families.
-The join converts values and packed validity directly into its existing
-generic device buffers, with no intermediate host export. Profiles report
-the native producer's retained bytes and `native_input_conversion_bytes`
-(21 bytes per converted row). The join itself still uses the generic matrix
-and performs a conservative synchronization at this conversion boundary.
+A single-key join that the native hash join accepts reads the retained
+Float32 column and validity directly (`native_input_conversion_bytes` is 0).
+Otherwise, for example with a Bool payload, the sorted join converts values
+and packed validity directly into its generic device buffers, with no
+intermediate host export, and reports 21 bytes per converted row. That join
+performs a conservative synchronization at this conversion boundary.
 
 The first precompiled reduction family accepts one Int32 input, an optional
 `x > Int32(threshold)` filter, optional checked `(x + addend) * factor`, an
@@ -626,9 +627,12 @@ It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
-then runs the integrated query contracts, independent oracles and the hash
-and grouped integer programs, and reports every failed step at the end. Those
-last steps can also run alone, with the pinned environment:
+then runs the integrated query contracts, independent oracles, the hash and
+grouped integer programs, kernel checks for the statistics, quantile,
+window schedule and wide integer paths the benchmark queries use, and CPU
+checks of the Metal suite's answer exports and diagnostics. It reports every
+failed step at the end. Those last steps can also run alone, with the
+pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu
@@ -636,6 +640,8 @@ pixi run --locked -e gpu test-mojo-gpu-floating
 pixi run --locked -e gpu test-mojo-gpu-decimal
 pixi run --locked -e gpu test-mojo-gpu-integer
 pixi run --locked -e gpu test-mojo-gpu-grouping
+pixi run --locked -e gpu test-mojo-gpu-kernels
+pixi run --locked -e gpu test-metal-suite-checks
 ```
 
 The independent integer oracle uses Python arbitrary-precision arithmetic:
