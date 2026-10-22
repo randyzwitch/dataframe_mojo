@@ -387,11 +387,32 @@ struct BusinessCalendar(Copyable):
             raise Error("week_mask must enable at least one day")
         for i in range(1, len(fields)):
             var day = parse(String(fields[i]), DataType.DATE)
-            if day not in self.holidays and self.mask[Int(_weekday(day) - 1)]:
+            if self.mask[Int(_weekday(day) - 1)]:
                 self.holidays.append(day)
+        sort(self.holidays)
+        var unique = List[Int64](capacity=len(self.holidays))
+        for day in self.holidays:
+            if not len(unique) or unique[len(unique) - 1] != day:
+                unique.append(day)
+        self.holidays = unique^
+
+    def _lower_bound(self, day: Int64) -> Int:
+        """First holiday at or after day; no arithmetic on stored dates."""
+        var low = 0
+        var high = len(self.holidays)
+        while low < high:
+            var middle = low + (high - low) // 2
+            if self.holidays[middle] < day:
+                low = middle + 1
+            else:
+                high = middle
+        return low
 
     def contains(self, day: Int64) -> Bool:
-        return self.mask[Int(_weekday(day) - 1)] and day not in self.holidays
+        if not self.mask[Int(_weekday(day) - 1)]:
+            return False
+        var at = self._lower_bound(day)
+        return at == len(self.holidays) or self.holidays[at] != day
 
     def count(self, start: Int64, end: Int64) raises -> Int64:
         if start > end:
@@ -404,10 +425,7 @@ struct BusinessCalendar(Copyable):
         var count = checked_mul(span // 7, self.days_per_week)
         for i in range(Int(span % 7)):
             count += Int64(self.mask[Int((_weekday(start) - 1 + Int64(i)) % 7)])
-        for holiday in self.holidays:
-            if holiday >= start and holiday < end:
-                count -= 1
-        return count
+        return count - Int64(self._lower_bound(end) - self._lower_bound(start))
 
     def add(self, start: Int64, n: Int64, roll: String) raises -> Int64:
         var day = start
@@ -507,14 +525,18 @@ def _packed_temporal(
     node: Node, input: Series, dtype: DataType, mask: List[Bool]
 ) raises -> Series:
     var packed = input.struct_column()
-    var fields = List[Series]()
+    # Materialize chunked children once, then keep typed buffer windows.
+    # Validity and payload reads in the row loop do not box AnyValues.
+    var fields = List[Column[Int64]]()
     var names = packed.field_names()
     for i in range(packed.field_count()):
-        fields.append(packed.field(i))
+        var field = packed.field(i).rechunk()
+        fields.append(field._data[Column[Int64]].copy())
     var op = node.op
-    var target = DataType.parse(
-        node.text
-    ) if op == DT_BUILD else dtype.field_dtype(0)
+    var base_type = dtype.field_dtype(0)
+    var target = DataType.parse(node.text) if op == DT_BUILD else base_type
+    var base_aware = base_type.is_datetime() and base_type.time_zone() != ""
+    var base_zone = zone_of(base_type) if base_aware else TimeZone.utc()
     if op == DT_COMBINE:
         target = DataType.datetime(node.text, dtype.field_dtype(0).time_zone())
     if op == DT_BUSINESS_DAY_COUNT:
@@ -529,56 +551,53 @@ def _packed_temporal(
     ) if op == DT_ADD_BUSINESS_DAYS or op == DT_BUSINESS_DAY_COUNT else BusinessCalendar(
         "1111100"
     )
+    var ambiguous = ambiguous_code(node.text) if op == DT_REPLACE else 0
+    var scales = List[Int64]()
+    var per_tick = Int128(1)
+    if target.is_duration():
+        scales = [
+            604800000000000,
+            86400000000000,
+            3600000000000,
+            60000000000,
+            1000000000,
+            1000000,
+            1000,
+            1,
+        ]
+        per_tick = Int128(Int64(1000000000) // target.per_second())
     for row in range(n):
         if len(mask) and not mask[row]:
             continue
         var observed = True
         for field in fields:
-            observed = observed and not field.get(row).is_null()
+            observed = observed and field._valid(row)
         if not observed:
             continue
         var original = Int64(0)
         var p = Parts(1970, 1, 1, 0, 0, 0, 0)
         if op != DT_BUILD:
-            original = fields[0].get(row).to_physical()
-            var base_type = dtype.field_dtype(0)
+            original = fields[0]._get(row)
             var local = to_local(
-                original, base_type, zone_of(base_type)
-            ) if base_type.is_datetime() else original
+                original, base_type, base_zone
+            ) if base_aware else original
             p = split(local, base_type)
             if op == DT_BUSINESS_DAY_COUNT:
-                values[row] = calendar.count(
-                    original, fields[1].get(row).to_physical()
-                )
+                values[row] = calendar.count(original, fields[1]._get(row))
                 valid[row] = True
                 continue
             if op == DT_ADD_BUSINESS_DAYS:
                 var day = days_from_civil(p.year, p.month, p.day)
                 var shifted = civil_from_days(
-                    calendar.add(
-                        day, fields[1].get(row).to_physical(), node.text
-                    )
+                    calendar.add(day, fields[1]._get(row), node.text)
                 )
                 p.year = shifted[0]
                 p.month = shifted[1]
                 p.day = shifted[2]
         if target.is_duration():
-            var scales: List[Int64] = [
-                604800000000000,
-                86400000000000,
-                3600000000000,
-                60000000000,
-                1000000000,
-                1000000,
-                1000,
-                1,
-            ]
             var total = Int128(0)
-            var per_tick = Int128(Int64(1000000000) // target.per_second())
             for k in range(len(fields)):
-                var component = Int128(
-                    fields[k].get(row).to_physical()
-                ) * Int128(scales[k])
+                var component = Int128(fields[k]._get(row)) * Int128(scales[k])
                 var ticks = component // per_tick
                 if component < 0 and component % per_tick != 0:
                     ticks += 1
@@ -595,7 +614,7 @@ def _packed_temporal(
             var name = names[k]
             if name == "base" or op == DT_ADD_BUSINESS_DAYS:
                 continue
-            var v = fields[k].get(row).to_physical()
+            var v = fields[k]._get(row)
             if name == "year":
                 p.year = v
             elif name == "month":
@@ -627,7 +646,7 @@ def _packed_temporal(
                     result,
                     target,
                     zone,
-                    ambiguous_code(node.text) if op == DT_REPLACE else 0,
+                    ambiguous,
                     0,
                 )
                 if not localized:
