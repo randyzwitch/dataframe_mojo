@@ -19,7 +19,7 @@ compression, no dictionary encoding, and 250,000 rows per row group. Fixture
 generation happens in a separate process. Each read runs in a fresh process;
 peak RSS comes from `wait4`, includes the runtime and final eager result, and
 is not an allocation count. Three paired runs alternate baseline/candidate
-order. Reported values are medians; [raw results](parquet-streaming.csv)
+order. Reported values are medians; [raw results](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/parquet-streaming.csv)
 include all runs. The driver waits for detected Mojo compiler activity and
 discards interrupted runs; other host activity remains possible.
 

@@ -16,7 +16,7 @@ excludes export and input construction; each binary warms once and checks
 complete values after every repetition. Two rounds reverse baseline/candidate
 order, with five samples each. Read timing uses three alternating fresh
 processes and eight-column zstd fixtures with 250k-row groups. Table values
-are medians at eight configured workers; [raw data](arrow-import.csv) retain
+are medians at eight configured workers; [raw data](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/arrow-import.csv) retain
 all settings and the rejected M1 parallel trial.
 
 | Machine / case | Serial baseline | Final policy |

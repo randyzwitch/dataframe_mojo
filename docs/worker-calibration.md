@@ -27,7 +27,7 @@ outside hot loops; comparisons use the same experimental binary. Inputs and
 correctness checks are untimed. Each microbenchmark warms once and records
 five repetitions in each of two rounds, reversing setting order. Tables below
 report the mean of per-round minima in milliseconds. All samples and macro
-benchmark aggregates are in [worker-calibration.csv](worker-calibration.csv).
+benchmark aggregates are in [worker-calibration.csv](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/worker-calibration.csv).
 `source` identifies the suite, configured worker count, setting and/or round;
 settings are caps, not promises that every worker is used.
 

@@ -17,7 +17,7 @@ round two. Each process warmed once, then recorded five timed repetitions.
 Tables below report the mean of the two per-round minima, in milliseconds.
 Inputs and validation are outside timing. These are calibration measurements,
 not universal crossover guarantees or performance claims against another
-engine. The [companion CSV](join-cutoffs.csv) retains every round and sample. The focused final recheck uses four
+engine. The [companion CSV](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/join-cutoffs.csv) retains every round and sample. The focused final recheck uses four
 rounds of seven repetitions, with the same alternating order and summary rule.
 
 The benchmark exercised CSR construction, progression

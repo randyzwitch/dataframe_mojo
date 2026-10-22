@@ -1,5 +1,0 @@
-PASS fused Float32 affine/filter exact oracle
-PASS fused Float32 rounding and Float64 accumulation
-PASS fused Float32 null/nonfinite/reassociation contract
-PASS fused Float32 empty/min_count/bounded budget
-PASS fused Float32 pipeline reuse across variants and query values
