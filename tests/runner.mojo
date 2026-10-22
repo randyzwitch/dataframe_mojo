@@ -17,13 +17,13 @@ def main() raises:
     var packaging = String(DEFAULT_PACKAGING)
     var output = String("build/contract-tests")
     var compiler = String("mojo")
-    var provider = String("")
+    var provider = String("metal")
     var i = 1
     while i < len(arguments):
         var option = String(arguments[i])
         if option == "--help" or option == "-h":
             print(
-                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--provider metal] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
+                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--provider cpu|metal] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
             )
             return
         i += 1
@@ -66,8 +66,8 @@ def main() raises:
             raise Error(
                 "Capability "
                 + capability
-                + " needs the Metal provider in the build: pass --provider"
-                " metal"
+                + " needs the Metal provider in the build, which is the"
+                " default: do not pass --provider " + provider
             )
     if not areas:
         comptime for index in range(len(AREAS)):

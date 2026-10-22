@@ -428,8 +428,9 @@ struct RunnerOptions(Copyable, Movable):
     var output: String
     var compiler: String
     var capabilities: List[String]
-    # Name of a directory under providers/ put ahead of the root on the import
-    # path ("metal" for a Metal build). Empty builds with the CPU-only provider.
+    # "metal" builds with the root dataframe_provider (the default). Any other
+    # name is a directory under providers/ put ahead of the root on the import
+    # path ("cpu" compiles no GPU code).
     var provider: String
 
     def __init__(
@@ -441,7 +442,7 @@ struct RunnerOptions(Copyable, Movable):
         output: String,
         compiler: String,
         capabilities: List[String] = List[String](),
-        provider: String = "",
+        provider: String = "metal",
     ):
         self.root = root.copy()
         self.areas = areas.copy()
@@ -454,9 +455,9 @@ struct RunnerOptions(Copyable, Movable):
 
 
 def include_flags(options: RunnerOptions) -> List[String]:
-    """The `-I` flags of every build: the chosen provider, then the root."""
+    """The `-I` flags of every build: a non-default provider, then the root."""
     var flags = List[String]()
-    if options.provider:
+    if options.provider != "metal":
         flags.append("-I")
         flags.append(options.root + "/providers/" + options.provider)
     flags.append("-I")
@@ -524,7 +525,7 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
     for capability in options.capabilities:
         if capability not in policy.capabilities:
             raise Error("Unknown runtime capability: " + capability)
-    if options.provider and not exists(
+    if options.provider != "metal" and not exists(
         options.root + "/providers/" + options.provider
     ):
         raise Error("Unknown provider: " + options.provider)

@@ -39,9 +39,10 @@ executable when that packaging is useful for investigation.
 Test functions are discovered automatically. `--contracts` selects named module
 groups; it does not require assigning every test to a coverage registry.
 
-A build uses the CPU-only provider unless `--provider metal` is passed, which
-adds `-I providers/metal` ahead of `-I .` to every build. `--capabilities metal`
-(or `mojo_gpu`) without `--provider metal` is an error.
+Builds use the default (Metal) provider, as the library does. `--provider cpu`
+(`pixi run test-cpu`) adds `-I providers/cpu` ahead of `-I .` to every build, so
+no GPU code is compiled; the Linux CI areas use it. `--capabilities metal` (or
+`mojo_gpu`) with `--provider cpu` is an error.
 
 Native Metal contracts run on a local Apple silicon Mac through
 `scripts/test_metal_local.sh`; hosted macOS runners expose no usable Metal
@@ -171,9 +172,9 @@ dependencies, so those two names are the ones to require. Timing artifacts
 have unique names for every job, including the area.
 
 Hosted runners cannot execute Metal contracts (their virtual GPU gives Metal
-buffers no device address), so no CI job runs them. The `metal-compile` job
+buffers no device address), so no CI job runs them. The `linux-default-build` job
 compiles the backend for a CPU-only target and runs its dispatch checks, since
-the contract areas build with the CPU-only provider and never compile it. A change under
+the Linux contract areas build with `--provider cpu` and never compile it. A change under
 `dataframe_metal/accelerator/` runs `scripts/test_metal_local.sh` on an Apple
 silicon Mac before its pull request is opened.
 

@@ -1,7 +1,8 @@
 """The Metal provider: the six provider functions over the Metal runtime.
 
-Build with `-I providers/metal` ahead of `-I .` so `dataframe_provider`
-resolves to the file that re-exports this module.
+The root `dataframe_provider` package re-exports this module, so a plain
+`-I .` build uses it. `-I providers/cpu -I .` replaces it with the CPU-only
+provider.
 
 The provider surface is six functions whose signatures mention only core
 types. Calibration is backend-specific and is imported from the backend.

@@ -467,8 +467,6 @@ def main():
                     "build",
                     "-O3",
                     "-I",
-                    str(ROOT / "providers/metal"),
-                    "-I",
                     str(ROOT),
                     "-I",
                     str(sources),

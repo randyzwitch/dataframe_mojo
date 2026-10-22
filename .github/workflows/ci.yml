@@ -46,7 +46,7 @@ jobs:
             pixi run -e oracle python3 "$t"
           done
       - name: Check Mojo test runner
-        run: pixi run mojo run -I . tests/tooling/test_contract_runner.mojo
+        run: pixi run mojo run -I providers/cpu -I . tests/tooling/test_contract_runner.mojo
       - name: Check dtype literals
         run: bash scripts/check_dtype_literals.sh
       - name: Check public docstrings and API reference
@@ -109,7 +109,7 @@ jobs:
           AREA: ${{ matrix.area }}
         run: >-
           python3 scripts/ci_time.py --label "contract-$AREA" --budget-seconds 1500 --
-          pixi run test --areas "$AREA" --output build/contract-tests
+          pixi run test-cpu --areas "$AREA" --output build/contract-tests
       - name: Install independent format consumers
         if: matrix.area == 'interchange'
         run: |
@@ -160,19 +160,21 @@ jobs:
         with:
           name: ci-timings-unit-macos-${{ matrix.area }}
 
-  metal-compile:
-    # The CPU contract areas no longer compile the Metal backend. This job
-    # compiles it for a CPU-only target and runs its dispatch checks, so the
-    # backend cannot stop building unnoticed.
+  linux-default-build:
+    # The Linux contract areas build with the CPU-only provider
+    # (`-I providers/cpu`) and never compile the Metal backend. This job is the
+    # default build, with the Metal provider: it compiles the backend for a
+    # CPU-only target and runs its dispatch checks, so it cannot stop building
+    # unnoticed.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - name: Compile the Metal backend for a CPU target
+      - name: Default (Metal provider) build for a CPU target
         run: >-
-          python3 scripts/ci_time.py --label metal-compile --budget-seconds 1500 --
+          python3 scripts/ci_time.py --label linux-default-build --budget-seconds 1500 --
           pixi run test-metal-cpu-compile
 
   answers:
@@ -226,7 +228,7 @@ jobs:
     # The existing check name, aggregating every Linux job.
     name: test (ubuntu-latest)
     if: always()
-    needs: [checks, native-linux, unit-linux, metal-compile, answers]
+    needs: [checks, native-linux, unit-linux, linux-default-build, answers]
     runs-on: ubuntu-latest
     steps:
       - name: Require all Linux checks to pass

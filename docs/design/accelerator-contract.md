@@ -121,19 +121,20 @@ by import path.
 
 - `dataframe/_accel_provider.mojo` only re-exports the six provider functions
   from `dataframe_provider`.
-- `dataframe_provider/` in the repository root is the CPU-only provider:
-  `installed()` is false, `execute` raises "Accelerator provider is not
-  installed", `select_auto` returns `cpu`.
-- A backend ships its own `dataframe_provider/` package, in a directory of its
-  own (`providers/metal/dataframe_provider/`), that re-exports the six
-  functions from its implementation package (`dataframe_metal.provider`).
-- A build puts the backend's directory first: `mojo build -I providers/metal
-  -I . app.mojo`. A CPU build uses `-I .` and compiles no GPU code. Two
-  backends in one build are not supported; the first `dataframe_provider` on
-  the path wins.
-- Packaging follows the same rule: `scripts/build_package.py` precompiles
-  `dataframe` and `dataframe_provider`, and with `--provider metal` also
-  `dataframe_metal`, whose provider re-exports it.
+- `dataframe_provider/` in the repository root is the default provider, Metal:
+  it re-exports the six functions from `dataframe_metal.provider`. Where Metal
+  cannot run (Linux), `installed()` is false and collection stays on the CPU.
+- `providers/cpu/dataframe_provider/` is the CPU-only provider: `installed()`
+  is false, `execute` raises "Accelerator provider is not installed",
+  `select_auto` returns `cpu`. `-I providers/cpu -I .` puts it first and
+  compiles no GPU code.
+- Another backend ships its own `dataframe_provider/` package that re-exports
+  the six functions from its implementation package, and puts it first on the
+  import path. Two backends in one build are not supported; the first
+  `dataframe_provider` on the path wins.
+- Packaging: `scripts/build_package.py` picks the artifact by platform. macOS
+  arm64 holds `dataframe`, `dataframe_provider` (Metal) and `dataframe_metal`;
+  Linux holds `dataframe` and the CPU-only `dataframe_provider`.
 
 The core, the backend and the provider reference each other across package
 boundaries (`dataframe.lazy` imports `_accel_provider`, which imports
@@ -148,11 +149,12 @@ functions, and drop the replacement step.
 The checks are in `scripts/check_accelerator_boundary.sh`: core may import
 `dataframe_provider` only from `_accel_provider.mojo` and never imports
 `dataframe_metal`; `dataframe_metal` may import `dataframe` but not `tests`;
-the root `dataframe_provider` imports nothing from a backend.
+the root `dataframe_provider` (Metal) may import `dataframe_metal`; and
+`providers/cpu/dataframe_provider` imports nothing from a backend.
 
 ## Status
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | Package `dataframe_metal` in this repository, with its provider in `providers/metal/dataframe_provider/` | Provider chosen by import path: `-I providers/metal -I .` | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Compiled only in a Metal build; CI compiles it for a CPU target in the `metal-compile` job. Tested on a local Mac (hosted CI cannot run it). | A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
+| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
 | NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |

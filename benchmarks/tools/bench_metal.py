@@ -351,7 +351,7 @@ def metadata(binaries, threads, warmups, binary_receipts):
         ),
         "xcode": command(["xcodebuild", "-version"]),
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
-        "compile_flags": ["-O3", "-I", "providers/metal", "-I", "."],
+        "compile_flags": ["-O3", "-I", "."],
         "dataframe_threads": threads,
         "warmups_per_engine": warmups,
         "powerconditions": powerconditions(),
@@ -617,7 +617,7 @@ def main():
     ):
         parser.error("Invalid rows, workload or variant")
     binary = args.binary.resolve()
-    compile_flags = ["-O3", "-I", "providers/metal", "-I", "."]
+    compile_flags = ["-O3", "-I", "."]
     if not args.skip_build:
         binary.parent.mkdir(parents=True, exist_ok=True)
         build_identity = capture_build_identity(compile_flags)

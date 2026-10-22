@@ -1,4 +1,6 @@
-"""Compile and exercise backend dispatch with no accelerator architecture."""
+"""Compile and exercise backend dispatch with no accelerator architecture.
+
+Built with the default (Metal) provider and `--target-accelerator=unknown`."""
 from std.testing import assert_true
 from dataframe_metal.accelerator.gpu.target import compiled_for_metal
 from tests.execution_modes.test_backends import (

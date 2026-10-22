@@ -1,45 +1,16 @@
-"""The CPU-only accelerator provider: no backend is installed.
+"""The default accelerator provider: Metal.
 
-`dataframe/_accel_provider.mojo` imports the six functions below. A backend
-build puts its own `dataframe_provider` package ahead of this one on the import
-path, for example `-I providers/metal -I .`.
+`dataframe/_accel_provider.mojo` imports these six functions. On a host
+without Metal `installed()` is False and collection stays on the CPU. For a
+build that compiles no GPU code, put `providers/cpu` first on the import path
+(`-I providers/cpu -I .`). Another backend ships its own `dataframe_provider`
+package and puts it ahead of this one.
 """
-from dataframe.frame import DataFrame
-from dataframe.lazy import LazyFrame
-
-
-def installed() -> Bool:
-    return False
-
-
-def execute(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-    raise Error(
-        "Accelerator provider is not installed; use the optional GPU package or accelerator=runtime"
-    )
-
-
-def describe(plan: LazyFrame) -> String:
-    return "ENGINE accel: Accelerator provider is not installed; use the optional GPU package or accelerator=runtime\n"
-
-
-def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-    return execute(plan)
-
-
-def select_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) -> Tuple[String, String]:
-    return ("cpu", "auto uses CPU; accelerator provider is not installed")
-
-
-def execute_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-    profiling: Bool,
-) raises -> Tuple[DataFrame, DataFrame]:
-    return execute(plan)
+from dataframe_metal.provider import (
+    installed,
+    execute,
+    describe,
+    execute_profiled,
+    select_auto,
+    execute_auto,
+)

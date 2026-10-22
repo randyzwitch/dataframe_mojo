@@ -4,9 +4,6 @@
 # gives Metal buffers no GPU address, which MAX's device context needs, so
 # Metal changes are validated here, on Apple silicon, before a pull request.
 #
-# Every build here puts the Metal provider first on the import path
-# (`-I providers/metal -I .`); the default build is CPU-only.
-#
 # usage: scripts/test_metal_local.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,12 +14,12 @@ fi
 mkdir -p build/contract-tests
 
 echo "== CPU-only build of the Mojo GPU provider"
-pixi run --locked mojo build --target-accelerator=unknown -I providers/metal -I . \
+pixi run --locked mojo build --target-accelerator=unknown -I . \
   tests/tooling/mojo_gpu_cpu_compile.mojo -o build/contract-tests/mojo-gpu-cpu-compile
 build/contract-tests/mojo-gpu-cpu-compile
 
 echo "== Metal device"
-pixi run --locked mojo build -I providers/metal -I . tests/tooling/metal_available.mojo \
+pixi run --locked mojo build -I . tests/tooling/metal_available.mojo \
   -o build/contract-tests/metal-available
 capability="$(build/contract-tests/metal-available)"
 if [[ "$capability" != available ]]; then
@@ -43,7 +40,7 @@ failed=""
 echo "== Metal contracts on the device: $groups"
 # shellcheck disable=SC2086 # one argument per group
 pixi run --locked test --areas execution public --contracts $groups \
-  --provider metal --capabilities metal mojo_gpu || failed="$failed contracts"
+  --capabilities metal mojo_gpu || failed="$failed contracts"
 
 echo "== Mojo GPU contracts and independent oracles"
 for task in test-mojo-gpu test-mojo-gpu-floating test-mojo-gpu-decimal \

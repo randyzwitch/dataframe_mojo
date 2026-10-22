@@ -6,8 +6,8 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 mkdir -p dist
 python3 scripts/build_package.py --output dist
-# The routing contracts below use the Metal backend, so they need the Metal
-# flavor: dataframe_metal and a provider that re-exports it.
+# The routing contracts below use the Metal backend, so they need a package
+# that holds it, whatever the platform's default artifact is.
 python3 scripts/build_package.py --provider metal --output dist-metal
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

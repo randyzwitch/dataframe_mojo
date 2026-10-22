@@ -7,9 +7,11 @@ Optional backends use the same `DataFrame`, expressions, binder, and lazy
 collection API as CPU execution. An explicit runtime implements
 `dataframe.lazy.AcceleratorBackend`; an optional distribution can register its
 default through `dataframe._accel_provider`, which re-exports the
-`dataframe_provider` first on the import path (the CPU-only one in the
-repository root, or a backend's, such as `providers/metal`). Ordinary CPU
-imports and builds must not require MAX, a driver, or a physical GPU.
+`dataframe_provider` first on the import path. Metal is the default provider
+of the open-source package (the root `dataframe_provider`); another backend,
+such as NVIDIA in the extensions repository, supplies its own
+`dataframe_provider` ahead of it, and `providers/cpu` is the CPU-only choice.
+Ordinary CPU imports and runs must not require a driver or a physical GPU.
 
 `dataframe_metal.accelerator` supplies CPU-only row-plan lowering, semantic capability
 checks, and overflow-checked requested-memory estimates. It does not discover

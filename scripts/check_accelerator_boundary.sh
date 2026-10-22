@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Check the core/backend boundary (docs/design/accelerator-contract.md).
 #
-# A backend is a package outside the core (dataframe_metal) chosen at build
-# time by which `dataframe_provider` package comes first on the import path.
+# A backend is a package outside the core (dataframe_metal). The root
+# `dataframe_provider` package makes Metal the default; a build can put another
+# (providers/cpu, or a third-party backend) first on the import path.
 # This script fails, listing every offending import, when:
 #   1. a .mojo file under dataframe/ imports dataframe_metal (absolute or
 #      relative to a sibling package);
@@ -10,7 +11,8 @@
 #      dataframe_provider, or _accel_provider is imported by a core file that is
 #      not one of the allowed dispatchers;
 #   3. a file under dataframe_metal/ imports from tests;
-#   4. the root dataframe_provider/ package imports a backend.
+#   4. providers/cpu/dataframe_provider imports a backend. (The root
+#      dataframe_provider is the Metal provider and may import dataframe_metal.)
 #
 # Every allow-list entry below is a deliberate decision. Adding one needs a
 # reason in the comment beside it.
@@ -86,7 +88,7 @@ while IFS= read -r file; do
     [[ -z $hit ]] && continue
     fail "the CPU-only provider imports a backend: $file:${hit%%:*}: ${hit#*:}"
   done < <(grep -nE "$(absolute_import dataframe_metal)" "$file" || true)
-done < <(find dataframe_provider -name '*.mojo' | sort)
+done < <(find providers/cpu -name '*.mojo' | sort)
 
 if ((failures > 0)); then
   echo "Accelerator boundary check failed: $failures violation(s)." >&2

@@ -426,8 +426,6 @@ def main():
                     "build",
                     "-O3",
                     "-I",
-                    str(tree / "providers/metal"),
-                    "-I",
                     str(tree),
                     "-I",
                     str(sources),

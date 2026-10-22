@@ -1,6 +1,6 @@
 """Validate statistical word states on host and Apple GPU against CPU states.
 
-Run with: pixi run -e gpu mojo -I providers/metal -I . tests/tooling/mojo_gpu_moments_probe.mojo
+Run with: pixi run -e gpu mojo -I . tests/tooling/mojo_gpu_moments_probe.mojo
 """
 
 from max.gpu import global_idx

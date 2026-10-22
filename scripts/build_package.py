@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Stage a CPU-identified dataframe package without editing the source tree.
 
-The default flavor is CPU-only: `dataframe.mojoc` and `dataframe_provider.mojoc`
-(the stub provider). `--provider metal` also stages `dataframe_metal.mojoc` and
-a `dataframe_provider.mojoc` that re-exports it. Use the output directory as
-the import path (`-I dist`).
+One artifact per platform, chosen here and not by the user. On macOS arm64 it
+holds `dataframe.mojoc`, `dataframe_provider.mojoc` (re-exporting the Metal
+provider) and `dataframe_metal.mojoc`. Elsewhere Metal cannot run, so it holds
+`dataframe.mojoc` and `dataframe_provider.mojoc` with the CPU-only provider.
+`--provider cpu|metal` overrides the choice for testing. Use the output
+directory as the import path (`-I dist`).
 """
 import argparse
 import hashlib
 import json
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,26 +21,29 @@ from build_identity import cpu_build_id, identity_source
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def build(output: Path, provider: str = "") -> None:
+def default_provider() -> str:
+    mac = platform.system() == "Darwin" and platform.machine() == "arm64"
+    return "metal" if mac else "cpu"
+
+
+def build(output: Path, provider: str) -> None:
     compiler = subprocess.check_output(["mojo", "--version"], text=True).strip()
     identity = cpu_build_id(ROOT, compiler)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="dataframe-package-") as directory:
         stage = Path(directory)
         shutil.copytree(ROOT / "dataframe", stage / "dataframe")
-        # The CPU stub unless a backend's provider directory is chosen.
+        # The root provider is Metal; the CPU-only one lives in providers/cpu.
         shutil.copytree(
-            ROOT / "providers" / provider / "dataframe_provider"
-            if provider
+            ROOT / "providers/cpu/dataframe_provider"
+            if provider == "cpu"
             else ROOT / "dataframe_provider",
             stage / "dataframe_provider",
         )
         packages = ["dataframe", "dataframe_provider"]
-        if provider:
-            shutil.copytree(
-                ROOT / f"dataframe_{provider}", stage / f"dataframe_{provider}"
-            )
-            packages.append(f"dataframe_{provider}")
+        if provider == "metal":
+            shutil.copytree(ROOT / "dataframe_metal", stage / "dataframe_metal")
+            packages.append("dataframe_metal")
         (stage / "dataframe/_build_identity.mojo").write_text(
             identity_source(identity)
         )
@@ -89,7 +95,7 @@ def build(output: Path, provider: str = "") -> None:
         ).strip()
     )
     metadata = {
-        "provider": "core-with-mojo-metal" if provider else "core-cpu",
+        "provider": "core-with-mojo-metal" if provider == "metal" else "core-cpu",
         "implementation": "mojo",
         "runtime_build_id": "dataframe-mojo-metal-v1;source-compiler-sdk="
         + identity,
@@ -114,9 +120,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     parser.add_argument(
         "--provider",
-        choices=["metal"],
-        default="",
-        help="also package this backend and its provider (default: CPU only)",
+        choices=["cpu", "metal"],
+        default=default_provider(),
+        help="override the platform's provider (testing only)",
     )
     args = parser.parse_args()
     build(args.output.resolve(), args.provider)

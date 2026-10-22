@@ -12,27 +12,24 @@ CPU environments. Importing dataframe, constructing a runtime, explaining a
 query or explicitly collecting on the CPU does not construct a GPU context.
 Mojo itself may load the system Metal framework independently of dataframe.
 
-## Enabling the Metal backend
+## Metal is included
 
-A default build is CPU-only: it compiles no Metal code, and `engine="accel"`
-raises "Accelerator provider is not installed". The backend lives in the
-`dataframe_metal` package, and a build chooses it by import path. Put the
-Metal provider ahead of the repository root:
+Metal is part of the package; there is nothing to enable. The backend is the
+`dataframe_metal` package, and the root `dataframe_provider` package makes it
+the default provider that `dataframe._accel_provider` imports. A plain
+`mojo build -I . app.mojo` uses it. Where Metal cannot run (Linux),
+`installed()` is False and collection stays on the CPU.
 
-```sh
-mojo build -I providers/metal -I . app.mojo
-```
+The macOS arm64 package (`pixi run package`) holds `dataframe.mojoc`,
+`dataframe_provider.mojoc` and `dataframe_metal.mojoc`. The Linux package holds
+the first two with the CPU-only provider, since Metal cannot run there. There
+is one artifact per platform; `scripts/build_package.py` chooses it.
 
-`providers/metal/dataframe_provider` re-exports `dataframe_metal.provider`, and
-`dataframe._accel_provider` imports whichever `dataframe_provider` comes first
-on the path. For an installed package, build the Metal flavor with
-`pixi run package-metal` (`python3 scripts/build_package.py --provider metal`)
-and put its output directory on the import path. It holds `dataframe.mojoc`,
-`dataframe_provider.mojoc` and `dataframe_metal.mojoc`; the default `pixi run
-package` flavor holds only the first two, with the CPU-only provider.
+A build that must not compile any GPU code (the Linux CI contract areas, for
+compile time) puts the CPU-only provider first: `-I providers/cpu -I .`.
 
-An application that passes a `MetalRuntime` as `accelerator=` needs only
-`import dataframe_metal.metal`, with or without the provider.
+An application that passes a `MetalRuntime` as `accelerator=` imports
+`dataframe_metal.metal`.
 
 ## Using the provider
 
@@ -44,7 +41,7 @@ var result = query.collect(engine="accel", accelerator=runtime)
 var measured = query.profile(engine="accel", accelerator=runtime)
 ```
 
-In a Metal build, the default Apple accelerator uses the same implementation. Runtime copies
+The default Apple accelerator uses the same implementation. Runtime copies
 retain configuration and share a lazy device service. Direct row and scalar
 collections exclusively lease its one cached context; overlapping collections
 use private contexts. Other resident DAG/operator routes still own fresh
@@ -597,15 +594,15 @@ preflight estimate includes both temporary hash arrays, at most 8 MiB.
 The focused physical-GPU gate runs in the pinned GPU environment:
 
 ```sh
-mojo run -I providers/metal -I . tests/tooling/mojo_gpu_hash_grouping.mojo
+mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo
 ```
 
 Timing programs are reviewed separately from engine changes, as required by
 the benchmark separation rule.
 
 ```sh
-mojo run -I providers/metal -I . benchmarks/bench_gpu_hash_partitions.mojo
-mojo run -I providers/metal -I . benchmarks/bench_gpu_groupby_engine.mojo
+mojo run -I . benchmarks/bench_gpu_hash_partitions.mojo
+mojo run -I . benchmarks/bench_gpu_groupby_engine.mojo
 ```
 
 The partition benchmark checks complete row membership and compares
@@ -647,7 +644,7 @@ the retired `native-metal` job did, and fails if no device is found:
 scripts/test_metal_local.sh
 ```
 
-It builds the provider for a CPU-only target (with `-I providers/metal`), probes the device
+It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
@@ -673,7 +670,7 @@ The independent integer oracle uses Python arbitrary-precision arithmetic:
 ```sh
 mkdir -p build/contract-tests
 python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin
-pixi run --locked -e gpu mojo run -I providers/metal -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin
+pixi run --locked -e gpu mojo run -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin
 ```
 
 Installed-package validation can include actual GPU routing and execution:
