@@ -33,9 +33,9 @@ def source() raises -> DataFrame:
     var valid: List[Bool] = [True, True, True, False]
     return DataFrame(
         [
-            Series("g", Column[Int32](keys^, key_valid^)),
+            Series("g", Column[Int32](keys^, key_valid)),
             Series("sale", Column[Int64](sale^, valid)).with_dtype(dtype),
-            Series("refund", Column[Int64](refund^, valid^)).with_dtype(dtype),
+            Series("refund", Column[Int64](refund^, valid)).with_dtype(dtype),
             Series("zero", Column[Int64](zero^)).with_dtype(dtype),
         ]
     )

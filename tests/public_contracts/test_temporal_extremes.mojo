@@ -89,7 +89,7 @@ def full_date_fixture() raises -> DataFrame:
     for i in range(len(raw)):
         valid.append(i < 19 or i % 11 != 0)
     return DataFrame(
-        [Series("d", Column[Int64](raw^, valid^)).with_dtype(DataType.DATE)]
+        [Series("d", Column[Int64](raw^, valid)).with_dtype(DataType.DATE)]
     ).slice(1, 529)
 
 
@@ -119,7 +119,7 @@ def full_date_expected(frame: DataFrame) raises -> DataFrame:
                     row
                 ) else Int64(0)
             )
-        fields.append(Series(names[field], Column[Int64](values^, valid^)))
+        fields.append(Series(names[field], Column[Int64](values^, valid)))
     return DataFrame(fields^)
 
 

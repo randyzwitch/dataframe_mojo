@@ -64,12 +64,12 @@ def main() raises:
     _ = execute_suite(
         RunnerOptions(
             ".",
-            areas^,
-            contracts^,
-            packaging^,
-            output^,
-            compiler^,
-            capabilities^,
+            areas,
+            contracts,
+            packaging,
+            output,
+            compiler,
+            capabilities,
         ),
         production_policy(),
     )

@@ -310,14 +310,14 @@ def top_k_mask(
             return None
     var mask = List[Bool](length=height, fill=False)
     if k <= 0 or height == 0:
-        return BoolColumn(mask^)
+        return BoolColumn(mask)
     var whole = value.rechunk() if value.is_chunked() else value.copy()
     var workers = worker_count(height)
     var table = _table_top_rows(keys, whole, k, descending, height, workers)
     if table:
         for row in table.value():
             mask[row] = True
-        return BoolColumn(mask^)
+        return BoolColumn(mask)
     var partitions = encode_rows(keys, nulls_equal=True) if workers <= 1 else (
         encode_rows_parallel(keys, True, workers) if low_cardinality(
             keys
@@ -399,7 +399,7 @@ def top_k_mask(
                 _ = counts^
                 _ = partitions^
                 _ = whole^
-                return BoolColumn(mask^)
+                return BoolColumn(mask)
             # Bucket indices once; workers only visit their own groups.
             # Members use N slots, starts/cursors use G+1 slots each, and
             # all worker heaps together use <= N UInt128 slots (each heap
@@ -454,5 +454,5 @@ def top_k_mask(
             _ = starts^
             _ = partitions^
             _ = whole^
-            return BoolColumn(mask^)
+            return BoolColumn(mask)
     return None

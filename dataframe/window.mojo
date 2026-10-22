@@ -594,7 +594,7 @@ def _interpolate(
     var out_valid = List[Bool](capacity=len(source))
     for row in source:
         out_valid.append(row >= 0)
-    return Series("", Column[Float64](out^, out_valid^))
+    return Series("", Column[Float64](out^, out_valid))
 
 
 def interpolate_by_op(
@@ -729,7 +729,7 @@ def _bins(input: Series, groups: List[List[Int]], node: Node) raises -> Series:
             breakpoints[row] = edges[bin] if bin < len(edges) else Float64(
                 1
             ) / Float64(0)
-    var labels = Series("category", StringColumn(categories^, out_valid.copy()))
+    var labels = Series("category", StringColumn(categories, out_valid.copy()))
     if (node.integer & 2) == 0:
         return labels.renamed("")
     var breaks = Series(
@@ -1180,7 +1180,7 @@ def _rolling_decimal_sum_by(
                 total += value
             output[row] = total
             valid[row] = True
-    return Series("", Column[Int128](output^, valid^)).with_dtype(target)
+    return Series("", Column[Int128](output^, valid)).with_dtype(target)
 
 
 def _rolling_u64_sum(

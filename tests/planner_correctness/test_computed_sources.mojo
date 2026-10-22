@@ -22,7 +22,7 @@ def _part(shift: Int) raises -> DataFrame:
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("v", Column[Int64](values^, valid^)),
+            Series("v", Column[Int64](values^, valid)),
             Series("label", Column[String](labels^)),
         ]
     )

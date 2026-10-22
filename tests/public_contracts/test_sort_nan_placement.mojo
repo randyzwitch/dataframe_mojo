@@ -45,7 +45,7 @@ def _frame[
             ids.append(Int64(r * len(values) + j))
     return DataFrame(
         [
-            Series(name, Column[Scalar[D]](column^, present^)),
+            Series(name, Column[Scalar[D]](column^, present)),
             Series("i", Column[Int64](ids^)),
         ]
     )

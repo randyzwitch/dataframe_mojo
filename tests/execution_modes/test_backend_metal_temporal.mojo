@@ -184,11 +184,11 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
         if not dtype.is_time():
             columns.extend(
                 [
-                    tagged("weekday", DataType.INT64, weekday^, weekday_bits^),
+                    tagged("weekday", DataType.INT64, weekday, weekday_bits),
                     tagged(
                         "ordinal",
                         DataType.INT64,
-                        ordinal^,
+                        ordinal,
                         calendar_bits.copy(),
                     ),
                 ]
@@ -196,16 +196,14 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
         if not dtype.is_time():
             columns.extend(
                 [
+                    tagged("year", DataType.INT64, years, calendar_bits.copy()),
                     tagged(
-                        "year", DataType.INT64, years^, calendar_bits.copy()
-                    ),
-                    tagged(
-                        "month", DataType.INT64, months^, calendar_bits.copy()
+                        "month", DataType.INT64, months, calendar_bits.copy()
                     ),
                     tagged(
                         "day",
                         DataType.INT64,
-                        days_of_month^,
+                        days_of_month,
                         calendar_bits.copy(),
                     ),
                 ]
@@ -213,17 +211,17 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
         if not dtype.is_date():
             columns.extend(
                 [
-                    tagged("hour", DataType.INT64, hours^, bits.copy()),
-                    tagged("minute", DataType.INT64, minutes^, bits.copy()),
-                    tagged("second", DataType.INT64, seconds^, bits.copy()),
-                    tagged("nanos", DataType.INT64, nanos^, bits.copy()),
+                    tagged("hour", DataType.INT64, hours, bits.copy()),
+                    tagged("minute", DataType.INT64, minutes, bits.copy()),
+                    tagged("second", DataType.INT64, seconds, bits.copy()),
+                    tagged("nanos", DataType.INT64, nanos, bits.copy()),
                 ]
             )
         if dtype.is_datetime():
             columns.extend(
                 [
-                    tagged("date", DataType.DATE, dates^, bits.copy()),
-                    tagged("time", DataType.TIME, times^, bits.copy()),
+                    tagged("date", DataType.DATE, dates, bits.copy()),
+                    tagged("time", DataType.TIME, times, bits.copy()),
                 ]
             )
         var expected = DataFrame(columns^)
@@ -346,10 +344,10 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
                         floor128(Int128(value) - origin, step) * step + origin
                     )
                 )
-            var source = DataFrame([tagged("t", dtype, raw^, bits.copy())])
+            var source = DataFrame([tagged("t", dtype, raw, bits.copy())])
             check_temporal_domain(
                 source.lazy().select(col("t").dt().truncate(periods[at])),
-                DataFrame([tagged("t", dtype, expected^, bits.copy())]),
+                DataFrame([tagged("t", dtype, expected, bits.copy())]),
                 runtime,
                 native,
             )

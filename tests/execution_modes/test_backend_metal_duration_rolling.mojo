@@ -57,9 +57,9 @@ def fixture(dtype: DataType, n: Int = 35) raises -> DataFrame:
         second.append(Int32(i % 2))
     return DataFrame(
         [
-            Series("x", Column[Int64](x^, valid^)),
+            Series("x", Column[Int64](x^, valid)),
             Series("t", Column[Int64](times^)).with_dtype(dtype),
-            Series("k", Column[Int32](keys^, key_valid^)),
+            Series("k", Column[Int32](keys^, key_valid)),
             Series("j", Column[Int32](second^)),
         ]
     )

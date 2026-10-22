@@ -429,7 +429,7 @@ def test_lazy_distinct_counts_and_flags_match_eager_and_scalar_groups() raises:
     var nan = Float64(0) / Float64(0)
     var values: List[Float64] = [-0.0, 0.0, nan, nan, 8, 9, 9]
     var valid: List[Bool] = [True, True, True, True, True, False, False]
-    var floats = DataFrame([Series("f", Column[Float64](values^, valid^))])
+    var floats = DataFrame([Series("f", Column[Float64](values^, valid))])
     assert_distinct(floats, [])
     var expected = DataFrame(
         [

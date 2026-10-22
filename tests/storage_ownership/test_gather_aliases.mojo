@@ -30,8 +30,8 @@ def test_sorted_repeated_positions_with_full_chunk_endpoints_never_reuse_wrong_r
             var length = 64 if aligned else 79 if chunk == 15 else 63
             string_parts.append(text.slice(first, length))
         var columns: List[Series] = [
-            Series._from_chunks(numeric_parts^),
-            Series._from_chunks(string_parts^),
+            Series._from_chunks(numeric_parts),
+            Series._from_chunks(string_parts),
         ]
         var rows: List[Int] = [0, 0]
         for row in range(2, 64):

@@ -22,6 +22,7 @@ from tests.execution_modes.test_mojo_gpu_ordering import (
     test_mojo_gpu_ordering_float_encodings_nan_zero_subnormal_and_nulls,
     test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery,
     test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings,
+    test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget,
 )
 
 from tests.execution_modes.test_mojo_gpu_statistics import (
@@ -185,6 +186,10 @@ def main() raises:
         "RUN test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings"
     )
     test_mojo_gpu_ordering_tiled_merge_boundaries_ties_nulls_and_float_encodings()
+    print(
+        "RUN test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget"
+    )
+    test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget()
     print(
         "RUN test_mojo_gpu_statistics_numeric_layouts_empty_masks_and_mixed_outputs"
     )

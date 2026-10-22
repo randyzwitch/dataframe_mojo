@@ -78,7 +78,7 @@ struct StrategyTrace(Movable):
             if byte < 0:
                 break
             bytes.append(UInt8(byte))
-        return String(unsafe_from_utf8=bytes^)
+        return String(unsafe_from_utf8=bytes)
 
     def __deinit__(deinit self):
         _ = external_call["dup2", Int32](self.previous, Int32(2))

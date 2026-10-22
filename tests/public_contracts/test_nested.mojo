@@ -826,11 +826,7 @@ def test_nested_parent_child_bitmaps_cross_window_and_batch_boundaries() raises:
                     Series(
                         "record",
                         StructColumn(
-                            [
-                                Series(
-                                    "value", Column[Int64](values^, children^)
-                                )
-                            ],
+                            [Series("value", Column[Int64](values^, children))],
                             bits^,
                         ),
                     ),

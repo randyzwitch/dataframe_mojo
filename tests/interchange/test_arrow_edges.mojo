@@ -52,8 +52,8 @@ def edge_metadata(
         for row in range(len(keys) - 1, -1, -1):
             reordered_keys.append(keys[row].copy())
             reordered_values.append(values[row].copy())
-        return packed_metadata(reordered_keys^, reordered_values^)
-    return packed_metadata(keys^, values^)
+        return packed_metadata(reordered_keys, reordered_values)
+    return packed_metadata(keys, values)
 
 
 def opaque_series(
@@ -246,10 +246,10 @@ def test_arrow_dispatch_sized_parent_slices_preserve_order_nulls_and_recursive_e
                     validity[row // 8] |= UInt8(1 << (row % 8))
             producer.nodes[1].describe("l", "a", N, 0, -1)
             producer.nodes[1].buffer(validity^)
-            producer.nodes[1].buffer(integers(values^, 8, 1), 1)
+            producer.nodes[1].buffer(integers(values, 8, 1), 1)
             producer.nodes[2].describe("e" if fail else "l", "b", N)
             producer.nodes[2].buffer([])
-            producer.nodes[2].buffer(integers(other^, 8, 1), 1)
+            producer.nodes[2].buffer(integers(other, 8, 1), 1)
             producer.seal()
             if fail:
                 with assert_raises(contains="Unsupported Arrow format 'e'"):

@@ -1,11 +1,24 @@
 """Stable direct Mojo GPU ordering across public lazy-query compositions."""
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Series, col
+from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col
+from dataframe.decimal import pow10
 from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.key_kernel_reference import KeyCell, expected_order
 from dataframe.accelerator.gpu.ordering import merge_grid
+from dataframe.accelerator.gpu.residency import Scope
+from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
+
+
+def _resident_order_bytes(query: LazyFrame) raises -> Int:
+    # Public collect exports host columns and correctly reports zero resident
+    # output. Inspect the region before export to test its retained capacity.
+    var scope = Scope()
+    var plan = _preflight(query)
+    var executed = execute_plan(plan, scope)
+    scope.synchronize()
+    return executed[0].retained_bytes()
 
 
 def _layout(source: Series, chunked: Bool) raises -> Series:
@@ -92,6 +105,161 @@ def _integer_case[D: DType](n: Int, chunked: Bool) raises:
         )
         for row in range(n):
             assert_equal(actual.item(row, "id").int64(), Int64(expected[row]))
+
+
+def _topk_composite_frame(rows: Int, chunked: Bool) raises -> DataFrame:
+    var major = List[Int64]()
+    var major_valid = List[Bool]()
+    var float_words = List[UInt64]()
+    var float_valid = List[Bool]()
+    var wide = List[Int128]()
+    var wide_valid = List[Bool]()
+    var ids = List[Int64]()
+    var encodings: List[UInt64] = [
+        0,
+        0x8000000000000000,
+        0x3FF0000000000000,
+        0xBFF0000000000000,
+        0x7FF0000000000000,
+        0xFFF0000000000000,
+        0x7FF8000000000042,
+        0xFFF8000000000099,
+        1,
+        0x8000000000000001,
+    ]
+    var large = pow10(25)
+    var decimal_keys: List[Int128] = [
+        -2 * large,
+        -large,
+        -1,
+        0,
+        1,
+        large,
+        2 * large,
+    ]
+    for physical in range(rows + 6):
+        major.append(Int64((physical * 17 + physical // 7) % 19 - 9))
+        major_valid.append(physical % 97 != 0)
+        float_words.append(
+            encodings[(physical * 3 + physical // 11) % len(encodings)]
+        )
+        float_valid.append(physical % 113 != 0)
+        wide.append(
+            decimal_keys[(physical * 5 + physical // 13) % len(decimal_keys)]
+        )
+        wide_valid.append(physical % 131 != 0)
+        ids.append(Int64(physical - 3))
+    var float_values = List[Float64](capacity=len(float_words))
+    for value in float_words:
+        float_values.append(bitcast[DType.float64](value))
+    var frame = DataFrame(
+        [
+            _layout(
+                Series(
+                    "major",
+                    Column[Int64](major^, major_valid^),
+                ).slice(3, rows),
+                chunked,
+            ),
+            _layout(
+                Series(
+                    "minor",
+                    Column[Float64](
+                        float_values^,
+                        float_valid^,
+                    ),
+                ).slice(3, rows),
+                chunked,
+            ),
+            _layout(
+                Series("wide", Column[Int128](wide^, wide_valid^))
+                .with_dtype(DataType.decimal(38, 0))
+                .slice(3, rows),
+                chunked,
+            ),
+            _layout(Series("id", Column[Int64](ids^)).slice(3, rows), chunked),
+        ]
+    )
+    return frame^
+
+
+# requires: mojo_gpu
+def test_mojo_gpu_ordering_topk_composite_stability_layout_and_budget() raises:
+    var rows = 8_193
+    var frame = _topk_composite_frame(rows, True)
+    for k in [1, 17, 255, 256, 257, 1_024, 4_096]:
+        var query = (
+            frame.lazy()
+            .sort(
+                ["major", "minor", "wide"],
+                descending=[True, False, True],
+                nulls_last=[False, True, False],
+            )
+            .head(k)
+        )
+        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+        same(actual, query.collect(engine="cpu", streaming=False))
+        assert_equal(actual.height(), k)
+
+    # Cover partial base runs and merge widths around the 256-row boundary.
+    for boundary_rows in [31, 255, 257, 511, 513]:
+        var boundary_frame = _topk_composite_frame(boundary_rows, True)
+        for k in [1, 17, 255, 256]:
+            if k >= boundary_rows:
+                continue
+            var boundary_query = (
+                boundary_frame.lazy()
+                .sort(
+                    ["major", "minor", "wide"],
+                    descending=[True, False, True],
+                    nulls_last=[False, True, False],
+                )
+                .head(k)
+            )
+            var boundary_actual = boundary_query.collect(
+                accelerator=MetalRuntime(), engine="accel"
+            )
+            same(
+                boundary_actual,
+                boundary_query.collect(engine="cpu", streaming=False),
+            )
+            assert_equal(boundary_actual.height(), k)
+
+    var selected = frame.lazy().sort("major").head(31)
+    var result = selected.collect(accelerator=MetalRuntime(), engine="accel")
+    same(result, selected.collect(engine="cpu", streaming=False))
+    var profile = selected.profile(accelerator=MetalRuntime(), engine="accel")
+    var peak = Int(profile[1].item(0, "peak_requested_bytes").int64())
+    var topk_launches = profile[1].item(0, "kernel_launches").int64()
+    assert_equal(
+        _resident_order_bytes(selected),
+        31 * frame.width() * 21,
+    )
+    with assert_raises(contains="budget"):
+        _ = selected.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=peak - 1),
+            engine="accel",
+        )
+    same(
+        selected.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
+        ),
+        result,
+    )
+    var full = frame.lazy().sort("major")
+    var full_profile = full.profile(accelerator=MetalRuntime(), engine="accel")
+    assert_true(
+        topk_launches < full_profile[1].item(0, "kernel_launches").int64()
+    )
+
+    # Filters are before the sort in this plan. The exact one-step certificate
+    # rejects pushdown and retains the ordinary full-capacity result path.
+    var filtered = frame.lazy().filter(col("major") > 0).sort("major").head(31)
+    var filtered_result = filtered.collect(
+        accelerator=MetalRuntime(), engine="accel"
+    )
+    same(filtered_result, filtered.collect(engine="cpu", streaming=False))
+    assert_true(_resident_order_bytes(filtered) > 31 * frame.width() * 21)
 
 
 # requires: mojo_gpu

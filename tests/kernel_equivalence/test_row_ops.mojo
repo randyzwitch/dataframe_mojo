@@ -96,7 +96,7 @@ def test_bitmap_filter_compaction_matches_scalar_rows_at_every_density() raises:
                     for row in range(n):
                         flags.append(row_selected(row, n, density))
                         valid.append(row_valid(row, validity))
-                    var mask = BoolColumn(flags^, valid^).slice(offset, n)
+                    var mask = BoolColumn(flags, valid).slice(offset, n)
                     var expected = expected_selection(n, density, validity)
                     assert_equal(true_rows(mask), expected)
                     # Directly invoke the specialized 64-bit bitmap scan:
@@ -124,7 +124,7 @@ def scalar_column[
         var present = row_valid(row, mode)
         values.append(row_payload[D](row, present))
         valid.append(present)
-    return Column[Scalar[D]](values^, valid^).slice(offset, n)
+    return Column[Scalar[D]](values^, valid).slice(offset, n)
 
 
 def assert_gathered[
@@ -253,8 +253,8 @@ def integer_row_kernels[D: DType, operation: Int]() raises:
                         )
                         av.append(left_valid)
                         bv.append(right_valid)
-                    var left = Column[Scalar[D]](a^, av^).slice(offset, n)
-                    var right = Column[Scalar[D]](b^, bv^).slice(offset, n)
+                    var left = Column[Scalar[D]](a^, av).slice(offset, n)
+                    var right = Column[Scalar[D]](b^, bv).slice(offset, n)
                     if broadcast == 1:
                         left = Column[Scalar[D]](
                             [Scalar[D](4 if operation == 1 else 2)]
@@ -369,7 +369,7 @@ def integer_overflow_and_poison[D: DType, operation: Int]() raises:
         var valid = List[Bool](length=33, fill=True)
         valid[at] = False
         var hidden = _numeric_int[op, D](
-            Column[Scalar[D]](a^, valid^), right, List[Bool]()
+            Column[Scalar[D]](a^, valid), right, List[Bool]()
         )
         assert_true(hidden.get(at).is_null())
         for row in range(33):
@@ -588,8 +588,8 @@ def float_special_rows[D: DType, op: Int, width: Int]() raises:
                     bv.append(row_valid(row + 1, mode))
                     a.append(Scalar[D](xs[row % 8]))
                     b.append(Scalar[D](ys[row % 8]))
-                var left = Column[Scalar[D]](a^, av^).slice(offset, n)
-                var right = Column[Scalar[D]](b^, bv^).slice(offset, n)
+                var left = Column[Scalar[D]](a^, av).slice(offset, n)
+                var right = Column[Scalar[D]](b^, bv).slice(offset, n)
                 var actual = binary[op, width](
                     Series("a", left.copy()), Series("b", right.copy())
                 )
@@ -659,16 +659,16 @@ def test_boolean_and_string_row_kernels_preserve_selected_payload_and_validity()
                     text_b.append("β" + String(row))
                     valid_a.append(row_valid(row, mode))
                     valid_b.append(row_valid(row + 1, mode))
-                var a = Series("a", BoolColumn(bool_a^, valid_a.copy())).slice(
+                var a = Series("a", BoolColumn(bool_a, valid_a.copy())).slice(
                     offset, n
                 )
-                var b = Series("b", BoolColumn(bool_b^, valid_b.copy())).slice(
+                var b = Series("b", BoolColumn(bool_b, valid_b.copy())).slice(
                     offset, n
                 )
-                var ta = Series("ta", Column[String](text_a^, valid_a^)).slice(
+                var ta = Series("ta", Column[String](text_a^, valid_a)).slice(
                     offset, n
                 )
-                var tb = Series("tb", Column[String](text_b^, valid_b^)).slice(
+                var tb = Series("tb", Column[String](text_b^, valid_b)).slice(
                     offset, n
                 )
                 for broadcast in range(3):
@@ -859,9 +859,9 @@ def test_float_filter_direct_selection_matches_materialized_bitmap_and_scalar_ro
                 for row in range(n + offset):
                     values.append(pattern[row % 7])
                     valid.append(row_valid(row, mode))
-                var source = Series(
-                    "x", Column[Float64](values^, valid^)
-                ).slice(offset, n)
+                var source = Series("x", Column[Float64](values^, valid)).slice(
+                    offset, n
+                )
                 var cut = min(3, n)
                 var chunked = Series._from_chunks(
                     [source.slice(0, cut), source.slice(cut, n - cut)]
@@ -976,7 +976,7 @@ def decimal_series_for_rows[
         9 if width == 32 else 18 if width == 64 else 38, scale, width
     )
     return (
-        Series._wrap("d", Column[Scalar[D]](values^, valid^))
+        Series._wrap("d", Column[Scalar[D]](values^, valid))
         .with_dtype(dtype)
         .slice(offset, n)
     )
@@ -1135,7 +1135,7 @@ def test_decimal_precision_overflow_never_evaluates_null_or_inactive_slots() rai
         present[at] = False
         values[at] = Int128.MAX
         var hidden = Series._wrap(
-            "a", Column[Int128](values^, present^)
+            "a", Column[Int128](values^, present)
         ).with_dtype(dtype)
         var masked = binary[ADD](hidden, right)
         assert_true(masked.get(at).is_null())

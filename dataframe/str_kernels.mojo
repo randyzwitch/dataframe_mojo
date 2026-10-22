@@ -191,7 +191,7 @@ def string_op(node: Node, input: Series) raises -> Series:
                     flags[i] = text.endswith(node.text)
                 else:
                     flags[i] = node.text in text
-        return Series("", BoolColumn(flags^, valid))
+        return Series("", BoolColumn(flags, valid))
     var out = StringBuilder(n, column._value_bytes())
     for i in range(n):
         if not valid[i]:

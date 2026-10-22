@@ -41,7 +41,7 @@ def csv_records(
                 bytes.append(b)
             continue
         if b == separator or b == 10 or b == 13:
-            record.append(CsvCell(String(unsafe_from_utf8=bytes^), quoted))
+            record.append(CsvCell(String(unsafe_from_utf8=bytes), quoted))
             bytes = []
             quoted = False
             closed = False
@@ -70,7 +70,7 @@ def csv_records(
     if inside:
         raise Error("Reference CSV unterminated quoted field")
     if started or record:
-        record.append(CsvCell(String(unsafe_from_utf8=bytes^), quoted))
+        record.append(CsvCell(String(unsafe_from_utf8=bytes), quoted))
         records.append(record^)
     return records^
 

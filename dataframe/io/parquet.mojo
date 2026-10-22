@@ -934,5 +934,5 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
             j += 1
         columns[c] = pieces[0].copy() if len(
             pieces
-        ) == 1 else Series._from_chunks(pieces^)
+        ) == 1 else Series._from_chunks(pieces)
     return DataFrame(columns^, height=frame.height())

@@ -102,7 +102,7 @@ def _numeric_distinct[D: DType](rows: Int) raises:
         valid.append(present)
         labels.append(row * 8191 % GROUPS)
         classes.append(cls if present else 4)
-    var source = Series("v", Column[Scalar[D]](payload^, valid^)).slice(7, rows)
+    var source = Series("v", Column[Scalar[D]](payload^, valid)).slice(7, rows)
     _assert_counts(source, labels, classes, GROUPS + 1)
     if rows > 65538:
         var chunked = Series._from_chunks(
@@ -231,11 +231,9 @@ def test_inplace_hash_aggregation_merges_complete_scalar_states_and_declines_uns
                 state.float_most = max(state.float_most, floating)
     var frame = DataFrame(
         [
-            Series("key", Column[Int64](keys^, key_valid^)).slice(7, ROWS),
-            Series("i", Column[Int64](integers^, integer_valid^)).slice(
-                7, ROWS
-            ),
-            Series("f", Column[Float64](floats^, float_valid^)).slice(7, ROWS),
+            Series("key", Column[Int64](keys^, key_valid)).slice(7, ROWS),
+            Series("i", Column[Int64](integers^, integer_valid)).slice(7, ROWS),
+            Series("f", Column[Float64](floats^, float_valid)).slice(7, ROWS),
         ]
     )
     var expressions: List[Expr] = [

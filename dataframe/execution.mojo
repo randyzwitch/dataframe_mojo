@@ -3226,7 +3226,7 @@ def _rows[
     var parts = List[Series](capacity=len(jobs))
     while len(jobs) > 0:
         parts.append(jobs.pop(0).into_result())
-    return Series._from_chunks(parts^)
+    return Series._from_chunks(parts)
 
 
 def _whole_masked_branch[

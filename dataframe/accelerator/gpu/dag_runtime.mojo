@@ -243,7 +243,6 @@ def _profile_phases(report: DataFrame) raises -> DataFrame:
     return result^
 
 
-
 def _append_profile_region(
     report: DataFrame, region: DataFrame
 ) raises -> DataFrame:

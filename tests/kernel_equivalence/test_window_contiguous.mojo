@@ -65,8 +65,8 @@ def frame() raises -> DataFrame:
         same.append(0)
     return DataFrame(
         [
-            Series("x", Column[Int64](x^, xv^)),
-            Series("k", Column[String](k^, kv^)),
+            Series("x", Column[Int64](x^, xv)),
+            Series("k", Column[String](k^, kv)),
             Series("j", Column[Int64](j^)),
             Series("same", Column[Int64](same^)),
         ]
@@ -120,7 +120,7 @@ def test_over_on_contiguous_partitions_matches_the_scalar_models() raises:
             if x._valid(row):
                 total += x._get(row)
                 counted += 1
-        var cells = WindowCells(values^, valid^)
+        var cells = WindowCells(values, valid)
         var expected: List[WindowCells] = [
             cumulative(cells, "sum", False),
             cumulative(cells, "sum", True),

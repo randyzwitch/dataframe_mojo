@@ -197,6 +197,9 @@ from .ordering import (
     radix_apply_carries,
     radix_bucket_offsets,
     radix_scatter,
+    order_compact_runs,
+    order_merge_topk,
+    order_gather_topk,
 )
 from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
 from .windows import (
@@ -218,6 +221,8 @@ from .reductions import (
 
 
 comptime CELL_BYTES = 21
+comptime TOPK_MAX_LIMIT = 4096
+comptime TOPK_BASE_RUN_ROWS = 256
 
 
 def capabilities() -> RowCapabilities:
@@ -813,12 +818,12 @@ def _output(
             values.append(
                 value.cast[DType.int128]() if valid[row] else Int128(0)
             )
-        return Series(name, Column[Int128](values^, valid^)).with_dtype(dtype)
+        return Series(name, Column[Int128](values^, valid)).with_dtype(dtype)
     if dtype == DataType.BOOL:
         var values = List[Bool](capacity=count)
         for row in range(count):
             values.append(valid[row] and words[base + row] != 0)
-        return Series(name, Column[Bool](values^, valid^))
+        return Series(name, Column[Bool](values^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype.physical() == DataType.of(D):
@@ -833,7 +838,7 @@ def _output(
                     )
                 else:
                     values.append(value.cast[D]())
-            return Series(name, Column[Scalar[D]](values^, valid^)).with_dtype(
+            return Series(name, Column[Scalar[D]](values^, valid)).with_dtype(
                 dtype
             )
     raise Error("Mojo GPU unsupported output storage")
@@ -888,6 +893,62 @@ def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
     ):
         return -1
     return Int(integer_width(_kind(dtype)) // 4) + 1
+
+
+def _topk_limit(
+    plan: RowPlan, rows: Int, terminal_boundary: Bool
+) raises -> Int:
+    """Certify only a terminal ORDER BY over raw input columns followed by head."""
+    if (
+        not terminal_boundary
+        or plan.ordered_mode != 0
+        or plan.reductions
+        or plan.limit <= 0
+        or plan.limit > TOPK_MAX_LIMIT
+        or plan.limit >= rows
+        or len(plan.steps) != 1
+        or len(plan.outputs) != plan.source.width()
+    ):
+        return -1
+    var step = plan.steps[0].copy()
+    if (
+        not step.order
+        or step.filter
+        or step.grouped
+        or step.nodes <= 0
+        or step.gather_count != plan.source.width()
+    ):
+        return -1
+    for column in range(step.gather_count):
+        if plan.gathers[step.gather_start + column] != Int64(column):
+            return -1
+    for node in range(step.start, step.start + step.nodes):
+        var slot = Int(plan.code[4 * node + 1])
+        if (
+            plan.code[4 * node] != ROW_SORT_KEY
+            or slot < 0
+            or slot >= plan.source.width()
+            or plan.node_dtypes[node] != plan.source._columns[slot].dtype()
+            or (plan.code[4 * node + 2] != 0 and plan.code[4 * node + 2] != 1)
+            or (plan.code[4 * node + 3] & ~Int64(3)) != 0
+        ):
+            return -1
+    for output in range(len(plan.outputs)):
+        if (
+            plan.outputs[output].slot != output
+            or plan.outputs[output].reduction >= 0
+            or plan.outputs[output].dtype
+            != plan.source._columns[output].dtype()
+        ):
+            return -1
+    return plan.limit
+
+
+def _topk_retained_rows(rows: Int, run_width: Int, limit: Int) raises -> Int:
+    var full_runs = rows // run_width
+    var tail = rows % run_width
+    var keep = min(limit, run_width)
+    return _checked_add(_checked_mul(full_runs, keep), min(limit, tail))
 
 
 def _iana_scalar_slots(plan: RowPlan) raises -> Int:
@@ -960,6 +1021,7 @@ def estimate_resources(
     var windows = False
     var duration_windows = False
     var radix_ordering = False
+    var topk_limit = _topk_limit(plan, rows, terminal_boundary)
     for step in plan.steps:
         ordering = ordering or step.order or step.grouped
         grouping = grouping or step.grouped
@@ -974,9 +1036,16 @@ def estimate_resources(
             )
             duration_windows = duration_windows or header == ROW_DURATION_KEY
         movement = movement or step.filter or step.order or step.grouped
+    if topk_limit > 0:
+        radix_ordering = False
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, CELL_BYTES)
+    var result_matrix_bytes = matrix_bytes
+    if topk_limit > 0:
+        result_matrix_bytes = _checked_mul(
+            _checked_mul(topk_limit, plan.slots), CELL_BYTES
+        )
     var program_bytes = _checked_mul(
         len(plan.code)
         + 2 * len(plan.literals)
@@ -994,7 +1063,7 @@ def estimate_resources(
         # A second matrix prevents overlapping reads/writes during compaction.
         # Scans use row positions, two block arrays and a two-word count/error
         # readback. Gather metadata is bounded by the full plan's gather list.
-        shared = _checked_add(shared, matrix_bytes)
+        shared = _checked_add(shared, result_matrix_bytes)
         shared = _checked_add(shared, _checked_mul(rows, 8 if ordering else 4))
         shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 8))
         shared = _checked_add(shared, 16)
@@ -1040,7 +1109,9 @@ def estimate_resources(
         # One device UInt32 source-index plane is reused across scalar outputs
         # and grouped phases; no host copy, download or extra wait is needed.
         shared = _checked_add(shared, _checked_mul(rows, 4))
-    var result_bytes = _checked_add(matrix_bytes, program_bytes) if rows else 0
+    var result_bytes = _checked_add(
+        result_matrix_bytes, program_bytes
+    ) if rows else 0
     if rows and grouping:
         result_bytes = _checked_add(result_bytes, _checked_mul(plan.slots, 8))
     if plan.reductions:
@@ -1195,7 +1266,20 @@ def estimate_resources(
                 # key/window observation phases; bounds every supported mode.
                 var order_launch_bound = passes + 16
                 var radix_pass_count = _radix_sort_passes(plan, step)
-                if radix_pass_count > 0:
+                var topk_limit = _topk_limit(plan, rows, terminal_boundary)
+                if topk_limit > 0:
+                    var base_passes = 0
+                    var run_width = 1
+                    while run_width < min(rows, TOPK_BASE_RUN_ROWS):
+                        base_passes += 1
+                        run_width *= 2
+                    var merge_levels = 0
+                    var span = TOPK_BASE_RUN_ROWS
+                    while span < rows:
+                        merge_levels += 1
+                        span *= 2
+                    order_launch_bound = 4 + base_passes + merge_levels
+                elif radix_pass_count > 0:
                     var level_count = (rows + 255) // 256
                     var level_total = 1
                     var down_carries = 0
@@ -1311,10 +1395,9 @@ def estimate_resources(
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
-    # A runtime-owned service drains once more before a direct context or
-    # resident DAG context can return to the idle pool. This conservative
-    # per-plan bound includes the DAG's terminal service drain; shared-region
-    # and uncached calls may omit it.
+    # A reusable standalone service drains its stream once more before the
+    # context can return to the idle pool. Shared-region and uncached calls
+    # may omit this drain; the metadata estimate remains an upper bound.
     # Zero-column inputs carry row metadata without creating a device context.
     if rows and cells:
         waits = _checked_add(waits, 1)
@@ -1443,7 +1526,7 @@ def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
                 codes.append(UInt32(original - 1) if present else UInt32(0))
                 valid.append(present)
             output = Series(
-                field.name(), Column[UInt32](codes^, valid^)
+                field.name(), Column[UInt32](codes^, valid)
             ).with_dtype(owner[].dtype)
             if table.categories[column].value().string_codes:
                 # A source coded String keeps its own codes when transported.
@@ -1874,6 +1957,7 @@ def execute_plan(
         count = 0 if plan.limit == 0 else 1
     var cells = _checked_mul(rows, plan.slots)
     var current_rows = rows
+    var result_capacity = rows
     var movement = False
     var ordering = False
     var grouping = False
@@ -2890,117 +2974,17 @@ def execute_plan(
                             block_dim=256,
                         )
                         submissions += 2
-                        var radix_pass_count = _radix_sort_passes(plan, step)
-                        if radix_pass_count > 0 and current_rows > 0:
-                            var tiles = blocks
-                            var level_counts = List[Int]()
-                            var level_offsets = List[Int]()
-                            var level_count = tiles
-                            var summary_count = 0
-                            while level_count > 0:
-                                level_counts.append(level_count)
-                                level_offsets.append(summary_count)
-                                summary_count = _checked_add(
-                                    summary_count, level_count
-                                )
-                                if level_count == 1:
-                                    break
-                                level_count = (level_count + 255) // 256
-                            radix_counts = ctx.enqueue_create_buffer[
-                                DType.uint32
-                            ](16 * summary_count)
-                            radix_offsets = ctx.enqueue_create_buffer[
-                                DType.uint32
-                            ](16)
-                            var node = UInt32(step.start)
-                            var width = integer_width(
-                                _kind(plan.node_dtypes[step.start])
-                            )
-                            var digits = Int(width // 4) + 1
-                            for pass_index in range(digits):
-                                var null_marker = UInt32(
-                                    pass_index == Int(width // 4)
-                                )
-                                var shift = UInt32(pass_index * 4)
-                                ctx.enqueue_function[radix_histogram](
-                                    device_words.unsafe_ptr(),
-                                    device_valid.unsafe_ptr(),
-                                    index.unsafe_ptr(),
-                                    radix_counts.value().unsafe_ptr(),
-                                    device_code.unsafe_ptr(),
-                                    device_types.unsafe_ptr(),
-                                    node,
-                                    UInt32(current_rows),
-                                    UInt32(rows),
-                                    UInt32(summary_count),
-                                    shift,
-                                    null_marker,
-                                    grid_dim=tiles,
-                                    block_dim=256,
-                                )
-                                submissions += 1
-                                for level in range(len(level_counts) - 1):
-                                    var count = level_counts[level]
-                                    var parent_base = level_offsets[level + 1]
-                                    ctx.enqueue_function[radix_scan_level](
-                                        radix_counts.value().unsafe_ptr(),
-                                        UInt32(count),
-                                        UInt32(level_offsets[level]),
-                                        UInt32(parent_base),
-                                        UInt32(summary_count),
-                                        grid_dim=16 * ((count + 255) // 256),
-                                        block_dim=256,
-                                    )
-                                    submissions += 1
-                                for level in range(len(level_counts) - 1):
-                                    var at = len(level_counts) - 2 - level
-                                    var count = level_counts[at]
-                                    if count <= 256:
-                                        continue
-                                    ctx.enqueue_function[radix_apply_carries](
-                                        radix_counts.value().unsafe_ptr(),
-                                        UInt32(count),
-                                        UInt32(level_offsets[at]),
-                                        UInt32(level_offsets[at + 1]),
-                                        UInt32(summary_count),
-                                        grid_dim=16 * ((count + 255) // 256),
-                                        block_dim=256,
-                                    )
-                                    submissions += 1
-                                ctx.enqueue_function[radix_bucket_offsets](
-                                    radix_counts.value().unsafe_ptr(),
-                                    radix_offsets.value().unsafe_ptr(),
-                                    UInt32(tiles),
-                                    UInt32(summary_count),
-                                    grid_dim=1,
-                                    block_dim=256,
-                                )
-                                ctx.enqueue_function[radix_scatter](
-                                    device_words.unsafe_ptr(),
-                                    device_valid.unsafe_ptr(),
-                                    index.unsafe_ptr(),
-                                    next_index.unsafe_ptr(),
-                                    radix_counts.value().unsafe_ptr(),
-                                    radix_offsets.value().unsafe_ptr(),
-                                    device_code.unsafe_ptr(),
-                                    device_types.unsafe_ptr(),
-                                    node,
-                                    UInt32(current_rows),
-                                    UInt32(rows),
-                                    UInt32(summary_count),
-                                    shift,
-                                    null_marker,
-                                    grid_dim=tiles,
-                                    block_dim=256,
-                                )
-                                submissions += 2
-                                # Stable passes alternate only the index owners.
-                                var previous = index^
-                                index = next_index^
-                                next_index = previous^
-                        else:
+                        var topk = _topk_limit(
+                            plan, current_rows, terminal_boundary
+                        )
+                        if topk > 0:
+                            # Sort bounded base runs with the shared comparator,
+                            # then compact each run to its first K indices.
                             var run_width = 1
-                            while run_width < current_rows:
+                            while (
+                                run_width < current_rows
+                                and run_width < TOPK_BASE_RUN_ROWS
+                            ):
                                 ctx.enqueue_function[order_merge](
                                     device_words.unsafe_ptr(),
                                     device_valid.unsafe_ptr(),
@@ -3020,21 +3004,227 @@ def execute_plan(
                                     ),
                                     block_dim=256,
                                 )
-                                # Swapping owners keeps both buffers alive across queued passes.
                                 var previous = index^
                                 index = next_index^
                                 next_index = previous^
                                 run_width *= 2
                                 submissions += 1
+                            var keep_per_run = min(topk, TOPK_BASE_RUN_ROWS)
+                            var active_rows = _topk_retained_rows(
+                                current_rows, TOPK_BASE_RUN_ROWS, topk
+                            )
+                            ctx.enqueue_function[order_compact_runs](
+                                index.unsafe_ptr(),
+                                next_index.unsafe_ptr(),
+                                UInt32(current_rows),
+                                UInt32(TOPK_BASE_RUN_ROWS),
+                                UInt32(keep_per_run),
+                                UInt32(active_rows),
+                                grid_dim=(active_rows + 255) // 256,
+                                block_dim=256,
+                            )
+                            var previous = index^
+                            index = next_index^
+                            next_index = previous^
+                            submissions += 1
+                            var child_width = TOPK_BASE_RUN_ROWS
+                            while child_width < current_rows:
+                                var parent_width = 2 * child_width
+                                var parent_keep = min(topk, parent_width)
+                                active_rows = _topk_retained_rows(
+                                    current_rows, parent_width, topk
+                                )
+                                var pairs = (
+                                    current_rows + parent_width - 1
+                                ) // parent_width
+                                var tiles_per_pair = (
+                                    parent_keep + 2047
+                                ) // 2048
+                                ctx.enqueue_function[order_merge_topk](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    UInt32(step.start),
+                                    UInt32(step.nodes),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(child_width),
+                                    UInt32(min(topk, child_width)),
+                                    UInt32(parent_keep),
+                                    UInt32(plan.slots),
+                                    device_literals.unsafe_ptr(),
+                                    grid_dim=pairs * tiles_per_pair,
+                                    block_dim=256,
+                                )
+                                var previous = index^
+                                index = next_index^
+                                next_index = previous^
+                                child_width = parent_width
+                                submissions += 1
+                            current_rows = topk
+                            result_capacity = topk
+                        else:
+                            var radix_pass_count = _radix_sort_passes(
+                                plan, step
+                            )
+                            if radix_pass_count > 0 and current_rows > 0:
+                                var tiles = blocks
+                                var level_counts = List[Int]()
+                                var level_offsets = List[Int]()
+                                var level_count = tiles
+                                var summary_count = 0
+                                while level_count > 0:
+                                    level_counts.append(level_count)
+                                    level_offsets.append(summary_count)
+                                    summary_count = _checked_add(
+                                        summary_count, level_count
+                                    )
+                                    if level_count == 1:
+                                        break
+                                    level_count = (level_count + 255) // 256
+                                radix_counts = ctx.enqueue_create_buffer[
+                                    DType.uint32
+                                ](16 * summary_count)
+                                radix_offsets = ctx.enqueue_create_buffer[
+                                    DType.uint32
+                                ](16)
+                                var node = UInt32(step.start)
+                                var width = integer_width(
+                                    _kind(plan.node_dtypes[step.start])
+                                )
+                                var digits = Int(width // 4) + 1
+                                for pass_index in range(digits):
+                                    var null_marker = UInt32(
+                                        pass_index == Int(width // 4)
+                                    )
+                                    var shift = UInt32(pass_index * 4)
+                                    ctx.enqueue_function[radix_histogram](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        radix_counts.value().unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        node,
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(summary_count),
+                                        shift,
+                                        null_marker,
+                                        grid_dim=tiles,
+                                        block_dim=256,
+                                    )
+                                    submissions += 1
+                                    for level in range(len(level_counts) - 1):
+                                        var count = level_counts[level]
+                                        var parent_base = level_offsets[
+                                            level + 1
+                                        ]
+                                        ctx.enqueue_function[radix_scan_level](
+                                            radix_counts.value().unsafe_ptr(),
+                                            UInt32(count),
+                                            UInt32(level_offsets[level]),
+                                            UInt32(parent_base),
+                                            UInt32(summary_count),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
+                                            block_dim=256,
+                                        )
+                                        submissions += 1
+                                    for level in range(len(level_counts) - 1):
+                                        var at = len(level_counts) - 2 - level
+                                        var count = level_counts[at]
+                                        if count <= 256:
+                                            continue
+                                        ctx.enqueue_function[
+                                            radix_apply_carries
+                                        ](
+                                            radix_counts.value().unsafe_ptr(),
+                                            UInt32(count),
+                                            UInt32(level_offsets[at]),
+                                            UInt32(level_offsets[at + 1]),
+                                            UInt32(summary_count),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
+                                            block_dim=256,
+                                        )
+                                        submissions += 1
+                                    ctx.enqueue_function[radix_bucket_offsets](
+                                        radix_counts.value().unsafe_ptr(),
+                                        radix_offsets.value().unsafe_ptr(),
+                                        UInt32(tiles),
+                                        UInt32(summary_count),
+                                        grid_dim=1,
+                                        block_dim=256,
+                                    )
+                                    ctx.enqueue_function[radix_scatter](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        next_index.unsafe_ptr(),
+                                        radix_counts.value().unsafe_ptr(),
+                                        radix_offsets.value().unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        node,
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(summary_count),
+                                        shift,
+                                        null_marker,
+                                        grid_dim=tiles,
+                                        block_dim=256,
+                                    )
+                                    submissions += 2
+                                    # Stable passes alternate only the index owners.
+                                    var previous = index^
+                                    index = next_index^
+                                    next_index = previous^
+                            else:
+                                var run_width = 1
+                                while run_width < current_rows:
+                                    ctx.enqueue_function[order_merge](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        next_index.unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        UInt32(step.start),
+                                        UInt32(step.nodes),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(run_width),
+                                        UInt32(plan.slots),
+                                        device_literals.unsafe_ptr(),
+                                        grid_dim=merge_grid(
+                                            current_rows, run_width
+                                        ),
+                                        block_dim=256,
+                                    )
+                                    # Swapping owners keeps both buffers alive across queued passes.
+                                    var previous = index^
+                                    index = next_index^
+                                    next_index = previous^
+                                    run_width *= 2
+                                    submissions += 1
+                        var selected_cells = (
+                            _checked_mul(current_rows, plan.slots) if topk
+                            > 0 else cells
+                        )
+                        var gather_blocks = (current_rows + 255) // 256
                         var gathered_words = ctx.enqueue_create_buffer[
                             DType.uint64
-                        ](2 * cells)
+                        ](2 * selected_cells)
                         var gathered_valid = ctx.enqueue_create_buffer[
                             DType.uint8
-                        ](cells)
+                        ](selected_cells)
                         var gathered_errors = ctx.enqueue_create_buffer[
                             DType.uint32
-                        ](cells)
+                        ](selected_cells)
                         if step.gather_count:
                             var gathers = List[Int64](
                                 capacity=step.gather_count
@@ -3051,22 +3241,41 @@ def execute_plan(
                                     device_gathers, gathers.unsafe_ptr()
                                 )
                                 uploaded += len(gathers) * 8
-                                ctx.enqueue_function[order_gather](
-                                    device_words.unsafe_ptr(),
-                                    device_valid.unsafe_ptr(),
-                                    device_errors.unsafe_ptr(),
-                                    gathered_words.unsafe_ptr(),
-                                    gathered_valid.unsafe_ptr(),
-                                    gathered_errors.unsafe_ptr(),
-                                    index.unsafe_ptr(),
-                                    device_gathers.unsafe_ptr(),
-                                    UInt32(step.gather_count),
-                                    UInt32(current_rows),
-                                    UInt32(rows),
-                                    UInt32(plan.slots),
-                                    grid_dim=blocks,
-                                    block_dim=256,
-                                )
+                                if topk > 0:
+                                    ctx.enqueue_function[order_gather_topk](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        device_errors.unsafe_ptr(),
+                                        gathered_words.unsafe_ptr(),
+                                        gathered_valid.unsafe_ptr(),
+                                        gathered_errors.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        device_gathers.unsafe_ptr(),
+                                        UInt32(step.gather_count),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(current_rows),
+                                        UInt32(plan.slots),
+                                        grid_dim=gather_blocks,
+                                        block_dim=256,
+                                    )
+                                else:
+                                    ctx.enqueue_function[order_gather](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        device_errors.unsafe_ptr(),
+                                        gathered_words.unsafe_ptr(),
+                                        gathered_valid.unsafe_ptr(),
+                                        gathered_errors.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        device_gathers.unsafe_ptr(),
+                                        UInt32(step.gather_count),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(plan.slots),
+                                        grid_dim=blocks,
+                                        block_dim=256,
+                                    )
                                 submissions += 1
                                 # The gather metadata and source owners outlive all queued reads.
                                 scope.synchronize()
@@ -3697,7 +3906,7 @@ def execute_plan(
                 resident_result = Table(
                     Matrix(
                         scope,
-                        rows,
+                        result_capacity,
                         plan.slots,
                         device_words^,
                         device_valid^,

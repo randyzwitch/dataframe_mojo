@@ -361,8 +361,8 @@ def execute(
                     DType.int64
                 ]()
             )
-        var keys = Series(key.name(), StringColumn(labels^, valid^))
-        var keys2 = Series(key2.name(), StringColumn(labels2^, valid2^))
+        var keys = Series(key.name(), StringColumn(labels, valid))
+        var keys2 = Series(key2.name(), StringColumn(labels2, valid2))
         keys._field_metadata = key._field_metadata
         keys2._field_metadata = key2._field_metadata
         var totals = Series(node.exprs[0]._name, Column[Int64](sums^))
