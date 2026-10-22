@@ -72,7 +72,7 @@ invalid types, names, tolerances and sortedness. The planner's
 [`test_asof_boundaries.mojo`](../tests/planner_correctness/test_asof_boundaries.mojo)
 holds execution fixed while checking filter/slice boundaries and lazy errors.
 Run `pixi run test --contracts table.join planner.relational`. The
-[coverage guide](test-coverage-plan.md) describes the reference and dimension
+[coverage guide](design/test-coverage-plan.md) describes the reference and dimension
 requirements for extending these tests.
 
 Run the issue's 10M-left/1M-right development measurement with:

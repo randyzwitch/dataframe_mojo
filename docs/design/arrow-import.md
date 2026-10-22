@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit be283d9d (2026-10-15); they are a record of that decision, not current numbers.
+
 # Parallel Arrow import (#276)
 
 Independent record-batch columns can be copied on a scoped worker pool.

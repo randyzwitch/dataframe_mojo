@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit 51c40c90 (2026-10-20); they are a record of that decision, not current numbers.
+
 # Primitive GPU transfer probe
 
 Run on an Apple Silicon Mac with the repository's GPU environment:

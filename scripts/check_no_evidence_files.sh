@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rule 7 in docs/benchmarks.md: the repo holds code that produces reports,
+# Rule 7 in docs/design/benchmarks.md: the repo holds code that produces reports,
 # never the reports. Fails if tracked files include benchmark results or
 # generated data/pages under docs/.
 #

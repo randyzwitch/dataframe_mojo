@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit 54495318 (2026-10-15); they are a record of that decision, not current numbers.
+
 # Low-cardinality sort calibration (#271)
 
 > **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.

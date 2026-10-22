@@ -41,7 +41,7 @@ pixi run -e native build-dfparquet # native dependency for interchange tests
 pixi run test           # maintained dataframe contract suite
 pixi run example
 pixi run build
-pixi run bench-csv      # CSV reader benchmark; docs/benchmarks.md covers the rest
+pixi run bench-csv      # CSV reader benchmark; docs/design/benchmarks.md covers the rest
 ./build/sales
 
 ```
@@ -351,4 +351,5 @@ and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 
 See [semantics](docs/semantics.md) for the behavior the tests promise and
 [architecture and next steps](docs/architecture.md) for the intended progression.
+Design notes and measurement records are in [docs/design/](docs/design/).
 Historical benchmarks and one-off experiments are in the [research wiki](https://github.com/randyzwitch/dataframe_mojo/wiki).

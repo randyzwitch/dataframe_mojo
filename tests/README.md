@@ -1,7 +1,7 @@
 # Dataframe contract suite
 
 Tests start from observable dataframe behavior and independent reference
-semantics. The [coverage guide](../docs/test-coverage-plan.md) describes the
+semantics. The [coverage guide](../docs/design/test-coverage-plan.md) describes the
 contracts, adversarial dimensions and evidence to maintain.
 
 | Directory | Responsibility |

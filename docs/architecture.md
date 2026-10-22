@@ -45,12 +45,12 @@ explicit request; chunked columns and Arrow C Data import and export
 ([Arrow interchange](arrow.md)); CSV and Parquet input ([CSV](csv.md),
 [Parquet](parquet.md)); and multi-column sorts with multiple numeric or string
 grouping and join keys. Performance work is measured query by query against
-Polars and DuckDB on external suites; see [benchmarks](benchmarks.md).
+Polars and DuckDB on external suites; see [benchmarks](design/benchmarks.md).
 
 Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
 until a Mojo-native reader exists; `dataframe/io/parquet.mojo` is the seam.
 
 Optional GPU execution on Apple silicon is covered in
-[Apple Metal](apple-metal.md). Distributed execution, arbitrary Python-object
+[Apple Metal](design/apple-metal.md). Distributed execution, arbitrary Python-object
 columns, pandas index compatibility, and cross-engine adapters are outside the
 scope.

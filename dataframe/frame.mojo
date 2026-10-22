@@ -4260,7 +4260,7 @@ struct _ChunkFilterJob(Job):
 
 # Measured on a Threadripper 3970X (32 cores, 16 MiB L3 per cache domain),
 # Mojo 1.2, at 32 workers with an 8-worker cross-check; see
-# docs/join-cutoffs.md for the alternating sweeps and their limitations.
+# docs/design/join-cutoffs.md for the alternating sweeps and their limitations.
 # CSR: 750k distinct rows lose (15 vs 18 ms), 1M win (33 vs 21-26 ms).
 # At 1.5M rows / 93,750 groups serial wins; at 1.75M / 109,375 parallel wins.
 # Use the conservative 16 MiB working-set boundary: earlier dispatch helps

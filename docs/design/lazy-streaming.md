@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit 54495318 (2026-10-15); they are a record of that decision, not current numbers.
+
 # Lazy streaming: time and resident memory (#109)
 
 > **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
@@ -5,7 +7,7 @@
 The default lazy executor runs supported row-wise operators as ordered
 batches, merges aggregate state and streams supported join probe sides.
 `collect(streaming=False)` retains the materializing executor. The
-[execution guide](lazy.md) lists supported state, boundaries and limitations.
+[execution guide](../lazy.md) lists supported state, boundaries and limitations.
 
 ## Method
 
