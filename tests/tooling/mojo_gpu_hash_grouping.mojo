@@ -1,5 +1,7 @@
 """Focused regression gate for equality hash grouping."""
 from tests.execution_modes.test_mojo_gpu_hash_grouping import (
+    test_mojo_gpu_hash_grouping_unordered_integer_reductions,
+    test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group,
     test_mojo_gpu_hash_grouping_boundaries_and_integer_states,
     test_mojo_gpu_hash_grouping_composite_null_nan_keys_and_source_order,
     test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum,
@@ -17,6 +19,8 @@ from tests.execution_modes.test_mojo_gpu_grouping import (
 
 
 def main() raises:
+    test_mojo_gpu_hash_grouping_unordered_integer_reductions()
+    test_mojo_gpu_hash_grouping_parallelism_requires_a_large_hash_group()
     test_mojo_gpu_hash_grouping_boundaries_and_integer_states()
     test_mojo_gpu_hash_grouping_composite_null_nan_keys_and_source_order()
     test_mojo_gpu_hash_grouping_probe_exhaustion_and_checked_sum()
