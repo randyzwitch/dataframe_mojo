@@ -275,7 +275,7 @@ def test_distinct_estimates_sample_like_duckdb_and_skip_booleans() raises:
     var estimate = distinct_estimate(ints("unique", unique))
     assert_true(estimate > n // 3 and estimate <= n)
     # Null rows count as sampled but are never hashed.
-    var sparse = Series("sparse", Column[Int64](few.copy(), mostly_null^))
+    var sparse = Series("sparse", Column[Int64](few.copy(), mostly_null))
     assert_true(distinct_estimate(sparse) <= 5)
     var flags = List[Bool]()
     for row in range(10):

@@ -109,6 +109,7 @@ from dataframe.execution_report import ExecutionReport
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import (
     RowPlan,
+    RowStep,
     lower_rows,
     ROW_SLICE,
     ROW_IANA_ZONE_FIELDS,
@@ -147,7 +148,12 @@ from dataframe.accelerator.faults import data_fault
 from dataframe.accelerator.code_domains import TextField, CategoryField
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes, StringColumn
-from .rows import row_program, row_program_ordered, row_program_iana
+from .rows import (
+    integer_width,
+    row_program,
+    row_program_ordered,
+    row_program_iana,
+)
 from . import iana_scalar_scopes
 from dataframe.accelerator import iana_certificate, checked_rank
 from dataframe.accelerator.iana_mutations import (
@@ -179,8 +185,25 @@ from .grouping import (
     group_window_merge,
     group_window_schedule,
     group_reduce,
+    group_integer_partials,
+    group_integer_finish,
+    integer_partial_supported,
 )
-from .ordering import order_init, order_merge, order_key_errors, order_gather
+from .ordering import (
+    order_init,
+    order_merge,
+    order_key_errors,
+    order_gather,
+    merge_grid,
+    radix_histogram,
+    radix_scan_level,
+    radix_apply_carries,
+    radix_bucket_offsets,
+    radix_scatter,
+    order_compact_runs,
+    order_merge_topk,
+    order_gather_topk,
+)
 from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
 from .windows import (
     window_assign,
@@ -201,6 +224,8 @@ from .reductions import (
 
 
 comptime CELL_BYTES = 21
+comptime TOPK_MAX_LIMIT = 4096
+comptime TOPK_BASE_RUN_ROWS = 256
 
 
 def capabilities() -> RowCapabilities:
@@ -796,12 +821,12 @@ def _output(
             values.append(
                 value.cast[DType.int128]() if valid[row] else Int128(0)
             )
-        return Series(name, Column[Int128](values^, valid^)).with_dtype(dtype)
+        return Series(name, Column[Int128](values^, valid)).with_dtype(dtype)
     if dtype == DataType.BOOL:
         var values = List[Bool](capacity=count)
         for row in range(count):
             values.append(valid[row] and words[base + row] != 0)
-        return Series(name, Column[Bool](values^, valid^))
+        return Series(name, Column[Bool](values^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype.physical() == DataType.of(D):
@@ -816,7 +841,7 @@ def _output(
                     )
                 else:
                     values.append(value.cast[D]())
-            return Series(name, Column[Scalar[D]](values^, valid^)).with_dtype(
+            return Series(name, Column[Scalar[D]](values^, valid)).with_dtype(
                 dtype
             )
     raise Error("Mojo GPU unsupported output storage")
@@ -842,6 +867,41 @@ def _group_quantiles(plan: RowPlan, start: Int, nodes: Int) -> Bool:
     return False
 
 
+def _grouped_integer_partial_nodes(
+    plan: RowPlan, start: Int, nodes: Int
+) raises -> List[UInt32]:
+    """Metadata-only output certificate shared by sizing and dispatch."""
+    var result = List[UInt32]()
+    var header = plan.code[4 * start]
+    if header != ROW_GROUP_HEADER and header != ROW_GROUP_HEADER_LAST:
+        return result^
+    var keys = Int(plan.code[4 * start + 1])
+    var unsupported_physical_candidate = False
+    for column in range(keys + 1, nodes):
+        var node = start + column
+        var source_slot = Int(plan.code[4 * node + 1])
+        var target_slot = Int(plan.code[4 * node + 2])
+        var op = plan.code[4 * node + 3]
+        var source_dtype = plan.slot_dtypes[source_slot]
+        var target_dtype = plan.slot_dtypes[target_slot]
+        if (
+            source_dtype.physical().is_integer()
+            and target_dtype.physical().is_integer()
+        ):
+            if integer_partial_supported(
+                header, op, _kind(source_dtype), _kind(target_dtype)
+            ):
+                if source_dtype.is_integer() and target_dtype.is_integer():
+                    result.append(UInt32(node))
+                else:
+                    # Device slot kinds are physical. Avoid skipping a temporal
+                    # logical aggregate if another output admits this step.
+                    unsupported_physical_candidate = True
+    if unsupported_physical_candidate:
+        return List[UInt32]()
+    return result^
+
+
 def _quantile_indices(plan: RowPlan) -> Bool:
     if plan.reductions:
         for output in plan.outputs:
@@ -851,6 +911,82 @@ def _quantile_indices(plan: RowPlan) -> Bool:
         if step.grouped and _group_quantiles(plan, step.start, step.nodes):
             return True
     return False
+
+
+def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
+    """Admit only one direct, untransformed fixed-width integer sort key."""
+    if (
+        not step.order
+        or step.grouped
+        or step.nodes != 1
+        or plan.code[4 * step.start] != ROW_SORT_KEY
+    ):
+        return -1
+    var node = step.start
+    var dtype = plan.node_dtypes[node]
+    if (
+        not dtype.is_integer()
+        or (plan.code[4 * node + 2] != 0 and plan.code[4 * node + 2] != 1)
+        or (plan.code[4 * node + 3] & ~Int64(1)) != 0
+    ):
+        return -1
+    return Int(integer_width(_kind(dtype)) // 4) + 1
+
+
+def _topk_limit(
+    plan: RowPlan, rows: Int, terminal_boundary: Bool
+) raises -> Int:
+    """Certify only a terminal ORDER BY over raw input columns followed by head."""
+    if (
+        not terminal_boundary
+        or plan.ordered_mode != 0
+        or plan.reductions
+        or plan.limit <= 0
+        or plan.limit > TOPK_MAX_LIMIT
+        or plan.limit >= rows
+        or len(plan.steps) != 1
+        or len(plan.outputs) != plan.source.width()
+    ):
+        return -1
+    var step = plan.steps[0].copy()
+    if (
+        not step.order
+        or step.filter
+        or step.grouped
+        or step.nodes <= 0
+        or step.gather_count != plan.source.width()
+    ):
+        return -1
+    for column in range(step.gather_count):
+        if plan.gathers[step.gather_start + column] != Int64(column):
+            return -1
+    for node in range(step.start, step.start + step.nodes):
+        var slot = Int(plan.code[4 * node + 1])
+        if (
+            plan.code[4 * node] != ROW_SORT_KEY
+            or slot < 0
+            or slot >= plan.source.width()
+            or plan.node_dtypes[node] != plan.source._columns[slot].dtype()
+            or (plan.code[4 * node + 2] != 0 and plan.code[4 * node + 2] != 1)
+            or (plan.code[4 * node + 3] & ~Int64(3)) != 0
+        ):
+            return -1
+    for output in range(len(plan.outputs)):
+        if (
+            plan.outputs[output].slot != output
+            or plan.outputs[output].reduction >= 0
+            or plan.outputs[output].dtype
+            != plan.source._columns[output].dtype()
+        ):
+            return -1
+    return plan.limit
+
+
+def _topk_retained_rows(rows: Int, run_width: Int, limit: Int) raises -> Int:
+    var full_runs = rows // run_width
+    var tail = rows % run_width
+    var keep = min(limit, run_width)
+    return _checked_add(_checked_mul(full_runs, keep), min(limit, tail))
 
 
 def _iana_scalar_slots(plan: RowPlan) raises -> Int:
@@ -922,9 +1058,12 @@ def estimate_resources(
     var ranking = False
     var windows = False
     var duration_windows = False
+    var radix_ordering = False
+    var topk_limit = _topk_limit(plan, rows, terminal_boundary)
     for step in plan.steps:
         ordering = ordering or step.order or step.grouped
         grouping = grouping or step.grouped
+        radix_ordering = radix_ordering or _radix_sort_passes(plan, step) > 0
         if step.order and not step.grouped:
             var header = Int(plan.code[4 * step.start])
             ranking = ranking or header == ROW_RANK_KEY
@@ -935,9 +1074,16 @@ def estimate_resources(
             )
             duration_windows = duration_windows or header == ROW_DURATION_KEY
         movement = movement or step.filter or step.order or step.grouped
+    if topk_limit > 0:
+        radix_ordering = False
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, CELL_BYTES)
+    var result_matrix_bytes = matrix_bytes
+    if topk_limit > 0:
+        result_matrix_bytes = _checked_mul(
+            _checked_mul(topk_limit, plan.slots), CELL_BYTES
+        )
     var program_bytes = _checked_mul(
         len(plan.code)
         + 2 * len(plan.literals)
@@ -955,7 +1101,7 @@ def estimate_resources(
         # A second matrix prevents overlapping reads/writes during compaction.
         # Scans use row positions, two block arrays and a two-word count/error
         # readback. Gather metadata is bounded by the full plan's gather list.
-        shared = _checked_add(shared, matrix_bytes)
+        shared = _checked_add(shared, result_matrix_bytes)
         shared = _checked_add(shared, _checked_mul(rows, 8 if ordering else 4))
         shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 8))
         shared = _checked_add(shared, 16)
@@ -964,6 +1110,21 @@ def estimate_resources(
             # Duration errors preserve four distinct fault categories on both
             # host and device, replacing the ordinary one-word block summary.
             shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 24))
+        if radix_ordering:
+            # Sixteen per-tile UInt32 histograms plus every recursive summary
+            # level and sixteen global bucket offsets; scratch is reused by
+            # all digit passes and released after the sort's error drain.
+            var level_count = (rows + 255) // 256
+            var summary_count = 0
+            while level_count > 0:
+                summary_count = _checked_add(summary_count, level_count)
+                if level_count == 1:
+                    break
+                level_count = (level_count + 255) // 256
+            shared = _checked_add(
+                shared,
+                _checked_add(_checked_mul(summary_count, 16 * 4), 16 * 4),
+            )
         if ranking:
             # The idle sort-index owner supplies dense prefixes. Only the
             # additional per-block dense counts need separate device storage.
@@ -986,7 +1147,9 @@ def estimate_resources(
         # One device UInt32 source-index plane is reused across scalar outputs
         # and grouped phases; no host copy, download or extra wait is needed.
         shared = _checked_add(shared, _checked_mul(rows, 4))
-    var result_bytes = _checked_add(matrix_bytes, program_bytes) if rows else 0
+    var result_bytes = _checked_add(
+        result_matrix_bytes, program_bytes
+    ) if rows else 0
     if rows and grouping:
         result_bytes = _checked_add(result_bytes, _checked_mul(plan.slots, 8))
     if plan.reductions:
@@ -1067,6 +1230,20 @@ def estimate_resources(
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
             )
+    # The grouped integer path reuses one bounded 4096-state device scratch
+    # buffer across outputs and grouped steps. The group count is only known
+    # after sorting, so charge the full cap whenever metadata and row count
+    # could admit P >= 2; resident calls keep this same conservative envelope.
+    var grouped_integer_possible = False
+    if rows > 256:
+        for step in plan.steps:
+            if step.grouped and len(
+                _grouped_integer_partial_nodes(plan, step.start, step.nodes)
+            ):
+                grouped_integer_possible = True
+                break
+    if grouped_integer_possible:
+        peak = _checked_add(peak, 4096 * STATE_WORDS * 8)
     var upload = 0
     var download = 0
     var launches = 0
@@ -1139,7 +1316,38 @@ def estimate_resources(
             if step.order or step.grouped:
                 # Includes all sort, dense/group scans, scatter and checked
                 # key/window observation phases; bounds every supported mode.
-                launches = _checked_add(launches, passes + 16)
+                var order_launch_bound = passes + 16
+                var radix_pass_count = _radix_sort_passes(plan, step)
+                var topk_limit = _topk_limit(plan, rows, terminal_boundary)
+                if topk_limit > 0:
+                    var base_passes = 0
+                    var run_width = 1
+                    while run_width < min(rows, TOPK_BASE_RUN_ROWS):
+                        base_passes += 1
+                        run_width *= 2
+                    var merge_levels = 0
+                    var span = TOPK_BASE_RUN_ROWS
+                    while span < rows:
+                        merge_levels += 1
+                        span *= 2
+                    order_launch_bound = 4 + base_passes + merge_levels
+                elif radix_pass_count > 0:
+                    var level_count = (rows + 255) // 256
+                    var level_total = 1
+                    var down_carries = 0
+                    while level_count > 1:
+                        level_total += 1
+                        if level_count > 256:
+                            down_carries += 1
+                        level_count = (level_count + 255) // 256
+                    var per_digit_launches = 3 + level_total - 1 + down_carries
+                    order_launch_bound = max(
+                        order_launch_bound,
+                        2
+                        + radix_pass_count * per_digit_launches
+                        + Int(step.gather_count > 0),
+                    )
+                launches = _checked_add(launches, order_launch_bound)
                 waits = _checked_add(waits, 8)
                 download = _checked_add(
                     download, _checked_mul((rows + 255) // 256, 64)
@@ -1276,44 +1484,31 @@ def materialize(table: Table) raises -> DataFrame:
     return _materialize_host(table, host)
 
 
-def _readback_native(table: Table) raises -> List[Column[Float32]]:
-    from .typed_storage import readback_float32
-
+def _readback_native(table: Table) raises -> List[Series]:
     var additional = 0
-    for slot in table.columns:
-        ref column = table.native_columns[Int(slot)]
-        additional = _checked_add(additional, _checked_mul(table.rows, 4))
-        var validity = column.validity()
-        if validity:
-            additional = _checked_add(additional, len(validity.value()))
-            additional = _checked_add(
-                additional, _checked_add(table.rows, 7) // 8
-            )
-        var errors = column.errors()
-        if errors:
-            additional = _checked_add(
-                additional, _checked_mul(len(errors.value()), 4)
-            )
+    for output in range(table.schema.width()):
+        var column = table.native_columns[Int(table.columns[output])].view(
+            table.offset, table.rows
+        )
+        additional = _checked_add(additional, column.readback_bytes())
     _ = table.native_columns[0].scope().check(additional)
-    var columns = List[Column[Float32]](capacity=table.schema.width())
-    for slot in table.columns:
+    var columns = List[Series](capacity=table.schema.width())
+    for output in range(table.schema.width()):
+        var index = Int(table.columns[output])
         columns.append(
-            readback_float32(
-                table.native_columns[Int(slot)].view(table.offset, table.rows)
-            )
+            table.native_columns[index]
+            .view(table.offset, table.rows)
+            .readback_series(table.schema._columns[output])
         )
     return columns^
 
 
 def _materialize_native_host(
-    table: Table, var host: List[Column[Float32]]
+    table: Table, var host: List[Series]
 ) raises -> DataFrame:
     var columns = List[Series](capacity=table.schema.width())
-    for i in range(table.schema.width()):
-        ref field = table.schema._columns[i]
-        var output = Series(field.name(), host[i].copy())
-        output._field_metadata = field._field_metadata
-        columns.append(output^)
+    for output in host:
+        columns.append(output.copy())
     return DataFrame(columns^, height=table.rows)
 
 
@@ -1383,7 +1578,7 @@ def _materialize_host(table: Table, host: HostMatrix) raises -> DataFrame:
                 codes.append(UInt32(original - 1) if present else UInt32(0))
                 valid.append(present)
             output = Series(
-                field.name(), Column[UInt32](codes^, valid^)
+                field.name(), Column[UInt32](codes^, valid)
             ).with_dtype(owner[].dtype)
             if table.categories[column].value().string_codes:
                 # A source coded String keeps its own codes when transported.
@@ -1626,13 +1821,12 @@ def execute_plan(
     """
     if plan.source_failure:
         raise Error(plan.source_failure)
-    # Native owners are currently published only at terminal row boundaries.
-    # Other region families retain their existing representation explicitly.
+    # Native output is selected by the DAG's preflighted representation plan,
+    # or by the existing direct terminal route. Other families retain MATRIX.
     from . import typed_rows, typed_runtime
 
     if (
         native_output
-        and terminal_boundary
         and export_values
         and not resident_input
         and not text_domain
@@ -1815,6 +2009,7 @@ def execute_plan(
         count = 0 if plan.limit == 0 else 1
     var cells = _checked_mul(rows, plan.slots)
     var current_rows = rows
+    var result_capacity = rows
     var movement = False
     var ordering = False
     var grouping = False
@@ -1967,6 +2162,16 @@ def execute_plan(
     )
     var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     var ordered_partials = Optional[DeviceBuffer[DType.uint32]]()
+    var grouped_integer_scratch = Optional[DeviceBuffer[DType.uint64]]()
+    var grouped_int_parallel_outputs = 0
+    var grouped_int_max_partial_states = 0
+    var grouped_int_max_partials_per_group = 0
+    var grouped_int_max_group_batch = 0
+    var grouped_int_max_qualifying_hash_group_rows = 0
+    var grouped_int_partial_tiles = 0
+    var grouped_int_scratch_bytes = 0
+    var radix_counts = Optional[DeviceBuffer[DType.uint32]]()
+    var radix_offsets = Optional[DeviceBuffer[DType.uint32]]()
     var fault_groups = min(1024, max(1, (rows + 255) // 256))
     # One word flags a fault in any value this region writes, before a
     # filter, head or HAVING step can drop it (accelerator/faults.mojo).
@@ -2203,6 +2408,11 @@ def execute_plan(
                             device_slot_types, slot_types.unsafe_ptr()
                         )
                         uploaded += len(slot_types) * 8
+                        var integer_partial_nodes = (
+                            _grouped_integer_partial_nodes(
+                                plan, step.start, step.nodes
+                            )
+                        )
                         var hash_route = False
                         var shape = List[UInt32]()
                         if current_rows >= 256 and hash_grouping.eligible(
@@ -2251,6 +2461,11 @@ def execute_plan(
                                     next_index.unsafe_ptr(),
                                     metadata.unsafe_ptr(),
                                     UInt32(capacity),
+                                    UInt32(
+                                        hash_grouping.MINIMUM_PARALLEL_GROUP_ROWS
+                                    ) if len(integer_partial_nodes) else UInt32(
+                                        0
+                                    ),
                                     grid_dim=(capacity + 255) // 256,
                                     block_dim=256,
                                 )
@@ -2290,6 +2505,10 @@ def execute_plan(
                                 waits += 1
                                 hash_route = shape[2] == 0
                                 if hash_route:
+                                    grouped_int_max_qualifying_hash_group_rows = max(
+                                        grouped_int_max_qualifying_hash_group_rows,
+                                        Int(shape[3]),
+                                    )
                                     trace_path("metal.hash_grouping")
                                 else:
                                     trace_path(
@@ -2322,7 +2541,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=blocks,
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                                 var previous = index^
@@ -2469,6 +2690,62 @@ def execute_plan(
                                 submissions += 2
                                 positions = group_order^
                                 next_index = next_group_order^
+                            var partials_per_group = 1
+                            var group_batch = 0
+                            if (
+                                len(integer_partial_nodes)
+                                and shape[0] > 0
+                                and (not hash_route or shape[3] != 0)
+                            ):
+                                var average_group_rows = (
+                                    Int(current_rows) + Int(shape[0]) - 1
+                                ) // Int(shape[0])
+                                var desired_partials = (
+                                    average_group_rows + 255
+                                ) // 256
+                                partials_per_group = min(
+                                    4096,
+                                    min(
+                                        4096 // Int(shape[0]),
+                                        desired_partials,
+                                    ),
+                                )
+                                if partials_per_group >= 2:
+                                    group_batch = min(
+                                        Int(shape[0]),
+                                        4096 // partials_per_group,
+                                    )
+                                    if not grouped_integer_scratch:
+                                        grouped_integer_scratch = (
+                                            ctx.enqueue_create_buffer[
+                                                DType.uint64
+                                            ](4096 * 8)
+                                        )
+                                        grouped_int_scratch_bytes = (
+                                            4096 * STATE_WORDS * 8
+                                        )
+                                    grouped_int_parallel_outputs += len(
+                                        integer_partial_nodes
+                                    )
+                                    grouped_int_max_partial_states = max(
+                                        grouped_int_max_partial_states,
+                                        group_batch * partials_per_group,
+                                    )
+                                    grouped_int_max_partials_per_group = max(
+                                        grouped_int_max_partials_per_group,
+                                        partials_per_group,
+                                    )
+                                    grouped_int_max_group_batch = max(
+                                        grouped_int_max_group_batch,
+                                        group_batch,
+                                    )
+                                    grouped_int_partial_tiles += (
+                                        (Int(shape[0]) + group_batch - 1)
+                                        // group_batch
+                                        * len(integer_partial_nodes)
+                                    )
+                                else:
+                                    partials_per_group = 1
                             ctx.enqueue_function[group_reduce](
                                 device_words.unsafe_ptr(),
                                 device_valid.unsafe_ptr(),
@@ -2489,11 +2766,71 @@ def execute_plan(
                                 UInt32(rows),
                                 UInt32(plan.slots),
                                 UInt32(hash_route),
+                                UInt32(partials_per_group),
                                 grid_dim=(Int(shape[0]) * step.nodes + 255)
                                 // 256,
                                 block_dim=256,
                             )
                             submissions += 1 + Int(not hash_route)
+                            if partials_per_group > 1:
+                                for node in integer_partial_nodes:
+                                    for group_base in range(
+                                        0, Int(shape[0]), group_batch
+                                    ):
+                                        var current_batch = min(
+                                            group_batch,
+                                            Int(shape[0]) - group_base,
+                                        )
+                                        ctx.enqueue_function[
+                                            group_integer_partials
+                                        ](
+                                            device_words.unsafe_ptr(),
+                                            device_valid.unsafe_ptr(),
+                                            device_errors.unsafe_ptr(),
+                                            index.unsafe_ptr(),
+                                            starts.unsafe_ptr(),
+                                            device_code.unsafe_ptr(),
+                                            device_literals.unsafe_ptr(),
+                                            device_slot_types.unsafe_ptr(),
+                                            UInt32(step.start),
+                                            node,
+                                            UInt32(group_base),
+                                            UInt32(current_batch),
+                                            shape[0],
+                                            UInt32(partials_per_group),
+                                            UInt32(current_rows),
+                                            UInt32(rows),
+                                            grouped_integer_scratch.value().unsafe_ptr(),
+                                            grid_dim=(
+                                                current_batch
+                                                * partials_per_group
+                                            ),
+                                            block_dim=256,
+                                        )
+                                        ctx.enqueue_function[
+                                            group_integer_finish
+                                        ](
+                                            gathered_words.unsafe_ptr(),
+                                            gathered_valid.unsafe_ptr(),
+                                            gathered_errors.unsafe_ptr(),
+                                            starts.unsafe_ptr(),
+                                            device_code.unsafe_ptr(),
+                                            device_literals.unsafe_ptr(),
+                                            device_slot_types.unsafe_ptr(),
+                                            UInt32(step.start),
+                                            node,
+                                            UInt32(group_base),
+                                            UInt32(current_batch),
+                                            shape[0],
+                                            UInt32(partials_per_group),
+                                            UInt32(current_rows),
+                                            UInt32(rows),
+                                            UInt32(plan.slots),
+                                            grouped_integer_scratch.value().unsafe_ptr(),
+                                            grid_dim=current_batch,
+                                            block_dim=256,
+                                        )
+                                        submissions += 2
                             if _group_quantiles(plan, step.start, step.nodes):
                                 ctx.enqueue_function[
                                     quantiles.correct_zero_groups
@@ -2634,7 +2971,9 @@ def execute_plan(
                                     UInt32(run_width),
                                     UInt32(plan.slots),
                                     device_literals.unsafe_ptr(),
-                                    grid_dim=blocks,
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
                                     block_dim=256,
                                 )
                             var previous = index^
@@ -2825,40 +3164,257 @@ def execute_plan(
                             block_dim=256,
                         )
                         submissions += 2
-                        var run_width = 1
-                        while run_width < current_rows:
-                            ctx.enqueue_function[order_merge](
-                                device_words.unsafe_ptr(),
-                                device_valid.unsafe_ptr(),
+                        var topk = _topk_limit(
+                            plan, current_rows, terminal_boundary
+                        )
+                        if topk > 0:
+                            # Sort bounded base runs with the shared comparator,
+                            # then compact each run to its first K indices.
+                            var run_width = 1
+                            while (
+                                run_width < current_rows
+                                and run_width < TOPK_BASE_RUN_ROWS
+                            ):
+                                ctx.enqueue_function[order_merge](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    UInt32(step.start),
+                                    UInt32(step.nodes),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(run_width),
+                                    UInt32(plan.slots),
+                                    device_literals.unsafe_ptr(),
+                                    grid_dim=merge_grid(
+                                        current_rows, run_width
+                                    ),
+                                    block_dim=256,
+                                )
+                                var previous = index^
+                                index = next_index^
+                                next_index = previous^
+                                run_width *= 2
+                                submissions += 1
+                            var keep_per_run = min(topk, TOPK_BASE_RUN_ROWS)
+                            var active_rows = _topk_retained_rows(
+                                current_rows, TOPK_BASE_RUN_ROWS, topk
+                            )
+                            ctx.enqueue_function[order_compact_runs](
                                 index.unsafe_ptr(),
                                 next_index.unsafe_ptr(),
-                                device_code.unsafe_ptr(),
-                                device_types.unsafe_ptr(),
-                                UInt32(step.start),
-                                UInt32(step.nodes),
                                 UInt32(current_rows),
-                                UInt32(rows),
-                                UInt32(run_width),
-                                UInt32(plan.slots),
-                                device_literals.unsafe_ptr(),
-                                grid_dim=blocks,
+                                UInt32(TOPK_BASE_RUN_ROWS),
+                                UInt32(keep_per_run),
+                                UInt32(active_rows),
+                                grid_dim=(active_rows + 255) // 256,
                                 block_dim=256,
                             )
-                            # Swapping owners keeps both buffers alive across queued passes.
                             var previous = index^
                             index = next_index^
                             next_index = previous^
-                            run_width *= 2
                             submissions += 1
+                            var child_width = TOPK_BASE_RUN_ROWS
+                            while child_width < current_rows:
+                                var parent_width = 2 * child_width
+                                var parent_keep = min(topk, parent_width)
+                                active_rows = _topk_retained_rows(
+                                    current_rows, parent_width, topk
+                                )
+                                var pairs = (
+                                    current_rows + parent_width - 1
+                                ) // parent_width
+                                var tiles_per_pair = (
+                                    parent_keep + 2047
+                                ) // 2048
+                                ctx.enqueue_function[order_merge_topk](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
+                                    next_index.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    UInt32(step.start),
+                                    UInt32(step.nodes),
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(child_width),
+                                    UInt32(min(topk, child_width)),
+                                    UInt32(parent_keep),
+                                    UInt32(plan.slots),
+                                    device_literals.unsafe_ptr(),
+                                    grid_dim=pairs * tiles_per_pair,
+                                    block_dim=256,
+                                )
+                                var previous = index^
+                                index = next_index^
+                                next_index = previous^
+                                child_width = parent_width
+                                submissions += 1
+                            current_rows = topk
+                            result_capacity = topk
+                        else:
+                            var radix_pass_count = _radix_sort_passes(
+                                plan, step
+                            )
+                            if radix_pass_count > 0 and current_rows > 0:
+                                var tiles = blocks
+                                var level_counts = List[Int]()
+                                var level_offsets = List[Int]()
+                                var level_count = tiles
+                                var summary_count = 0
+                                while level_count > 0:
+                                    level_counts.append(level_count)
+                                    level_offsets.append(summary_count)
+                                    summary_count = _checked_add(
+                                        summary_count, level_count
+                                    )
+                                    if level_count == 1:
+                                        break
+                                    level_count = (level_count + 255) // 256
+                                radix_counts = ctx.enqueue_create_buffer[
+                                    DType.uint32
+                                ](16 * summary_count)
+                                radix_offsets = ctx.enqueue_create_buffer[
+                                    DType.uint32
+                                ](16)
+                                var node = UInt32(step.start)
+                                var width = integer_width(
+                                    _kind(plan.node_dtypes[step.start])
+                                )
+                                var digits = Int(width // 4) + 1
+                                for pass_index in range(digits):
+                                    var null_marker = UInt32(
+                                        pass_index == Int(width // 4)
+                                    )
+                                    var shift = UInt32(pass_index * 4)
+                                    ctx.enqueue_function[radix_histogram](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        radix_counts.value().unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        node,
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(summary_count),
+                                        shift,
+                                        null_marker,
+                                        grid_dim=tiles,
+                                        block_dim=256,
+                                    )
+                                    submissions += 1
+                                    for level in range(len(level_counts) - 1):
+                                        var count = level_counts[level]
+                                        var parent_base = level_offsets[
+                                            level + 1
+                                        ]
+                                        ctx.enqueue_function[radix_scan_level](
+                                            radix_counts.value().unsafe_ptr(),
+                                            UInt32(count),
+                                            UInt32(level_offsets[level]),
+                                            UInt32(parent_base),
+                                            UInt32(summary_count),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
+                                            block_dim=256,
+                                        )
+                                        submissions += 1
+                                    for level in range(len(level_counts) - 1):
+                                        var at = len(level_counts) - 2 - level
+                                        var count = level_counts[at]
+                                        if count <= 256:
+                                            continue
+                                        ctx.enqueue_function[
+                                            radix_apply_carries
+                                        ](
+                                            radix_counts.value().unsafe_ptr(),
+                                            UInt32(count),
+                                            UInt32(level_offsets[at]),
+                                            UInt32(level_offsets[at + 1]),
+                                            UInt32(summary_count),
+                                            grid_dim=16
+                                            * ((count + 255) // 256),
+                                            block_dim=256,
+                                        )
+                                        submissions += 1
+                                    ctx.enqueue_function[radix_bucket_offsets](
+                                        radix_counts.value().unsafe_ptr(),
+                                        radix_offsets.value().unsafe_ptr(),
+                                        UInt32(tiles),
+                                        UInt32(summary_count),
+                                        grid_dim=1,
+                                        block_dim=256,
+                                    )
+                                    ctx.enqueue_function[radix_scatter](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        next_index.unsafe_ptr(),
+                                        radix_counts.value().unsafe_ptr(),
+                                        radix_offsets.value().unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        node,
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(summary_count),
+                                        shift,
+                                        null_marker,
+                                        grid_dim=tiles,
+                                        block_dim=256,
+                                    )
+                                    submissions += 2
+                                    # Stable passes alternate only the index owners.
+                                    var previous = index^
+                                    index = next_index^
+                                    next_index = previous^
+                            else:
+                                var run_width = 1
+                                while run_width < current_rows:
+                                    ctx.enqueue_function[order_merge](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        next_index.unsafe_ptr(),
+                                        device_code.unsafe_ptr(),
+                                        device_types.unsafe_ptr(),
+                                        UInt32(step.start),
+                                        UInt32(step.nodes),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(run_width),
+                                        UInt32(plan.slots),
+                                        device_literals.unsafe_ptr(),
+                                        grid_dim=merge_grid(
+                                            current_rows, run_width
+                                        ),
+                                        block_dim=256,
+                                    )
+                                    # Swapping owners keeps both buffers alive across queued passes.
+                                    var previous = index^
+                                    index = next_index^
+                                    next_index = previous^
+                                    run_width *= 2
+                                    submissions += 1
+                        var selected_cells = (
+                            _checked_mul(current_rows, plan.slots) if topk
+                            > 0 else cells
+                        )
+                        var gather_blocks = (current_rows + 255) // 256
                         var gathered_words = ctx.enqueue_create_buffer[
                             DType.uint64
-                        ](2 * cells)
+                        ](2 * selected_cells)
                         var gathered_valid = ctx.enqueue_create_buffer[
                             DType.uint8
-                        ](cells)
+                        ](selected_cells)
                         var gathered_errors = ctx.enqueue_create_buffer[
                             DType.uint32
-                        ](cells)
+                        ](selected_cells)
                         if step.gather_count:
                             var gathers = List[Int64](
                                 capacity=step.gather_count
@@ -2875,22 +3431,41 @@ def execute_plan(
                                     device_gathers, gathers.unsafe_ptr()
                                 )
                                 uploaded += len(gathers) * 8
-                                ctx.enqueue_function[order_gather](
-                                    device_words.unsafe_ptr(),
-                                    device_valid.unsafe_ptr(),
-                                    device_errors.unsafe_ptr(),
-                                    gathered_words.unsafe_ptr(),
-                                    gathered_valid.unsafe_ptr(),
-                                    gathered_errors.unsafe_ptr(),
-                                    index.unsafe_ptr(),
-                                    device_gathers.unsafe_ptr(),
-                                    UInt32(step.gather_count),
-                                    UInt32(current_rows),
-                                    UInt32(rows),
-                                    UInt32(plan.slots),
-                                    grid_dim=blocks,
-                                    block_dim=256,
-                                )
+                                if topk > 0:
+                                    ctx.enqueue_function[order_gather_topk](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        device_errors.unsafe_ptr(),
+                                        gathered_words.unsafe_ptr(),
+                                        gathered_valid.unsafe_ptr(),
+                                        gathered_errors.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        device_gathers.unsafe_ptr(),
+                                        UInt32(step.gather_count),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(current_rows),
+                                        UInt32(plan.slots),
+                                        grid_dim=gather_blocks,
+                                        block_dim=256,
+                                    )
+                                else:
+                                    ctx.enqueue_function[order_gather](
+                                        device_words.unsafe_ptr(),
+                                        device_valid.unsafe_ptr(),
+                                        device_errors.unsafe_ptr(),
+                                        gathered_words.unsafe_ptr(),
+                                        gathered_valid.unsafe_ptr(),
+                                        gathered_errors.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        device_gathers.unsafe_ptr(),
+                                        UInt32(step.gather_count),
+                                        UInt32(current_rows),
+                                        UInt32(rows),
+                                        UInt32(plan.slots),
+                                        grid_dim=blocks,
+                                        block_dim=256,
+                                    )
                                 submissions += 1
                                 # The gather metadata and source owners outlive all queued reads.
                                 scope.synchronize()
@@ -2909,6 +3484,13 @@ def execute_plan(
                                     "Mojo GPU sort key failed: checked"
                                     " arithmetic overflow or strict cast failed"
                                 )
+                        # The readback above drains every radix read. Drop and
+                        # reinitialize the scratch owners before a later sort
+                        # allocates its own histograms on this context.
+                        _ = radix_counts^
+                        _ = radix_offsets^
+                        radix_counts = Optional[DeviceBuffer[DType.uint32]]()
+                        radix_offsets = Optional[DeviceBuffer[DType.uint32]]()
                         device_words = gathered_words^
                         device_valid = gathered_valid^
                         device_errors = gathered_errors^
@@ -3514,7 +4096,7 @@ def execute_plan(
                 resident_result = Table(
                     Matrix(
                         scope,
-                        rows,
+                        result_capacity,
                         plan.slots,
                         device_words^,
                         device_valid^,
@@ -3538,6 +4120,9 @@ def execute_plan(
             _ = iana_replay^
             _ = ordered_control^
             _ = ordered_partials^
+            _ = grouped_integer_scratch^
+            _ = radix_counts^
+            _ = radix_offsets^
             _ = remap_owner^
             raise error^
     elif plan.reductions:
@@ -3584,6 +4169,9 @@ def execute_plan(
     _ = iana_replay^
     _ = ordered_control^
     _ = ordered_partials^
+    _ = grouped_integer_scratch^
+    _ = radix_counts^
+    _ = radix_offsets^
     _ = remap_owner^
     if not resident_result:
         if plan.reductions and count:
@@ -3706,6 +4294,58 @@ def execute_plan(
         )
     )
     fields.append(Series("runtime_implementation", Column[String](["mojo"])))
+    fields.append(
+        Series(
+            "grouped_int_algorithm",
+            Column[String](
+                [
+                    "mojo_gpu_grouped_int_partials" if grouped_int_parallel_outputs else "legacy"
+                ]
+            ),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_parallel_outputs",
+            Column[Int64]([Int64(grouped_int_parallel_outputs)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_partial_states",
+            Column[Int64]([Int64(grouped_int_max_partial_states)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_partials_per_group",
+            Column[Int64]([Int64(grouped_int_max_partials_per_group)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_group_batch",
+            Column[Int64]([Int64(grouped_int_max_group_batch)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_max_qualifying_hash_group_rows",
+            Column[Int64]([Int64(grouped_int_max_qualifying_hash_group_rows)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_partial_tiles",
+            Column[Int64]([Int64(grouped_int_partial_tiles)]),
+        )
+    )
+    fields.append(
+        Series(
+            "grouped_int_scratch_bytes",
+            Column[Int64]([Int64(grouped_int_scratch_bytes)]),
+        )
+    )
     fields.append(Series("host_result_bytes", Column[Int64]([Int64(0)])))
     fields.append(
         Series(

@@ -37,9 +37,9 @@ def sales(salt: Int) raises -> DataFrame:
         amount_valid.append((row + salt) % 11 != 2)
     return DataFrame(
         [
-            Series("year", Column[Int64](years^, year_valid^)),
+            Series("year", Column[Int64](years^, year_valid)),
             Series("customer", Column[Int64](customers^)),
-            Series("amount", Column[Int64](amounts^, amount_valid^)),
+            Series("amount", Column[Int64](amounts^, amount_valid)),
         ]
     )
 

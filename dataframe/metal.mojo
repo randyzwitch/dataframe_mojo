@@ -593,6 +593,7 @@ struct MetalRuntime(AcceleratorBackend):
                 text_context=self._text_context,
                 ordered_source=original_entry,
                 eager_feed=not self._execution_settings.streaming,
+                device_service=self._device_service.copy(),
             )
         if not has_explode(query) and (
             has_grouped_implode(query)
@@ -1241,6 +1242,7 @@ struct MetalRuntime(AcceleratorBackend):
                 capabilities(),
                 observation_only=self._observation_only,
                 text_context=self._text_context,
+                device_service=self._device_service.copy(),
             )
         return execute(
             query,

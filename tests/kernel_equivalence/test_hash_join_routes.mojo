@@ -55,10 +55,10 @@ def numeric_probes[D: DType]() raises:
         padded_right.extend(right_values.copy())
         lv.extend(left_valid.copy())
         rv.extend(right_valid.copy())
-        var left = Series("k", Column[Scalar[D]](padded_left^, lv^)).slice(
+        var left = Series("k", Column[Scalar[D]](padded_left^, lv)).slice(
             offset, 7
         )
-        var right = Series("k", Column[Scalar[D]](padded_right^, rv^)).slice(
+        var right = Series("k", Column[Scalar[D]](padded_right^, rv)).slice(
             offset, 6
         )
         for chunked in [False, True]:
@@ -269,7 +269,7 @@ def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_li
                 values[row + 7] = low + Int64(row % 3)
             valid[17] = False
             var right = (
-                Series("k", Column[Int64](values^, valid^))
+                Series("k", Column[Int64](values^, valid))
                 .with_dtype(dtype)
                 .slice(7, n)
             )
@@ -325,7 +325,7 @@ def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_li
             semi.append(row)
         else:
             anti.append(row)
-    var probe = Series("k", Column[Int64](probes^, validity^))
+    var probe = Series("k", Column[Int64](probes^, validity))
     for matched in [False, True]:
         var actual = _range_int64_membership_rows(probe, build, matched)
         assert_true(actual[0])

@@ -191,7 +191,7 @@ def test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_ty
         [
             Series("k", Column[Int64](keys^)).slice(7, n),
             Series("id", Column[Int64](ids^)).slice(7, n),
-            Series("text", Column[String](texts^, valid^)).slice(7, n),
+            Series("text", Column[String](texts^, valid)).slice(7, n),
         ]
     )
     for shuffled in [False, True]:

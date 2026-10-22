@@ -138,7 +138,7 @@ def test_decimal_distinct_counts_compare_full_int128_values() raises:
     assert_equal(expected, 5)
     var frame = DataFrame(
         [
-            Series("x", Column[Int128](values^, valid^)).with_dtype(
+            Series("x", Column[Int128](values^, valid)).with_dtype(
                 DataType.decimal(38, 2)
             )
         ]
@@ -288,7 +288,7 @@ def test_decimal128_sum_checks_final_precision_and_ignores_null_payloads() raise
         assert_equal(overflow, example == 0 or example == 1)
         var raw = DataFrame(
             [
-                Series("x", Column[Int128](values^, valid^)).with_dtype(
+                Series("x", Column[Int128](values^, valid)).with_dtype(
                     DataType.decimal(38, 0)
                 ),
                 Series(

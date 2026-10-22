@@ -24,7 +24,7 @@ def source(n: Int = 33) raises -> DataFrame:
         positions.append(Float64((i * i) % 101))
         valid.append(i % 11 != 4)
     return frame.hstack(
-        DataFrame([Series("axis", Column[Float64](positions^, valid^))])
+        DataFrame([Series("axis", Column[Float64](positions^, valid))])
     )
 
 

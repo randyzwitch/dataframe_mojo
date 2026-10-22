@@ -189,7 +189,7 @@ def test_series_reductions_return_correct_tagged_values_and_empty_identities() r
         ]:
             assert_true(result.is_null())
     var valid: List[Bool] = [True, False, True]
-    var flags = Series("b", Column[Bool]([True, False, True], valid^))
+    var flags = Series("b", Column[Bool]([True, False, True], valid))
     assert_true(flags.any().dtype() == DataType.BOOL)
     assert_true(flags.any().bool())
     assert_true(flags.all().bool())

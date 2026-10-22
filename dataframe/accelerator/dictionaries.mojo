@@ -494,8 +494,8 @@ def _concat_tables(
         for y in right:
             a.append(x)
             b.append(y)
-    var keys = Series(key_name, StringColumn(a^))
-    var right_keys = Series(right_name, StringColumn(b^))
+    var keys = Series(key_name, StringColumn(a))
+    var right_keys = Series(right_name, StringColumn(b))
     var mapped = concat_strings(keys, right_keys, separator).renamed(value_name)
     return (keys^, right_keys^, mapped^)
 
@@ -774,7 +774,7 @@ def lower_dictionary_operations(
                     )
                     key_names.append(right_name)
                 result._nodes.append(
-                    _plan_node(WITH_COLUMNS, operation.left, exprs=sources^)
+                    _plan_node(WITH_COLUMNS, operation.left, exprs=sources)
                 )
                 var left = len(result._nodes) - 1
                 # Verify the generated identity itself. Public join owners

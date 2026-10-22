@@ -35,7 +35,7 @@ def _column(
 ) raises -> Series:
     if not valid:
         valid = List[Bool](length=len(values), fill=True)
-    return Series(name, Column[Int64](values^, valid^))
+    return Series(name, Column[Int64](values^, valid))
 
 
 def _facts(n: Int, layout: Int) raises -> DataFrame:
@@ -189,8 +189,8 @@ def _query(
         right_keys.append("join_day")
     var joined = left.join(
         stock,
-        left_on=left_keys^,
-        right_on=right_keys^,
+        left_on=left_keys,
+        right_on=right_keys,
         how="semi" if semi else "inner",
     )
     if semi:

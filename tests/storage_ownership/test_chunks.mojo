@@ -55,7 +55,7 @@ def test_numeric_chunks_merge_on_every_worker_with_their_nulls_and_dtypes() rais
     var sources: List[Series] = [
         Series("ints", Column[Int64](ints^, valid.copy())),
         Series("small", Column[Int32](small^)),
-        Series("floats", Column[Float64](floats^, valid^)),
+        Series("floats", Column[Float64](floats^, valid)),
         Series("days", Column[Int64](List[Int64](length=n, fill=7))).with_dtype(
             DataType.DATE
         ),

@@ -279,6 +279,15 @@ readback lists. Multi-output, grouped and other unconverted regions still use
 the legacy representation. This Float32 kernel still interprets a bounded
 expression program; it is not the interpreter-free fused reduction path.
 
+A certified one-column Float32 row producer can also retain native storage
+when its only consumer is a join in the same query. This includes supported
+stable filters, but excludes limited producers and other consumer families.
+The join converts values and packed validity directly into its existing
+generic device buffers, with no intermediate host export. Profiles report
+the native producer's retained bytes and `native_input_conversion_bytes`
+(21 bytes per converted row). The join itself still uses the generic matrix
+and performs a conservative synchronization at this conversion boundary.
+
 The first precompiled reduction family accepts one Int32 input, an optional
 `x > Int32(threshold)` filter, optional checked `(x + addend) * factor`, an
 explicit Int64 cast, and terminal SUM. It preserves the filter boundary and
@@ -331,6 +340,19 @@ and fused pipeline-cache counters.
 Context creation remains lazy: metadata-only work, empty native input and budget
 rejection before submission do not initialize the device. Pipeline-handle reuse
 outside the fused scalar path remains separate work.
+
+Plain grouped SUM, COUNT, MIN and MAX over integer columns can split each
+group across GPU blocks and merge exact partial states. The schedule uses
+row and group counts, with at most 4096 partial states across a batch;
+high-cardinality or small groups retain the existing reducer. One 256 KiB
+scratch buffer is reused across eligible outputs. Metadata resource estimates
+include that conservative cap whenever a plan could select the parallel path,
+while profiles report actual allocation and partial geometry through the
+`grouped_int_*` fields. Integer SUM keeps two-word totals until final narrowing,
+and every partial retains source error bits. Floating, decimal, temporal and
+window reductions retain their existing schedules. Group membership uses the
+existing hash or sorted partition builder; both supply the same generic
+index and group-start representation to these reducers.
 
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and
@@ -604,15 +626,16 @@ It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
-then runs the integrated query contracts and independent oracles, and reports
-every failed step at the end. Those last steps can also run alone, with the
-pinned environment:
+then runs the integrated query contracts, independent oracles and the hash
+and grouped integer programs, and reports every failed step at the end. Those
+last steps can also run alone, with the pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu
 pixi run --locked -e gpu test-mojo-gpu-floating
 pixi run --locked -e gpu test-mojo-gpu-decimal
 pixi run --locked -e gpu test-mojo-gpu-integer
+pixi run --locked -e gpu test-mojo-gpu-grouping
 ```
 
 The independent integer oracle uses Python arbitrary-precision arithmetic:

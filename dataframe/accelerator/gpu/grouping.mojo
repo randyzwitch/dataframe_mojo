@@ -6,20 +6,102 @@ representatives preserve original encodings; NaNs, signed zeros and nulls
 have the same grouping equivalence as the dataframe CPU path.
 """
 
-from max.gpu import global_idx, thread_idx, block_idx
+from max.gpu import global_idx, thread_idx, block_idx, barrier
 from max.gpu.primitives.block import prefix_sum
-from std.memory import Pointer
+from std.memory import Pointer, unsafe_stack_allocation
 from dataframe.accelerator.rows import (
+    ROW_GROUP_HEADER,
     ROW_GROUP_HEADER_LAST,
     ROW_GROUP_HEADER_WINDOW,
 )
-from dataframe.expr import ARG_MIN, ARG_MAX, COV, CORR, SUM, MEAN
+from dataframe.expr import (
+    ARG_MIN,
+    ARG_MAX,
+    COV,
+    CORR,
+    SUM,
+    MEAN,
+    MIN,
+    MAX,
+    COUNT,
+)
 from dataframe.partition import _mix, _combine
 from . import floating as f
 from .decimal_descriptors import DECIMAL_SUM, DECIMAL_MEAN
 from .reductions import State as BasicState
 from .statistics import State as StatisticalState, supported as statistical
 from . import quantiles
+
+
+@always_inline
+def integer_partial_supported(
+    header: Int64,
+    op: Int64,
+    source_dtype: Int64,
+    target_dtype: Int64,
+) -> Bool:
+    """Exact first-tier certificate shared by host dispatch and group_reduce."""
+    var integer = (
+        source_dtype == 2
+        or source_dtype == 3
+        or source_dtype == 5
+        or source_dtype == 6
+        or source_dtype == 7
+        or source_dtype == 8
+        or source_dtype == 9
+        or source_dtype == 10
+    )
+    var target_integer = (
+        target_dtype == 2
+        or target_dtype == 3
+        or target_dtype == 5
+        or target_dtype == 6
+        or target_dtype == 7
+        or target_dtype == 8
+        or target_dtype == 9
+        or target_dtype == 10
+    )
+    return (
+        (header == ROW_GROUP_HEADER or header == ROW_GROUP_HEADER_LAST)
+        and integer
+        and target_integer
+        and (op == SUM or op == COUNT or op == MIN or op == MAX)
+    )
+
+
+@always_inline
+def _group_shared_state_store(
+    state: BasicState,
+    output: Pointer[UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED],
+    at: Int,
+):
+    """Write the eight reducer words directly into CTA shared memory."""
+    output[unsafe_offset=at] = state.word
+    output[unsafe_offset=at + 1] = state.high
+    output[unsafe_offset=at + 2] = state.count
+    output[unsafe_offset=at + 3] = state.index
+    output[unsafe_offset=at + 4] = state.present
+    output[unsafe_offset=at + 5] = state.flags
+    output[unsafe_offset=at + 6] = state.error
+    output[unsafe_offset=at + 7] = state.nan_index
+
+
+@always_inline
+def _group_shared_state_load(
+    input: Pointer[UInt64, MutAnyOrigin, address_space=AddressSpace.SHARED],
+    at: Int,
+) -> BasicState:
+    """Load reducer state from CTA shared memory without address-space casts."""
+    var state = BasicState()
+    state.word = input[unsafe_offset=at]
+    state.high = input[unsafe_offset=at + 1]
+    state.count = input[unsafe_offset=at + 2]
+    state.index = input[unsafe_offset=at + 3]
+    state.present = input[unsafe_offset=at + 4]
+    state.flags = input[unsafe_offset=at + 5]
+    state.error = input[unsafe_offset=at + 6]
+    state.nan_index = input[unsafe_offset=at + 7]
+    return state^
 
 
 @always_inline
@@ -496,6 +578,7 @@ def group_reduce(
     stride: UInt32,
     slots: UInt32 = 0,
     unordered: UInt32 = 0,
+    partials_per_group: UInt32 = 1,
 ):
     var work = global_idx.x
     if work >= Int(groups) * Int(nodes):
@@ -539,6 +622,10 @@ def group_reduce(
     var op = code[unsafe_offset=node * 4 + 3]
     var dtype = slot_types[unsafe_offset=source_slot]
     var target_dtype = slot_types[unsafe_offset=target_slot]
+    if partials_per_group > 1 and integer_partial_supported(
+        code[unsafe_offset=header], op, dtype, target_dtype
+    ):
+        return
     var parameter = literals[unsafe_offset=node]
     var result: Tuple[UInt64, UInt8, UInt32]
     var result_high = UInt64(0)
@@ -737,3 +824,160 @@ def group_reduce(
         ] = result_high
     output_validity[unsafe_offset=target] = result[1]
     output_errors[unsafe_offset=target] = result[2]
+
+
+def group_integer_partials(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    starts: Pointer[UInt32, ImmutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    slot_types: Pointer[Int64, ImmutAnyOrigin],
+    start: UInt32,
+    node: UInt32,
+    group_base: UInt32,
+    batch_groups: UInt32,
+    total_groups: UInt32,
+    partials_per_group: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    partial_states: Pointer[UInt64, MutAnyOrigin],
+):
+    """One CTA computes and shared-reduces one (group, partition) state."""
+    var work = Int(block_idx.x)
+    if work >= Int(batch_groups) * Int(partials_per_group):
+        return
+    var local_group = work // Int(partials_per_group)
+    var partition = work % Int(partials_per_group)
+    var group = Int(group_base) + local_group
+    var begin = Int(starts[unsafe_offset=group])
+    var end = Int(starts[unsafe_offset=group + 1]) if group + 1 < Int(
+        total_groups
+    ) else Int(rows)
+    var length = end - begin
+    var first = begin + length * partition // Int(partials_per_group)
+    var last = begin + length * (partition + 1) // Int(partials_per_group)
+    var source_slot = Int(code[unsafe_offset=Int(node) * 4 + 1])
+    var op = code[unsafe_offset=Int(node) * 4 + 3]
+    var dtype = slot_types[unsafe_offset=source_slot]
+    var minimum = literals[unsafe_offset=Int(node)].cast[DType.int64]()
+    var state = BasicState()
+    var at = first + Int(thread_idx.x)
+    while at < last:
+        var row = Int(index[unsafe_offset=at])
+        var source = source_slot * Int(stride) + row
+        state.add(
+            words[unsafe_offset=source],
+            validity[unsafe_offset=source] != 0,
+            errors[unsafe_offset=source],
+            UInt64(row),
+            op,
+            dtype,
+        )
+        at += 256
+    var shared = unsafe_stack_allocation[
+        256 * 8, DType.uint64, address_space=AddressSpace.SHARED
+    ]()
+    var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
+    _group_shared_state_store(state, shared_write, Int(thread_idx.x) * 8)
+    barrier()
+    var width = 128
+    while width > 0:
+        if Int(thread_idx.x) < width:
+            var left = _group_shared_state_load(
+                shared_write, Int(thread_idx.x) * 8
+            )
+            var right = _group_shared_state_load(
+                shared_write, (Int(thread_idx.x) + width) * 8
+            )
+            left.merge(right, op, dtype, minimum)
+            _group_shared_state_store(left, shared_write, Int(thread_idx.x) * 8)
+        barrier()
+        width //= 2
+    if thread_idx.x == 0:
+        var base = (local_group * Int(partials_per_group) + partition) * 8
+        var total = _group_shared_state_load(shared_write, 0)
+        total.store(partial_states, base)
+
+
+def group_integer_finish(
+    output_words: Pointer[UInt64, MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+    starts: Pointer[UInt32, ImmutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    slot_types: Pointer[Int64, ImmutAnyOrigin],
+    start: UInt32,
+    node: UInt32,
+    group_base: UInt32,
+    batch_groups: UInt32,
+    total_groups: UInt32,
+    partials_per_group: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    slots: UInt32,
+    partial_states: Pointer[UInt64, ImmutAnyOrigin],
+):
+    """Merge one group's partial states in parallel and publish its result."""
+    var group = Int(group_base) + Int(block_idx.x)
+    if Int(block_idx.x) >= Int(batch_groups):
+        return
+    var begin = Int(starts[unsafe_offset=group])
+    var end = Int(starts[unsafe_offset=group + 1]) if group + 1 < Int(
+        total_groups
+    ) else Int(rows)
+    var source_slot = Int(code[unsafe_offset=Int(node) * 4 + 1])
+    var target_slot = Int(code[unsafe_offset=Int(node) * 4 + 2])
+    var op = code[unsafe_offset=Int(node) * 4 + 3]
+    var dtype = slot_types[unsafe_offset=source_slot]
+    var target_dtype = slot_types[unsafe_offset=target_slot]
+    var minimum = literals[unsafe_offset=Int(node)].cast[DType.int64]()
+    var state = BasicState()
+    var partition = Int(thread_idx.x)
+    var partial_base = Int(block_idx.x) * Int(partials_per_group) * 8
+    while partition < Int(partials_per_group):
+        var partial = BasicState.load(
+            partial_states, partial_base + partition * 8
+        )
+        state.merge(partial, op, dtype, minimum)
+        partition += 256
+    var shared = unsafe_stack_allocation[
+        256 * 8, DType.uint64, address_space=AddressSpace.SHARED
+    ]()
+    var shared_write = shared.unsafe_origin_cast[MutAnyOrigin]()
+    _group_shared_state_store(state, shared_write, Int(thread_idx.x) * 8)
+    barrier()
+    var width = 128
+    while width > 0:
+        if Int(thread_idx.x) < width:
+            var left = _group_shared_state_load(
+                shared_write, Int(thread_idx.x) * 8
+            )
+            var right = _group_shared_state_load(
+                shared_write, (Int(thread_idx.x) + width) * 8
+            )
+            left.merge(right, op, dtype, minimum)
+            _group_shared_state_store(left, shared_write, Int(thread_idx.x) * 8)
+        barrier()
+        width //= 2
+    if thread_idx.x == 0:
+        var total = _group_shared_state_load(shared_write, 0)
+        var result = total.finish(
+            op,
+            dtype,
+            target_dtype,
+            minimum,
+            UInt64(end - begin),
+        )
+        var result_high = total.result_high(op, target_dtype, result[1])
+        var target = target_slot * Int(stride) + group
+        output_words[unsafe_offset=target] = result[0]
+        if slots > 0:
+            output_words[
+                unsafe_offset=Int(stride) * Int(slots) + target
+            ] = result_high
+        output_validity[unsafe_offset=target] = result[1]
+        output_errors[unsafe_offset=target] = result[2]

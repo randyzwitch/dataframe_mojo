@@ -146,7 +146,7 @@ def encode_sort_keys(
             for item in columns:
                 contiguous.append(item.rechunk())
             return encode_sort_keys(
-                contiguous^,
+                contiguous,
                 descending,
                 nulls_last,
                 prefix_only=prefix_only,

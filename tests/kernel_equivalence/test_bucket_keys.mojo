@@ -119,7 +119,7 @@ def category_codes(domain: Int, poison_visible: Bool = False) raises -> Series:
     ]
     var valid: List[Bool] = [True, True, poison_visible, True, True, True, True]
     return (
-        Series("c", Column[UInt32](values^, valid^))
+        Series("c", Column[UInt32](values^, valid))
         .with_dtype(DataType.categorical(dictionary^))
         .slice(1, 5)
     )

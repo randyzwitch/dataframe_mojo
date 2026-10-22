@@ -29,10 +29,10 @@ def _frame(n: Int, span: Int, chunked: Bool) raises -> DataFrame:
         f.append(Float64(row % 23) / 4 - 2)
         f_valid.append(row % 19 != 5)
     var columns: List[Series] = [
-        Series("a", Column[Int64](a^, a_valid^)),
-        Series("b", Column[Int32](b^, b_valid^)),
-        Series("v", Column[Int64](v^, v_valid^)),
-        Series("f", Column[Float64](f^, f_valid^)),
+        Series("a", Column[Int64](a^, a_valid)),
+        Series("b", Column[Int32](b^, b_valid)),
+        Series("v", Column[Int64](v^, v_valid)),
+        Series("f", Column[Float64](f^, f_valid)),
     ]
     columns.append(columns[0].cast(DataType.STRING).renamed("sa"))
     columns.append(columns[1].cast(DataType.STRING).renamed("sb"))

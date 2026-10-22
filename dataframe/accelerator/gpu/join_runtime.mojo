@@ -26,6 +26,7 @@ from dataframe.accelerator.code_domains import TextField
 from .runtime import _stage_category_column
 from . import category_keys
 from . import joins as j
+from . import native_hash_join
 
 
 @fieldwise_init
@@ -179,7 +180,7 @@ def execute_plan(
         for name in task.schema.columns():
             columns.append(col(name))
         var empty_plan = preflight_rows(
-            task.schema.clear().lazy().select_exprs(columns^)
+            task.schema.clear().lazy().select_exprs(columns)
         )
         var empty = execute_rows(
             empty_plan, scope, profiling=profiling, export_values=export_values
@@ -201,6 +202,21 @@ def execute_plan(
             )
         )
         return (empty[0].copy(), report^)
+    var native_hash = native_hash_join.try_execute(
+        task,
+        left,
+        right,
+        scope,
+        profiling,
+        left_resident,
+        right_resident,
+        Bool(text_remap) or len(source_text) > 0,
+        layout.probe,
+        layout.build,
+        layout.side,
+    )
+    if native_hash.used:
+        return (native_hash.table.take(), native_hash.report.take())
     var resident_workspace = _checked_mul(
         (left.width() if left_resident else 0)
         + (right.width() if right_resident else 0),
@@ -227,6 +243,7 @@ def execute_plan(
     var words = List[UInt64](length=2 * host_cells, fill=0)
     var validity = List[UInt8](length=host_cells, fill=0)
     var errors = List[UInt32](length=host_cells, fill=0)
+    var native_input_conversion_bytes = 0
     var column = 0
     for side in range(2):
         var frame = right.copy() if side else left.copy()
@@ -329,7 +346,7 @@ def execute_plan(
                             "Mojo GPU resident join source field mismatch"
                         )
                     mapping.append(Int64(found))
-                _ = resident.value().copy_to(
+                var copied = resident.value().copy_to(
                     scope,
                     device_words,
                     device_validity,
@@ -339,6 +356,10 @@ def execute_plan(
                     mapping,
                     left.width() if side else 0,
                 )
+                if len(resident.value().native_columns):
+                    native_input_conversion_bytes = _checked_add(
+                        native_input_conversion_bytes, copied
+                    )
         if text_remap:
             text_submission = submit_text(
                 scope,
@@ -417,7 +438,7 @@ def execute_plan(
             UInt32(layout.probe),
             UInt32(layout.build),
             UInt32(task.how),
-            UInt32(task.how == 7),
+            UInt32(task.nulls_equal or task.how == 7),
             UInt64(layout.cells),
             grid_dim=pb,
             block_dim=256,
@@ -689,6 +710,12 @@ def execute_plan(
             Series(
                 "resident_output_bytes",
                 Column[Int64]([Int64(result.retained_bytes())]),
+            )
+        )
+        fields.append(
+            Series(
+                "native_input_conversion_bytes",
+                Column[Int64]([Int64(native_input_conversion_bytes)]),
             )
         )
         fields.append(

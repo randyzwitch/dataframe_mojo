@@ -132,7 +132,7 @@ def read_dbf(
         if kind == 67:
             columns.append(Series(name, Column[String](strings^, valid)))
         elif kind == 76:
-            columns.append(Series(name, BoolColumn(bools^, valid)))
+            columns.append(Series(name, BoolColumn(bools, valid)))
         elif kind == 68:
             columns.append(
                 Series(name, Column[Int64](ints^, valid)).with_dtype(

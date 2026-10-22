@@ -31,8 +31,8 @@ def fixture(n: Int = 33) raises -> DataFrame:
         second.append(Int32(i % 2))
     return DataFrame(
         [
-            Series("x", Column[Int64](values^, valid^)),
-            Series("k", Column[Int32](keys^, key_valid^)),
+            Series("x", Column[Int64](values^, valid)),
+            Series("k", Column[Int32](keys^, key_valid)),
             Series("j", Column[Int32](second^)),
         ]
     )

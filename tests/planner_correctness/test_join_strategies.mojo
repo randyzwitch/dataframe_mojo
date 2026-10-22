@@ -23,7 +23,7 @@ def _inputs() raises -> Tuple[DataFrame, DataFrame]:
         small^,
         DataFrame(
             [
-                Series("b", Column[Int64](keys^, valid^)),
+                Series("b", Column[Int64](keys^, valid)),
                 Series("value", Column[Int64](values^)),
             ]
         ),

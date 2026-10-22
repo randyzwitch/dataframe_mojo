@@ -90,7 +90,7 @@ def fixture() raises -> DataFrame:
     values.append(bitcast[DType.float64](UInt64(0x000FFFFFFFFFFFFF)))
     var valid = List[Bool](length=len(values), fill=True)
     valid[4] = False
-    return DataFrame([Series("x", Column[Float64](values^, valid^))])
+    return DataFrame([Series("x", Column[Float64](values^, valid))])
 
 
 def test_transcendental_capability_metadata_types_and_no_device_preflight() raises:

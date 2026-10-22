@@ -34,7 +34,7 @@ def frame() raises -> DataFrame:
         groups.append(group_of(row))
     return DataFrame(
         [
-            Series("v", Column[Int64](values^, valid^)),
+            Series("v", Column[Int64](values^, valid)),
             Series("g", Column[Int64](groups^)),
         ]
     )

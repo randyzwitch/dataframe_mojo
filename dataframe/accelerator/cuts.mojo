@@ -407,7 +407,7 @@ def _scalar_sibling(
             scalar_input,
             exprs=[value^],
             text="metal_window_materialization",
-            names2=metadata^,
+            names2=metadata,
         )
     )
     var produced = len(result._nodes) - 1
