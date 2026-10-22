@@ -4,21 +4,21 @@ from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
-from dataframe.accelerator.code_domains import (
+from dataframe_metal.accelerator.code_domains import (
     TextField,
     TextQuery,
     same_dictionary,
     code,
 )
-from dataframe.accelerator.window_keys import WindowKey
-from dataframe.accelerator.text_key_domains import append_partition_values
-from dataframe.accelerator.gpu.residency import (
+from dataframe.plan_types import WindowKey
+from dataframe_metal.accelerator.text_key_domains import append_partition_values
+from dataframe_metal.accelerator.gpu.residency import (
     Scope,
     TextDomain,
     TextColumn,
     Table,
 )
-from dataframe.accelerator.gpu.text_domains import (
+from dataframe_metal.accelerator.gpu.text_domains import (
     union_domain,
     ColumnMap,
     MapPlan,
@@ -208,7 +208,7 @@ def test_dynamic_text_domain_guards_precede_device_creation() raises:
 
 # requires: mojo_gpu
 def test_dynamic_qcut_label_controls_match_cpu_literal_spelling() raises:
-    from dataframe.accelerator.gpu.qcut_labels import build
+    from dataframe_metal.accelerator.gpu.qcut_labels import build
 
     var scope = Scope(99999)
     var edges: List[UInt64] = [0x3FE8000000000000, 0x4002000000000000]

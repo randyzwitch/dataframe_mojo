@@ -1,13 +1,15 @@
 """Exact decimal comparisons across scales and physical storage widths."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, DataType, col, lit, when
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_float64_emulation import same

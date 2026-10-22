@@ -12,9 +12,9 @@ from dataframe import (
 )
 from dataframe.dtype import CategoricalDictionary
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.public_contracts.test_grouped_key_domains import _key, _coded
-from dataframe.accelerator.grouped_key_domains import STRING, BINARY, GEOMETRY
+from dataframe.key_domains import STRING, BINARY, GEOMETRY
 
 
 def _collect(query: LazyFrame) raises -> DataFrame:

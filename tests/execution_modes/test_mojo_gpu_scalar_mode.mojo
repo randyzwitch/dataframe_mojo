@@ -15,9 +15,9 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.decimal import pow10
-from dataframe.accelerator.distributions import lower_scalar_modes
+from dataframe_metal.accelerator.distributions import lower_scalar_modes
 from tests.public_contracts.test_scalar_mode import (
     mode_sources,
     mode_expected,

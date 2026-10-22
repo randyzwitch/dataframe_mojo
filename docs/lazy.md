@@ -10,7 +10,7 @@ and `collect(optimize=False)` show and run the plan as written.
 
 `collect`, `profile`, and `fetch` default to `engine="auto"`; `engine="cpu"`
 forces CPU execution and `engine="accel"` requires an accelerator provider.
-In this CPU distribution, auto uses CPU without accelerator dependencies or
+In a CPU-only build (the default), auto uses CPU without accelerator dependencies or
 device discovery. Eager operations retain their existing behavior.
 
 The core exposes an `AcceleratorBackend` extension interface. A separately

@@ -1,7 +1,9 @@
 """GPU exponential/logarithm approximations retain domain and numeric contracts."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_true, assert_equal, assert_raises
 from std.math import isnan, isfinite
 from std.memory import bitcast
@@ -16,9 +18,9 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
 
 

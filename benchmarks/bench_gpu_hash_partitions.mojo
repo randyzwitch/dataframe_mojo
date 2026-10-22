@@ -6,15 +6,15 @@ are partition timings, not complete query or CPU/GPU speedups.
 """
 from std.testing import assert_equal, assert_true
 from std.time import perf_counter_ns
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu import hash_grouping as h
-from dataframe.accelerator.gpu.ordering import order_init, order_merge
-from dataframe.accelerator.gpu.grouping import (
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu import hash_grouping as h
+from dataframe_metal.accelerator.gpu.ordering import order_init, order_merge
+from dataframe_metal.accelerator.gpu.grouping import (
     group_mark,
     group_offsets,
     group_starts,
 )
-from dataframe.accelerator.rows import ROW_GROUP_HEADER, ROW_GROUP_KEY
+from dataframe_metal.accelerator.rows import ROW_GROUP_HEADER, ROW_GROUP_KEY
 
 
 def main() raises:

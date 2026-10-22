@@ -15,7 +15,7 @@ from dataframe import (
     null,
     when,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

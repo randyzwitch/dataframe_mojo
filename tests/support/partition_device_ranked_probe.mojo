@@ -3,10 +3,10 @@ from max.gpu.host import DeviceBuffer
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
-from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.ranked_rows import evaluate, estimate
-from dataframe.accelerator.gpu import ordered_faults
+from dataframe_metal.accelerator.gpu.runtime import _preflight, execute_plan
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.ranked_rows import evaluate, estimate
+from dataframe_metal.accelerator.gpu import ordered_faults
 from tests.public_contracts.test_ranked_rows_resources import (
     ranked_operand,
     test_private_ranked_rows_resources_zero_rows_descriptors_and_wide_cells,

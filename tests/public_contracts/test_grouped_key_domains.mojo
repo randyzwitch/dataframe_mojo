@@ -15,7 +15,7 @@ from dataframe.dtype import CategoricalDictionary
 from dataframe.categorical import decode
 from dataframe.string_column import StringCodes
 from dataframe.partition import _hash_column, _mix, low_cardinality
-from dataframe.accelerator.grouped_key_domains import (
+from dataframe.key_domains import (
     KeyDomain,
     direct_category_codes,
     coded_string_dtype,

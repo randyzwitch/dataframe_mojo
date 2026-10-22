@@ -12,12 +12,15 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import DataType
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.constants import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.constants import (
     fold_literal_text_parsing,
     has_literal_text_parsing,
 )
-from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    encode_query,
+)
 
 
 from tests.execution_modes.test_backend_metal import require_metal

@@ -3,7 +3,7 @@
 # parsed only in dataframe/dtype.mojo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if grep -nE '"(int64|float64|bool|string)"' dataframe/*.mojo dataframe/io/*.mojo | grep -v '^dataframe/dtype.mojo:'; then
+if grep -nE '"(int64|float64|bool|string)"' dataframe/*.mojo dataframe/io/*.mojo dataframe_provider/*.mojo dataframe_metal/*.mojo dataframe_metal/accelerator/*.mojo dataframe_metal/accelerator/gpu/*.mojo | grep -v '^dataframe/dtype.mojo:'; then
     echo "dtype string literals found outside dataframe/dtype.mojo" >&2
     exit 1
 fi

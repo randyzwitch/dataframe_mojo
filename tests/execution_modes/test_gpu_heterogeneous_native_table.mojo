@@ -4,16 +4,19 @@ from std.testing import assert_equal, assert_raises, assert_true
 from std.memory import ArcPointer, bitcast
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
-from dataframe.accelerator.code_domains import CategoryField, CategoryOwner
-from dataframe.accelerator.gpu.query_scope import Scope
-from dataframe.accelerator.gpu.residency import (
+from dataframe_metal.accelerator.code_domains import (
+    CategoryField,
+    CategoryOwner,
+)
+from dataframe_metal.accelerator.gpu.query_scope import Scope
+from dataframe_metal.accelerator.gpu.residency import (
     Matrix,
     NativeJoinField,
     NativeRowMap,
     Table,
 )
-from dataframe.accelerator.gpu.runtime import materialize
-from dataframe.accelerator.gpu.typed_storage import (
+from dataframe_metal.accelerator.gpu.runtime import materialize
+from dataframe_metal.accelerator.gpu.typed_storage import (
     NativeColumnAny,
     allocate_native_column,
     upload_native,

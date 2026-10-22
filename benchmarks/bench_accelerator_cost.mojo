@@ -9,8 +9,15 @@ from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, Series, LazyFrame, col, lit
 from dataframe.dtype import NUMERIC_DTYPES, DataType
 from dataframe._accel_provider import select_auto
-from dataframe.metal import calibration_runtime, calibration_key, estimate_auto
-from dataframe.accelerator.cost import COST_FEATURE_COUNT, cost_feature_names
+from dataframe_metal.metal import (
+    calibration_runtime,
+    calibration_key,
+    estimate_auto,
+)
+from dataframe_metal.accelerator.cost import (
+    COST_FEATURE_COUNT,
+    cost_feature_names,
+)
 from dataframe.json_value import json_quote
 
 

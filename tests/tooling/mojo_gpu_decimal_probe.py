@@ -278,6 +278,8 @@ def main():
                 "mojo",
                 "run",
                 "-I",
+                "providers/metal",
+                "-I",
                 ".",
                 "tests/tooling/mojo_gpu_decimal_probe.mojo",
                 str(corpus),

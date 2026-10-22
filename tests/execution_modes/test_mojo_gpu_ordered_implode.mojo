@@ -4,19 +4,21 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.accelerator import implode_ordered
-from dataframe.accelerator.lists import lower_terminal_implode
-from dataframe.accelerator.rows import RowPlan
-from dataframe.accelerator.joins import DAG_ROWS
-from dataframe.accelerator.gpu.dag_runtime import preflight as dag_preflight
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator import implode_ordered
+from dataframe_metal.accelerator.lists import lower_terminal_implode
+from dataframe_metal.accelerator.rows import RowPlan
+from dataframe_metal.accelerator.joins import DAG_ROWS
+from dataframe_metal.accelerator.gpu.dag_runtime import (
+    preflight as dag_preflight,
+)
+from dataframe_metal.accelerator.gpu.runtime import (
     _preflight,
     capabilities,
     estimate_resources,
     execute_plan,
 )
-from dataframe.accelerator.gpu.residency import Scope, Table, HostMatrix
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.residency import Scope, Table, HostMatrix
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

@@ -140,15 +140,18 @@ def capture_build_identity(compile_flags):
     compiler = command(["mojo", "--version"])
     compiler_path = shutil.which("mojo")
     source_diff = command(
-        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"]
     )
     return {
         "git_commit": command(["git", "rev-parse", "HEAD"]),
         "git_status": command(["git", "status", "--porcelain"]),
         "engine_status": command(
-            ["git", "status", "--porcelain", "--", "dataframe"]
+            ["git", "status", "--porcelain", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"]
         ),
         "engine_content_sha256": source_fingerprint(ROOT / "dataframe"),
+        "engine_metal_content_sha256": source_fingerprint(
+            ROOT / "dataframe_metal"
+        ),
         "engine_diff_sha256": hashlib.sha256(source_diff.encode()).hexdigest(),
         "compiler_identity": compiler,
         "build_platform": platform.platform(),
@@ -288,7 +291,7 @@ def metadata(binaries, threads, warmups, binary_receipts):
     compiler = command(["mojo", "--version"])
     compiler_path = shutil.which("mojo")
     source_diff = command(
-        ["git", "diff", "--binary", "HEAD", "--", "dataframe"]
+        ["git", "diff", "--binary", "HEAD", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"]
     )
     return {
         "recorded_at_utc": datetime.datetime.now(
@@ -303,12 +306,15 @@ def metadata(binaries, threads, warmups, binary_receipts):
         "source_tree": {
             "status": command(["git", "status", "--porcelain"]),
             "dataframe_status": command(
-                ["git", "status", "--porcelain", "--", "dataframe"]
+                ["git", "status", "--porcelain", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"]
             ),
             "dataframe_diff_sha256": hashlib.sha256(
                 source_diff.encode()
             ).hexdigest(),
             "dataframe_content_sha256": source_fingerprint(ROOT / "dataframe"),
+            "dataframe_metal_content_sha256": source_fingerprint(
+                ROOT / "dataframe_metal"
+            ),
         },
         "engine_status": command(
             [
@@ -317,6 +323,9 @@ def metadata(binaries, threads, warmups, binary_receipts):
                 "--porcelain",
                 "--",
                 "dataframe",
+                "dataframe_metal",
+                "dataframe_provider",
+                "providers",
             ]
         ),
         "benchmark_status": command(
@@ -342,7 +351,7 @@ def metadata(binaries, threads, warmups, binary_receipts):
         ),
         "xcode": command(["xcodebuild", "-version"]),
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
-        "compile_flags": ["-O3", "-I", "."],
+        "compile_flags": ["-O3", "-I", "providers/metal", "-I", "."],
         "dataframe_threads": threads,
         "warmups_per_engine": warmups,
         "powerconditions": powerconditions(),
@@ -608,7 +617,7 @@ def main():
     ):
         parser.error("Invalid rows, workload or variant")
     binary = args.binary.resolve()
-    compile_flags = ["-O3", "-I", "."]
+    compile_flags = ["-O3", "-I", "providers/metal", "-I", "."]
     if not args.skip_build:
         binary.parent.mkdir(parents=True, exist_ok=True)
         build_identity = capture_build_identity(compile_flags)

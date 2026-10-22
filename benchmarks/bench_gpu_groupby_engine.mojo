@@ -6,7 +6,7 @@ publication. Source creation and CPU verification are outside Metal timing.
 from std.testing import assert_true
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, Series, col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 def main() raises:

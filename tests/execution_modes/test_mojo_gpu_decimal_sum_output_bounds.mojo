@@ -7,18 +7,21 @@ from dataframe import DataFrame, Series, Column, col, lit
 from dataframe.dtype import DataType, CategoricalDictionary
 from dataframe.lazy import LazyFrame, SELECT, _plan_node
 from dataframe.binding import bind
-from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.joins import lower_join_dag, _mark_decimal_producers
-from dataframe.accelerator.metadata import prune_projections
-from dataframe.accelerator.code_domains import (
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.joins import (
+    lower_join_dag,
+    _mark_decimal_producers,
+)
+from dataframe_metal.accelerator.metadata import prune_projections
+from dataframe_metal.accelerator.code_domains import (
     CategoryOwner,
     CategoryField,
     TextField,
 )
-from dataframe.accelerator import decimal_sum_bounds as raw
-from dataframe.accelerator import decimal_sum_receipts
-from dataframe.accelerator.gpu.runtime import capabilities, _preflight
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator import decimal_sum_bounds as raw
+from dataframe_metal.accelerator import decimal_sum_receipts
+from dataframe_metal.accelerator.gpu.runtime import capabilities, _preflight
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.lifecycle_jobs import WorkerSetting
 

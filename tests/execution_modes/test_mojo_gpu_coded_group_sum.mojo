@@ -5,8 +5,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.dtype import CategoricalDictionary
 from dataframe.string_column import StringCodes
-from dataframe.accelerator.gpu.coded_group_sum import eligible, execute
-from dataframe.accelerator.gpu.target import METAL_TARGET
+from dataframe_metal.accelerator.gpu.coded_group_sum import eligible, execute
+from dataframe_metal.accelerator.gpu.target import METAL_TARGET
 from dataframe.lazy import LazyFrame
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.support.coverage_compare import assert_frame

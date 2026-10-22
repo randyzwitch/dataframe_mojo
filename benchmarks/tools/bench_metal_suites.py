@@ -98,7 +98,7 @@ def derive(source, name, engine, *, audit_runtime=False):
         (
             "from metal_coverage_audit import CoverageAuditRuntime as MetalRuntime\nfrom "
             if audit_runtime
-            else "from dataframe.metal import MetalRuntime\nfrom "
+            else "from dataframe_metal.metal import MetalRuntime\nfrom "
         ),
         source,
         count=1,
@@ -467,6 +467,8 @@ def main():
                     "build",
                     "-O3",
                     "-I",
+                    str(ROOT / "providers/metal"),
+                    "-I",
                     str(ROOT),
                     "-I",
                     str(sources),
@@ -487,7 +489,7 @@ def main():
             ).isoformat(),
             "engine_revision": command(["git", "rev-parse", "HEAD"]),
             "engine_status": command(
-                ["git", "status", "--porcelain", "--", "dataframe"]
+                ["git", "status", "--porcelain", "--", "dataframe", "dataframe_metal", "dataframe_provider", "providers"]
             ),
             "mojo": command(["mojo", "--version"]),
             "platform": platform.platform(),

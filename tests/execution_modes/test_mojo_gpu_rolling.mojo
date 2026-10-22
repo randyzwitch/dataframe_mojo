@@ -13,7 +13,7 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.execution_modes.test_backend_metal_float64_emulation import same

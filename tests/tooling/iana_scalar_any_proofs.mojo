@@ -2,10 +2,13 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import bind, SCALAR
-from dataframe.accelerator import iana_certificate, ordered_rows
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
-from dataframe.accelerator.gpu import iana_scalar_scopes
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator import iana_certificate, ordered_rows
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
+from dataframe_metal.accelerator.gpu import iana_scalar_scopes
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 from tests.tooling.iana_mutation_proofs import (
     cpu_nonfused_kernel_mask_dtype_and_operand,

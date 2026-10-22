@@ -17,8 +17,8 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.source_structs import lower_source_structs
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.source_structs import lower_source_structs
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

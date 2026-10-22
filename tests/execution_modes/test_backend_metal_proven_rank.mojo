@@ -1,11 +1,13 @@
 """Static no-error proofs admit rank inputs without hiding checked children."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_true, assert_raises
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal_proven_arithmetic import (
     frame,
     check,

@@ -15,10 +15,10 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.metadata import prune_projections, schema_frame
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.support.coverage_compare import assert_frame
 
 # Stands for a null Int64 in literal expectations.

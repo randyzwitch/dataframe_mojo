@@ -1,15 +1,17 @@
 """Static integer error proofs preserve CPU observations across Metal stages."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from tests.support.metal_outcomes import same_outcome
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr, when
 from dataframe.binding import bind
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.integer_ranges import proven_integer_nodes
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.integer_ranges import proven_integer_nodes
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 

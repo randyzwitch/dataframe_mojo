@@ -4,9 +4,9 @@
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, ListColumn, Series, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.joins import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.joins import (
     lower_join_dag,
     DAG_SOURCE_FIELDS,
     DAG_EXPLODE,

@@ -4,7 +4,7 @@
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit, when
 from dataframe.binding import bind
-from dataframe.accelerator.partition_cuts import capture, validate
+from dataframe_metal.accelerator.partition_cuts import capture, validate
 
 
 # requires: mojo_gpu
@@ -67,9 +67,12 @@ def test_partition_cut_capture_keeps_original_controls_and_eager_state() raises:
 
 # requires: mojo_gpu
 def test_partition_nested_scope_cache_entry_snapshots() raises:
-    from dataframe.accelerator.gpu.partition_state import Context
-    from dataframe.accelerator.cuts import lower_cuts
-    from dataframe.accelerator.partition_cuts import is_marker, marker_capture
+    from dataframe_metal.accelerator.gpu.partition_state import Context
+    from dataframe_metal.accelerator.cuts import lower_cuts
+    from dataframe_metal.accelerator.partition_cuts import (
+        is_marker,
+        marker_capture,
+    )
     from dataframe.lazy import LazyFrame
 
     var context = Context()
@@ -118,9 +121,9 @@ def test_partition_nested_scope_cache_entry_snapshots() raises:
 
 # requires: mojo_gpu
 def test_partition_lookup_reservation_retained_live_witness() raises:
-    from dataframe.accelerator.gpu.residency import Scope
-    from dataframe.accelerator.gpu.ranked_rows import _Reservation
-    from dataframe.accelerator.gpu.partition_runtime import _finish_lookup
+    from dataframe_metal.accelerator.gpu.residency import Scope
+    from dataframe_metal.accelerator.gpu.ranked_rows import _Reservation
+    from dataframe_metal.accelerator.gpu.partition_runtime import _finish_lookup
 
     # No context can be initialized here, even on a machine without Metal.
     var scope = Scope(999999, budget=31)

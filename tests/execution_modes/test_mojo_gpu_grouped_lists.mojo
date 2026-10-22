@@ -4,10 +4,10 @@
 from std.memory import ArcPointer, bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.grouped_lists import prepare
-from dataframe.accelerator.gpu.calibration import estimate
-from dataframe.accelerator.gpu.grouped_lists_runtime import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.grouped_lists import prepare
+from dataframe_metal.accelerator.gpu.calibration import estimate
+from dataframe_metal.accelerator.gpu.grouped_lists_runtime import (
     execute as execute_grouped_lists,
 )
 from tests.support.coverage_generators import offset_layout, chunk_layout

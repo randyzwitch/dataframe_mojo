@@ -160,6 +160,21 @@ jobs:
         with:
           name: ci-timings-unit-macos-${{ matrix.area }}
 
+  metal-compile:
+    # The CPU contract areas no longer compile the Metal backend. This job
+    # compiles it for a CPU-only target and runs its dispatch checks, so the
+    # backend cannot stop building unnoticed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - name: Compile the Metal backend for a CPU target
+        run: >-
+          python3 scripts/ci_time.py --label metal-compile --budget-seconds 1500 --
+          pixi run test-metal-cpu-compile
+
   answers:
     needs: native-linux
     permissions:
@@ -211,7 +226,7 @@ jobs:
     # The existing check name, aggregating every Linux job.
     name: test (ubuntu-latest)
     if: always()
-    needs: [checks, native-linux, unit-linux, answers]
+    needs: [checks, native-linux, unit-linux, metal-compile, answers]
     runs-on: ubuntu-latest
     steps:
       - name: Require all Linux checks to pass

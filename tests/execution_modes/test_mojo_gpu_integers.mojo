@@ -1,7 +1,7 @@
 """Direct query coverage for integer-only operators and membership payloads."""
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, DataFrame, Series, Expr, col, lit, when
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.metal_outcomes import same_outcome
 from tests.support.coverage_compare import assert_frame
 

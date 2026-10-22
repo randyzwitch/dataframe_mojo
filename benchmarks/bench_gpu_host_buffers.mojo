@@ -8,7 +8,7 @@ outside device transfer timings. It does not run a GPU kernel,
 exercise DeviceBuffer.unsafe_host_ptr(), or measure dataframe query performance.
 
 Run on Apple Silicon with:
-    pixi run -e gpu mojo -I . benchmarks/bench_gpu_host_buffers.mojo
+    pixi run -e gpu mojo -I providers/metal -I . benchmarks/bench_gpu_host_buffers.mojo
 Optional positional arguments select one row count and repetitions. Defaults
 are 4097 and 1048576 rows with five repetitions.
 """

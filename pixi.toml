@@ -59,15 +59,17 @@ test = "bash tests/run_tests.sh"
 test-interchange-oracles = "mojo run -I . tests/tooling/interchange_oracles.mojo build/contract-tests"
 check-version = "python3 scripts/check_version.py"
 example = "mojo run -I . examples/sales.mojo && mojo run -I . examples/expressions.mojo && mojo run -I . examples/read_csv.mojo"
-format = "mblack --target-version mojo --line-length 80 dataframe tests examples benchmarks"
-format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples benchmarks"
+format = "mblack --target-version mojo --line-length 80 dataframe dataframe_metal dataframe_provider providers tests examples benchmarks"
+format-check = "mblack --check --target-version mojo --line-length 80 dataframe dataframe_metal dataframe_provider providers tests examples benchmarks"
 build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales && mojo build -I . examples/expressions.mojo -o build/expressions && mojo build -I . examples/read_csv.mojo -o build/read_csv"
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
 package = "python3 scripts/build_package.py --output dist"
+package-metal = "python3 scripts/build_package.py --provider metal --output dist-metal"
+test-metal-cpu-compile = "mkdir -p build && mojo build --target-accelerator=unknown -I providers/metal -I . tests/tooling/mojo_gpu_cpu_compile.mojo -o build/cpu-compile && build/cpu-compile"
 check-parquet-abi = "mojo run -I . tests/tooling/check_parquet_abi.mojo"
 package-smoke = "bash tests/tooling/package_smoke.sh"
-docs = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json docs/api.md"
-docs-check = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json --check"
+docs = "mkdir -p build && mojo doc -I . dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json docs/api.md"
+docs-check = "mkdir -p build && mojo doc -I . dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json --check"
 
 [feature.oracle.dependencies]
 polars = ">=2.0"
@@ -106,9 +108,9 @@ platforms = ["osx-arm64"]
 
 [feature.gpu.tasks]
 test-mojo-gpu-floating = "python3 tests/tooling/mojo_gpu_floating.py"
-test-mojo-gpu = "mojo run -I . tests/tooling/mojo_gpu_rows.mojo"
+test-mojo-gpu = "mojo run -I providers/metal -I . tests/tooling/mojo_gpu_rows.mojo"
 test-mojo-gpu-decimal = "python3 tests/tooling/mojo_gpu_decimal_probe.py"
-test-mojo-gpu-integer = "mkdir -p build/contract-tests && python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin && mojo run -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin"
-test-mojo-gpu-grouping = "mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo && mojo run -I . tests/tooling/mojo_gpu_group_integer.mojo"
-test-mojo-gpu-kernels = "mojo run -I . tests/tooling/mojo_gpu_moments_probe.mojo && mojo run -I . tests/tooling/mojo_gpu_statistics_probe.mojo && mojo run -I . tests/tooling/mojo_gpu_quantiles_probe.mojo && mojo run -I . tests/tooling/mojo_gpu_partition_schedule_probe.mojo && mojo run -I . tests/tooling/mojo_gpu_wide_integer_kernels.mojo"
-test-metal-suite-checks = { cmd = "mkdir -p build/answer-probe && mojo run -I . -I benchmarks tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo && mojo run -I . -I benchmarks tests/tooling/mojo_cpu_metal_answer_exports_probe.mojo", env = { DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX = "build/answer-probe/answer" } }
+test-mojo-gpu-integer = "mkdir -p build/contract-tests && python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin"
+test-mojo-gpu-grouping = "mojo run -I providers/metal -I . tests/tooling/mojo_gpu_hash_grouping.mojo && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_group_integer.mojo"
+test-mojo-gpu-kernels = "mojo run -I providers/metal -I . tests/tooling/mojo_gpu_moments_probe.mojo && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_statistics_probe.mojo && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_quantiles_probe.mojo && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_partition_schedule_probe.mojo && mojo run -I providers/metal -I . tests/tooling/mojo_gpu_wide_integer_kernels.mojo"
+test-metal-suite-checks = { cmd = "mkdir -p build/answer-probe && mojo run -I providers/metal -I . -I benchmarks tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo && mojo run -I providers/metal -I . -I benchmarks tests/tooling/mojo_cpu_metal_answer_exports_probe.mojo", env = { DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX = "build/answer-probe/answer" } }

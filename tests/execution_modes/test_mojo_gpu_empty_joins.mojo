@@ -4,7 +4,7 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 def _empty_inputs() raises -> Tuple[DataFrame, DataFrame]:

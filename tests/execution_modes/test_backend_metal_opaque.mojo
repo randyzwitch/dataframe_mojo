@@ -4,7 +4,7 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import (
     require_metal,
     assert_native_report,

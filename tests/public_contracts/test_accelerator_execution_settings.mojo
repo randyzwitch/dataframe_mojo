@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.execution_settings import ExecutionSettings
 from dataframe.lazy import AcceleratorBackend, LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 @fieldwise_init

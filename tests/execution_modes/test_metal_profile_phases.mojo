@@ -2,8 +2,8 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.dag_runtime import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.dag_runtime import (
     _append_profile_region,
     _profile_phases,
 )

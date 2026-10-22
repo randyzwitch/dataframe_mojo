@@ -4,7 +4,7 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 from tests.tooling.iana_scalar_any_proofs import _frame, _expression
 

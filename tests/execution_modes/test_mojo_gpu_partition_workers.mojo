@@ -1,7 +1,7 @@
 """CPU-equivalent proved contiguous partition association on the GPU."""
 
 from dataframe import Column, DataFrame, Expr, Series, col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.support.lifecycle_jobs import WorkerSetting
 

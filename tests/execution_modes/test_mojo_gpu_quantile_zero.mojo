@@ -4,8 +4,11 @@
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import (
+    _preflight,
+    estimate_resources,
+)
 from dataframe.expr import SUM
 
 

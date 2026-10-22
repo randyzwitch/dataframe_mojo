@@ -1,6 +1,6 @@
 # Apple Silicon Metal backend
 
-`MetalRuntime` runs Mojo kernels in `dataframe/accelerator/gpu/` through the
+`MetalRuntime` runs Mojo kernels in `dataframe_metal/accelerator/gpu/` through the
 Mojo GPU APIs supplied by MAX. Allocation, transfers, launches, synchronization,
 query orchestration and intermediate ownership are implemented in Mojo inside
 the dataframe library. GPU execution requires no repository dylib, C ABI bridge,
@@ -12,17 +12,39 @@ CPU environments. Importing dataframe, constructing a runtime, explaining a
 query or explicitly collecting on the CPU does not construct a GPU context.
 Mojo itself may load the system Metal framework independently of dataframe.
 
+## Enabling the Metal backend
+
+A default build is CPU-only: it compiles no Metal code, and `engine="accel"`
+raises "Accelerator provider is not installed". The backend lives in the
+`dataframe_metal` package, and a build chooses it by import path. Put the
+Metal provider ahead of the repository root:
+
+```sh
+mojo build -I providers/metal -I . app.mojo
+```
+
+`providers/metal/dataframe_provider` re-exports `dataframe_metal.provider`, and
+`dataframe._accel_provider` imports whichever `dataframe_provider` comes first
+on the path. For an installed package, build the Metal flavor with
+`pixi run package-metal` (`python3 scripts/build_package.py --provider metal`)
+and put its output directory on the import path. It holds `dataframe.mojoc`,
+`dataframe_provider.mojoc` and `dataframe_metal.mojoc`; the default `pixi run
+package` flavor holds only the first two, with the CPU-only provider.
+
+An application that passes a `MetalRuntime` as `accelerator=` needs only
+`import dataframe_metal.metal`, with or without the provider.
+
 ## Using the provider
 
 ```mojo
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 var runtime = MetalRuntime(memory_limit_bytes=256 * 1024 * 1024)
 var result = query.collect(engine="accel", accelerator=runtime)
 var measured = query.profile(engine="accel", accelerator=runtime)
 ```
 
-The default Apple accelerator uses the same implementation. Runtime copies
+In a Metal build, the default Apple accelerator uses the same implementation. Runtime copies
 retain configuration and share a lazy device service. Direct row and scalar
 collections exclusively lease its one cached context; overlapping collections
 use private contexts. Other resident DAG/operator routes still own fresh
@@ -59,7 +81,7 @@ result when the faulting values are never evaluated there. A fault-free run
 returns Metal's own result. Profiles of a decided query carry
 `fault_adjudication="cpu"`. Device, budget and planning failures still raise
 as they are; only errors marked as data faults
-(`dataframe/accelerator/faults.mojo`) are decided this way.
+(`dataframe_metal/accelerator/faults.mojo`) are decided this way.
 
 Each region flags a fault in any step's output slot as soon as the step
 writes it, and checks grouped outputs and reduction states, so no pruned
@@ -575,15 +597,15 @@ preflight estimate includes both temporary hash arrays, at most 8 MiB.
 The focused physical-GPU gate runs in the pinned GPU environment:
 
 ```sh
-mojo run -I . tests/tooling/mojo_gpu_hash_grouping.mojo
+mojo run -I providers/metal -I . tests/tooling/mojo_gpu_hash_grouping.mojo
 ```
 
 Timing programs are reviewed separately from engine changes, as required by
 the benchmark separation rule.
 
 ```sh
-mojo run -I . benchmarks/bench_gpu_hash_partitions.mojo
-mojo run -I . benchmarks/bench_gpu_groupby_engine.mojo
+mojo run -I providers/metal -I . benchmarks/bench_gpu_hash_partitions.mojo
+mojo run -I providers/metal -I . benchmarks/bench_gpu_groupby_engine.mojo
 ```
 
 The partition benchmark checks complete row membership and compares
@@ -612,7 +634,9 @@ they are not the development feedback loop.
 
 ## Validation
 
-Metal is validated on an Apple silicon Mac before a pull request, not in CI.
+CI compiles the backend for a CPU-only target in its own job
+(`pixi run test-metal-cpu-compile`), because the contract areas no longer
+compile it. Metal is validated on an Apple silicon Mac before a pull request, not in CI.
 GitHub's hosted macOS runners are virtual machines whose GPU gives Metal
 buffers no GPU address, which MAX's device context needs, so the Mojo GPU
 provider cannot run there (288 of 354 contracts failed, 278 of them on
@@ -623,7 +647,7 @@ the retired `native-metal` job did, and fails if no device is found:
 scripts/test_metal_local.sh
 ```
 
-It builds the provider for a CPU-only target, probes the device
+It builds the provider for a CPU-only target (with `-I providers/metal`), probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
@@ -649,7 +673,7 @@ The independent integer oracle uses Python arbitrary-precision arithmetic:
 ```sh
 mkdir -p build/contract-tests
 python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin
-pixi run --locked -e gpu mojo run -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin
+pixi run --locked -e gpu mojo run -I providers/metal -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin
 ```
 
 Installed-package validation can include actual GPU routing and execution:

@@ -1,18 +1,20 @@
 """Decimal-to-Float64 casts round the integer first, then divide by scale."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, Expr, col, lit, when
 from dataframe.decimal import pow10
 from dataframe.dtype import DataType
-from dataframe.metal import (
+from dataframe_metal.metal import (
     MetalRuntime,
 )
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal_scalar_broadcasts import (
     same,
     check,

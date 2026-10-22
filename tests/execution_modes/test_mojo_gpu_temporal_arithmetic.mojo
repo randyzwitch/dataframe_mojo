@@ -15,13 +15,17 @@ from dataframe import (
     when,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.metal_outcomes import same_outcome
 from dataframe.expr import ADD
-from dataframe.accelerator.gpu.runtime import _preflight, capabilities
-from dataframe.accelerator.gpu.dag_runtime import preflight as dag_preflight
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.temporal_descriptors import ROW_TEMPORAL_BINARY
+from dataframe_metal.accelerator.gpu.runtime import _preflight, capabilities
+from dataframe_metal.accelerator.gpu.dag_runtime import (
+    preflight as dag_preflight,
+)
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.temporal_descriptors import (
+    ROW_TEMPORAL_BINARY,
+)
 
 
 def tagged(name: String, dtype: DataType, values: List[Int64]) raises -> Series:

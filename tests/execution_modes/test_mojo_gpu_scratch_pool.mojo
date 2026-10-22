@@ -3,9 +3,9 @@
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col, lit
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.query_scope import DeviceService, Scope
-from dataframe.accelerator.gpu.typed_storage import _NativeReservation
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.query_scope import DeviceService, Scope
+from dataframe_metal.accelerator.gpu.typed_storage import _NativeReservation
 
 
 def _sum_query(value: Int32, rows: Int = 513) raises -> LazyFrame:

@@ -16,10 +16,16 @@ from dataframe import (
 )
 from dataframe.dtype import CategoricalDictionary
 from dataframe.lazy import AGG, LazyFrame
-from dataframe.accelerator.window_keys import WindowKey
-from dataframe.accelerator.code_domains import CategoryOwner, CategoryField
-from dataframe.accelerator.windows import lower_partition_aggregates
-from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
+from dataframe.plan_types import WindowKey
+from dataframe_metal.accelerator.code_domains import (
+    CategoryOwner,
+    CategoryField,
+)
+from dataframe_metal.accelerator.windows import lower_partition_aggregates
+from dataframe_metal.accelerator.dictionaries import (
+    DictionaryCodes,
+    encode_query,
+)
 
 
 def _keys(query: LazyFrame) -> List[WindowKey]:

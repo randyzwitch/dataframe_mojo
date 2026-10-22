@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
-# Check the core/accelerator boundary (docs/design/accelerator-contract.md).
+# Check the core/backend boundary (docs/design/accelerator-contract.md).
 #
-# Core code reaches an accelerator backend only through
-# dataframe/_accel_provider.mojo. This script fails, listing every offending
-# import, when:
-#   1. a .mojo file under dataframe/ outside the backend imports
-#      dataframe.accelerator, .accelerator, dataframe.metal or .metal;
-#   2. a file under dataframe/accelerator/ imports from tests;
-#   3. a core file other than the allowed importers imports _accel_provider.
+# A backend is a package outside the core (dataframe_metal) chosen at build
+# time by which `dataframe_provider` package comes first on the import path.
+# This script fails, listing every offending import, when:
+#   1. a .mojo file under dataframe/ imports dataframe_metal (absolute or
+#      relative to a sibling package);
+#   2. a core file other than dataframe/_accel_provider.mojo imports
+#      dataframe_provider, or _accel_provider is imported by a core file that is
+#      not one of the allowed dispatchers;
+#   3. a file under dataframe_metal/ imports from tests;
+#   4. the root dataframe_provider/ package imports a backend.
 #
 # Every allow-list entry below is a deliberate decision. Adding one needs a
 # reason in the comment beside it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-# Files that are the backend or its only door. They may import the Metal
-# backend. dataframe/accelerator/ is matched by prefix.
-backend_files=(
-  dataframe/_accel_provider.mojo  # the provider slot; hard-imports .metal today
-  dataframe/metal.mojo            # the Metal runtime, part of the backend
-)
 
 # Core files allowed to import _accel_provider. Both dispatch to the provider;
 # nothing else in core should know a provider exists.
@@ -27,12 +23,6 @@ provider_importers=(
   dataframe/lazy.mojo               # execute, describe, select_auto, ...
   dataframe/execution_backend.mojo  # installed(), for engine="accel"
 )
-
-# Recorded exceptions: core files that import a backend module directly. Each
-# entry is "file module". The list is empty since the planner-owned types
-# moved into core (dataframe/plan_types.mojo and friends). Do not add to this
-# list.
-known_core_imports=()
 
 failures=0
 fail() {
@@ -50,25 +40,38 @@ in_list() {
   return 1
 }
 
-# Matches "from X import" / "import X" lines whose module path starts with
-# the given name (relative dots or the dataframe. prefix allowed).
-import_pattern() {
+# Matches "from X import" / "import X" lines whose module path starts with X.
+# Relative dots are allowed only where the caller asks for them.
+absolute_import() {
+  printf '^[[:space:]]*(from|import)[[:space:]]+%s([.[:space:]]|$)' "$1"
+}
+relative_import() {
   printf '^[[:space:]]*(from|import)[[:space:]]+(dataframe\\.|\\.+)?%s([.[:space:]]|$)' "$1"
 }
 
 while IFS= read -r file; do
-  [[ $file == dataframe/accelerator/* ]] && continue
-  in_list "$file" "${backend_files[@]}" && continue
   while IFS= read -r hit; do
     [[ -z $hit ]] && continue
-    line=${hit%%:*}
-    text=${hit#*:}
-    module=$(printf '%s' "$text" | sed -E 's/^[[:space:]]*(from|import)[[:space:]]+(dataframe\.|\.+)?([A-Za-z_.]+).*/\3/')
-    if in_list "$file $module" "${known_core_imports[@]}"; then
-      continue
-    fi
-    fail "core imports the backend: $file:$line: $text"
-  done < <(grep -nE "$(import_pattern accelerator)|$(import_pattern metal)" "$file" || true)
+    fail "core imports the backend: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(absolute_import dataframe_metal)" "$file" || true)
+  # The old in-package paths must not come back.
+  while IFS= read -r hit; do
+    [[ -z $hit ]] && continue
+    fail "core imports a backend module: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(relative_import accelerator)|$(relative_import metal)" "$file" || true)
+done < <(find dataframe -name '*.mojo' | sort)
+
+while IFS= read -r file; do
+  [[ $file == dataframe/_accel_provider.mojo ]] && continue
+  while IFS= read -r hit; do
+    [[ -z $hit ]] && continue
+    fail "core imports dataframe_provider outside _accel_provider: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(absolute_import dataframe_provider)" "$file" || true)
+  in_list "$file" "${provider_importers[@]}" && continue
+  while IFS= read -r hit; do
+    [[ -z $hit ]] && continue
+    fail "unlisted importer of _accel_provider: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(relative_import _accel_provider)" "$file" || true)
 done < <(find dataframe -name '*.mojo' | sort)
 
 while IFS= read -r file; do
@@ -76,16 +79,14 @@ while IFS= read -r file; do
     [[ -z $hit ]] && continue
     fail "backend imports tests: $file:${hit%%:*}: ${hit#*:}"
   done < <(grep -nE '^[[:space:]]*(from|import)[[:space:]]+(\.+)?tests([.[:space:]]|$)' "$file" || true)
-done < <(find dataframe/accelerator -name '*.mojo' | sort)
+done < <(find dataframe_metal -name '*.mojo' | sort)
 
 while IFS= read -r file; do
-  in_list "$file" "${backend_files[@]}" "${provider_importers[@]}" && continue
-  [[ $file == dataframe/accelerator/* ]] && continue
   while IFS= read -r hit; do
     [[ -z $hit ]] && continue
-    fail "unlisted importer of _accel_provider: $file:${hit%%:*}: ${hit#*:}"
-  done < <(grep -nE "$(import_pattern _accel_provider)" "$file" || true)
-done < <(find dataframe -name '*.mojo' | sort)
+    fail "the CPU-only provider imports a backend: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(absolute_import dataframe_metal)" "$file" || true)
+done < <(find dataframe_provider -name '*.mojo' | sort)
 
 if ((failures > 0)); then
   echo "Accelerator boundary check failed: $failures violation(s)." >&2

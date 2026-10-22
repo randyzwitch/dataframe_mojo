@@ -13,10 +13,10 @@ from dataframe import (
 from dataframe.dtype import CategoricalDictionary
 from dataframe.hashing import encode_rows
 from dataframe.partition import _hash_bytes
-from dataframe.accelerator.window_keys import WindowKey
-from dataframe.accelerator.gpu.residency import Scope, Table
-from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
-from dataframe.accelerator.gpu.partition_layout import (
+from dataframe.plan_types import WindowKey
+from dataframe_metal.accelerator.gpu.residency import Scope, Table
+from dataframe_metal.accelerator.gpu.runtime import _preflight, execute_plan
+from dataframe_metal.accelerator.gpu.partition_layout import (
     KeyInput,
     build,
     estimate_bytes,

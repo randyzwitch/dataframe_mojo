@@ -14,7 +14,7 @@ from dataframe import (
     corr,
     lit,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_moments import near
 
 

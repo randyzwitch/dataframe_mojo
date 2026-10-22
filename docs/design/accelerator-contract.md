@@ -36,7 +36,7 @@ of the contract: `calibration_runtime`, `calibration_key` and `estimate_auto`.
 They return or involve backend types (`MetalRuntime`, `CalibrationKey`), and
 only benchmark and calibration code calls them. Calibration is backend-specific
 by nature, so those programs import them from the backend
-(`dataframe.metal`) instead.
+(`dataframe_metal.metal`) instead.
 
 The same shapes exist as the `dataframe.lazy.AcceleratorBackend` trait, for an
 explicit runtime object passed by the application. Its methods other than
@@ -88,7 +88,7 @@ minimal backend implements only those two.
   not catch them and rerun on CPU.
 - **Data faults are adjudicated by the CPU.** This is the one rerun. A data
   fault is a value-dependent error a kernel can only flag (checked overflow,
-  for example; `dataframe/accelerator/faults.mojo`). A backend that computes
+  for example; `dataframe_metal/accelerator/faults.mojo`). A backend that computes
   every checked value and reports a fault lets the CPU rerun the query, because
   the CPU's evaluation order decides which error, if any, the query raises.
   Budget, planning and device failures are not data faults.
@@ -102,10 +102,9 @@ minimal backend implements only those two.
   types they carry (`LazyFrame`, `DataFrame`, `Series`, `Column`, expression
   and plan-node structures). Today the Metal backend does import many core
   modules; those imports are the surface the migration must name and narrow.
-- Be imported by core code other than through `_accel_provider`. The check
-  fails if any core file outside the provider and Metal files imports
-  `dataframe.accelerator` or `dataframe.metal`. (One known exception exists;
-  see the status section.)
+- Be imported by core code. The check fails if any file under `dataframe/`
+  imports `dataframe_metal`, or imports `dataframe_provider` from anywhere
+  but `_accel_provider.mojo`.
 - Import from `tests/`. Backend code is part of the package; tests are not.
 - Change result types, add a GPU-only result type, or require an application
   to call a vendor API, upload data or hold a device handle.
@@ -116,81 +115,44 @@ minimal backend implements only those two.
 
 ## Registration model
 
-**Today: the provider file is replaced at build.** `_accel_provider.mojo`
-ships with the Metal import hard-coded. The NVIDIA package builder
-(`dataframe_mojo_extensions/scripts/build_accel_package.py`) copies the core
-into a temporary tree, overwrites `dataframe/_accel_provider.mojo` with a file
-that re-exports from `dataframe_accel.provider`, and precompiles both packages.
-Consequences:
+Mojo has no conditional imports and no import-time side effects, so a backend
+cannot register itself by being imported. The backend is chosen at build time,
+by import path.
 
-- Every build on every platform compiles the Metal backend (155 files, about
-  60,000 lines under `dataframe/accelerator/` plus `dataframe/metal.mojo`),
-  because the provider imports it. A local measurement put each test program at
-  6 to 13 minutes of compile for about 90 seconds of run time. A Linux CPU
-  installation pays this for code it cannot run.
-- Two backends cannot be present at once. Choosing one means editing a core
-  file.
-- The replacement must track the provider interface by hand. It is a second
-  copy of the contract with no check against the first.
+- `dataframe/_accel_provider.mojo` only re-exports the six provider functions
+  from `dataframe_provider`.
+- `dataframe_provider/` in the repository root is the CPU-only provider:
+  `installed()` is false, `execute` raises "Accelerator provider is not
+  installed", `select_auto` returns `cpu`.
+- A backend ships its own `dataframe_provider/` package, in a directory of its
+  own (`providers/metal/dataframe_provider/`), that re-exports the six
+  functions from its implementation package (`dataframe_metal.provider`).
+- A build puts the backend's directory first: `mojo build -I providers/metal
+  -I . app.mojo`. A CPU build uses `-I .` and compiles no GPU code. Two
+  backends in one build are not supported; the first `dataframe_provider` on
+  the path wins.
+- Packaging follows the same rule: `scripts/build_package.py` precompiles
+  `dataframe` and `dataframe_provider`, and with `--provider metal` also
+  `dataframe_metal`, whose provider re-exports it.
 
-**Target: a backend package the application imports.** A backend is a separate
-package that registers itself with a small registry in core, and the core
-never names a backend. Core's `_accel_provider` holds the registry and
-dispatches through it; `installed()` is false when nothing registered. An
-application that wants a GPU writes one import (for example
-`import dataframe_metal`), and a CPU-only application compiles no GPU code. The
-provider interface above becomes the registry's trait, so a backend that does
-not match fails to compile in its own package, not in core.
+The core, the backend and the provider reference each other across package
+boundaries (`dataframe.lazy` imports `_accel_provider`, which imports
+`dataframe_provider`, which imports `dataframe_metal`, which imports
+`dataframe.lazy`). Mojo resolves this at compile time, as it did inside the one
+package before.
+
+The NVIDIA package still replaces `_accel_provider.mojo` in a staged tree. It
+can instead ship a `dataframe_provider/` package that re-exports its six
+functions, and drop the replacement step.
+
+The checks are in `scripts/check_accelerator_boundary.sh`: core may import
+`dataframe_provider` only from `_accel_provider.mojo` and never imports
+`dataframe_metal`; `dataframe_metal` may import `dataframe` but not `tests`;
+the root `dataframe_provider` imports nothing from a backend.
 
 ## Status
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | In this repository: `dataframe/accelerator/`, `dataframe/metal.mojo` | Hard-imported by `_accel_provider.mojo` | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Tested on a local Mac (hosted CI cannot run it). | Compiled on every platform. No registry. Core no longer imports the backend package: the planner-owned types moved to core. |
-| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. Pinned to an older core revision. |
-| Other | Nothing | n/a | n/a | A third backend would have to replace the provider file too, so it could not coexist with either. |
-
-Former boundary violation, now removed. `dataframe/lazy.mojo` used to import
-`PlanEstimate`, `WindowKey`, `KeyQuery`, `ByteDomain` and `TextField` from
-`dataframe.accelerator`. They are plan-node field types and an estimate type
-that the planner and the `AcceleratorBackend` trait use. Step 2 moved them into
-core (`dataframe/plan_types.mojo`, `byte_domain.mojo`, `key_domains.mojo`,
-`key_query.mojo`), and the exception list in the check is empty. Do not add to
-it.
-
-## Migration plan
-
-Each step is its own pull request.
-
-1. **This note and the boundary check.** No code moves. The check passes on
-   main with the one recorded exception.
-2. **Shrink the provider and move planner types into core.** Done in two
-   parts. The provider drops `calibration_runtime`, `calibration_key` and
-   `estimate_auto`, leaving the six functions above (callers import the three
-   from `dataframe.metal`). The planner-owned types move into core modules and
-   the exception list in the check is emptied. Still to do: a registry (a trait
-   for the six functions plus `register`) so the Metal import becomes one line
-   in one file, and the NVIDIA draft updated to that trait.
-3. **Move the Metal backend into its own package.** `dataframe/accelerator/`
-   and `dataframe/metal.mojo` go to a `dataframe_metal` package that registers
-   itself on import. I recommend a top-level `dataframe_metal/` over
-   `dataframe/backends/metal/`: packaging the `dataframe` package (`mojo
-   package`, the `.mojoc` the build scripts produce) would still carry a nested
-   directory, while a top-level package is built, versioned and shipped
-   separately and left out of a CPU installation entirely. (Not measured here;
-   step 5 confirms the compile drop.) It also matches how the
-   extensions repository already lays out `dataframe_accel`, so both backends
-   have the same shape. The backend's remaining core imports are then the list
-   to shrink, and the boundary check grows to cover the new package.
-4. **Build the NVIDIA extension against the same registry.** Drop the file
-   replacement from `build_accel_package.py`; the extension imports the
-   registry and registers itself. Repin `core.json`.
-5. **Measure the compile-time drop on Linux.** Time a test program and a CI run
-   before and after step 3, with the same method as the 6 to 13 minute
-   measurement, and record it in the PR.
-
-Coordination cost. Several Metal pull requests are open at any time, and step
-3 renames every file under `dataframe/accelerator/`, so it conflicts with all
-of them. It should land when the Metal queue is quiet, announced ahead of time,
-with open Metal branches merged first or rebased by their owners right after.
-Steps 1, 2, 4 and 5 touch few files and do not have this problem.
+| Metal | Package `dataframe_metal` in this repository, with its provider in `providers/metal/dataframe_provider/` | Provider chosen by import path: `-I providers/metal -I .` | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Compiled only in a Metal build; CI compiles it for a CPU target in the `metal-compile` job. Tested on a local Mac (hosted CI cannot run it). | A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
+| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |

@@ -11,13 +11,13 @@ from dataframe import (
     null,
 )
 from dataframe.lazy import JOIN
-from dataframe.accelerator.dictionaries import (
+from dataframe_metal.accelerator.dictionaries import (
     lower_dictionary_operations,
     DictionaryCodes,
     encode_query,
 )
-from dataframe.accelerator.metadata import schema_frame
-from dataframe.accelerator.joins import has_decimal_consumers
+from dataframe_metal.accelerator.metadata import schema_frame
+from dataframe_metal.accelerator.joins import has_decimal_consumers
 from tests.public_contracts.test_accelerator_field_metadata import (
     field_text_source,
     assert_field_owner,

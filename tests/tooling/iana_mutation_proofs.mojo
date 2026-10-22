@@ -2,11 +2,11 @@
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit, when
 from dataframe.binding import bind, SCALAR
-from dataframe.accelerator import iana_mutations, iana_certificate
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import capabilities, _preflight
-from dataframe.accelerator.gpu.program import Program
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator import iana_mutations, iana_certificate
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import capabilities, _preflight
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 
 

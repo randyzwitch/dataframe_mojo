@@ -2,7 +2,7 @@
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, cov, corr
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

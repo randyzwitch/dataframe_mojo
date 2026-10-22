@@ -1,6 +1,8 @@
 """GPU partition aggregates preserve null partitions, order and errors."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.memory import bitcast, ArcPointer
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe.dtype import DataType
@@ -17,14 +19,14 @@ from dataframe import (
     Expr,
 )
 from dataframe.lazy import LazyFrame, SCAN_FRAME
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.windows import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.windows import (
     has_partition_aggregates,
     lower_partition_aggregates,
 )
-from dataframe.accelerator.joins import lower_join_dag
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.metadata import schema_frame, prune_projections
+from dataframe_metal.accelerator.joins import lower_join_dag
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.metadata import schema_frame, prune_projections
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 

@@ -5,7 +5,7 @@ from max.gpu.host import DeviceBuffer
 from std.memory import bitcast, Pointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Column, Series
-from dataframe.accelerator.gpu.residency import (
+from dataframe_metal.accelerator.gpu.residency import (
     Scope,
     Matrix,
     Table,

@@ -3,9 +3,9 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, LazyFrame, col
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.gpu.runtime import capabilities
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.gpu.runtime import capabilities
 from tests.support.coverage_compare import assert_frame
 
 

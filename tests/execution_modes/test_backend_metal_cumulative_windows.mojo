@@ -15,10 +15,10 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.windows import lower_partition_aggregates
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.capabilities import RowCapabilities
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.windows import lower_partition_aggregates
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.capabilities import RowCapabilities
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 

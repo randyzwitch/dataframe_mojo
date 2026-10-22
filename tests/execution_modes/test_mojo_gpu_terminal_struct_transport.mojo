@@ -3,8 +3,8 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises
 from dataframe import Column, DataFrame, Series, as_struct, col, lit
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.structs import lower_terminal_structs, assemble
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.structs import lower_terminal_structs, assemble
 from tests.public_contracts.test_terminal_struct_transport import (
     source_frame,
     expressions,

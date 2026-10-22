@@ -3,7 +3,7 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit
 from dataframe.dtype import DataType
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 
 
 from tests.execution_modes.test_backend_metal import require_metal

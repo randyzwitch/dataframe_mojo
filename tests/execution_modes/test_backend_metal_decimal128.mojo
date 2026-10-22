@@ -1,15 +1,17 @@
 """Exact two-word decimal transport and reductions on Metal."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.cpu_work import cpu_features
-from dataframe.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.cpu_work import cpu_features
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
 
 
 def check(query: LazyFrame) raises:

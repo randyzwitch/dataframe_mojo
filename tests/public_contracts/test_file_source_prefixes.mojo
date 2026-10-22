@@ -17,13 +17,13 @@ from dataframe import (
 from dataframe.decimal import pow10
 from dataframe.lazy import LazyFrame, SCAN_FRAME, JOIN, SELECT, _plan_node
 from dataframe.join_type import JOIN_CROSS
-from dataframe.accelerator.sources import (
+from dataframe_metal.accelerator.sources import (
     source_prefixes,
     file_source_nodes,
     prepare_file_sources,
     stage_file_sources,
 )
-from dataframe.accelerator.metadata import prune_projections
+from dataframe_metal.accelerator.metadata import prune_projections
 
 
 def _missing() raises -> LazyFrame:
@@ -278,7 +278,7 @@ def _prefix_budget_query(failing: Bool) raises -> LazyFrame:
 
 
 def test_file_source_prefixes_drop_future_dictionary_frames_and_keep_live_owner() raises:
-    from dataframe.accelerator.dictionaries import (
+    from dataframe_metal.accelerator.dictionaries import (
         DictionaryCodes,
         has_dictionary_columns,
     )

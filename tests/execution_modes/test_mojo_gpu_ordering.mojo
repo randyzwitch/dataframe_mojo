@@ -3,12 +3,12 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.key_kernel_reference import KeyCell, expected_order
-from dataframe.accelerator.gpu.ordering import merge_grid
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.runtime import _preflight, execute_plan
+from dataframe_metal.accelerator.gpu.ordering import merge_grid
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.runtime import _preflight, execute_plan
 
 
 def _resident_order_bytes(query: LazyFrame) raises -> Int:

@@ -1,6 +1,6 @@
 """Compile and exercise backend dispatch with no accelerator architecture."""
 from std.testing import assert_true
-from dataframe.accelerator.gpu.target import compiled_for_metal
+from dataframe_metal.accelerator.gpu.target import compiled_for_metal
 from tests.execution_modes.test_backends import (
     test_metal_cpu_only_target_keeps_cpu_dispatch_and_rejects_gpu_submission,
     test_registered_slot_cpu_fallback_and_absence_are_explicit,

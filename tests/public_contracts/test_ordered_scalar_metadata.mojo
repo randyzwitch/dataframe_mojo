@@ -4,8 +4,8 @@
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.accelerator.cuts import lower_cuts
-from dataframe.accelerator.gpu import runtime
+from dataframe_metal.accelerator.cuts import lower_cuts
+from dataframe_metal.accelerator.gpu import runtime
 
 
 def test_cut_ordered_scalar_rank_transport_and_resource_metadata() raises:

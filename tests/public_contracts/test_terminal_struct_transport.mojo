@@ -16,7 +16,7 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.accelerator.structs import (
+from dataframe_metal.accelerator.structs import (
     has_terminal_structs,
     lower_terminal_structs,
     assemble,

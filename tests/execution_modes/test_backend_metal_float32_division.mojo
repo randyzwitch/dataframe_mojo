@@ -4,7 +4,7 @@ from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, Series, Column, col, lit
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 

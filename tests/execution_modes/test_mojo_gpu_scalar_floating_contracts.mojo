@@ -2,7 +2,7 @@
 # contract-group: execution.backends
 from dataframe import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.floating_reduction_literals import (
     check_result,
     dyadic_fixture,

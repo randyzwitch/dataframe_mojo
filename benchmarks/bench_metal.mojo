@@ -13,7 +13,7 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.parallel import configured_workers
 from std.os import getenv
 from std.time import perf_counter_ns
@@ -475,7 +475,7 @@ def main() raises:
     if not profile[0].equals(expected):
         raise Error("Profiled collection differs from CPU reference")
     report_profile(profile[1])
-    from dataframe.accelerator.gpu.identity import runtime_build_id
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
 
     print("BUILD_ID", runtime_build_id())
     print("VALIDATED", True)

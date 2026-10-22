@@ -1,74 +1,16 @@
-"""Default provider slot with context-free Mojo Metal availability.
+"""The core's door to an accelerator provider.
 
-The provider surface is six functions whose signatures mention only core
-types. Calibration is backend-specific and is imported from the backend.
-Presence checks do not open a driver. CPU collection never initializes Metal.
-The optional NVIDIA package builder can replace this module in its staged tree.
+The provider is chosen at build time by import path. `dataframe_provider` is
+the CPU-only provider in the repository root; a build that wants a backend puts
+that backend's `dataframe_provider` first on the import path (Metal:
+`-I providers/metal -I .`). The six functions are the whole contract; see
+docs/design/accelerator-contract.md.
 """
-from .frame import DataFrame
-from .lazy import LazyFrame
-from .metal import MetalRuntime, default_runtime, metal_installed
-
-
-def installed() -> Bool:
-    return metal_installed()
-
-
-def _runtime() raises -> MetalRuntime:
-    return default_runtime()
-
-
-def execute(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-    if installed():
-        return _runtime().execute(plan)
-    raise Error(
-        "Accelerator provider is not installed; use the optional GPU package or accelerator=runtime"
-    )
-
-
-def describe(plan: LazyFrame) -> String:
-    if installed():
-        try:
-            return _runtime().describe(plan)
-        except error:
-            return "ENGINE accel: " + String(error) + "\n"
-    return "ENGINE accel: Accelerator provider is not installed; use the optional GPU package or accelerator=runtime\n"
-
-
-def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-    if installed():
-        return _runtime().execute_profiled(plan)
-    return execute(plan)
-
-
-def select_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) -> Tuple[String, String]:
-    """Select before execution; providers supply facts to the shared analytical cost selector."""
-    if installed():
-        try:
-            return _runtime().select_auto(plan, optimize, streaming, batch_size)
-        except error:
-            return (
-                "cpu",
-                "automatic analytical preflight rejected: " + String(error),
-            )
-    return ("cpu", "auto uses CPU; accelerator provider is not installed")
-
-
-def execute_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-    profiling: Bool,
-) raises -> Tuple[DataFrame, DataFrame]:
-    """Execute a selected region; execution errors must propagate to callers."""
-    return (
-        _runtime()
-        .execute_profiled(plan) if profiling else _runtime()
-        .execute(plan)
-    )
+from dataframe_provider import (
+    installed,
+    execute,
+    describe,
+    execute_profiled,
+    select_auto,
+    execute_auto,
+)

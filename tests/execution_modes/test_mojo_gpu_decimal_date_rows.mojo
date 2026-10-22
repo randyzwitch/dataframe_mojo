@@ -15,11 +15,11 @@ from dataframe import (
 )
 from dataframe.lazy import LazyFrame
 from dataframe.binding import bind, BoundExpr
-from dataframe.accelerator import decimal_row_feed, ordered_rows
-from dataframe.accelerator.constants import fold_literal_text_parsing
-from dataframe.accelerator.aggregates import lower_aggregate_compositions
-from dataframe.accelerator.joins import _decimal_date_producer
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator import decimal_row_feed, ordered_rows
+from dataframe_metal.accelerator.constants import fold_literal_text_parsing
+from dataframe_metal.accelerator.aggregates import lower_aggregate_compositions
+from dataframe_metal.accelerator.joins import _decimal_date_producer
+from dataframe_metal.metal import MetalRuntime
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.coverage_generators import offset_layout, chunk_layout
 

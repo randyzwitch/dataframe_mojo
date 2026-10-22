@@ -12,8 +12,8 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import CategoricalDictionary
-from dataframe.accelerator.code_domains import same_dictionary
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.code_domains import same_dictionary
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
@@ -250,7 +250,11 @@ def test_mojo_gpu_categorical_asof_temporary_by_union_preserves_output_owner() r
 # requires: mojo_gpu
 def test_mojo_gpu_categorical_dictionary_budget_owners() raises:
     from std.memory import ArcPointer
-    from dataframe.accelerator.gpu.residency import Scope, CategoryLease, Table
+    from dataframe_metal.accelerator.gpu.residency import (
+        Scope,
+        CategoryLease,
+        Table,
+    )
 
     var scope = Scope(budget=64)
     assert_equal(scope.info()[0], 0)
@@ -273,11 +277,14 @@ def test_mojo_gpu_categorical_dictionary_budget_owners() raises:
 def test_mojo_gpu_categorical_mixed_join_control_readback_and_budget() raises:
     from std.memory import ArcPointer
     from std.testing import assert_raises
-    from dataframe.accelerator.dictionaries import DictionaryCodes, encode_query
-    from dataframe.accelerator.code_domains import TextQuery
-    from dataframe.accelerator.gpu.dag_runtime import execute
-    from dataframe.accelerator.gpu.runtime import capabilities
-    from dataframe.accelerator.gpu.joins import METADATA_WORDS
+    from dataframe_metal.accelerator.dictionaries import (
+        DictionaryCodes,
+        encode_query,
+    )
+    from dataframe_metal.accelerator.code_domains import TextQuery
+    from dataframe_metal.accelerator.gpu.dag_runtime import execute
+    from dataframe_metal.accelerator.gpu.runtime import capabilities
+    from dataframe_metal.accelerator.gpu.joins import METADATA_WORDS
 
     var left = DataFrame([Series("k", Column[String](["new", "dup", "new"]))])
     var right = DataFrame(

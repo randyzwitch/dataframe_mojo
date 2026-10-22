@@ -17,12 +17,13 @@ def main() raises:
     var packaging = String(DEFAULT_PACKAGING)
     var output = String("build/contract-tests")
     var compiler = String("mojo")
+    var provider = String("")
     var i = 1
     while i < len(arguments):
         var option = String(arguments[i])
         if option == "--help" or option == "-h":
             print(
-                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
+                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--provider metal] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
             )
             return
         i += 1
@@ -55,9 +56,19 @@ def main() raises:
             output = value^
         elif option == "--compiler":
             compiler = value^
+        elif option == "--provider":
+            provider = value^
         else:
             raise Error("Unknown argument: " + option)
         i += 1
+    for capability in capabilities:
+        if capability in ["metal", "mojo_gpu"] and provider != "metal":
+            raise Error(
+                "Capability "
+                + capability
+                + " needs the Metal provider in the build: pass --provider"
+                " metal"
+            )
     if not areas:
         comptime for index in range(len(AREAS)):
             areas.append(String(AREAS[index]))
@@ -70,6 +81,7 @@ def main() raises:
             output,
             compiler,
             capabilities,
+            provider,
         ),
         production_policy(),
     )

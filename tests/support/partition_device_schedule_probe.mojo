@@ -16,8 +16,11 @@ from dataframe.window_layout import (
     partition_layout,
     keyed_layout,
 )
-from dataframe.accelerator.rows import ROW_GROUP_HEADER_WINDOW, ROW_GROUP_KEY
-from dataframe.accelerator.gpu.partition_schedule import (
+from dataframe_metal.accelerator.rows import (
+    ROW_GROUP_HEADER_WINDOW,
+    ROW_GROUP_KEY,
+)
+from dataframe_metal.accelerator.gpu.partition_schedule import (
     dense_kind,
     group_hashes,
     row_groups,

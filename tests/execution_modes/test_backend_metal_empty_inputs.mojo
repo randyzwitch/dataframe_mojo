@@ -1,7 +1,7 @@
 """Zero-column sources and resident consumers retain independent row metadata."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import (
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
     capabilities as _capabilities,
     estimate_resources,
 )
@@ -17,10 +17,10 @@ from dataframe import (
     all,
     by_dtype,
 )
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.selectors import lower_selectors
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.selectors import lower_selectors
 from tests.execution_modes.test_backend_metal import require_metal
 
 

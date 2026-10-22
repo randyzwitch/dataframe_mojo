@@ -1,12 +1,14 @@
 """Decimal duration sums retain precision; floating windows retain decimal scale."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.program import Program
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.program import Program
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, col, lit, when
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.rows import lower_rows, ROW_DURATION_KEY
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.rows import lower_rows, ROW_DURATION_KEY
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_duration_rolling import (
     check,

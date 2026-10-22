@@ -2,15 +2,15 @@
 # contract-group: planner.routing
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows, RowPlan
-from dataframe.accelerator.memory import (
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows, RowPlan
+from dataframe_metal.accelerator.memory import (
     row_memory,
     bitmap_bytes,
     checked_add,
     checked_mul,
 )
-from dataframe.accelerator.cost import (
+from dataframe_metal.accelerator.cost import (
     CalibrationKey,
     PlanEstimate,
     cost_feature_names,
@@ -355,8 +355,8 @@ def test_automatic_placement_rejects_ambiguous_nonfinite_or_unvalidated_estimate
 def test_bool_sums_means_and_cumulative_sums_stay_on_the_cpu() raises:
     # Bool sums count true values (#790); no device contract covers them,
     # so Metal refuses them and engine="auto" runs them on the CPU.
-    from dataframe.accelerator.gpu.runtime import capabilities
-    from dataframe.metal import MetalRuntime
+    from dataframe_metal.accelerator.gpu.runtime import capabilities
+    from dataframe_metal.metal import MetalRuntime
 
     var frame = DataFrame(
         [

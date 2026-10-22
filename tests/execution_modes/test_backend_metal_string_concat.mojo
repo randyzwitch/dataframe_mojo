@@ -12,9 +12,9 @@ from dataframe import (
     when,
     concat_str,
 )
-from dataframe.accelerator.dictionaries import lower_dictionary_operations
-from dataframe.accelerator.observed_concat import has_markers
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.dictionaries import lower_dictionary_operations
+from dataframe_metal.accelerator.observed_concat import has_markers
+from dataframe_metal.metal import MetalRuntime
 from dataframe.lazy import LazyFrame
 
 

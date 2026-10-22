@@ -1,6 +1,6 @@
 """Validate statistical word states on host and Apple GPU against CPU states.
 
-Run with: pixi run -e gpu mojo -I . tests/tooling/mojo_gpu_moments_probe.mojo
+Run with: pixi run -e gpu mojo -I providers/metal -I . tests/tooling/mojo_gpu_moments_probe.mojo
 """
 
 from max.gpu import global_idx
@@ -8,8 +8,8 @@ from max.gpu.host import DeviceContext
 from std.math import abs, isfinite, isnan, sqrt
 from std.memory import Pointer, bitcast
 from std.testing import assert_equal, assert_true
-from dataframe.accelerator.gpu import floating as f
-from dataframe.accelerator.gpu.moments import (
+from dataframe_metal.accelerator.gpu import floating as f
+from dataframe_metal.accelerator.gpu.moments import (
     VarianceState,
     CentralMomentState,
     CovarianceState,

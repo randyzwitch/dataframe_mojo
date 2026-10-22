@@ -428,6 +428,9 @@ struct RunnerOptions(Copyable, Movable):
     var output: String
     var compiler: String
     var capabilities: List[String]
+    # Name of a directory under providers/ put ahead of the root on the import
+    # path ("metal" for a Metal build). Empty builds with the CPU-only provider.
+    var provider: String
 
     def __init__(
         out self,
@@ -438,6 +441,7 @@ struct RunnerOptions(Copyable, Movable):
         output: String,
         compiler: String,
         capabilities: List[String] = List[String](),
+        provider: String = "",
     ):
         self.root = root.copy()
         self.areas = areas.copy()
@@ -446,6 +450,18 @@ struct RunnerOptions(Copyable, Movable):
         self.output = output.copy()
         self.compiler = compiler.copy()
         self.capabilities = capabilities.copy()
+        self.provider = provider.copy()
+
+
+def include_flags(options: RunnerOptions) -> List[String]:
+    """The `-I` flags of every build: the chosen provider, then the root."""
+    var flags = List[String]()
+    if options.provider:
+        flags.append("-I")
+        flags.append(options.root + "/providers/" + options.provider)
+    flags.append("-I")
+    flags.append(options.root)
+    return flags^
 
 
 @fieldwise_init
@@ -508,6 +524,10 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
     for capability in options.capabilities:
         if capability not in policy.capabilities:
             raise Error("Unknown runtime capability: " + capability)
+    if options.provider and not exists(
+        options.root + "/providers/" + options.provider
+    ):
+        raise Error("Unknown provider: " + options.provider)
     if options.packaging not in ["combined", "areas"]:
         raise Error("Unknown packaging mode: " + options.packaging)
     var seen_areas = List[String]()
@@ -577,15 +597,13 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
             for entry in group:
                 expected += Int(policy.failure_index(entry) >= 0)
         for phase in [String("compile"), String("execute")]:
-            var command: List[String] = [
-                options.compiler,
-                "build",
-                "-I",
-                options.root,
-                source,
-                "-o",
-                binary,
-            ] if phase == "compile" else [binary.copy()]
+            var command: List[String] = [binary.copy()]
+            if phase == "compile":
+                command = [options.compiler, "build"]
+                command.extend(include_flags(options))
+                command.append(source.copy())
+                command.append("-o")
+                command.append(binary.copy())
             print("Contract", phase, name)
             var result = capture(command)
             var log = folder + "/" + phase + ".log"
@@ -607,17 +625,12 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
             generate_fatal_driver(process_areas, process_cases, folder),
         )
         print("Contract compile fatal-bundle")
-        var build = capture(
-            [
-                options.compiler,
-                "build",
-                "-I",
-                options.root,
-                source,
-                "-o",
-                binary,
-            ]
-        )
+        var build_command: List[String] = [options.compiler, "build"]
+        build_command.extend(include_flags(options))
+        build_command.append(source.copy())
+        build_command.append("-o")
+        build_command.append(binary.copy())
+        var build = capture(build_command)
         write_text(folder + "/compile.log", build[1])
         events.append(
             RunEvent(
@@ -679,6 +692,8 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
         + json_quote(options.packaging)
         + ',"contracts":'
         + json_strings(options.contracts)
+        + ',"provider":'
+        + json_quote(options.provider)
         + ',"enabled_capabilities":'
         + json_strings(options.capabilities)
         + ',"skipped_capability_cases":'

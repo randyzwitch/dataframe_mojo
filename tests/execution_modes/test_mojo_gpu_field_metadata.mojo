@@ -3,7 +3,7 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, Series, col
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 from tests.public_contracts.test_accelerator_field_metadata import (
     field_source,

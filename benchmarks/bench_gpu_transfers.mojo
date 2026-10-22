@@ -1,7 +1,7 @@
 """Primitive copy timing probe; this is not an end-to-end query or bandwidth claim.
 
 Run on Apple Silicon with:
-    pixi run -e gpu mojo -I . benchmarks/bench_gpu_transfers.mojo
+    pixi run -e gpu mojo -I providers/metal -I . benchmarks/bench_gpu_transfers.mojo
 Optional positional arguments select one row count and repetitions. The default
 runs 4097 and 1048576 rows with five repetitions per layout.
 """

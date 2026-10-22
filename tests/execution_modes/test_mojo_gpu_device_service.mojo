@@ -3,11 +3,11 @@
 # contract-group: execution.apple_parity
 from std.testing import assert_equal, assert_false, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.accelerator.gpu.query_scope import DeviceService, Scope
-from dataframe.accelerator.gpu.dag_runtime import execute as execute_dag
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.gpu.runtime import _preflight
-from dataframe.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.query_scope import DeviceService, Scope
+from dataframe_metal.accelerator.gpu.dag_runtime import execute as execute_dag
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.gpu.runtime import _preflight
+from dataframe_metal.metal import MetalRuntime
 from tests.support.resident_grouped_publication_reference import (
     _source,
     _expressions,

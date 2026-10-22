@@ -22,7 +22,7 @@ from dataframe import (
     null,
     sum_horizontal,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import chunk_layout
 
 

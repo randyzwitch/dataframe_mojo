@@ -2,7 +2,7 @@ from max.gpu import global_idx
 from max.gpu.host import DeviceContext
 from std.memory import Pointer, bitcast
 from std.testing import assert_equal
-from dataframe.accelerator.gpu import wide_integer_sum
+from dataframe_metal.accelerator.gpu import wide_integer_sum
 
 
 def initialize(values: Pointer[UInt64, MutAnyOrigin], a: UInt64, b: UInt64):

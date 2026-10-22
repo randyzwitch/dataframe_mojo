@@ -1,16 +1,21 @@
 """Native temporal fields and fixed logical values use independent calendars."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.constants import (
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.constants import (
     has_literal_text_parsing,
     fold_literal_text_parsing,
 )
-from dataframe.accelerator.joins import has_scalar_consumers, lower_join_dag
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.joins import (
+    has_scalar_consumers,
+    lower_join_dag,
+)
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal import assert_native_report
 from tests.support.coverage_compare import assert_frame

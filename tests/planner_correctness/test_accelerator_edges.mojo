@@ -4,12 +4,12 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, col, lit
 from dataframe.lazy import LazyFrame
 from dataframe.categorical import encode
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
-from dataframe.accelerator.dictionaries import DictionaryCodes
-from dataframe.accelerator.cpu_work import cpu_features
-from dataframe.accelerator.cost import cost_feature_names
-from dataframe.accelerator.memory import row_memory
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
+from dataframe_metal.accelerator.dictionaries import DictionaryCodes
+from dataframe_metal.accelerator.cpu_work import cpu_features
+from dataframe_metal.accelerator.cost import cost_feature_names
+from dataframe_metal.accelerator.memory import row_memory
 
 
 def test_accelerator_dictionary_codes_are_query_wide_ordered_and_keep_empty_source_dictionary_identity() raises:
@@ -218,8 +218,8 @@ def test_math_functions_product_and_cum_prod_stay_on_the_cpu() raises:
     # them, so engine="auto" runs them on the CPU and a forced Metal run
     # reports them unsupported instead of computing a wrong value.
     from dataframe import Expr, arctan2
-    from dataframe.accelerator.gpu.runtime import capabilities
-    from dataframe.metal import MetalRuntime
+    from dataframe_metal.accelerator.gpu.runtime import capabilities
+    from dataframe_metal.metal import MetalRuntime
 
     var frame = DataFrame(
         [

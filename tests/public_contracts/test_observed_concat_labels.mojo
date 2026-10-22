@@ -3,8 +3,8 @@
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import DataType
 from dataframe.dtype import CategoricalDictionary
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.observed_concat_labels import build
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.observed_concat_labels import build
 
 
 def _dtype(values: List[String]) -> DataType:

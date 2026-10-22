@@ -6,8 +6,8 @@ from std.memory import bitcast
 from std.testing import assert_equal, assert_true
 from dataframe.aggregate import quantile_of
 from dataframe.expr import COUNT
-from dataframe.accelerator.rows import ROW_QUANTILE_LINEAR
-from dataframe.accelerator.gpu import quantiles as q
+from dataframe_metal.accelerator.rows import ROW_QUANTILE_LINEAR
+from dataframe_metal.accelerator.gpu import quantiles as q
 
 comptime CASES = 12
 comptime ROWS = 257

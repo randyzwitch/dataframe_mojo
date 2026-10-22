@@ -11,8 +11,11 @@ from dataframe.window_layout import (
     partition_layout,
     keyed_layout,
 )
-from dataframe.accelerator.rows import ROW_GROUP_HEADER_WINDOW, ROW_GROUP_KEY
-from dataframe.accelerator.gpu.grouping import (
+from dataframe_metal.accelerator.rows import (
+    ROW_GROUP_HEADER_WINDOW,
+    ROW_GROUP_KEY,
+)
+from dataframe_metal.accelerator.gpu.grouping import (
     group_window_prepare,
     group_window_merge,
     group_window_schedule,

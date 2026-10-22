@@ -16,18 +16,18 @@ from dataframe import (
     when,
     from_wkb,
 )
-from dataframe.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime
 from dataframe.lazy import LazyFrame, SCAN_FRAME
-from dataframe.accelerator.opaque import (
+from dataframe_metal.accelerator.opaque import (
     prepare,
     restoration_bytes,
     has_opaque_columns,
 )
-from dataframe.accelerator.windows import lower_partition_aggregates
-from dataframe.accelerator.joins import lower_join_dag, DAG_ROWS
-from dataframe.accelerator.rows import lower_rows, ROW_GROUP_KEY
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.opaque_dictionary import hex_key
+from dataframe_metal.accelerator.windows import lower_partition_aggregates
+from dataframe_metal.accelerator.joins import lower_join_dag, DAG_ROWS
+from dataframe_metal.accelerator.rows import lower_rows, ROW_GROUP_KEY
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe.byte_domain import hex_key
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

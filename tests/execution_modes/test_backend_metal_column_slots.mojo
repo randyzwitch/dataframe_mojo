@@ -1,14 +1,16 @@
 """Column aliases share resident values without changing visible schemas."""
 # contract-group: execution.backends
-from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from dataframe_metal.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+)
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
 from dataframe.string_column import StringColumn
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import lower_rows
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.capabilities import RowCapabilities
+from dataframe_metal.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.execution_modes.test_backend_metal_wide_plans import (
     wide_frame,

@@ -6,10 +6,12 @@ specified in [accelerator-contract.md](accelerator-contract.md).
 Optional backends use the same `DataFrame`, expressions, binder, and lazy
 collection API as CPU execution. An explicit runtime implements
 `dataframe.lazy.AcceleratorBackend`; an optional distribution can register its
-default through `dataframe._accel_provider`. Ordinary CPU imports and builds
-must not require MAX, a driver, or a physical GPU.
+default through `dataframe._accel_provider`, which re-exports the
+`dataframe_provider` first on the import path (the CPU-only one in the
+repository root, or a backend's, such as `providers/metal`). Ordinary CPU
+imports and builds must not require MAX, a driver, or a physical GPU.
 
-`dataframe.accelerator` supplies CPU-only row-plan lowering, semantic capability
+`dataframe_metal.accelerator` supplies CPU-only row-plan lowering, semantic capability
 checks, and overflow-checked requested-memory estimates. It does not discover
 devices, allocate accelerator storage, scan source values, or submit work.
 Backends own their runtime, physical storage, kernels, synchronization, and
@@ -48,7 +50,7 @@ preserves the current CPU optimizer's observable overflow behavior. Forced
 acceleration rejects unsupported regions before submission. Automatic
 selection may choose CPU, but execution errors after submission must
 propagate rather than retrying on CPU. The one exception is a data fault
-(`dataframe/accelerator/faults.mojo`): a backend with `adjudicated_faults`
+(`dataframe_metal/accelerator/faults.mojo`): a backend with `adjudicated_faults`
 computes every checked value and lets the CPU decide a query whose kernels
 wrote a fault, since the CPU's evaluation order defines which error, if any,
 the query raises.
@@ -74,7 +76,7 @@ and include any staging allocations.
 
 ## Apple implementation scope
 
-The Apple provider lives in this repository and runs Mojo kernels through MAX's Metal device API.
+The Apple provider lives in this repository, in the `dataframe_metal` package, and runs Mojo kernels through MAX's Metal device API.
 It accelerates supported Float32, integer, Boolean, and integer-emulated
 Float64 regions, with no implicit downcasts. Emulated binary64 work uses a
 separate calibration family; uncalibrated plans and unsupported operations
@@ -91,7 +93,7 @@ or application syntax.
 
 ## Shared analytical automatic placement (prepared; validation pending)
 
-`dataframe.accelerator.cost.select_auto` owns the CPU/accelerator comparison.
+`dataframe_metal.accelerator.cost.select_auto` owns the CPU/accelerator comparison.
 Providers implement `estimate_auto(plan) -> PlanEstimate`: two feature vectors,
 peak requested bytes, dtype family, and candidate placement. Estimation binds
 metadata without reading source values or submitting device work. Runtime
@@ -128,7 +130,7 @@ identity before substituting their registration slot.
 
 The provider-neutral `benchmarks/bench_accelerator_cost.mojo` runner requires
 `calibration_runtime`, `calibration_key` and `estimate_auto` hooks from the
-backend (`dataframe.metal` for Metal). They are not part of the core's provider
+backend (`dataframe_metal.metal` for Metal). They are not part of the core's provider
 contract. `benchmarks/tools/bench_accelerator_cost.py` writes a generated-plan
 manifest by default; `--collect --binary /path/to/runner` explicitly measures.
 Compile the runner against identified packages outside the source import path.

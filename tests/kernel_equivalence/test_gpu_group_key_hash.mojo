@@ -1,7 +1,7 @@
 """Key hashing is congruent with the existing exact grouping equivalence."""
 from std.testing import assert_equal
-from dataframe.accelerator.gpu.grouping import key_equal
-from dataframe.accelerator.gpu.hash_grouping import _canonical
+from dataframe_metal.accelerator.gpu.grouping import key_equal
+from dataframe_metal.accelerator.gpu.hash_grouping import _canonical
 
 
 def test_gpu_group_key_hash_respects_float_encodings_and_integer_identity() raises:

@@ -2,8 +2,8 @@
 # contract-group: execution.apple_parity
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises
-from dataframe.accelerator.gpu.residency import Scope
-from dataframe.accelerator.gpu.partition_labels import build
+from dataframe_metal.accelerator.gpu.residency import Scope
+from dataframe_metal.accelerator.gpu.partition_labels import build
 
 
 def _check_literal_labels(

@@ -20,8 +20,8 @@ from dataframe import (
     scan_csv,
 )
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.source_structs import lower_source_structs
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.source_structs import lower_source_structs
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.tooling.contract_runner import temporary_directory, run_command
 

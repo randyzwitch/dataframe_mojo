@@ -6,9 +6,9 @@ from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import AnyValue, Column, DataFrame, DataType, Series, col
 from dataframe.lazy import LazyFrame
 from dataframe.dtype import CategoricalDictionary
-from dataframe.metal import MetalRuntime
-from dataframe.accelerator.gpu.runtime import capabilities
-from dataframe.accelerator.joins import lower_join_dag
+from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.accelerator.gpu.runtime import capabilities
+from dataframe_metal.accelerator.joins import lower_join_dag
 from tests.support.asof_reference import assert_asof_rows
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout

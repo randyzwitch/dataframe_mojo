@@ -2,7 +2,7 @@
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, StringColumn, col
-from dataframe.accelerator.late_payload import columns, prepare, restore
+from dataframe_metal.accelerator.late_payload import columns, prepare, restore
 from tests.support.coverage_compare import assert_frame
 from tests.execution_modes.test_backend_metal import require_metal
 
