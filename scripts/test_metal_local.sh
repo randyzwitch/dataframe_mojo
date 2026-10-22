@@ -44,7 +44,7 @@ pixi run --locked test --areas execution public --contracts $groups \
 
 echo "== Mojo GPU contracts and independent oracles"
 for task in test-mojo-gpu test-mojo-gpu-floating test-mojo-gpu-decimal \
-  test-mojo-gpu-integer; do
+  test-mojo-gpu-integer test-mojo-gpu-grouping; do
   pixi run --locked -e gpu "$task" || failed="$failed $task"
 done
 if [[ -n "$failed" ]]; then

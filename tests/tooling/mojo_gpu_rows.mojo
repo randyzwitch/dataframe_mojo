@@ -32,9 +32,11 @@ from tests.execution_modes.test_mojo_gpu_statistics import (
 )
 
 from tests.execution_modes.test_mojo_gpu_grouping import (
+    test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg,
     test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts,
     test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions,
     test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow,
+    test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback,
 )
 
 from tests.execution_modes.test_mojo_gpu_ranking import (
@@ -201,6 +203,10 @@ def main() raises:
     print(
         "RUN test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts"
     )
+    print(
+        "RUN test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg"
+    )
+    test_grouped_integer_metadata_certificate_accepts_normal_groupby_agg()
     test_mojo_gpu_grouping_mixed_keys_all_reductions_and_nullable_layouts()
     print(
         "RUN test_mojo_gpu_grouping_key_only_stability_distinct_groups_and_compositions"
@@ -210,6 +216,11 @@ def main() raises:
         "RUN test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow"
     )
     test_mojo_gpu_grouping_exact_wide_sum_local_arg_positions_and_overflow()
+    print(
+        "RUN test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback",
+        flush=True,
+    )
+    test_mojo_gpu_grouping_integer_partials_shared_merge_and_fallback()
     print("RUN test_mojo_gpu_rank_integer_widths_chunks_methods_and_partitions")
     test_mojo_gpu_rank_integer_widths_chunks_methods_and_partitions()
     print(

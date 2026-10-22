@@ -204,6 +204,17 @@ those tables through GPU row/join operations. Profiles report dictionary staging
 and restoration separately; they do not imply that string transformation code
 executes on the GPU.
 
+Concatenations whose possible dictionary pairs exceed the static lookup limits
+use the rows produced by upstream GPU operators instead. The GPU discovers
+and deduplicates operand-code pairs; the host constructs only those distinct
+labels, and the GPU maps resident rows to the resulting ordered dictionary.
+This preserves nulls and duplicate labels without allocating the Cartesian
+product. Scratch space scales with row count, with explicit payload-budget
+checks before allocation. Profiles identify this phase as
+`mojo_gpu_observed_text_pairs`. Further concatenations and ordinary relational
+consumers preserve the generated dictionary. Other string transformations
+consuming these dynamically generated labels remain explicitly unsupported.
+
 Categorical transport preserves original codes and dictionary owners through
 row, filter, sort, group, window, join and as-of operations. Duplicate category
 labels remain distinct codes. Temporary join dictionaries do not replace the
@@ -330,6 +341,19 @@ and fused pipeline-cache counters.
 Context creation remains lazy: metadata-only work, empty native input and budget
 rejection before submission do not initialize the device. Pipeline-handle reuse
 outside the fused scalar path remains separate work.
+
+Plain grouped SUM, COUNT, MIN and MAX over integer columns can split each
+group across GPU blocks and merge exact partial states. The schedule uses
+row and group counts, with at most 4096 partial states across a batch;
+high-cardinality or small groups retain the existing reducer. One 256 KiB
+scratch buffer is reused across eligible outputs. Metadata resource estimates
+include that conservative cap whenever a plan could select the parallel path,
+while profiles report actual allocation and partial geometry through the
+`grouped_int_*` fields. Integer SUM keeps two-word totals until final narrowing,
+and every partial retains source error bits. Floating, decimal, temporal and
+window reductions retain their existing schedules. Group membership uses the
+existing hash or sorted partition builder; both supply the same generic
+index and group-start representation to these reducers.
 
 File scans compact decoded source buffers before GPU execution. The budget
 includes their retained values, validity, text offsets, categorical domains and
@@ -603,15 +627,16 @@ It builds the provider for a CPU-only target, probes the device
 (`tests/tooling/metal_available.mojo` prints why it decides), builds the
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
-then runs the integrated query contracts and independent oracles, and reports
-every failed step at the end. Those last steps can also run alone, with the
-pinned environment:
+then runs the integrated query contracts, independent oracles and the hash
+and grouped integer programs, and reports every failed step at the end. Those
+last steps can also run alone, with the pinned environment:
 
 ```sh
 pixi run --locked -e gpu test-mojo-gpu
 pixi run --locked -e gpu test-mojo-gpu-floating
 pixi run --locked -e gpu test-mojo-gpu-decimal
 pixi run --locked -e gpu test-mojo-gpu-integer
+pixi run --locked -e gpu test-mojo-gpu-grouping
 ```
 
 The independent integer oracle uses Python arbitrary-precision arithmetic:

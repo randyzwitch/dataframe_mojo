@@ -5,6 +5,7 @@ lexicographic string order. Providers retain this owner until final decoding;
 encoding and decoding are host staging work and belong in end-to-end costs.
 """
 from .metadata import schema_frame
+from . import observed_concat
 from .window_keys import WindowKey
 from .code_domains import (
     TextField,
@@ -441,22 +442,14 @@ def _concat_pool(
     return values^
 
 
-def _concat_tables(
-    left: List[String],
-    right: List[String],
-    separator: String,
-    key_name: String,
-    right_name: String,
-    value_name: String,
-    generated_bytes: Int,
-    budget: Int,
-) raises -> Tuple[Series, Series, Series]:
-    # Check the Cartesian allocation before materializing even the key arrays.
-    # The independent ceiling also protects callers with an unlimited payload
-    # budget. This is dictionary staging, never row-wise CPU execution.
+def _concat_shape(
+    left: List[String], right: List[String], separator: String
+) raises -> Tuple[Int, Int]:
+    # Select the observed-pair path before any potentially huge Cartesian
+    # arithmetic, even when the product itself would overflow host Int.
+    if len(right) and len(left) > 1_048_576 // len(right):
+        return (1_048_577, 0)
     var pairs = checked_mul(len(left), len(right))
-    if pairs > 1_048_576:
-        raise Error("Metal unsupported [dictionary]: concat pair capacity")
     var left_bytes = 0
     var right_bytes = 0
     for text in left:
@@ -473,6 +466,24 @@ def _concat_tables(
     var reserve = checked_mul(
         checked_add(checked_mul(pairs, 128), text_bytes), 8
     )
+    return (pairs, reserve)
+
+
+def _concat_tables(
+    left: List[String],
+    right: List[String],
+    separator: String,
+    key_name: String,
+    right_name: String,
+    value_name: String,
+    generated_bytes: Int,
+    budget: Int,
+) raises -> Tuple[Series, Series, Series]:
+    var shape = _concat_shape(left, right, separator)
+    var pairs = shape[0]
+    var reserve = shape[1]
+    if pairs > 1_048_576:
+        raise Error("Metal unsupported [dictionary]: concat pair capacity")
     if reserve > 536_870_912:
         raise Error("Metal unsupported [dictionary]: concat staging capacity")
     if budget >= 0 and reserve > budget - generated_bytes:
@@ -568,10 +579,14 @@ def lower_dictionary_operations(
     var result = query.copy()
     result._nodes = List[PlanNode]()
     var roots = List[Int]()
+    var observed = List[Bool](length=len(query._nodes), fill=False)
     var generated_bytes = 0
     var lookups = 0
     for index in range(len(query._nodes)):
         var operation = query._nodes[index].copy()
+        var observed_input = (
+            operation.left >= 0 and observed[operation.left]
+        ) or (operation.right >= 0 and observed[operation.right])
         if operation.left >= 0:
             operation.left = roots[operation.left]
         if operation.right >= 0:
@@ -629,6 +644,10 @@ def lower_dictionary_operations(
                     right_name, StringColumn(List[String]())
                 )
                 var mapped = Series(value_name, StringColumn(List[String]()))
+                if observed_input and node.op != STR_CONCAT:
+                    raise Error(
+                        "Metal unsupported [dictionary]: String operation after observed concat"
+                    )
                 if node.op == STR_CONCAT:
                     var left_pool = _concat_pool(
                         subtree(expression, node.left), query, result, pool
@@ -636,6 +655,45 @@ def lower_dictionary_operations(
                     var right_pool = _concat_pool(
                         subtree(expression, node.right), query, result, pool
                     )
+                    var shape = _concat_shape(left_pool, right_pool, node.text)
+                    if (
+                        observed_input
+                        or shape[0] > 1_048_576
+                        or shape[1] > 536_870_912
+                    ):
+                        # Observe the computed operands after upstream GPU work.
+                        # Only distinct pairs will become dictionary metadata;
+                        # no Cartesian product is allocated here.
+                        var operands: List[Expr] = [
+                            subtree(expression, node.left)
+                            .fill_null(null(DataType.STRING))
+                            .alias(key_name),
+                            subtree(expression, node.right)
+                            .fill_null(null(DataType.STRING))
+                            .alias(right_name),
+                        ]
+                        result._nodes.append(
+                            _plan_node(
+                                WITH_COLUMNS,
+                                operation.left,
+                                exprs=operands^,
+                                text="metal_window_materialization",
+                            )
+                        )
+                        _ = observed_concat.stage(
+                            result,
+                            len(result._nodes) - 1,
+                            key_name,
+                            right_name,
+                            value_name,
+                            node.text,
+                        )
+                        operation.left = len(result._nodes) - 1
+                        expression._nodes[n] = _node(COL, text=value_name)
+                        observed_input = True
+                        lookups += 1
+                        changed = True
+                        continue
                     var tables = _concat_tables(
                         left_pool,
                         right_pool,
@@ -776,6 +834,7 @@ def lower_dictionary_operations(
                 _plan_node(SELECT, len(result._nodes) - 1, exprs=projected)
             )
         roots.append(len(result._nodes) - 1)
+        observed[index] = observed_input
     return (result^, generated_bytes, lookups)
 
 

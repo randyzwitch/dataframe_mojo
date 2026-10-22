@@ -35,6 +35,8 @@ from dataframe.accelerator.joins import (
 from . import runtime as rows
 from . import typed_rows
 from . import qcut_runtime as qcuts
+from . import observed_concat_runtime as observed_concats
+from dataframe.accelerator import observed_concat
 from dataframe.accelerator.qcuts import is_qcut_marker
 from dataframe.accelerator.partition_cuts import (
     is_marker as is_partition_cut_marker,
@@ -92,6 +94,9 @@ def preflight(
                 semantic,
             )
         elif task.kind == DAG_ROWS:
+            if observed_concat.is_marker(task.query):
+                _ = observed_concats.preflight(task.query)
+                continue
             if is_partition_cut_marker(task.query):
                 _ = partition_cuts.preflight(task.query)
                 continue
@@ -220,6 +225,34 @@ def _float_column(
             Column[Float64](List[Float64](length=report.height(), fill=value)),
         )
     )
+
+
+def _grouped_integer_profile_fields(report: DataFrame) raises -> DataFrame:
+    """Give non-grouping DAG regions the grouped integer fields' defaults."""
+    var result = report.copy()
+    if "grouped_int_algorithm" not in result.columns():
+        result = result.with_column(
+            Series(
+                "grouped_int_algorithm",
+                Column[String](
+                    List[String](length=result.height(), fill="legacy")
+                ),
+            )
+        )
+    for name in List[String](
+        [
+            "grouped_int_parallel_outputs",
+            "grouped_int_max_partial_states",
+            "grouped_int_max_partials_per_group",
+            "grouped_int_max_group_batch",
+            "grouped_int_max_qualifying_hash_group_rows",
+            "grouped_int_partial_tiles",
+            "grouped_int_scratch_bytes",
+        ]
+    ):
+        if name not in result.columns():
+            result = _int_column(result, name, 0)
+    return result^
 
 
 def _profile_phases(report: DataFrame) raises -> DataFrame:
@@ -476,6 +509,7 @@ def execute(
                         Float64(scope.timing_ns()[1] - region_sync_before)
                         / 1e6,
                     )
+                region = _grouped_integer_profile_fields(region)
                 report = _append_profile_region(report, region)
                 values.append(None)
                 nested.append(fields^)
@@ -665,7 +699,21 @@ def execute(
                     task.query._frames[0] = _frame(dag, values, task.source)
                     resident = values[task.source].copy()
                 var source_rows = resident.value().rows if resident else -1
-                if is_partition_cut_marker(task.query):
+                if observed_concat.is_marker(task.query):
+                    if not resident:
+                        raise Error(
+                            "Observed concat resident producer is missing"
+                        )
+                    executed = observed_concats.execute_plan(
+                        task.query,
+                        resident.value(),
+                        scope,
+                        export_values=not (
+                            observation_only and index == dag.root
+                        ),
+                        text_domain=target_domain,
+                    )
+                elif is_partition_cut_marker(task.query):
                     if not resident:
                         raise Error(
                             "Partition CUT original resident producer is missing"
@@ -882,6 +930,7 @@ def execute(
                     "synchronization_ms",
                     Float64(scope.timing_ns()[1] - region_sync_before) / 1e6,
                 )
+            region = _grouped_integer_profile_fields(region)
             report = _append_profile_region(report, region)
             values.append(executed[0].copy())
             nested.append(None)
