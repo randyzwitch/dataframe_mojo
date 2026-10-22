@@ -101,6 +101,26 @@ from .expr import (
     DT_TOTAL,
     DT_STRFTIME,
     DT_STRPTIME,
+    DT_QUARTER,
+    DT_WEEK,
+    DT_ISO_YEAR,
+    DT_MILLISECOND,
+    DT_MICROSECOND,
+    DT_CENTURY,
+    DT_MILLENNIUM,
+    DT_EPOCH,
+    DT_MONTH_START,
+    DT_MONTH_END,
+    DT_DAYS_IN_MONTH,
+    DT_IS_LEAP_YEAR,
+    DT_ROUND,
+    DT_WITH_TIME_UNIT,
+    DT_BUILD,
+    DT_REPLACE,
+    DT_COMBINE,
+    DT_IS_BUSINESS_DAY,
+    DT_ADD_BUSINESS_DAYS,
+    DT_BUSINESS_DAY_COUNT,
     DT_REPLACE_TZ,
     DT_CONVERT_TZ,
     is_dt_op,
@@ -756,6 +776,83 @@ def _leaf(expr: Expr, index: Int) -> Bool:
 
 def _dt_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
+    if (
+        op == DT_BUILD
+        or op == DT_REPLACE
+        or op == DT_COMBINE
+        or op == DT_ADD_BUSINESS_DAYS
+        or op == DT_BUSINESS_DAY_COUNT
+    ):
+        if not input.is_struct():
+            raise Error("temporal constructor requires field inputs")
+        if op == DT_BUILD:
+            return DataType.parse(node.text)
+        var base = input.field_dtype(0)
+        if not (base.is_date() or base.is_datetime()):
+            raise Error("calendar operation requires date or datetime input")
+        if op == DT_COMBINE:
+            if not input.field_dtype(1).is_time():
+                raise Error("combine requires a time expression")
+            return DataType.datetime(node.text)
+        if op == DT_BUSINESS_DAY_COUNT:
+            if not base.is_date() or not input.field_dtype(1).is_date():
+                raise Error("business_day_count requires dates")
+            return DataType.INT64
+        if op == DT_ADD_BUSINESS_DAYS:
+            if (
+                node.text != "raise"
+                and node.text != "forward"
+                and node.text != "backward"
+            ):
+                raise Error("roll must be raise, forward or backward")
+        else:
+            _ = ambiguous_code(node.text)
+            if base.is_date():
+                for name in input.field_names():
+                    if (
+                        name == "hour"
+                        or name == "minute"
+                        or name == "second"
+                        or name == "microsecond"
+                    ):
+                        raise Error("date values have no time-of-day fields")
+        return base
+    if op == DT_WITH_TIME_UNIT:
+        if input.is_datetime():
+            return DataType.datetime(node.text, input.time_zone())
+        if input.is_duration():
+            return DataType.duration(node.text)
+        raise Error("with_time_unit requires datetime or duration")
+    if op == DT_EPOCH:
+        if not (input.is_date() or input.is_datetime()):
+            raise Error("epoch requires date or datetime")
+        if (
+            node.text != "ns"
+            and node.text != "us"
+            and node.text != "ms"
+            and (
+                node.text2 == "timestamp"
+                or (node.text != "s" and node.text != "d")
+            )
+        ):
+            raise Error("invalid epoch time unit: " + node.text)
+        return DataType.INT64
+    if op >= DT_QUARTER and op <= DT_IS_LEAP_YEAR:
+        var subsecond = op == DT_MILLISECOND or op == DT_MICROSECOND
+        if subsecond:
+            if not (input.is_datetime() or input.is_time()):
+                raise Error("subsecond fields require datetime or time")
+        elif not (input.is_date() or input.is_datetime()):
+            raise Error("calendar fields require date or datetime")
+        if op == DT_MONTH_START or op == DT_MONTH_END:
+            return input
+        if op == DT_IS_LEAP_YEAR:
+            return DataType.BOOL
+        return DataType.INT64
+    if op == DT_IS_BUSINESS_DAY:
+        if not (input.is_date() or input.is_datetime()):
+            raise Error("is_business_day requires date or datetime")
+        return DataType.BOOL
     if op == DT_STRPTIME:
         if input != DataType.STRING:
             raise Error(
@@ -817,7 +914,7 @@ def _dt_dtype(node: Node, input: DataType) raises -> DataType:
         if not input.is_datetime():
             raise Error("dt.time requires a datetime expression")
         return DataType.TIME
-    if op == DT_TRUNCATE or op == DT_OFFSET_BY:
+    if op == DT_TRUNCATE or op == DT_OFFSET_BY or op == DT_ROUND:
         _ = parse_every(node.text)
         return input
     if input.is_time() and op <= DT_DAY:

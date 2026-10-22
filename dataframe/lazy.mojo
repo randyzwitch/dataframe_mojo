@@ -65,6 +65,9 @@ from ._accel_provider import (
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     HORIZONTAL_ARGS,
+    STRUCT_PACK,
+    struct_pack_children,
+    _set_struct_pack_children,
     split_names,
     ARG_MAX,
     ARG_MIN,
@@ -711,7 +714,15 @@ def _emit_shared(
         out.append(col(names[text.value()])._nodes[0].copy())
         return len(out) - 1
     var copy = expr._nodes[i].copy()
-    if copy.left >= 0:
+    if copy.op == STRUCT_PACK:
+        var children = struct_pack_children(copy)
+        for k in range(len(children)):
+            var child = children[k]
+            children[k] = _emit_shared(
+                expr, child, seen, names, shared, taken, out
+            )
+        _set_struct_pack_children(copy, children)
+    elif copy.left >= 0:
         copy.left = _emit_shared(
             expr, expr._nodes[i].left, seen, names, shared, taken, out
         )
@@ -736,7 +747,13 @@ def _emit_replaced(
         out.append(replaced[i].copy())
         return len(out) - 1
     var copy = nodes[i].copy()
-    if copy.left >= 0:
+    if copy.op == STRUCT_PACK:
+        var children = struct_pack_children(copy)
+        for k in range(len(children)):
+            var child = children[k]
+            children[k] = _emit_replaced(nodes, replaced, child, out)
+        _set_struct_pack_children(copy, children)
+    elif copy.left >= 0:
         copy.left = _emit_replaced(nodes, replaced, nodes[i].left, out)
     if copy.right >= 0:
         copy.right = _emit_replaced(nodes, replaced, nodes[i].right, out)
@@ -776,7 +793,13 @@ def _emit_folded(
         if value[node.right] == identity:
             return _emit_folded(nodes, value, node.left, out)
     var copy = node.copy()
-    if copy.left >= 0:
+    if copy.op == STRUCT_PACK:
+        var children = struct_pack_children(copy)
+        for k in range(len(children)):
+            var child = children[k]
+            children[k] = _emit_folded(nodes, value, child, out)
+        _set_struct_pack_children(copy, children)
+    elif copy.left >= 0:
         copy.left = _emit_folded(nodes, value, node.left, out)
     if copy.right >= 0:
         copy.right = _emit_folded(nodes, value, node.right, out)

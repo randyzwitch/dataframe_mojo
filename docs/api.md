@@ -145,6 +145,14 @@ Per-row XY bounds as nullable xmin, ymin, xmax, ymax Float64 columns.
 def bounding_box(series: Series) -> DataFrame
 ```
 
+## `business_day_count`
+
+Count business dates, excluding end in either direction.
+
+```mojo
+def business_day_count(start: Expr, end: Expr, week_mask: List[Bool] = List(True, True, True, True, True, False, False, __list_literal__=NoneType(None)), holidays: List[String] = List()) -> Expr
+```
+
 ## `by_dtype`
 
 Columns whose dtype is listed, in schema order.
@@ -545,12 +553,28 @@ struct(names, dtypes) holds one value of each named field per row.
   The result type of product and cum_prod, as in Polars: INT64 for Bool and integers up to 32 bits, which would soon overflow their own width, and the type itself for Int64, UInt64 and floats. A decimal's product has a scale no column of it shares, so FLOAT64, as DuckDB's product is.
 - `def write_to(self, mut writer: T)`
 
+## `date`
+
+Construct dates from scalar or expression calendar fields.
+
+```mojo
+def date(year: Expr, month: Expr, day: Expr) -> Expr
+```
+
 ## `date_range`
 
 Dates from start through end (inclusive, ISO 8601 text) every interval, such as "1d", "1w", or "1mo".
 
 ```mojo
 def date_range(start: String, end: String, interval: String = "1d", name: String = "date") -> Series
+```
+
+## `datetime`
+
+Construct datetimes from local fields, raising for DST ambiguity.
+
+```mojo
+def datetime(year: Expr, month: Expr, day: Expr, hour: Expr = Int(0), minute: Expr = Int(0), second: Expr = Int(0), microsecond: Expr = Int(0), time_unit: String = "us", time_zone: String = "") -> Expr
 ```
 
 ## `datetime_range`
@@ -571,6 +595,44 @@ strftime use local time in that zone; fixed offsets (h, m, s, ...) and
 duration arithmetic act on the UTC instant, as in Polars. Nulls
 propagate.
 
+- `def quarter(self) -> Expr`
+  Quarter, 1 through 4.
+- `def week(self) -> Expr`
+  ISO week, 1 through 53; Monday starts the week.
+- `def iso_year(self) -> Expr`
+  ISO week-numbering year.
+- `def millisecond(self) -> Expr`
+  Milliseconds within the second.
+- `def microsecond(self) -> Expr`
+  Microseconds within the second.
+- `def century(self) -> Expr`
+  Century, with years 1 through 100 in century 1.
+- `def millennium(self) -> Expr`
+  Millennium, with years 1 through 1000 in millennium 1.
+- `def month_start(self) -> Expr`
+  First day of the month, preserving the time of day.
+- `def month_end(self) -> Expr`
+  Last day of the month, preserving the time of day.
+- `def days_in_month(self) -> Expr`
+  Number of days in the local calendar month.
+- `def is_leap_year(self) -> Expr`
+  Whether the local calendar year is a leap year.
+- `def epoch(self, time_unit: String = "us") -> Expr`
+  UTC ticks since 1970 in d, s, ms, us or ns; floors negatives.
+- `def timestamp(self, time_unit: String = "us") -> Expr`
+  UTC timestamp in ms, us or ns.
+- `def round(self, every: String) -> Expr`
+  Round local time as in Polars: shift by half the interval, then truncate. Calendar months use a 28-day estimate; fixed-unit ties round forward.
+- `def with_time_unit(self, time_unit: String) -> Expr`
+  Retag datetime/duration ticks without rescaling them.
+- `def combine(self, time: Expr, time_unit: String = "us") -> Expr`
+  Combine a local date with a time into a naive datetime.
+- `def replace(self, year: Expr = _no_default(), month: Expr = _no_default(), day: Expr = _no_default(), hour: Expr = _no_default(), minute: Expr = _no_default(), second: Expr = _no_default(), microsecond: Expr = _no_default(), ambiguous: String = "raise") -> Expr`
+  Replace selected local fields with scalars or expressions.
+- `def is_business_day(self, week_mask: List[Bool] = List(True, True, True, True, True, False, False, __list_literal__=NoneType(None)), holidays: List[String] = List()) -> Expr`
+  Business-day membership; holidays are ISO date strings.
+- `def add_business_days(self, n: Expr, week_mask: List[Bool] = List(True, True, True, True, True, False, False, __list_literal__=NoneType(None)), holidays: List[String] = List(), roll: String = "raise") -> Expr`
+  Offset local dates, preserving time. Roll: raise/forward/backward.
 - `def year(self) -> Expr`
 - `def month(self) -> Expr`
 - `def day(self) -> Expr`
@@ -604,6 +666,14 @@ propagate.
   Read each datetime's wall-clock time as local time in `time_zone` (empty makes it naive), keeping the wall time and changing the instant. `ambiguous` ("raise", "earliest", "latest", "null") picks between the two instants when clocks fall back; `non_existent` ("raise", "null") handles times skipped when clocks spring forward.
 - `def convert_time_zone(self, time_zone: String) -> Expr`
   The same instants shown in `time_zone`; naive input is read as UTC.
+
+## `duration`
+
+Fixed elapsed duration; calendar days are exactly 24 hours.
+
+```mojo
+def duration(weeks: Expr = Int(0), days: Expr = Int(0), hours: Expr = Int(0), minutes: Expr = Int(0), seconds: Expr = Int(0), milliseconds: Expr = Int(0), microseconds: Expr = Int(0), nanoseconds: Expr = Int(0), time_unit: String = "us") -> Expr
+```
 
 ## `exclude`
 
@@ -1339,6 +1409,14 @@ def lit(value: Bool) -> Expr
 def lit(value: String) -> Expr
 ```
 
+```mojo
+def lit(value: Int64, dtype: DataType) -> Expr
+```
+
+```mojo
+def lit(value: AnyValue) -> Expr
+```
+
 ## `max_horizontal`
 
 Greatest input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
@@ -1788,6 +1866,14 @@ It converts implicitly to an Expr whose unmatched rows are null.
 - `def otherwise(self, value: Expr) -> Expr`
 - `def end(self) -> Expr`
 - `def alias(self, name: String) -> Expr`
+
+## `time`
+
+Construct nanosecond times from scalar or expression fields.
+
+```mojo
+def time(hour: Expr = Int(0), minute: Expr = Int(0), second: Expr = Int(0), microsecond: Expr = Int(0)) -> Expr
+```
 
 ## `TimeGroupBy`
 

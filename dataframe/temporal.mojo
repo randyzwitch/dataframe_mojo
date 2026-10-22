@@ -15,7 +15,10 @@ Parsing and formatting support these directives: %Y (year, optional sign),
 (fractional seconds: up to nine digits when parsing, the unit's precision
 when formatting), %j (day of year), %z (UTC offset: +HHMM when formatting;
 Z, +HH, +HHMM or +HH:MM when parsing), %:z (+HH:MM), %Z (zone
-abbreviation, formatting only), and %%. Any other character must match
+abbreviation, formatting only), %b/%B (English month names), %a/%A
+(English weekday names), %y (two-digit year, 1970..2069 when parsing),
+%I/%p (12-hour clock and AM/PM), %e (space-padded day), %U/%W (week
+number from Sunday/Monday), %u (ISO weekday), and %%. Any other character must match
 literally. A parsed offset makes the value UTC.
 """
 from .calendar import (
@@ -117,9 +120,30 @@ def join(parts: Parts, dtype: DataType) raises -> Int64:
         raise Error("month out of range")
     if parts.day < 1 or parts.day > days_in_month(parts.year, parts.month):
         raise Error("day out of range")
-    if parts.hour > 23 or parts.minute > 59 or parts.second > 59:
+    if (
+        parts.hour < 0
+        or parts.hour > 23
+        or parts.minute < 0
+        or parts.minute > 59
+        or parts.second < 0
+        or parts.second > 59
+        or parts.nanos < 0
+        or parts.nanos >= 1000000000
+    ):
         raise Error("time of day out of range")
-    var days = days_from_civil(parts.year, parts.month, parts.day)
+    # Compute the civil day in wide storage: constructors must reject an
+    # unrepresentable date instead of wrapping before the tick checks.
+    var year = Int128(parts.year) - Int128(parts.month <= 2)
+    var era = year // 400
+    var yoe = year - era * 400
+    var mp = Int128((parts.month + 9) % 12)
+    var doy = (153 * mp + 2) // 5 + Int128(parts.day) - 1
+    var wide_days = (
+        era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+    )
+    if wide_days < Int128(INT64_MIN) or wide_days > Int128(INT64_MAX):
+        raise Error("temporal value overflows Int64")
+    var days = Int64(wide_days)
     if dtype.is_date():
         return days
     var seconds = (parts.hour * 60 + parts.minute) * 60 + parts.second
@@ -127,8 +151,12 @@ def join(parts: Parts, dtype: DataType) raises -> Int64:
         return seconds * 1000000000 + parts.nanos
     var per_second = dtype.per_second()
     var fraction = parts.nanos // (1000000000 // per_second)
-    var total = checked_add(checked_mul(days, SECONDS_PER_DAY), seconds)
-    return checked_add(checked_mul(total, per_second), fraction)
+    var total = (
+        wide_days * Int128(SECONDS_PER_DAY) + Int128(seconds)
+    ) * Int128(per_second) + Int128(fraction)
+    if total < Int128(INT64_MIN) or total > Int128(INT64_MAX):
+        raise Error("temporal value overflows Int64")
+    return Int64(total)
 
 
 def _digits(text: String, mut pos: Int, least: Int, most: Int) raises -> Int64:
@@ -422,6 +450,77 @@ def _end(text: String, pos: Int) raises:
         raise Error("unexpected trailing text")
 
 
+# English names, as in chrono/Polars, independent of the process locale.
+def _month_names(short: Bool) -> List[String]:
+    if short:
+        return [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
+    return [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+
+
+def _weekday_names(short: Bool) -> List[String]:
+    if short:
+        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+
+
+def _parse_name(
+    text: String, mut pos: Int, names: List[String]
+) raises -> Int64:
+    for i in range(len(names)):
+        var end = pos + names[i].byte_length()
+        if (
+            end <= text.byte_length()
+            and String(text[byte=pos:end]).lower() == names[i].lower()
+        ):
+            pos = end
+            return Int64(i + 1)
+    raise Error("expected a calendar name")
+
+
+def _iso_weekday(days: Int64) -> Int64:
+    return floor_mod(floor_mod(days, 7) + 3, 7) + 1
+
+
+def _week_number(days: Int64, year: Int64, monday: Bool) -> Int64:
+    var weekday = _iso_weekday(days) - 1 if monday else _iso_weekday(days) % 7
+    var ordinal = days - days_from_civil(year, 1, 1)
+    return (ordinal + 7 - weekday) // 7
+
+
 def _parse_format(
     text: String, dtype: DataType, format: String, mut seen: Bool
 ) raises -> Int64:
@@ -432,6 +531,11 @@ def _parse_format(
     var parts = Parts(1970, 1, 1, 0, 0, 0, 0)
     var ordinal = Int64(-1)
     var offset = Int64(0)
+    var weekday = Int64(-1)
+    var week = Int64(-1)
+    var monday = False
+    var hour12 = False
+    var afternoon = Int64(-1)
     while i < len(f):
         if f[i] == 37 and i + 1 < len(f):
             var d = f[i + 1]
@@ -450,6 +554,33 @@ def _parse_format(
                 parts.year = _digits(
                     text, pos, 4 if packed else 1, 4 if packed else 6
                 ) * (Int64(-1) if negative else Int64(1))
+            elif d == 121:  # y, chrono's 1970..2069 window
+                var year = _digits(text, pos, 2, 2)
+                parts.year = year + (Int64(2000) if year < 70 else Int64(1900))
+            elif d == 98 or d == 66:  # b/B
+                parts.month = _parse_name(text, pos, _month_names(d == 98))
+            elif d == 97 or d == 65:  # a/A
+                weekday = _parse_name(text, pos, _weekday_names(d == 97))
+            elif d == 117:  # u
+                weekday = _digits(text, pos, 1, 1)
+                if weekday < 1 or weekday > 7:
+                    raise Error("weekday out of range")
+            elif d == 85 or d == 87:  # U/W
+                week = _digits(text, pos, 2 if packed else 1, 2)
+                monday = d == 87
+                if week > 53:
+                    raise Error("week out of range")
+            elif d == 101:  # e
+                if pos < len(t) and t[pos] == 32:
+                    pos += 1
+                parts.day = _digits(text, pos, 1, 2)
+            elif d == 73:  # I
+                parts.hour = _digits(text, pos, 2 if packed else 1, 2)
+                if parts.hour < 1 or parts.hour > 12:
+                    raise Error("12-hour clock hour out of range")
+                hour12 = True
+            elif d == 112:  # p
+                afternoon = _parse_name(text, pos, ["AM", "PM"]) - 1
             elif d == 109:  # m
                 parts.month = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 100:  # d
@@ -489,6 +620,34 @@ def _parse_format(
         )
         parts.month = ymd[1]
         parts.day = ymd[2]
+    if hour12:
+        if afternoon < 0:
+            raise Error("12-hour clock requires AM or PM")
+        parts.hour = parts.hour % 12 + afternoon * 12
+    elif afternoon >= 0:
+        raise Error("AM or PM requires a 12-hour clock hour")
+    if week >= 0:
+        if weekday < 0:
+            raise Error("week requires a weekday")
+        var jan1 = days_from_civil(parts.year, 1, 1)
+        var jan_weekday = (
+            _iso_weekday(jan1) - 1 if monday else _iso_weekday(jan1) % 7
+        )
+        var within_week = weekday - 1 if monday else weekday % 7
+        var day = (
+            jan1 + floor_mod(-jan_weekday, 7) + (week - 1) * 7 + within_week
+        )
+        var ymd = civil_from_days(day)
+        if ymd[0] != parts.year:
+            raise Error("week date falls outside the requested year")
+        parts.month = ymd[1]
+        parts.day = ymd[2]
+    if (
+        weekday >= 0
+        and _iso_weekday(days_from_civil(parts.year, parts.month, parts.day))
+        != weekday
+    ):
+        raise Error("weekday does not match date")
     var value = join(parts, dtype)
     if offset != 0 and dtype.is_datetime():
         value = checked_add(
@@ -571,6 +730,34 @@ def _render(
             i += 2
             if d == 89:
                 out += _pad(p.year, 4)
+            elif d == 121:
+                out += _pad(floor_mod(p.year, 100), 2)
+            elif d == 98 or d == 66:
+                out += _month_names(d == 98)[Int(p.month - 1)]
+            elif d == 97 or d == 65:
+                out += _weekday_names(d == 97)[
+                    Int(
+                        _iso_weekday(days_from_civil(p.year, p.month, p.day))
+                        - 1
+                    )
+                ]
+            elif d == 117:
+                out += String(
+                    _iso_weekday(days_from_civil(p.year, p.month, p.day))
+                )
+            elif d == 85 or d == 87:
+                out += _pad(
+                    _week_number(
+                        days_from_civil(p.year, p.month, p.day), p.year, d == 87
+                    ),
+                    2,
+                )
+            elif d == 101:
+                out += (" " if p.day < 10 else "") + String(p.day)
+            elif d == 73:
+                out += _pad((p.hour + 11) % 12 + 1, 2)
+            elif d == 112:
+                out += "AM" if p.hour < 12 else "PM"
             elif d == 109:
                 out += _pad(p.month, 2)
             elif d == 100:

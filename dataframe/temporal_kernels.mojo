@@ -4,10 +4,13 @@ Temporal values are Int64 storage tagged with a DataType; these kernels take
 the logical types from the binder, so their inputs may carry either tag.
 """
 from .column import Column
+from .bool_column import BoolColumn
+from .calendar import civil_from_days, days_in_month, is_leap
 from .string_column import StringColumn
 from .dtype import DataType
 from .expr import (
     Node,
+    SEP,
     SUB,
     MUL,
     FLOORDIV,
@@ -26,6 +29,26 @@ from .expr import (
     DT_TOTAL,
     DT_STRFTIME,
     DT_STRPTIME,
+    DT_QUARTER,
+    DT_WEEK,
+    DT_ISO_YEAR,
+    DT_MILLISECOND,
+    DT_MICROSECOND,
+    DT_CENTURY,
+    DT_MILLENNIUM,
+    DT_EPOCH,
+    DT_MONTH_START,
+    DT_MONTH_END,
+    DT_DAYS_IN_MONTH,
+    DT_IS_LEAP_YEAR,
+    DT_ROUND,
+    DT_WITH_TIME_UNIT,
+    DT_BUILD,
+    DT_REPLACE,
+    DT_COMBINE,
+    DT_IS_BUSINESS_DAY,
+    DT_ADD_BUSINESS_DAYS,
+    DT_BUSINESS_DAY_COUNT,
     DT_REPLACE_TZ,
     DT_CONVERT_TZ,
 )
@@ -344,6 +367,277 @@ struct TotalUnits(Copyable):
         return value * self.multiply
 
 
+struct BusinessCalendar(Copyable):
+    var mask: List[Bool]
+    var holidays: List[Int64]
+    var days_per_week: Int64
+
+    def __init__(out self, options: String) raises:
+        self.mask = List[Bool]()
+        self.holidays = List[Int64]()
+        self.days_per_week = 0
+        var fields = options.split(SEP)
+        var bits = String(fields[0]).as_bytes()
+        if len(bits) != 7:
+            raise Error("invalid business calendar")
+        for bit in bits:
+            self.mask.append(bit == 49)
+            self.days_per_week += Int64(bit == 49)
+        if self.days_per_week == 0:
+            raise Error("week_mask must enable at least one day")
+        for i in range(1, len(fields)):
+            var day = parse(String(fields[i]), DataType.DATE)
+            if day not in self.holidays and self.mask[Int(_weekday(day) - 1)]:
+                self.holidays.append(day)
+
+    def contains(self, day: Int64) -> Bool:
+        return self.mask[Int(_weekday(day) - 1)] and day not in self.holidays
+
+    def count(self, start: Int64, end: Int64) raises -> Int64:
+        if start > end:
+            return (
+                -self.count(end, start)
+                + Int64(self.contains(end))
+                - Int64(self.contains(start))
+            )
+        var span = checked_sub(end, start)
+        var count = checked_mul(span // 7, self.days_per_week)
+        for i in range(Int(span % 7)):
+            count += Int64(self.mask[Int((_weekday(start) - 1 + Int64(i)) % 7)])
+        for holiday in self.holidays:
+            if holiday >= start and holiday < end:
+                count -= 1
+        return count
+
+    def add(self, start: Int64, n: Int64, roll: String) raises -> Int64:
+        var day = start
+        if not self.contains(day):
+            if roll == "raise":
+                raise Error("start date is not a business day")
+            var direction = Int64(1 if roll == "forward" else -1)
+            while not self.contains(day):
+                day = checked_add(day, direction)
+        var direction = Int64(1 if n >= 0 else -1)
+        # Keep the magnitude wide so Int64.MIN is also representable.
+        var remaining = Int128(n)
+        if remaining < 0:
+            remaining = -remaining
+        while remaining > 0:
+            if remaining >= 7:
+                var weeks = remaining // 7
+                var jump = weeks * 7 * Int128(direction)
+                var target = Int128(day) + jump
+                if (
+                    target < Int128(-9223372036854775807) - 1
+                    or target > 9223372036854775807
+                ):
+                    raise Error("temporal value overflows Int64")
+                var next = Int64(target)
+                var consumed = self.count(
+                    checked_add(day, 1), checked_add(next, 1)
+                ) if direction > 0 else self.count(next, day)
+                remaining -= Int128(consumed)
+                day = next
+            else:
+                day = checked_add(day, direction)
+                remaining -= Int128(self.contains(day))
+        return day
+
+
+def _iso_fields(days: Int64) -> Tuple[Int64, Int64]:
+    var p = civil_from_days(days)
+    var year = p[0]
+    var ordinal = p[2]
+    for month in range(1, Int(p[1])):
+        ordinal += days_in_month(year, Int64(month))
+    var thursday = ordinal + 4 - _weekday(days)
+    if thursday < 1:
+        year -= 1
+        thursday += Int64(366 if is_leap(year) else 365)
+    elif thursday > Int64(366 if is_leap(year) else 365):
+        thursday -= Int64(366 if is_leap(year) else 365)
+        year += 1
+    return (year, (thursday + 6) // 7)
+
+
+def _epoch(value: Int64, dtype: DataType, unit: String) raises -> Int64:
+    var per = Int64(1)
+    if unit == "ms":
+        per = 1000
+    elif unit == "us":
+        per = 1000000
+    elif unit == "ns":
+        per = 1000000000
+    if dtype.is_date():
+        return value if unit == "d" else checked_mul(
+            value, checked_mul(86400, per)
+        )
+    if unit == "d":
+        return floor_div(value, ticks_per_day(dtype))
+    var source = dtype.per_second()
+    return floor_div(value, source // per) if source >= per else checked_mul(
+        value, per // source
+    )
+
+
+def _round(value: Int64, truncation: Truncation) raises -> Int64:
+    # Polars Window::round shifts by half the estimated duration and then
+    # truncates. Its calendar-month estimate is 28 days (also for years).
+    if truncation.months:
+        var per_day = Int64(1) if truncation.dtype.is_date() else ticks_per_day(
+            truncation.dtype
+        )
+        var half = checked_mul(truncation.months, checked_mul(14, per_day))
+        return truncation.apply(checked_add(value, half))
+    # The shifted value and the bucket boundary can each leave Int64 even
+    # when the input is valid. Check the final boundary in wide storage.
+    var shifted = Int128(value) + Int128(truncation.step // 2)
+    var origin = Int128(truncation.origin)
+    var step = Int128(truncation.step)
+    var rounded = (shifted - origin) // step * step + origin
+    if (
+        rounded < Int128(-9223372036854775807) - 1
+        or rounded > 9223372036854775807
+    ):
+        raise Error("temporal value overflows Int64")
+    return Int64(rounded)
+
+
+def _packed_temporal(
+    node: Node, input: Series, dtype: DataType, mask: List[Bool]
+) raises -> Series:
+    var packed = input.struct_column()
+    var fields = List[Series]()
+    var names = packed.field_names()
+    for i in range(packed.field_count()):
+        fields.append(packed.field(i))
+    var op = node.op
+    var target = DataType.parse(
+        node.text
+    ) if op == DT_BUILD else dtype.field_dtype(0)
+    if op == DT_COMBINE:
+        target = DataType.datetime(node.text)
+    if op == DT_BUSINESS_DAY_COUNT:
+        target = DataType.INT64
+    var zone = zone_of(target)
+    var aware = target.is_datetime() and target.time_zone() != ""
+    var n = len(input)
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Int64](length=n, fill=0)
+    var calendar = BusinessCalendar(
+        node.text2
+    ) if op == DT_ADD_BUSINESS_DAYS or op == DT_BUSINESS_DAY_COUNT else BusinessCalendar(
+        "1111100"
+    )
+    for row in range(n):
+        if len(mask) and not mask[row]:
+            continue
+        var observed = True
+        for field in fields:
+            observed = observed and not field.get(row).is_null()
+        if not observed:
+            continue
+        var original = Int64(0)
+        var p = Parts(1970, 1, 1, 0, 0, 0, 0)
+        if op != DT_BUILD:
+            original = fields[0].get(row).to_physical()
+            var base_type = dtype.field_dtype(0)
+            var local = to_local(
+                original, base_type, zone_of(base_type)
+            ) if base_type.is_datetime() else original
+            p = split(local, base_type)
+            if op == DT_BUSINESS_DAY_COUNT:
+                values[row] = calendar.count(
+                    original, fields[1].get(row).to_physical()
+                )
+                valid[row] = True
+                continue
+            if op == DT_ADD_BUSINESS_DAYS:
+                var day = days_from_civil(p.year, p.month, p.day)
+                var shifted = civil_from_days(
+                    calendar.add(
+                        day, fields[1].get(row).to_physical(), node.text
+                    )
+                )
+                p.year = shifted[0]
+                p.month = shifted[1]
+                p.day = shifted[2]
+        if target.is_duration():
+            var scales: List[Int64] = [
+                604800000000000,
+                86400000000000,
+                3600000000000,
+                60000000000,
+                1000000000,
+                1000000,
+                1000,
+                1,
+            ]
+            var total = Int128(0)
+            var per_tick = Int128(Int64(1000000000) // target.per_second())
+            for k in range(len(fields)):
+                var component = Int128(
+                    fields[k].get(row).to_physical()
+                ) * Int128(scales[k])
+                var ticks = component // per_tick
+                if component < 0 and component % per_tick != 0:
+                    ticks += 1
+                total += ticks
+            if (
+                total < Int128(-9223372036854775807) - 1
+                or total > 9223372036854775807
+            ):
+                raise Error("temporal value overflows Int64")
+            values[row] = Int64(total)
+            valid[row] = True
+            continue
+        for k in range(len(fields)):
+            var name = names[k]
+            if name == "base" or op == DT_ADD_BUSINESS_DAYS:
+                continue
+            var v = fields[k].get(row).to_physical()
+            if name == "year":
+                p.year = v
+            elif name == "month":
+                p.month = v
+            elif name == "day":
+                p.day = v
+            elif name == "hour":
+                p.hour = v
+            elif name == "minute":
+                p.minute = v
+            elif name == "second":
+                p.second = v
+            elif name == "microsecond":
+                if v < 0 or v > 999999:
+                    raise Error("microsecond out of range")
+                p.nanos = v * 1000
+            elif name == "time":
+                var t = split(v, DataType.TIME)
+                p.hour = t.hour
+                p.minute = t.minute
+                p.second = t.second
+                p.nanos = t.nanos
+        var result = join(p, target)
+        if aware:
+            if op == DT_ADD_BUSINESS_DAYS:
+                result = relocalize(result, original, target, zone)
+            else:
+                var localized = localize(
+                    result,
+                    target,
+                    zone,
+                    ambiguous_code(node.text) if op == DT_REPLACE else 0,
+                    0,
+                )
+                if not localized:
+                    continue
+                result = localized.value()
+        values[row] = result
+        valid[row] = True
+    return Series("", Column[Int64](values^, valid)).with_dtype(target)
+
+
 def dt_op(
     node: Node, input: Series, dtype: DataType, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
@@ -352,12 +646,25 @@ def dt_op(
     var op = node.op
     if op == DT_STRPTIME:
         return _strptime(
-            input, node.dtypes[0].value(), node.text, node.integer == 1
+            input, node.dtypes[0].value(), node.text, node.integer == 1, mask
         )
     if op == DT_REPLACE_TZ:
         return _replace_time_zone(input, dtype, node)
     if op == DT_CONVERT_TZ:
         return input.with_dtype(dtype.with_time_zone(node.text))
+    if (
+        op == DT_BUILD
+        or op == DT_REPLACE
+        or op == DT_COMBINE
+        or op == DT_ADD_BUSINESS_DAYS
+        or op == DT_BUSINESS_DAY_COUNT
+    ):
+        return _packed_temporal(node, input, dtype, mask)
+    if op == DT_WITH_TIME_UNIT:
+        var target = DataType.datetime(
+            node.text, dtype.time_zone()
+        ) if dtype.is_datetime() else DataType.duration(node.text)
+        return input.with_dtype(target)
     ref column = input._data[Column[Int64]]
     var n = len(column)
     var valid = List[Bool](length=n, fill=False)
@@ -366,7 +673,7 @@ def dt_op(
     if op == DT_STRFTIME:
         var texts = List[String](length=n, fill="")
         for i in range(n):
-            valid[i] = column._valid(i)
+            valid[i] = column._valid(i) and (not len(mask) or mask[i])
             if valid[i]:
                 texts[i] = format_in(column._get(i), dtype, node.text, zone)
         return Series("", StringColumn(texts, valid))
@@ -376,14 +683,14 @@ def dt_op(
     # loop below is single-threaded over every row (10M in ClickBench
     # q18), so it checks nothing more per row.
     var parse = False
-    if op == DT_TRUNCATE or op == DT_OFFSET_BY:
+    if op == DT_TRUNCATE or op == DT_OFFSET_BY or op == DT_ROUND:
         for i in range(n):
             if column._valid(i) and (not len(mask) or mask[i]):
                 parse = True
                 break
-    var truncation = Truncation(
-        dtype, node.text
-    ) if parse and op == DT_TRUNCATE else Truncation.unused(dtype)
+    var truncation = Truncation(dtype, node.text) if parse and (
+        op == DT_TRUNCATE or op == DT_ROUND
+    ) else Truncation.unused(dtype)
     var offset_by = (
         Offset(dtype, node.text) if parse
         and op == DT_OFFSET_BY
@@ -395,17 +702,24 @@ def dt_op(
         and aware else ZonedOffset.unused(dtype)
     )
     var total = TotalUnits(dtype, node.text if op == DT_TOTAL else "")
+    var calendar = BusinessCalendar(
+        node.text2
+    ) if op == DT_IS_BUSINESS_DAY else BusinessCalendar("1111100")
     for i in range(n):
         valid[i] = column._valid(i) and (not len(mask) or mask[i])
         if not valid[i]:
             continue
         var v = column._get(i)
-        if aware and op == DT_TRUNCATE:
+        if op == DT_EPOCH:
+            values[i] = _epoch(v, dtype, node.text)
+            continue
+        if aware and (op == DT_TRUNCATE or op == DT_ROUND):
             # Truncate the local time, then map back keeping the offset.
             var per_second = dtype.per_second()
             var offset = zone.offset_at(floor_div(v, per_second))
             values[i] = relocalize(
-                truncation.apply(v + offset * per_second),
+                _round(v + offset * per_second, truncation) if op
+                == DT_ROUND else truncation.apply(v + offset * per_second),
                 v,
                 dtype,
                 zone,
@@ -417,7 +731,9 @@ def dt_op(
         if aware:
             # Every other operation reads local fields.
             v = to_local(v, dtype, zone)
-        if op == DT_TRUNCATE:
+        if op == DT_ROUND:
+            values[i] = _round(v, truncation)
+        elif op == DT_TRUNCATE:
             values[i] = truncation.apply(v)
         elif op == DT_OFFSET_BY:
             values[i] = offset_by.apply(v)
@@ -434,6 +750,36 @@ def dt_op(
         elif op == DT_ORDINAL_DAY:
             var p = split(v, dtype)
             values[i] = _days(v, dtype) - days_from_civil(p.year, 1, 1) + 1
+        elif op == DT_IS_BUSINESS_DAY:
+            values[i] = Int64(calendar.contains(_days(v, dtype)))
+        elif op == DT_WEEK or op == DT_ISO_YEAR:
+            var iso = _iso_fields(_days(v, dtype))
+            values[i] = iso[0] if op == DT_ISO_YEAR else iso[1]
+        elif (
+            op >= DT_QUARTER
+            and op <= DT_IS_LEAP_YEAR
+            and op != DT_MILLISECOND
+            and op != DT_MICROSECOND
+        ):
+            var p = split(v, dtype)
+            if op == DT_QUARTER:
+                values[i] = (p.month - 1) // 3 + 1
+            elif op == DT_CENTURY:
+                values[i] = floor_div(p.year - 1, 100) + 1
+            elif op == DT_MILLENNIUM:
+                values[i] = floor_div(p.year - 1, 1000) + 1
+            elif op == DT_DAYS_IN_MONTH:
+                values[i] = days_in_month(p.year, p.month)
+            elif op == DT_IS_LEAP_YEAR:
+                values[i] = Int64(is_leap(p.year))
+            else:
+                p.day = 1 if op == DT_MONTH_START else days_in_month(
+                    p.year, p.month
+                )
+                var shifted = join(p, dtype)
+                values[i] = relocalize(
+                    shifted, column._get(i), dtype, zone
+                ) if aware else shifted
         elif op == DT_YEAR or op == DT_MONTH or op == DT_DAY:
             var p = split(v, dtype)
             if op == DT_YEAR:
@@ -459,9 +805,25 @@ def dt_op(
             elif op == DT_SECOND:
                 values[i] = seconds % 60
             else:
-                values[i] = (within % per_second) * (1000000000 // per_second)
+                var nanos = (within % per_second) * (1000000000 // per_second)
+                values[i] = (
+                    nanos // 1000000 if op
+                    == DT_MILLISECOND else nanos // 1000 if op
+                    == DT_MICROSECOND else nanos
+                )
+    if op == DT_IS_LEAP_YEAR or op == DT_IS_BUSINESS_DAY:
+        var booleans = List[Bool](length=n, fill=False)
+        for i in range(n):
+            booleans[i] = values[i] != 0
+        return Series("", BoolColumn(booleans, valid))
     var result = Series("", Column[Int64](values^, valid))
-    if op == DT_TRUNCATE or op == DT_OFFSET_BY:
+    if (
+        op == DT_TRUNCATE
+        or op == DT_OFFSET_BY
+        or op == DT_ROUND
+        or op == DT_MONTH_START
+        or op == DT_MONTH_END
+    ):
         return result.with_dtype(dtype)
     if op == DT_DATE:
         return result.with_dtype(DataType.DATE)

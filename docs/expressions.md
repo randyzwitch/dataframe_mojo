@@ -199,6 +199,69 @@ display compactly (`1d 2h 3.5s`). `date_range(start, end, interval="1d")` and
 steps are measured from the start, so `2024-01-31` stepping `1mo` gives
 `2024-02-29`, `2024-03-31`, ...
 
+Calendar reporting adds `quarter()` (1–4), ISO `week()` and `iso_year()`,
+`century()`, `millennium()`, `millisecond()` and `microsecond()` (within the
+second). `days_in_month()` returns the local month's length and
+`is_leap_year()` returns a Boolean. `month_start()` and `month_end()` change
+only the day, preserving a datetime's local time of day. `round(every)` shifts by half the interval and then truncates, as in
+[Polars](https://github.com/pola-rs/polars/blob/main/crates/polars-time/src/windows/window.rs).
+Fixed-unit ties round forward; month/year intervals use Polars' 28-day
+estimate for each month. Zoned inputs apply this rule to local time.
+
+`epoch(time_unit="us")` returns Int64 elapsed units since 1970-01-01 in
+`"d"`, `"s"`, `"ms"`, `"us"` or `"ns"`; `timestamp(time_unit="us")` accepts
+`"ms"`, `"us"` or `"ns"`. These read UTC instants, including on zoned
+columns, and floor negative values. `with_time_unit(unit)` retags datetime
+or duration storage without changing its ticks; `cast` rescales ticks.
+
+The expression constructors `date(year, month, day)`,
+`datetime(year, month, day, hour=0, minute=0, second=0, microsecond=0,
+time_unit="us", time_zone="")`, and
+`time(hour=0, minute=0, second=0, microsecond=0)` accept scalar numbers or
+expressions for each field. `duration(weeks=0, days=0, hours=0, minutes=0,
+seconds=0, milliseconds=0, microseconds=0, nanoseconds=0, time_unit="us")`
+constructs a fixed elapsed duration. Components finer than the selected unit truncate toward zero before
+summing; use `time_unit="ns"` to retain nanoseconds. Null
+components produce null results; invalid dates, times and overflow raise.
+
+```mojo
+from dataframe import col, date, datetime, time, duration, lit, AnyValue, DataType
+
+var report = df.with_columns([
+    col("order_date").dt().quarter().alias("q"),
+    col("order_date").dt().month_end().alias("period_end"),
+    col("ts").dt().epoch("ms").alias("epoch_ms"),
+]).filter(col("order_date") >= date(2024, 1, 1))
+
+# Typed temporal literals can also use stored ticks or a nullable AnyValue.
+var cutoff = lit(Int64(19723), DataType.DATE)
+var same_cutoff = lit(AnyValue.temporal(DataType.DATE, 19723))
+```
+
+`dt().combine(time_expr, time_unit="us")` combines the local date of a
+Date/Datetime with a Time expression, producing a naive datetime.
+`dt().replace(year=..., month=..., day=..., hour=..., minute=..., second=...,
+microsecond=..., ambiguous="raise")` changes only supplied local fields.
+Fields accept scalars or expressions; invalid dates and nonexistent local
+times raise. Ambiguous times accept `"raise"`, `"earliest"`, `"latest"` or
+`"null"`.
+
+`dt().is_business_day()` and `dt().add_business_days(n, roll="raise")` use
+Monday through Friday by default. Both accept `week_mask` (seven Booleans,
+Monday first) and `holidays` (ISO date strings, duplicates ignored).
+`add_business_days` preserves local time and accepts an expression for `n`;
+`roll="forward"` or `"backward"` first moves a nonbusiness start date to a
+business date. `business_day_count(start, end, week_mask=..., holidays=...)`
+counts business dates from start toward end, excluding end in either
+direction. Backward counts are negative. At least one weekday must be enabled.
+
+Additional format directives are `%b`/`%B` (English abbreviated/full month),
+`%a`/`%A` (English abbreviated/full weekday), `%y` (two-digit year, parsed
+in 1970–2069), `%I`/`%p` (12-hour clock and AM/PM), `%e` (space-padded day),
+`%U`/`%W` (Sunday/Monday week numbers, including week 00), and `%u` (ISO
+weekday). Week-number parsing requires a year and weekday; inconsistent
+weekdays and dates raise. Names parse without case sensitivity.
+
 #### Time zones
 
 A datetime without a time zone is naive: a wall-clock reading. With one
@@ -216,7 +279,8 @@ comparing, subtracting, joining or concatenating them raises, as in Polars.
   it never happens: `non_existent` is `"raise"` or `"null"`.
 - `dt().convert_time_zone(zone)` keeps the instant and changes the zone
   (a naive input is read as UTC).
-- Fields, `date()`, `time()`, `strftime`, `truncate`, and calendar offsets
+- Fields, `date()`, `time()`, `strftime`, `truncate`, `round`, month boundaries,
+  business dates, and calendar offsets
   (`d`, `w`, `mo`, `y`) use local time; fixed offsets (`h`, `m`, `s`, ...)
   and duration arithmetic move the UTC instant. A shifted or truncated
   local time that falls in a DST gap or overlap is resolved as Polars does
