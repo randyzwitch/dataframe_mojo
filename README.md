@@ -9,6 +9,7 @@ backend facade. The API is provisional.
 
 Calendar-aware rolling and dynamic grouping are described in
 [Time windows](docs/time-windows.md).
+The Metal backend on Apple silicon is covered in [Apple Metal](docs/apple-metal.md), which explains how to enable it.
 
 ## Install
 

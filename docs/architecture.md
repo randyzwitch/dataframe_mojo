@@ -51,6 +51,6 @@ Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
 until a Mojo-native reader exists; `dataframe/io/parquet.mojo` is the seam.
 
 Optional GPU execution on Apple silicon is covered in
-[Apple Metal](design/apple-metal.md). Distributed execution, arbitrary Python-object
+[Apple Metal](apple-metal.md). Distributed execution, arbitrary Python-object
 columns, pandas index compatibility, and cross-engine adapters are outside the
 scope.

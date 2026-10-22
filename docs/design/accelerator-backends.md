@@ -75,7 +75,7 @@ The Apple provider lives in this repository and runs Mojo kernels through MAX's 
 It accelerates supported Float32, integer, Boolean, and integer-emulated
 Float64 regions, with no implicit downcasts. Emulated binary64 work uses a
 separate calibration family; uncalibrated plans and unsupported operations
-remain CPU candidates. See [Apple Metal](apple-metal.md) for the current
+remain CPU candidates. See [Apple Metal](../apple-metal.md) for the current
 operation and precision coverage. GPU selection needs measured
 complete-query benefit including initialization, allocation, transfers,
 launches, synchronization, and host result construction. Resident-kernel
