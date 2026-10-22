@@ -429,7 +429,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 offsets.append(column._offset)
                 lengths.append(len(column))
             var merged = StringViewStorage._concat_many(
-                storages^, offsets^, lengths^
+                storages, offsets, lengths
             )
             var merged_series = Self(self._name, StringColumn(merged^))
             merged_series._dtype = self._dtype
@@ -1210,7 +1210,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self.slice(0, 0).rechunk()
         var gathered = (
             parts[0].copy() if len(parts)
-            == 1 else Self._from_chunks(parts^).rechunk()
+            == 1 else Self._from_chunks(parts).rechunk()
         )
         var order = List[Int](capacity=len(indices))
         for k in range(len(indices)):

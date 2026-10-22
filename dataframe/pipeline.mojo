@@ -690,7 +690,7 @@ struct Morsel(Movable):
         # more than reading every row past that).
         if self.by_rows and 8 * self.count <= self.frame.height():
             var taken = take_parallel(
-                pending^,
+                pending,
                 self.rows.copy(),
                 worker_count(len(self.rows)),
                 or_null=False,
@@ -2752,9 +2752,9 @@ def _scatter_typed[
     var valid = List[Bool](length=n, fill=True)
     for j in range(len(rows)):
         valid[at[unsafe_offset=j]] = column._valid(j)
-    return Series(
-        compact.name(), Column[Scalar[D]](values^, valid^)
-    ).with_dtype(compact.dtype())
+    return Series(compact.name(), Column[Scalar[D]](values^, valid)).with_dtype(
+        compact.dtype()
+    )
 
 
 def _in_place_table_rows(

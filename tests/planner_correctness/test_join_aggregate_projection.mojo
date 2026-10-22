@@ -41,7 +41,7 @@ def _string_side(
     return (
         DataFrame(
             [
-                Series("k", Column[String](keys^, valid^)),
+                Series("k", Column[String](keys^, valid)),
                 Series(
                     "lp" if left else "rp",
                     Column[Int64](values^, value_valid.copy()),
@@ -74,7 +74,7 @@ def _compound_side(
     return (
         DataFrame(
             [
-                Series("f", Column[Float64](values^, valid^)),
+                Series("f", Column[Float64](values^, valid)),
                 Series("tag", Column[String](tags^)),
                 Series(
                     "lp" if left else "rp",
@@ -369,8 +369,8 @@ def test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_c
         expected_rv.append(rv[pair[1]])
     var expected = DataFrame(
         [
-            Series("left_p", Column[Int64](expected_lp^, expected_lv^)),
-            Series("right_p", Column[Int64](expected_rp^, expected_rv^)),
+            Series("left_p", Column[Int64](expected_lp^, expected_lv)),
+            Series("right_p", Column[Int64](expected_rp^, expected_rv)),
             Series("r", Column[Int64](expected_rid^)),
         ]
     )

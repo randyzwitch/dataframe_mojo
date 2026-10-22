@@ -50,12 +50,12 @@ def _source(
         wv.append(sample.text_valid)
     return DataFrame(
         [
-            Series("s", Column[String](s^, sv^)),
-            Series("k", Column[Int64](k^, kv^)),
+            Series("s", Column[String](s^, sv)),
+            Series("k", Column[Int64](k^, kv)),
             Series("d", Column[Int64](dimension^)),
-            Series("i", Column[Int64](integers^, iv^)),
-            Series("f", Column[Float64](floats^, fv^)),
-            Series("w", Column[String](words^, wv^)),
+            Series("i", Column[Int64](integers^, iv)),
+            Series("f", Column[Float64](floats^, fv)),
+            Series("w", Column[String](words^, wv)),
         ]
     )
 

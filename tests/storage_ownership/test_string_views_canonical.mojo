@@ -71,7 +71,7 @@ def strings(views: Bool, salt: Int) raises -> Series:
         values.append(word(row * salt))
         valid.append((row * salt) % 23 != 9)
     if not views:
-        return Series("s", StringColumn(values^, valid^))
+        return Series("s", StringColumn(values, valid))
     var builder = StringViewBuilder(ROWS)
     for row in range(ROWS):
         if valid[row]:

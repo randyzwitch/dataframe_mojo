@@ -325,9 +325,9 @@ def test_any_and_all_follow_kleene_logic() raises:
                 cv.append(z >= 0)
     var input = DataFrame(
         [
-            Series("a", Column[Bool](a^, av^)),
-            Series("b", Column[Bool](b^, bv^)),
-            Series("c", Column[Int64](c^, cv^)),
+            Series("a", Column[Bool](a^, av)),
+            Series("b", Column[Bool](b^, bv)),
+            Series("c", Column[Int64](c^, cv)),
         ]
     )
     for layout in range(2):

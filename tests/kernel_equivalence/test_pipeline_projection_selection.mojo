@@ -33,7 +33,7 @@ def fact() raises -> DataFrame:
         [
             Series("k", Column[Int64](k^)),
             Series("g", Column[Int64](g^)),
-            Series("x", Column[Int64](x^, x_valid^)),
+            Series("x", Column[Int64](x^, x_valid)),
             Series("noise", Column[Int64](noise^)),
         ]
     )

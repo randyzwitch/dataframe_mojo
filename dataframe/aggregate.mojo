@@ -2137,10 +2137,10 @@ struct Reducer(Movable):
                 var flags = List[Bool](capacity=len(values))
                 for value in values:
                     flags.append(value != 0)
-                child = Series("", BoolColumn(flags^, valid^))
+                child = Series("", BoolColumn(flags, valid))
             else:
                 child = _from_canonical(
-                    Series("", Column[Int64](values^, valid^)), self.input
+                    Series("", Column[Int64](values^, valid)), self.input
                 )
         elif len(self.mode_floats) > 0:
             var values = List[Float64]()
@@ -2172,7 +2172,7 @@ struct Reducer(Movable):
                     total = len(values)
                 offsets.append(Int64(total))
             child = _from_canonical(
-                Series("", Column[Float64](values^, valid^)), self.input
+                Series("", Column[Float64](values^, valid)), self.input
             )
         else:
             var values = List[String]()
@@ -2321,7 +2321,7 @@ struct Reducer(Movable):
                 var flags = List[Bool](capacity=len(values_i))
                 for value in values_i:
                     flags.append(value != 0)
-                values = Series("", BoolColumn(flags^, valid.copy()))
+                values = Series("", BoolColumn(flags, valid.copy()))
             else:
                 values = _from_canonical(
                     Series("", Column[Int64](values_i^, valid.copy())),
@@ -2359,17 +2359,17 @@ struct Reducer(Movable):
             var narrow = List[Int32](capacity=len(values))
             for value in values:
                 narrow.append(Int32(value))
-            return Series("", Column[Int32](narrow^, valid^)).with_dtype(
+            return Series("", Column[Int32](narrow^, valid)).with_dtype(
                 self.logical
             )
         if self.logical.decimal_width() == 64:
             var narrow = List[Int64](capacity=len(values))
             for value in values:
                 narrow.append(Int64(value))
-            return Series("", Column[Int64](narrow^, valid^)).with_dtype(
+            return Series("", Column[Int64](narrow^, valid)).with_dtype(
                 self.logical
             )
-        return Series("", Column[Int128](values^, valid^)).with_dtype(
+        return Series("", Column[Int128](values^, valid)).with_dtype(
             self.logical
         )
 
@@ -2577,4 +2577,4 @@ struct Reducer(Movable):
             valid[g] = Bool(result)
             if result:
                 output[g] = result.value()
-        return Series("", BoolColumn(output^, valid))
+        return Series("", BoolColumn(output, valid))

@@ -57,8 +57,8 @@ def frame() raises -> DataFrame:
         values.append(Int64((row * 7) % 101))
     return DataFrame(
         [
-            Series("t", Column[String](texts^, tv^)),
-            Series("n", Column[Int64](numbers^, nv^)),
+            Series("t", Column[String](texts^, tv)),
+            Series("n", Column[Int64](numbers^, nv)),
             Series("v", Column[Int64](values^)),
         ]
     )

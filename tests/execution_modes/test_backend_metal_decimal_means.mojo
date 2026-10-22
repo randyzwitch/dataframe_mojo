@@ -38,10 +38,10 @@ def fixture(n: Int, scale: Int, sign: Int = 0) raises -> DataFrame:
             Series("a", Column[Int64](a^, valid)).with_dtype(
                 DataType.decimal(18, scale, 64)
             ),
-            Series("b", Column[Int32](b^, valid^)).with_dtype(
+            Series("b", Column[Int32](b^, valid)).with_dtype(
                 DataType.decimal(9, min(scale, 9), 32)
             ),
-            Series("k", Column[String](keys^, key_valid^)),
+            Series("k", Column[String](keys^, key_valid)),
             Series("i", Column[Int64](integers^)),
         ]
     )

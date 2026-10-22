@@ -539,7 +539,7 @@ def _transport_matches(query: LazyFrame, at: Int) raises -> Bool:
         node.left,
         exprs=node.exprs,
         code_domain=query._nodes[node.left].code_domain,
-        text_fields=fields^,
+        text_fields=fields,
     )
     var staged = query.copy()
     staged._nodes[at] = expected^

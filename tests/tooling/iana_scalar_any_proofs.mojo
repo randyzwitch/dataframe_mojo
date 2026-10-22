@@ -27,7 +27,7 @@ def _frame(
             Series(
                 "gap",
                 Column[Int64](
-                    List[Int64](length=height, fill=1710037800000000), validity^
+                    List[Int64](length=height, fill=1710037800000000), validity
                 ),
             )
             .with_dtype(DataType.datetime("us"))

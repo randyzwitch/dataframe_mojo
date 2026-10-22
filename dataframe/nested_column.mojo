@@ -386,7 +386,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
             names.append(field.name())
             dtypes.append(field.dtype())
         try:
-            return DataType.struct(names^, dtypes^)
+            return DataType.struct(names, dtypes)
         except:
             return DataType.STRING
 

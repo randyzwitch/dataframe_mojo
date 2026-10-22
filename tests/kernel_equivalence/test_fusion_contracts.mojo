@@ -70,8 +70,8 @@ def _fusion_source(n: Int) raises -> DataFrame:
         y.append(Float64(row % 13 - 6) / 2)
         xv.append(row % 5 != 1)
         yv.append(row % 7 != 2)
-    var a = Series("x", Column[Float64](x^, xv^)).slice(7, n)
-    var b = Series("y", Column[Float64](y^, yv^)).slice(3, n)
+    var a = Series("x", Column[Float64](x^, xv)).slice(7, n)
+    var b = Series("y", Column[Float64](y^, yv)).slice(3, n)
     var cut = n // 2
     return DataFrame(
         [

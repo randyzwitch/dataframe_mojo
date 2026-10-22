@@ -67,7 +67,7 @@ def numbers(rows: Int) raises -> DataFrame:
         payload.append(Float64(i) * 0.25)
     return DataFrame(
         [
-            Series("k", Column[Int64](keys^, valid^)),
+            Series("k", Column[Int64](keys^, valid)),
             Series("g", Column[Int64](groups^)),
             Series("v", Column[Float64](payload^)),
         ]

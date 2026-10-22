@@ -48,7 +48,7 @@ def cumulative(cells: WindowCells, kind: String, reverse: Bool) -> WindowCells:
             valid[row] = True
         elif cells.valid[row]:
             values[row] = total if kind == "sum" else best
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def shifted(cells: WindowCells, distance: Int) -> WindowCells:
@@ -59,7 +59,7 @@ def shifted(cells: WindowCells, distance: Int) -> WindowCells:
         if source >= 0 and source < len(values):
             values[row] = cells.values[source]
             valid[row] = cells.valid[source]
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def changed(cells: WindowCells, distance: Int, relative: Bool) -> WindowCells:
@@ -72,7 +72,7 @@ def changed(cells: WindowCells, distance: Int, relative: Bool) -> WindowCells:
             values[row] = cells.values[row] - prior.values[row]
             if relative:
                 values[row] /= prior.values[row]
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def filled(cells: WindowCells, reverse: Bool, limit: Int) -> WindowCells:
@@ -93,7 +93,7 @@ def filled(cells: WindowCells, reverse: Bool, limit: Int) -> WindowCells:
                 valid[row] = True
                 break
             distance += 1
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def rolling(
@@ -138,7 +138,7 @@ def rolling(
             values[row] = squares / Float64(count - ddof)
             if kind == "std":
                 values[row] = sqrt(values[row])
-    return WindowCells(values^, valid^)
+    return WindowCells(values, valid)
 
 
 def ranked(cells: WindowCells, method: String, descending: Bool) -> WindowCells:
@@ -177,7 +177,7 @@ def ranked(cells: WindowCells, method: String, descending: Bool) -> WindowCells:
             result[row] = Float64(len(distinct_lower) + 1)
         else:
             result[row] = Float64(lower + earlier + 1)
-    return WindowCells(result^, cells.valid.copy())
+    return WindowCells(result, cells.valid.copy())
 
 
 def interpolated(
@@ -210,4 +210,4 @@ def interpolated(
                 + cells.values[after] * fraction
             )
         valid[row] = True
-    return WindowCells(result^, valid^)
+    return WindowCells(result, valid)

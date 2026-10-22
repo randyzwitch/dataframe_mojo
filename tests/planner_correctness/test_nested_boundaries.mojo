@@ -30,7 +30,7 @@ def nested_boundary_source() raises -> DataFrame:
             Series(
                 "xs",
                 ListColumn.from_lists(
-                    items^,
+                    items,
                     DataType.INT64,
                     [True, True, False, True, True, True, True, False, True],
                 ),

@@ -2041,8 +2041,8 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             )
             .join(
                 returning,
-                left_on=["wr_returning_cdemo_sk", "marital", "education"],
-                right_on=["cd2_sk", "marital2", "education2"],
+                left_on=["wr_returning_cdemo_sk"],
+                right_on=["cd2_sk"],
             )
             .join(
                 t["customer_address"]
@@ -2057,20 +2057,24 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                 right_on=["r_reason_sk"],
             )
             .filter(
-                (
-                    (col("marital") == "M")
-                    & (col("education") == "Advanced Degree")
-                    & between(sales, "ws_sales_price", "100.00", "150.00")
-                )
-                | (
-                    (col("marital") == "S")
-                    & (col("education") == "College")
-                    & between(sales, "ws_sales_price", "50.00", "100.00")
-                )
-                | (
-                    (col("marital") == "W")
-                    & (col("education") == "2 yr Degree")
-                    & between(sales, "ws_sales_price", "150.00", "200.00")
+                (col("marital2") == col("marital"))
+                & (col("education2") == col("education"))
+                & (
+                    (
+                        (col("marital") == "M")
+                        & (col("education") == "Advanced Degree")
+                        & between(sales, "ws_sales_price", "100.00", "150.00")
+                    )
+                    | (
+                        (col("marital") == "S")
+                        & (col("education") == "College")
+                        & between(sales, "ws_sales_price", "50.00", "100.00")
+                    )
+                    | (
+                        (col("marital") == "W")
+                        & (col("education") == "2 yr Degree")
+                        & between(sales, "ws_sales_price", "150.00", "200.00")
+                    )
                 )
             )
             .filter(

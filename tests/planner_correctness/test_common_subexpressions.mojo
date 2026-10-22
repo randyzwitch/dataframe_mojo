@@ -27,7 +27,7 @@ def _frame() raises -> DataFrame:
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("shipped", Column[Int64](shipped^, valid^)),
+            Series("shipped", Column[Int64](shipped^, valid)),
             Series("sold", Column[Int64](sold^)),
         ]
     )

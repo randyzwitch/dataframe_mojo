@@ -335,7 +335,7 @@ def string_sort_ranks(values: Series) raises -> Optional[Series]:
             valid[i] = False
         else:
             ranks[i] = rank[id]
-    return Series(values.name(), Column[UInt32](ranks^, valid^))
+    return Series(values.name(), Column[UInt32](ranks^, valid))
 
 
 struct _GatherJob[D: DType, packed: Bool](Job):

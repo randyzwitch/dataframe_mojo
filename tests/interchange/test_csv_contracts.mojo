@@ -400,7 +400,7 @@ def test_csv_inference_sampling_overrides_and_temporal_opt_in_follow_literal_typ
 def test_csv_utf8_validation_includes_unprojected_text_and_lossy_replacement() raises:
     var path = _path("encoding")
     var bytes: List[UInt8] = [120, 44, 115, 10, 49, 44, 255, 10]
-    _write(path, String(unsafe_from_utf8=bytes^))
+    _write(path, String(unsafe_from_utf8=bytes))
     var schema = CsvSchema([CsvField.int64("x"), CsvField.string("s")])
     with assert_raises():
         _ = read_csv(path, schema)

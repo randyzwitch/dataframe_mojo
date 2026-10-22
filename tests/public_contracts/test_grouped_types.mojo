@@ -356,7 +356,7 @@ def _flags(n: Int) raises -> DataFrame:
     return DataFrame(
         [
             Series("g", Column[Int64](groups^)),
-            Series("b", Column[Bool](values^, valid^)),
+            Series("b", Column[Bool](values^, valid)),
         ]
     )
 
