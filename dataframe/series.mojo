@@ -1851,7 +1851,7 @@ struct _KeyBucketSortJob(Job):
 
 
 # Threadripper 3970X, 32 workers, Mojo 1.2; full sweep in
-# docs/sort-cutoffs.md. At 100k rows, 64/65/128/256 values all win;
+# docs/design/sort-cutoffs.md. At 100k rows, 64/65/128/256 values all win;
 # at 65k, 512 is marginal and 1024 loses. Bound the histogram to 2 KiB
 # and amortize each bucket's allocation/job over at least 128 rows (8,192 rows / 64 values still win on M1).
 comptime _BUCKET_MAX_VALUES = 256

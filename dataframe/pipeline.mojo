@@ -1,4 +1,4 @@
-"""Thread-owned pipelines over morsels (docs/executor-design.md, #538).
+"""Thread-owned pipelines over morsels (docs/design/executor-design.md, #538).
 
 A pipeline is a source, a list of row-local steps and a sink. Every worker
 thread runs the whole pipeline on the morsels it takes from the source's

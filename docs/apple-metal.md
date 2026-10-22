@@ -498,8 +498,8 @@ execution supports them.
 
 The existing `bench_accelerator_cost` runner/fitter collects complete CPU/GPU
 materialization times and validates parity outside timing. Raw samples alone
-are not deployable calibration. See [benchmark rules](benchmarks.md) and
-[development measurements](apple-metal-benchmarks.md).
+are not deployable calibration. See [benchmark rules](design/benchmarks.md) and
+[development measurements](design/apple-metal-benchmarks.md).
 
 ## Remaining CPU coverage
 
@@ -523,7 +523,7 @@ ordinary scalars broadcast, while differing distribution lengths raise.
 ## Engine performance overhaul
 
 The current replacement status and the retirement gates are tracked in the
-[Metal replacement-coverage matrix](apple-metal-replacement-coverage.md).
+[Metal replacement-coverage matrix](design/apple-metal-replacement-coverage.md).
 
 The CPU and Metal engines should select the same families of algorithms,
 with implementations appropriate to their hardware. The CPU already has

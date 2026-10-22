@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit be283d9d (2026-10-15); they are a record of that decision, not current numbers.
+
 # Parquet row-group streaming (#277)
 
 `read_parquet` imports one selected row group at a time through Arrow's C

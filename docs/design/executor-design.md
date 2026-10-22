@@ -246,4 +246,4 @@ runs of the queries named; the full tier at the checkpoints of #491.
 5. **Remove the old paths** that no plan reaches, and the trace paths
    with them; the coverage table in the report shows what remains.
 
-Each stage's numbers go into `docs/benchmarks.md` and the epic.
+Each stage's numbers go into `docs/design/benchmarks.md` and the epic.

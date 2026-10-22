@@ -42,7 +42,7 @@ from std.sys import CompilationTarget, num_physical_cores, size_of
 # Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
 # expressions on M1 but makes cheap counts 5-7x slower and oversubscribed
 # grouping 4x slower. Keep the shared 64k floor; per-operation tuning is
-# separate. See docs/worker-calibration.md.
+# separate. See docs/design/worker-calibration.md.
 comptime MIN_ROWS_PER_WORKER = 65536
 
 # pthread_mutex_t and pthread_cond_t are opaque and platform-sized (up to 64
@@ -96,7 +96,7 @@ def _pool_spin_limit(participants: Int) -> Int:
     # M1 (4P+4E), Mojo 1.2: at 8 workers, 1M-row merge sort improves
     # 49 -> 43 ms with no spin; at 16, 100k rows improve 27 -> 3 ms.
     # Four workers still benefit from spinning (3.7 -> 3.1 ms).
-    # Threadripper and M1 sweeps: docs/worker-calibration.md (#273).
+    # Threadripper and M1 sweeps: docs/design/worker-calibration.md (#273).
     return 0 if participants > cores else _SPIN_LIMIT
 
 

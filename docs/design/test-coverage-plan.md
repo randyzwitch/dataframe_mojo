@@ -80,7 +80,7 @@ pixi run -e oracle test-interchange-oracles
 
 The runner discovers test functions automatically. Named `--contracts` groups
 select modules by their `# contract-group:` markers, which
-[suite_policy.mojo](../tests/tooling/suite_policy.mojo) reads;
+[suite_policy.mojo](../../tests/tooling/suite_policy.mojo) reads;
 they are a convenience for running related tests, not a coverage ledger.
 Default `--packaging areas` isolates areas and continues after failures.
 `--packaging combined` explicitly shares an executable. Logs and run metadata

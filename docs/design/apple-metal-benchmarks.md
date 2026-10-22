@@ -1,3 +1,5 @@
+Measurements in this note were taken at commit 51c40c90 (2026-10-20); they are a record of that decision, not current numbers.
+
 # Measuring Apple Metal development mechanisms
 
 `benchmarks/bench_metal.mojo` and `benchmarks/tools/bench_metal.py` compare the existing
