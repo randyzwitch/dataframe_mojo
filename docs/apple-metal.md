@@ -616,9 +616,10 @@ It builds the provider for a CPU-only target, probes the device
 Parquet reader, then runs every contract group that has a module marked
 `# requires: metal` or `# requires: mojo_gpu`, with both capabilities. It
 then runs the integrated query contracts, independent oracles, the hash and
-grouped integer programs, and kernel checks for the statistics, quantile,
-window schedule and wide integer paths the benchmark queries use. It reports
-every failed step at the end. Those last steps can also run alone, with the
+grouped integer programs, kernel checks for the statistics, quantile,
+window schedule and wide integer paths the benchmark queries use, and CPU
+checks of the Metal suite's answer exports and diagnostics. It reports every
+failed step at the end. Those last steps can also run alone, with the
 pinned environment:
 
 ```sh
@@ -628,6 +629,7 @@ pixi run --locked -e gpu test-mojo-gpu-decimal
 pixi run --locked -e gpu test-mojo-gpu-integer
 pixi run --locked -e gpu test-mojo-gpu-grouping
 pixi run --locked -e gpu test-mojo-gpu-kernels
+pixi run --locked -e gpu test-metal-suite-checks
 ```
 
 The independent integer oracle uses Python arbitrary-precision arithmetic:
