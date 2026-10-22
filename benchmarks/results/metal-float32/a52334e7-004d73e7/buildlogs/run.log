@@ -1,0 +1,9 @@
+START float32-baseline-smoke
+STATUS float32-baseline-smoke 0
+AUDIT /Users/randyzwitch/GitHub/dataframe_mojo-metal-float32-benchmark/build/float32-baseline-smoke/results.json 6 workers; 0 failed
+START float32-candidate-smoke
+STATUS float32-candidate-smoke 0
+AUDIT /Users/randyzwitch/GitHub/dataframe_mojo-metal-paired-float32/build/float32-candidate-smoke/results.json 6 workers; 0 failed
+START float32-paired
+STATUS float32-paired 0
+AUDIT /Users/randyzwitch/GitHub/dataframe_mojo-metal-paired-float32/build/float32-paired/results.json 72 workers; 0 failed

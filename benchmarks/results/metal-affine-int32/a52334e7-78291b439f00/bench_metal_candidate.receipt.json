@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "built_at_utc": "2026-10-19T22:50:49.914921+00:00",
+  "binary_path": "/Users/randyzwitch/github/dataframe_mojo-metal-868-fused-int32-bench/build/paired-a52334e7-78291b439f00/bench_metal_candidate",
+  "binary_sha256": "694d53123b7ff01b857175cd989bf746556cf1a38283121dba88155aabe0afd0",
+  "build_command": [
+    "mojo",
+    "build",
+    "-O3",
+    "-I",
+    ".",
+    "benchmarks/bench_metal.mojo",
+    "-o",
+    "/Users/randyzwitch/github/dataframe_mojo-metal-868-fused-int32-bench/build/paired-a52334e7-78291b439f00/bench_metal_candidate"
+  ],
+  "git_commit": "78291b439f004ec27519d3e1273ed84abff07ca4",
+  "git_status": "M benchmarks/bench_metal.mojo\n M benchmarks/tools/bench_metal.py",
+  "engine_status": "",
+  "engine_content_sha256": "c22f832b624b8eae173fdfcb235d961fd5f5b01c2a9ab66ba90258debde2b542",
+  "engine_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "compiler_identity": "Mojo 1.2.0.dev2026100905 (3b71af75)",
+  "build_platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "build_sdk": "26.5",
+  "build_xcode": "Xcode 26.6\nBuild version 17F113",
+  "compiler_executable": "/Users/randyzwitch/github/dataframe_mojo-metal-868/.pixi/envs/oracle/bin/mojo",
+  "compiler_executable_sha256": "ac42575fdf41cd8ced537812c20cbdda361223434ba90c866c6c42007df1a37b",
+  "pixi_lock_sha256": "098d02ba4d166a75640ed6b96aab77fdfe6cb468eded7838f23bba244496e277",
+  "benchmark_source_sha256": "383b12bbc2906d0f345617bb23bae1ba0b38142cdfb8c2cc52e6611a238b3864",
+  "driver_source_sha256": "16996036fc761f19d323b09e7c971c112c464e4680ad6d8158fe87c55e639aad",
+  "compile_flags": [
+    "-O3",
+    "-I",
+    "."
+  ],
+  "powerconditions": {
+    "battery": {
+      "status": "available",
+      "returncode": 0,
+      "output": "Now drawing from 'AC Power'"
+    },
+    "thermal": {
+      "status": "available",
+      "returncode": 0,
+      "output": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+    }
+  }
+}

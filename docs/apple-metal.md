@@ -497,6 +497,9 @@ ordinary scalars broadcast, while differing distribution lengths raise.
 
 ## Engine performance overhaul
 
+The current replacement status and the retirement gates are tracked in the
+[Metal replacement-coverage matrix](apple-metal-replacement-coverage.md).
+
 The CPU and Metal engines should select the same families of algorithms,
 with implementations appropriate to their hardware. The CPU already has
 bounded-domain aggregation, partitioned hash aggregation, bounded top-k,

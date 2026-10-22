@@ -1,0 +1,47 @@
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/runtime.mojo:288:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/decimal_sum_receipts.mojo:54:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/decimal_sum_bounds.mojo:152:32: warning: assignment to 'candidate' was never used; assign to '_' instead?
+        var candidate = unknown()
+                               ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/dag_runtime.mojo:677:39: warning: assignment to 'readback_ns' was never used; assign to '_' instead?
+                    var readback_ns = 0
+                                      ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:333:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/dag_runtime.mojo:678:37: warning: assignment to 'result_ns' was never used; assign to '_' instead?
+                    var result_ns = 0
+                                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:332:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/runtime.mojo:3485:40: warning: assignment to 'fault_zeroed' was never used; assign to '_' instead?
+                        fault_zeroed = True
+                                       ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/runtime.mojo:1652:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/typed_runtime.mojo:163:22: warning: assignment to 'staging_ns' was never used; assign to '_' instead?
+    var staging_ns = 0
+                     ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/runtime.mojo:1652:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/typed_runtime.mojo:164:21: warning: assignment to 'submit_ns' was never used; assign to '_' instead?
+    var submit_ns = 0
+                    ^
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/tooling/mojo_gpu_fused_float32_sum.mojo:3:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/tests/execution_modes/test_mojo_gpu_fused_float32_sum.mojo:8:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/metal.mojo:332:
+Included from /Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/runtime.mojo:1438:
+/Users/randyzwitch/GitHub/dataframe_mojo-metal-oct20-float32-cache/dataframe/accelerator/gpu/wide_integer_runtime.mojo:258:22: warning: assignment to 'offset' was never used; assign to '_' instead?
+        var offset = 0
+                     ^
