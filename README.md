@@ -21,7 +21,7 @@ preview = ["pixi-build"]
 
 [dependencies]
 mojo = ">=1.2,<1.3"
-dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.2.0" }
+dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.3.0" }
 ```
 
 ```mojo
@@ -65,6 +65,11 @@ The original sales example prints:
 east 90.0
 west 180.0
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test and send a change,
+and [ROADMAP.md](ROADMAP.md) for where the project is going.
 
 ## Expressions
 

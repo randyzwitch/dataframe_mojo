@@ -1,0 +1,42 @@
+name: Bug report
+description: Wrong result, crash or error
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit, and the Mojo version.
+      placeholder: v0.3.0, Mojo 1.2.0.dev2026102105
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, CPU, and whether Metal or another accelerator was on.
+      placeholder: Linux x86-64; macOS arm64 with engine="auto"
+    validations:
+      required: true
+  - type: textarea
+    id: code
+    attributes:
+      label: Minimal code
+      description: The smallest program that shows the problem.
+      render: mojo
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What Polars and DuckDB return for the same input.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What this library returns, or the error message.
+    validations:
+      required: true

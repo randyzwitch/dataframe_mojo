@@ -1,0 +1,41 @@
+name: Performance report
+description: A query that is slower than Polars or DuckDB
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: query
+    attributes:
+      label: Query
+      description: The code or SQL, and the shape of the data.
+      render: mojo
+    validations:
+      required: true
+  - type: input
+    id: suite
+    attributes:
+      label: Suite
+      description: Benchmark suite and query number, if it comes from one.
+      placeholder: TPC-DS q30
+  - type: textarea
+    id: timings
+    attributes:
+      label: Timings
+      description: Median time for this library, Polars and DuckDB, and how many runs.
+      placeholder: |
+        this library: 120 ms
+        Polars: 60 ms
+        DuckDB: 70 ms
+    validations:
+      required: true
+  - type: input
+    id: threads
+    attributes:
+      label: Threads
+      description: DATAFRAME_THREADS and the thread count given to the other engines.
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: CPU, memory, OS, and the CPU frequency governor.
+    validations:
+      required: true
