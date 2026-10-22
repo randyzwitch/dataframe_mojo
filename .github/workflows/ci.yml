@@ -49,6 +49,8 @@ jobs:
         run: |
           pixi run docs
           git diff --exit-code docs/api.md
+      - name: Check no evidence files
+        run: bash scripts/check_no_evidence_files.sh
 
   native-linux:
     runs-on: ubuntu-latest

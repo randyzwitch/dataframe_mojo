@@ -87,11 +87,11 @@ precision failure.
 
 ## M1 development run, 2026-10-10
 
-The [complete report](../benchmarks/results/apple-metal-m1-20261010/results.md)
-and [raw record](../benchmarks/results/apple-metal-m1-20261010/results.json)
+The [complete report](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-m1-20261010/results.md)
+and [raw record](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-m1-20261010/results.json)
 retain 252 successful processes: seven workloads, three row counts, three data
 variants, two native builds, and two rounds, with seven warm samples per engine
-per process. The earlier [initial smoke record](../benchmarks/results/apple-metal-m1-20261010/initial-smoke.json)
+per process. The earlier [initial smoke record](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-m1-20261010/initial-smoke.json)
 retains the three unsupported 65-node expressions described above. The corrected
 21-case smoke matrix and all full-run cases passed exact CPU-reference checks.
 
@@ -132,14 +132,14 @@ GPU-win claim and no automatic-selection threshold derived from this matrix.
 
 ## Filtered reductions and gather liveness, M1, 2026-10-10
 
-The [filtering report](../benchmarks/results/apple-metal-filter-m1-20261010/results.md)
-and [raw record](../benchmarks/results/apple-metal-filter-m1-20261010/results.json)
+The [filtering report](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-filter-m1-20261010/results.md)
+and [raw record](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-filter-m1-20261010/results.json)
 retain 72 successful processes: three workloads, two row counts, three data
 variants, two native builds, and two rounds with seven warm samples per engine.
 All measured outputs passed exact CPU-reference checks. The same optimized
 runner and CPU engine compare the resident runtime before and after predicate
 reductions and gather liveness; both native builds already include buffer reuse.
-The [source manifest](../benchmarks/results/apple-metal-filter-m1-20261010/source-manifest.json)
+The [source manifest](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/benchmarks/results/apple-metal-filter-m1-20261010/source-manifest.json)
 identifies the modified engine and both native sources. Raw process stdout is
 retained beside the report. First-use measurements remain separate in the JSON.
 

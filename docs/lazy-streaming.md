@@ -30,7 +30,7 @@ with order alternated, at 4/8/16 configured workers and 65,536 rows per batch.
 `wait4` reports peak process RSS, including runtime and retained allocator
 pages; this is not an allocation count. Files are reused, so these are warm
 filesystem-cache measurements, not cold-disk throughput. Medians are below;
-[all samples](lazy-streaming.csv) are committed.
+[all samples](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/lazy-streaming.csv) are committed.
 
 The driver waits for detected Mojo compiler activity and discards a run if
 it detects compilation afterward. It cannot exclude all background work;

@@ -1,3 +1,0 @@
-Native Metal ABI and pure request validation: PASS
-Native Metal metadata-only probe and exact plan cache state: PASS
-Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS

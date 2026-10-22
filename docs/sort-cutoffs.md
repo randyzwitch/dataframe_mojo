@@ -97,7 +97,7 @@ paired runs (about 2.9 vs 3.2 ms) but loses in the final run above. The
 100k/four-word/25%-hot case is 3.54 → 3.90 ms. These are not uniformly
 faster dispatch rules. The large new-domain gains are much more substantial;
 all final samples, including losses, are retained in the
-[companion CSV](sort-cutoffs.csv). Linux rows in that CSV are forced-kernel
+[companion CSV](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/sort-cutoffs.csv). Linux rows in that CSV are forced-kernel
 calibration; `mac-validation-8` is the final production-policy comparison.
 Worker-pool calibration and its separate spin change belong to #273.
 

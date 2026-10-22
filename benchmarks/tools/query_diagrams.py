@@ -177,7 +177,7 @@ def build_catalog(work, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=data_root())
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/query-diagrams.html")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/query-diagrams.html")
     parser.add_argument("--from-json", type=Path, help="Rerender a previously captured catalog without Mojo or data")
     args = parser.parse_args()
     work = ROOT / "build/query-plans"
@@ -195,7 +195,7 @@ def main():
     template = (ROOT / 'benchmarks/tools/query_diagrams.html').read_text()
     data = json.dumps(payload).replace('<', '\\u003c').replace('&', '\\u0026')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    vendor = ROOT / 'docs/vendor'
+    vendor = ROOT / "benchmarks/tools/vendor"
     destination = args.output.parent / 'vendor'
     if destination.resolve() != vendor.resolve():
         shutil.copytree(vendor, destination, dirs_exist_ok=True)

@@ -105,7 +105,7 @@ Times below are medians in milliseconds; ratios are Mojo / Polars.
 | grouped | forward | 416.7 | 97.3 | 4.28× |
 | grouped | nearest | 548.5 | 138.0 | 3.97× |
 
-[Raw measurements and machine information](asof-benchmark-results.json) include
+[Raw measurements and machine information](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/docs/asof-benchmark-results.json) include
 all repetitions. This was a development workstation run with other compilation
 work active, not an isolated performance baseline. The nullable variant checks
 non-null key ordering outside Polars' timer and disables its sortedness check,

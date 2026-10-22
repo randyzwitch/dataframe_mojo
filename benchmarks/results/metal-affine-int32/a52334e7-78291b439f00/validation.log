@@ -1,7 +1,0 @@
-VALIDATION OK: 180/180 unique run keys
-All runs: status=ok, validated=true, complete output, 3 timed repetitions, first-use CPU+Metal present
-Build receipts: baseline=verified, mojo=verified; engine/dataframe source trees clean
-Runtime counts: {'mojo': 90, 'baseline': 90}
-Rows/workloads/variants/rounds: [4097, 1048576] ['int32_affine_sum', 'filtered_int32_affine_sum', 'projection', 'expression15', 'filter_half'] ['base', 'sorted', 'nulls'] 3
-Candidate warm median CPU faster than Metal: 30/30 case cells
-Output cardinalities stable across runtimes/rounds: 30 case cells

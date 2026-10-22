@@ -43,6 +43,9 @@ useful going forward, while acknowledging prior exposure.
    loading is untimed; every timed run materializes the full result; answers
    are checked against DuckDB; ratios use geometric means; wrong answers and
    unsupported queries are counted, never dropped.
+7. **The repo holds code that produces reports, never the reports.** Result
+   dumps, CSVs and generated pages stay out of the tree (link a commit
+   permalink instead); `scripts/check_no_evidence_files.sh` enforces this in CI.
 
 Rules 3 to 6 apply to both tiers. The quick tier makes them cheap enough to
 follow on every change; the full tier is what a report cites.
@@ -146,7 +149,7 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
-The [completed M1 forced-Metal development baseline](../benchmarks/results/metal-development-baseline/50137ecc-m1-20261020/)
+The [completed M1 forced-Metal development baseline](https://github.com/randyzwitch/dataframe_mojo/tree/892b3626964719109af740703ee719b119bdc879/benchmarks/results/metal-development-baseline/50137ecc-m1-20261020/)
 retains 1,812 worker records across 302 cases, exact correctness receipts, raw
 logs and a hash verifier. Only 210 cases qualify for CPU/Metal timing ratios;
 unsupported and unverified cases remain visible. This is development-scale
@@ -203,7 +206,7 @@ checks those recorded identity fields; host hardware and runtime conditions
 remain separate recorded context.
 
 The paired native Int64/UInt64 run is archived at
-[`benchmarks/results/metal-native64/a52334e7-52efeb3a/`](../benchmarks/results/metal-native64/a52334e7-52efeb3a/).
+[`benchmarks/results/metal-native64/a52334e7-52efeb3a/`](https://github.com/randyzwitch/dataframe_mojo/tree/892b3626964719109af740703ee719b119bdc879/benchmarks/results/metal-native64/a52334e7-52efeb3a/).
 It compares baseline engine `a52334e758b7138c547883eb776d744442a1a0db` with
 candidate `52efeb3ab784c8949366870b7cd6b007b3bf77f9`, using benchmark and driver
 file contents matching commit
@@ -223,7 +226,7 @@ not rerun as all-green. See `summary.md` for the paired table and `validation/`
 for qualification details.
 
 The grouped integer candidate comparison is archived at
-[`benchmarks/results/metal-group-integer/a52334e7-0a9297c3/`](../benchmarks/results/metal-group-integer/a52334e7-0a9297c3/).
+[`benchmarks/results/metal-group-integer/a52334e7-0a9297c3/`](https://github.com/randyzwitch/dataframe_mojo/tree/892b3626964719109af740703ee719b119bdc879/benchmarks/results/metal-group-integer/a52334e7-0a9297c3/).
 It retains 234 validated workers across frozen-baseline and #865-intermediate
 comparisons. The candidate improves all warm cases over the frozen baseline,
 but is about 7% slower than #865 on two large non-null uniform cases while
@@ -335,10 +338,12 @@ needed decimal `fill_null` (#465).
 
 ## Query diagrams
 
-Open [the query explorer](query-diagrams.html) in a browser to choose a
+Run `python3 benchmarks/tools/query_diagrams.py` to build the query explorer
+at `build/query-diagrams.html`, then open it in a browser to choose a
 suite and query. It includes all 179 query IDs, including untranslated
 TPC-DS queries, with Mermaid diagrams, query source, zoom controls, and
-Mermaid/SVG downloads. The renderer is bundled in `docs/vendor`, so the explorer works offline.
+Mermaid/SVG downloads. The renderer is bundled in `benchmarks/tools/vendor`
+and copied beside the output, so the explorer works offline.
 Keep the HTML file and its `vendor` folder together when copying it.
 
 For lazy suites, compare `explain(optimize=False)` with `explain()`.
