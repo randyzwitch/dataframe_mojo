@@ -1,4 +1,0 @@
-PASS profile region schema union and optional metrics
-PASS native join followed by scalar SUM profile
-PASS host phase attribution and mixed report schemas
-PASS resident results, immutable branches, exports and budgets

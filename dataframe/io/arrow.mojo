@@ -1138,7 +1138,7 @@ comptime _ARROW_IMPORT_MIN_CELLS = 2_000_000
 def _arrow_import_workers(rows: Int, columns: Int) -> Int:
     # M1 4/8/16-worker sweeps found no copy win; eight workers regressed
     # standalone 10M x 8 imports from 22 to 29 ms. Keep macOS serial until
-    # another Mac demonstrates a useful crossover. See docs/arrow-import.md.
+    # another Mac demonstrates a useful crossover. See docs/design/arrow-import.md.
     comptime if CompilationTarget.is_macos():
         return 1
     return min(columns, worker_count(rows))

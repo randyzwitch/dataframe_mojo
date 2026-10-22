@@ -1,3 +1,0 @@
-/var/folders/52/wl2rr05s3xgd8jy28j0_7bhm0000gn/T/dataframe-package-uy4t4fvk/dataframe/execution.mojo:1706:21: warning: assignment to 'column_at' was never used; assign to '_' instead?
-/var/folders/52/wl2rr05s3xgd8jy28j0_7bhm0000gn/T/dataframe-package-uy4t4fvk/dataframe/lazy.mojo:844:27: warning: assignment to 'exprs' was never used; assign to '_' instead?
-Wrote case manifest only; pass --collect with an identified provider binary to measure.

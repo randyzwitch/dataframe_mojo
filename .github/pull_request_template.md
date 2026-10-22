@@ -4,7 +4,7 @@
 
 ## Performance claims (delete if none)
 
-See docs/benchmarks.md.
+See docs/design/benchmarks.md.
 
 - [ ] Measured on the external suites (`benchmarks/tools/bench_suites.py`), not only on an in-repo micro-benchmark.
 - [ ] Reported the worst data variant, not only the base case.

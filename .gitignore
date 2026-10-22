@@ -20,3 +20,6 @@ dist/
 # Profiler output (perf, Instruments)
 perf.data*
 *.trace
+
+# Local benchmark runs (reports are never committed)
+/benchmarks/results/

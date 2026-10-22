@@ -1,3 +1,0 @@
-# Preserve exact compiler output, including whitespace-only diagnostic lines.
-validation/*.log -whitespace
-buildlogs/*.log -whitespace

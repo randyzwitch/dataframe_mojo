@@ -14,7 +14,7 @@ from dataframe.accelerator.joins import DagTask, DAG_JOIN
 from dataframe.execution_report import ExecutionReport
 from .grouping import key_equal
 from . import hash_grouping
-from .runtime import _kind, _checked_add, _checked_mul, _width
+from .runtime import _kind, _checked_add, _checked_mul
 from .typed_storage import (
     NativeColumnAny,
     NativeColumn,
@@ -532,35 +532,6 @@ def _scratch_bytes(
     return _checked_add(bytes, 2 * (j.METADATA_WORDS * 8 + 4) + 4 + 2)
 
 
-def _upper_rows(task: DagTask, probe: Int, build: Int) raises -> Int:
-    var upper = 0
-    if task.how == 4 or task.how == 5:
-        upper = probe
-    else:
-        upper = _checked_mul(probe, build)
-        if task.how == 1 or task.how == 2 or task.how == 3 or task.how == 7:
-            upper = max(upper, probe)
-        if task.how == 3:
-            upper = _checked_add(upper, build)
-    if task.limit >= 0:
-        upper = min(upper, task.limit)
-    return min(upper, Int(Int32.MAX))
-
-
-def _output_bytes_upper(task: DagTask, rows: Int) raises -> Int:
-    var bytes = 0
-    for field in task.fields:
-        var width = _width(field.dtype)
-        if width <= 0:
-            raise Error("Mojo GPU native hash join output width is unsupported")
-        bytes = _checked_add(bytes, _checked_mul(rows, width))
-        # Upper-bound sidecars before pair generation reveals whether either
-        # side can be absent or contains nullable/error-bearing values.
-        bytes = _checked_add(bytes, _checked_add(rows, 7) // 8)
-        bytes = _checked_add(bytes, _checked_mul(rows, size_of[UInt32]()))
-    return bytes
-
-
 def _native_column_index(
     table: Table, frame: DataFrame, field: Int
 ) raises -> Int:
@@ -624,25 +595,10 @@ def try_execute(
     var capacity = hash_grouping.capacity(build_rows)
     var full = task.how == 3
     var scratch_bytes = _scratch_bytes(probe_rows, build_rows, capacity, full)
-    var upper_rows = _upper_rows(task, probe_rows, build_rows)
-    var upper_maps = _checked_mul(max(1, upper_rows), 2 * size_of[UInt32]())
-    var upper_output = _output_bytes_upper(task, upper_rows)
-    var current = scope.info()[0]
-    var budget = scope.info()[2]
-    if budget >= 0:
-        var conservative = _checked_add(
-            current,
-            _checked_add(
-                raw_bytes,
-                _checked_add(
-                    scratch_bytes,
-                    _checked_add(upper_maps, upper_output),
-                ),
-            ),
-        )
-        if conservative > budget:
-            return Attempt(False, None, None)
-        _ = scope.check(conservative - current)
+    # Uploads and hash scratch are exact before any allocation. Row maps and
+    # gathered output are checked at their counted sizes below, so the budget
+    # fails inside this join instead of choosing a different algorithm.
+    _ = scope.check(_checked_add(raw_bytes, scratch_bytes))
 
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
@@ -712,7 +668,6 @@ def try_execute(
                 right_table.offset,
                 right_table.rows,
             )
-            ^
         )
     except error:
         scope.synchronize()
@@ -996,7 +951,7 @@ def try_execute(
             scope,
             right_table,
             task.schema.copy(),
-            output_fields^,
+            output_fields,
             left_map,
             right_map,
         )

@@ -187,4 +187,4 @@ The adapter reports missing optional engines or an absent compatible Spatial
 extension as unavailable and attempts no extension download; semantic or loading
 errors for available engines fail. An unavailable engine is not passing
 interoperability evidence. See [the testing guide](testing.md) and
-[coverage guide](test-coverage-plan.md) for validation scope and test design.
+[coverage guide](design/test-coverage-plan.md) for validation scope and test design.

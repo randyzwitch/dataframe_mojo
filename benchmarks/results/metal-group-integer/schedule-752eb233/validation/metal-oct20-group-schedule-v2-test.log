@@ -1,6 +1,0 @@
-PASS normal grouped plan certificate
-PASS mixed keys, reducers and nullable layouts
-PASS key representatives and compositions
-PASS exact wide totals, argument positions and overflow
-PASS parallel grouped integers, budgets and generic consumers
-PASS hash grouping admission, representatives and fallback

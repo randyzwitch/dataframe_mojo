@@ -30,8 +30,8 @@ LEGACY_NOTE = (
 
 # A documented lower bound on exposure, not a claim about the first exposure.
 EXPOSURE_EVIDENCE = {
-    "h2o_groupby": "docs/benchmarks.md already designates H2O as development",
-    "h2o_join": "docs/benchmarks.md already designates H2O as development",
+    "h2o_groupby": "docs/design/benchmarks.md already designates H2O as development",
+    "h2o_join": "docs/design/benchmarks.md already designates H2O as development",
     "pdsh": "dataframe/lazy.mojo join ordering and streaming policy cite PDS-H queries; development since 2026-10-05",
     "tpcds": "held out from 2026-10-05; development since 2026-10-15",
     "clickbench": "dataframe/lazy.mojo group-by policy cites ClickBench per-query timings",
