@@ -43,8 +43,9 @@ combinations in that test remain unvalidated.
 
 Hardware omissions are recorded as `SKIP(capability)`. Enable actual Metal checks
 with `--capabilities metal` after probing the native device. An enabled test fails
-if its prerequisites are absent. macOS CI runs the native contracts when a device
-is exposed. Extreme Date fields are checked against an independent Int128
+if its prerequisites are absent. Hosted macOS CI has no usable Metal device;
+`scripts/test_metal_local.sh` runs the native contracts on an Apple silicon
+Mac. Extreme Date fields are checked against an independent Int128
 Gregorian model across the signed day-storage domain.
 Multiworker global positional reductions also remain a known
 limit: deterministic FIRST/LAST/ARGMIN/ARGMAX assertions currently use one worker

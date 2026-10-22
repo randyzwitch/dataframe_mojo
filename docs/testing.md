@@ -39,7 +39,9 @@ executable when that packaging is useful for investigation.
 Test functions are discovered automatically. `--contracts` selects named module
 groups; it does not require assigning every test to a coverage registry.
 
-Native Metal contracts execute in macOS CI when a device is exposed. Extreme
+Native Metal contracts run on a local Apple silicon Mac through
+`scripts/test_metal_local.sh`; hosted macOS runners expose no usable Metal
+device, so CI reports those contracts as capability skips. Extreme
 Date calendar fields are checked against an independent Int128 Gregorian model
 on CPU and Metal, including the complete signed day-storage endpoints.
 Capability skips do not establish GPU parity. Multiworker positional global
@@ -130,12 +132,17 @@ not aggregate concurrent memory. GitHub's job timestamps remain the source
 for setup/cache time and queue delay. Compare elapsed time and runner minutes
 separately, and compare native-cache hits with hits (misses with misses).
 
-Linux and macOS run `pixi run test` after building the native Parquet library
-and checking its exported ABI. Independent consumers then validate the actual
-writer artifacts with `pixi run -e oracle test-interchange-oracles`. Runner
-failure handling, formatting, version consistency, public
-docstrings and Python production-tool checks run separately. Compilation cost
-does not constrain semantic coverage.
+Each contract area is one compiled program, and compiling dominates the suite
+(6 to 13 minutes per program on a 64-core machine against 90 seconds of test
+execution in total), so CI runs the areas as parallel jobs:
+`pixi run test --areas AREA` once per area on Linux, after the native Parquet
+library is built once and its exported ABI checked. The `interchange` job then
+validates the actual writer artifacts with
+`pixi run -e oracle test-interchange-oracles`. On pull requests macOS runs the
+`public` and `interchange` areas; pushes to main, the nightly schedule and
+manual runs cover every area there. Runner failure handling, formatting,
+version consistency, public docstrings and Python production-tool checks run
+separately. Compilation cost does not constrain semantic coverage.
 
 Query-answer CI uses `bench_suites.py --correctness-only`: each selected query
 runs once per engine and variant, with no timed repetitions, trace reruns,
@@ -148,22 +155,21 @@ from performance results. Normal benchmark commands keep their existing behavior
 
 ### Independent required jobs
 
-Fast checks, Linux contracts, macOS contracts, and two query-answer
-jobs run independently. One Linux job restores/builds `libdfparquet` and
-publishes it for the Linux consumers, avoiding multiple cold native builds.
-macOS restores/builds its own library and does not wait for Linux.
+Fast checks, one Linux job per contract area, one macOS job per selected
+area, and two query-answer jobs run independently. One Linux job
+restores/builds `libdfparquet` and publishes it for the Linux consumers,
+avoiding multiple cold native builds. Each macOS job restores/builds its own
+library and does not wait for Linux.
 
-The existing `test (ubuntu-latest)` check aggregates every Linux job and
-fails for failed, cancelled, or skipped dependencies. `test (macos-latest)`
-continues to select the maintained macOS suite and independent interchange
-consumers. These workflow definitions are not evidence that a new macOS run has
-passed. Existing branch-protection names remain valid. Timing artifacts have
-unique names for every job.
+`test (ubuntu-latest)` aggregates every Linux job and `test (macos-latest)`
+every macOS area job; both fail for failed, cancelled, or skipped
+dependencies, so those two names are the ones to require. Timing artifacts
+have unique names for every job, including the area.
 
-The separate Native Metal workflow builds the runtime, checks its ABI and probes
-the device. It enables `--capabilities metal` only when that probe reports an
-actual device. An absent device leaves native witnesses explicitly skipped;
-broken runtime loading and enabled execution failures fail the job.
+Hosted runners cannot execute Metal contracts (their virtual GPU gives Metal
+buffers no device address), so there is no Metal CI job. A change under
+`dataframe/accelerator/` runs `scripts/test_metal_local.sh` on an Apple
+silicon Mac before its pull request is opened.
 
 Release validation builds the native Parquet library, runs the maintained suite
 and independent consumers, then checks
