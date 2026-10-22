@@ -396,6 +396,164 @@ def order_merge(
             b += 1
 
 
+def order_compact_runs(
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    target: Pointer[UInt32, MutAnyOrigin],
+    rows: UInt32,
+    run_width: UInt32,
+    keep_per_run: UInt32,
+    output_rows: UInt32,
+):
+    """Keep each sorted run's leading K indices in a compact array."""
+    var position = Int(global_idx.x)
+    if position >= Int(output_rows):
+        return
+    var run = position // Int(keep_per_run)
+    var within = position - run * Int(keep_per_run)
+    var source = run * Int(run_width) + within
+    if source < Int(rows):
+        target[unsafe_offset=position] = index[unsafe_offset=source]
+
+
+def order_merge_topk(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    target: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    start: UInt32,
+    keys: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    child_width: UInt32,
+    child_keep: UInt32,
+    parent_keep: UInt32,
+    slots: UInt32 = 0,
+    literals: Pointer[UInt64, ImmutAnyOrigin] = Pointer[UInt64, ImmutAnyOrigin](
+        unsafe_from_address=0
+    ),
+):
+    """Merge sorted runs while writing only each parent run's first K rows."""
+    var width = Int(child_width)
+    var cap = Int(parent_keep)
+    var tiles_per_pair = (cap + MERGE_TILE_ROWS - 1) // MERGE_TILE_ROWS
+    var tile_work = Int(block_idx.x)
+    var pair = tile_work // tiles_per_pair
+    var tile = tile_work % tiles_per_pair
+    var source_row_start = pair * 2 * width
+    var left_count = min(Int(child_keep), max(0, Int(rows) - source_row_start))
+    var right_count = min(
+        Int(child_keep), max(0, Int(rows) - source_row_start - width)
+    )
+    var left_start = pair * 2 * Int(child_keep)
+    var right_start = left_start + Int(child_keep)
+    var parent_rows = min(cap, Int(rows) - source_row_start)
+    var output_start = pair * cap
+    var tile_start = tile * MERGE_TILE_ROWS
+    if tile_start >= parent_rows:
+        return
+    var tile_end = min(tile_start + MERGE_TILE_ROWS, parent_rows)
+    var bounds = unsafe_stack_allocation[
+        4, DType.uint32, address_space=AddressSpace.SHARED
+    ]()
+    if thread_idx.x == 0:
+        var tile_left = _merge_corank(
+            tile_start,
+            left_start,
+            left_start + left_count,
+            right_start,
+            right_start + right_count,
+            index,
+            words,
+            validity,
+            code,
+            types,
+            start,
+            keys,
+            stride,
+            slots,
+            literals,
+        )
+        var tile_right = _merge_corank(
+            tile_end,
+            left_start,
+            left_start + left_count,
+            right_start,
+            right_start + right_count,
+            index,
+            words,
+            validity,
+            code,
+            types,
+            start,
+            keys,
+            stride,
+            slots,
+            literals,
+        )
+        bounds[unsafe_offset=0] = UInt32(tile_left[0])
+        bounds[unsafe_offset=1] = UInt32(tile_left[1])
+        bounds[unsafe_offset=2] = UInt32(tile_right[0])
+        bounds[unsafe_offset=3] = UInt32(tile_right[1])
+    barrier()
+    var a_start = left_start + Int(bounds[unsafe_offset=0])
+    var b_start = right_start + Int(bounds[unsafe_offset=1])
+    var a_end = left_start + Int(bounds[unsafe_offset=2])
+    var b_end = right_start + Int(bounds[unsafe_offset=3])
+    var lane_diagonal = Int(thread_idx.x) * (MERGE_TILE_ROWS // 256)
+    if lane_diagonal >= tile_end - tile_start:
+        return
+    var local = _merge_corank(
+        lane_diagonal,
+        a_start,
+        a_end,
+        b_start,
+        b_end,
+        index,
+        words,
+        validity,
+        code,
+        types,
+        start,
+        keys,
+        stride,
+        slots,
+        literals,
+    )
+    var a = a_start + local[0]
+    var b = b_start + local[1]
+    var remaining = min(
+        MERGE_TILE_ROWS // 256, tile_end - tile_start - lane_diagonal
+    )
+    for offset in range(remaining):
+        var from_a = False
+        if a < a_end:
+            if b >= b_end:
+                from_a = True
+            else:
+                from_a = order_less(
+                    index[unsafe_offset=a],
+                    index[unsafe_offset=b],
+                    words,
+                    validity,
+                    code,
+                    types,
+                    start,
+                    keys,
+                    stride,
+                    slots,
+                    literals,
+                )
+        target[
+            unsafe_offset=output_start + tile_start + lane_diagonal + offset
+        ] = index[unsafe_offset=a] if from_a else index[unsafe_offset=b]
+        if from_a:
+            a += 1
+        else:
+            b += 1
+
+
 @always_inline
 def _radix_digit(
     row: UInt32,
@@ -633,4 +791,48 @@ def order_gather(
         ]
         output_errors[unsafe_offset=base + row] = errors[
             unsafe_offset=base + source
+        ]
+
+
+def order_gather_topk(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    output_words: Pointer[UInt64, MutAnyOrigin],
+    output_validity: Pointer[UInt8, MutAnyOrigin],
+    output_errors: Pointer[UInt32, MutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    gathers: Pointer[Int64, ImmutAnyOrigin],
+    count: UInt32,
+    selected_rows: UInt32,
+    source_stride: UInt32,
+    output_stride: UInt32,
+    slots: UInt32 = 0,
+):
+    """Gather selected payload rows into a compact K-capacity matrix."""
+    var row = Int(global_idx.x)
+    if row >= Int(selected_rows):
+        return
+    var source = Int(index[unsafe_offset=row])
+    for column in range(Int(count)):
+        var source_base = Int(gathers[unsafe_offset=column]) * Int(
+            source_stride
+        )
+        var output_base = Int(gathers[unsafe_offset=column]) * Int(
+            output_stride
+        )
+        output_words[unsafe_offset=output_base + row] = words[
+            unsafe_offset=source_base + source
+        ]
+        if slots:
+            var source_high = Int(source_stride) * Int(slots)
+            var output_high = Int(output_stride) * Int(slots)
+            output_words[unsafe_offset=output_high + output_base + row] = words[
+                unsafe_offset=source_high + source_base + source
+            ]
+        output_validity[unsafe_offset=output_base + row] = validity[
+            unsafe_offset=source_base + source
+        ]
+        output_errors[unsafe_offset=output_base + row] = errors[
+            unsafe_offset=source_base + source
         ]
