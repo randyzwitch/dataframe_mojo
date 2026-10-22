@@ -2,6 +2,7 @@
 from .rows import RowPlan
 from dataframe.dtype import DataType
 from dataframe.expr import LEN
+from dataframe.checked_math import checked_add, checked_mul
 
 comptime ACCEL_THREADS = 256
 comptime ACCEL_MAX_BLOCKS = 1024
@@ -50,18 +51,6 @@ struct MemoryEstimate(Copyable):
             + " B; kernels="
             + String(self.launches)
         )
-
-
-def checked_add(a: Int, b: Int) raises -> Int:
-    if a < 0 or b < 0 or a > Int.MAX - b:
-        raise Error("Accelerator memory estimate overflows Int")
-    return a + b
-
-
-def checked_mul(a: Int, b: Int) raises -> Int:
-    if a < 0 or b < 0 or (b != 0 and a > Int.MAX // b):
-        raise Error("Accelerator memory estimate overflows Int")
-    return a * b
 
 
 def bitmap_bytes(rows: Int, offset: Int) raises -> Int:

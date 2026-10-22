@@ -97,7 +97,8 @@ from .accelerator.structs import (
     assemble as assemble_structs,
 )
 from .accelerator.metadata import schema_frame
-from .accelerator.cost import PlanEstimate, CalibrationKey
+from .accelerator.cost import CalibrationKey
+from .plan_types import PlanEstimate
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.joins import (
@@ -120,6 +121,41 @@ from .frame import DataFrame
 from .series import Series
 from .execution_settings import ExecutionSettings
 from std.time import perf_counter_ns
+from std.os import getenv
+
+
+def default_runtime() raises -> MetalRuntime:
+    """The runtime the default provider uses, configured from the environment."""
+    var device = 0
+    var limit = -1
+    var configured_device = getenv("DATAFRAME_ACCEL_DEVICE")
+    var configured_limit = getenv("DATAFRAME_ACCEL_MEMORY_LIMIT")
+    if configured_device:
+        device = Int(configured_device)
+        if device < 0:
+            raise Error("DATAFRAME_ACCEL_DEVICE must be nonnegative")
+    if configured_limit:
+        limit = Int(configured_limit)
+        if limit < 0:
+            raise Error("DATAFRAME_ACCEL_MEMORY_LIMIT must be nonnegative")
+    return MetalRuntime(device, memory_limit_bytes=limit)
+
+
+def calibration_runtime() raises -> MetalRuntime:
+    """Explicit runtime factory for the provider-neutral benchmark driver."""
+    return default_runtime()
+
+
+def calibration_key(
+    optimize: Bool, streaming: Bool, batch_size: Int
+) raises -> CalibrationKey:
+    """Provider metadata for the common calibration harness; no submission."""
+    return default_runtime().calibration_key(optimize, streaming, batch_size)
+
+
+def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
+    """Plan-time facts required by the provider-neutral calibration runner."""
+    return default_runtime().estimate_auto(plan)
 
 
 def metal_library_candidates() -> List[String]:

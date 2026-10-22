@@ -7,48 +7,10 @@ This module contains host metadata only and never imports a GPU owner/kernel.
 from std.memory import Pointer, ArcPointer
 from dataframe.column import Column
 from dataframe.dtype import DataType
-from .memory import checked_add, checked_mul
+from dataframe.checked_math import checked_add, checked_mul
+from dataframe.plan_types import CategoryOwner, CategoryField, TextField
 
 comptime TEXT_LITERAL = -2147483647
-
-
-@fieldwise_init
-struct CategoryOwner(Copyable):
-    """Exact CPU dictionary and immutable original scan code buffers.
-
-    Equal labels at distinct dictionary positions retain distinct identities.
-    The buffers preserve offsets, chunk boundaries and their original owners.
-    """
-
-    var dtype: DataType
-    var codes: List[Column[UInt32]]
-
-
-struct CategoryField(Copyable):
-    var owner: ArcPointer[CategoryOwner]
-    var string_codes: Bool
-
-    def __init__(
-        out self, owner: ArcPointer[CategoryOwner], string_codes: Bool = False
-    ):
-        self.owner = owner
-        self.string_codes = string_codes
-
-
-struct TextField(Copyable):
-    var name: String
-    var dtype: DataType
-    var category: Optional[CategoryField]
-
-    def __init__(
-        out self,
-        name: String,
-        dtype: DataType,
-        category: Optional[CategoryField] = None,
-    ):
-        self.name = name
-        self.dtype = dtype
-        self.category = category.copy()
 
 
 struct TextQuery(Movable):
