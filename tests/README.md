@@ -59,3 +59,11 @@ independent consumers; CI runs this separately.
 Every program under `tests/` must be run by the contract runner, CI, a pixi task
 or a documented script. `scripts/check_test_reachability.py` fails CI for any
 file in `tooling/`, `support/` or `tests/*.mojo` that nothing runs or imports.
+
+[COVERAGE.md](COVERAGE.md) maps every module under `dataframe/` to the contract
+groups whose tests import it by name, and lists the modules no test imports.
+That is a proxy: tests that go through the public API reach far more code than
+direct imports show. `tests/coverage_gaps.txt` is the list of known gaps;
+`scripts/check_module_coverage.py` fails CI for a new module with no direct
+import, for a listed module that now has one, and for a stale COVERAGE.md.
+Regenerate the map with `python3 scripts/check_module_coverage.py --write`.
