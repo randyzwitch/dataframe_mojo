@@ -2,6 +2,7 @@
 from dataframe.binding import bind
 from dataframe.execution import _WINDOW_BLOCK
 from dataframe.expr import (
+    node_children,
     Expr,
     RANK,
     OVER,
@@ -49,9 +50,8 @@ def isolated(expressions: List[Expr], schema: List[Series]) raises -> Bool:
                         continue
                     allowed[at] = True
                     ref child = bound.expr._nodes[at]
-                    for index in [child.left, child.right, child.extra]:
-                        if index >= 0:
-                            pending.append(index)
+                    for index in node_children(child):
+                        pending.append(index)
         var proven = proven_integer_nodes(bound)
         for at in range(len(bound.expr._nodes)):
             ref node = bound.expr._nodes[at]

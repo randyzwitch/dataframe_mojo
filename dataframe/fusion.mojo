@@ -15,6 +15,7 @@ from .dtype import DataType
 from .binding import BoundExpr
 from .bool_column import BoolColumn
 from .column import Column
+from .expr import node_children
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV
 from .series import Series
 
@@ -36,10 +37,8 @@ def _program(bound: BoundExpr, root: Int) -> List[_Step]:
         var i = root - reverse
         if keep[i]:
             ref node = bound.expr._nodes[i]
-            if node.left >= 0:
-                keep[node.left] = True
-            if node.right >= 0:
-                keep[node.right] = True
+            for child in node_children(node):
+                keep[child] = True
     var slot = List[Int](length=root + 1, fill=-1)
     var steps = List[_Step]()
     for i in range(root + 1):

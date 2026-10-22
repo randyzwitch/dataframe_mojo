@@ -65,6 +65,8 @@ from ._accel_provider import (
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     HORIZONTAL_ARGS,
+    node_children,
+    _set_node_children,
     split_names,
     ARG_MAX,
     ARG_MIN,
@@ -550,12 +552,8 @@ def _column_free(expr: Expr, root: Int) -> Bool:
             or is_window(node.op)
         ):
             return False
-        if node.left >= 0:
-            stack.append(node.left)
-        if node.right >= 0:
-            stack.append(node.right)
-        if node.op == WHEN and node.extra >= 0:
-            stack.append(node.extra)
+        for child in node_children(node):
+            stack.append(child)
     return True
 
 
@@ -709,18 +707,12 @@ def _emit_shared(
         out.append(col(names[text.value()])._nodes[0].copy())
         return len(out) - 1
     var copy = expr._nodes[i].copy()
-    if copy.left >= 0:
-        copy.left = _emit_shared(
-            expr, expr._nodes[i].left, seen, names, shared, taken, out
+    var children = node_children(copy)
+    for k in range(len(children)):
+        children[k] = _emit_shared(
+            expr, children[k], seen, names, shared, taken, out
         )
-    if copy.right >= 0:
-        copy.right = _emit_shared(
-            expr, expr._nodes[i].right, seen, names, shared, taken, out
-        )
-    if copy.op == WHEN and copy.extra >= 0:
-        copy.extra = _emit_shared(
-            expr, expr._nodes[i].extra, seen, names, shared, taken, out
-        )
+    _set_node_children(copy, children)
     out.append(copy^)
     return len(out) - 1
 
@@ -734,12 +726,10 @@ def _emit_replaced(
         out.append(replaced[i].copy())
         return len(out) - 1
     var copy = nodes[i].copy()
-    if copy.left >= 0:
-        copy.left = _emit_replaced(nodes, replaced, nodes[i].left, out)
-    if copy.right >= 0:
-        copy.right = _emit_replaced(nodes, replaced, nodes[i].right, out)
-    if nodes[i].op == WHEN and copy.extra >= 0:
-        copy.extra = _emit_replaced(nodes, replaced, nodes[i].extra, out)
+    var children = node_children(copy)
+    for k in range(len(children)):
+        children[k] = _emit_replaced(nodes, replaced, children[k], out)
+    _set_node_children(copy, children)
     out.append(copy^)
     return len(out) - 1
 
@@ -774,12 +764,10 @@ def _emit_folded(
         if value[node.right] == identity:
             return _emit_folded(nodes, value, node.left, out)
     var copy = node.copy()
-    if copy.left >= 0:
-        copy.left = _emit_folded(nodes, value, node.left, out)
-    if copy.right >= 0:
-        copy.right = _emit_folded(nodes, value, node.right, out)
-    if node.op == WHEN and copy.extra >= 0:
-        copy.extra = _emit_folded(nodes, value, node.extra, out)
+    var children = node_children(copy)
+    for k in range(len(children)):
+        children[k] = _emit_folded(nodes, value, children[k], out)
+    _set_node_children(copy, children)
     out.append(copy^)
     return len(out) - 1
 

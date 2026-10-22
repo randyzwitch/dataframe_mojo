@@ -3,15 +3,14 @@ from std.collections import Optional
 from .dtype import DataType
 from .expr import (
     split_names,
-    struct_pack_children,
+    node_children,
+    _set_node_children,
     COL,
     H_ALL,
     H_ANY,
     HORIZONTAL,
     HORIZONTAL_ARGS,
     LIT_BOOL,
-    SEP,
-    STRUCT_PACK,
     horizontal_name,
     subtree,
     Node,
@@ -90,12 +89,8 @@ def _parents(nodes: List[Node]) -> List[Int]:
     var parents = List[Int](length=len(nodes), fill=-1)
     for i in range(len(nodes)):
         ref node = nodes[i]
-        for child in [node.left, node.right, node.extra]:
-            if child >= 0:
-                parents[child] = i
-        if node.op == STRUCT_PACK:
-            for child in struct_pack_children(node):
-                parents[child] = i
+        for child in node_children(node):
+            parents[child] = i
     return parents^
 
 
@@ -125,24 +120,11 @@ def _emit(
             return left
         node.left = left
         node.right = right
-    elif node.op == STRUCT_PACK:
-        var roots = String()
-        var children = struct_pack_children(node)
-        for k in range(len(children)):
-            var root = _emit(source, children[k], target, replacement, out)
-            if k == 0:
-                node.left = root
-            else:
-                roots += SEP
-            roots += String(root)
-        node.text2 = roots
     else:
-        if node.left >= 0:
-            node.left = _emit(source, node.left, target, replacement, out)
-        if node.right >= 0:
-            node.right = _emit(source, node.right, target, replacement, out)
-        if node.extra >= 0:
-            node.extra = _emit(source, node.extra, target, replacement, out)
+        var children = node_children(node)
+        for k in range(len(children)):
+            children[k] = _emit(source, children[k], target, replacement, out)
+        _set_node_children(node, children)
     out.append(node^)
     return len(out) - 1
 

@@ -85,7 +85,7 @@ from .expr import (
     LIST_GET,
     STRUCT_PACK,
     STRUCT_FIELD,
-    struct_pack_children,
+    node_children,
     struct_pack_names,
     HORIZONTAL,
     HORIZONTAL_ARGS,
@@ -246,7 +246,7 @@ def _empty_output(
         return parent.struct_column().field(node.text).renamed("")
     if node.op == STRUCT_PACK:
         var names = struct_pack_names(node)
-        var children = struct_pack_children(node)
+        var children = node_children(node)
         var fields = List[Series](capacity=len(children))
         for field in range(len(children)):
             fields.append(
@@ -473,8 +473,7 @@ def _eval[
             node,
             left,
             bound.dtypes[node.left],
-            fit_mask(mask, len(left)) if node.op == DT_OFFSET_BY
-            or node.op == DT_TRUNCATE else List[Bool](),
+            fit_mask(mask, len(left)),
         )
     if node.op == CAST:
         # Categoricals are carried as strings inside an expression and
@@ -642,7 +641,7 @@ def _pack_struct[
         length if shape == ROWS or (grouped and shape == AGGREGATE) else 1
     )
     var names = struct_pack_names(node)
-    var children = struct_pack_children(node)
+    var children = node_children(node)
     var fields = List[Series](capacity=len(children))
     for k in range(len(children)):
         var value = _eval[width](
@@ -3009,15 +3008,8 @@ def evaluate[
                 continue
             inside_over[j] = True
             ref child = bound.expr._nodes[j]
-            if child.left >= 0:
-                reachable[child.left] = True
-            if child.right >= 0:
-                reachable[child.right] = True
-            if child.extra >= 0:
-                reachable[child.extra] = True
-            if child.op == STRUCT_PACK:
-                for field in struct_pack_children(child):
-                    reachable[field] = True
+            for dependency in node_children(child):
+                reachable[dependency] = True
     var states = List[Series]()
     for i in range(count):
         states.append(_empty(bound.dtypes[i]))

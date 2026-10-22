@@ -42,6 +42,7 @@ from dataframe.identity_metadata import identity_column_source
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
+    node_children,
     Expr,
     RANK,
     CUM_SUM,
@@ -280,12 +281,8 @@ def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
         if index == target:
             return True
         ref node = expression._nodes[index]
-        if node.left >= 0:
-            reachable[node.left] = True
-        if node.right >= 0:
-            reachable[node.right] = True
-        if node.extra >= 0:
-            reachable[node.extra] = True
+        for child in node_children(node):
+            reachable[child] = True
     return False
 
 

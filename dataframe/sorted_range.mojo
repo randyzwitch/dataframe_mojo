@@ -13,6 +13,7 @@ common (ClickBench's hits table is ordered by CounterID and EventDate);
 after one column narrows the window, the next is checked on that window,
 where a secondary sort key is in order again.
 """
+from .expr import node_children
 from .binding import bind
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -51,10 +52,8 @@ def _is_constant(expr: Expr, index: Int) -> Bool:
         ref node = expr._nodes[i]
         if node.op == COL:
             return False
-        if node.left >= 0:
-            stack.append(node.left)
-        if node.right >= 0:
-            stack.append(node.right)
+        for child in node_children(node):
+            stack.append(child)
     return True
 
 
