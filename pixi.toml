@@ -79,6 +79,8 @@ pyproj = ">=3.5,<4"
 
 [feature.oracle.tasks]
 bench-suites = "python3 benchmarks/tools/bench_suites.py"
+report-cpu = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier full --all-suites --output build/reports/cpu/results.json"
+report-cpu-quick = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier quick --output build/reports/cpu/results.json"
 
 [feature.oracle.pypi-dependencies]
 duckdb = ">=2.0, <3"

@@ -255,6 +255,29 @@ single cells, and confirm a single-query change on the full tier.
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
 this size), `dev` (1M rows, scale factor 0.1), `default` (10M) or `large` (100M).
 
+## Checkpoint reports
+
+Nothing is scheduled or published. Every few PRs, run a full report by hand
+on a quiet machine with the CPU governor set to `performance`, and keep it in
+a local history so checkpoints can be compared:
+
+```bash
+pixi run -e native build-dfparquet                      # once
+pixi run -e oracle report-cpu                           # hours; full tier, every suite
+pixi run -e oracle python3 benchmarks/tools/publish_report.py \
+    --results build/reports/cpu/results.json \
+    --html build/reports/cpu/results.html
+```
+
+`report-cpu-quick` runs the quick tier instead, to check the pipeline.
+`publish_report.py` copies the report to `$HOME/dataframe-reports/cpu/<date>-<shortsha>/`
+(`--site DIR` changes the directory; `--label NAME` keeps a second report of
+the same commit) and rebuilds `$HOME/dataframe-reports/index.html`, a table of
+every report there, newest first, with versions and per-suite geometric
+means. Open that file in a browser. Re-running it for the same report
+replaces that report. Nothing from a run is committed to the repository.
+Every report ends with the queries-per-path table, as every report here must.
+
 ## Keeping holdouts useful
 
 The practical boundary is tuning versus validation. Use development workloads
