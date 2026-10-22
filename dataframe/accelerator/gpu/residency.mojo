@@ -51,6 +51,15 @@ struct NativeJoinField(Copyable):
     var prefer_right: Bool
 
 
+struct _NativeRowMapReservation(Movable):
+    """Keep a row map's query-memory charge shared with copied map handles."""
+
+    var owner: _NativeReservation
+
+    def __init__(out self, var owner: _NativeReservation):
+        self.owner = owner^
+
+
 struct NativeRowMap(Copyable):
     """A retained device row map plus its producer's range certificate.
 
@@ -63,6 +72,7 @@ struct NativeRowMap(Copyable):
     var rows: Int
     var source_rows: Int
     var may_be_missing: Bool
+    var _reservation: ArcPointer[_NativeRowMapReservation]
 
     def __init__(
         out self,
@@ -71,6 +81,7 @@ struct NativeRowMap(Copyable):
         rows: Int,
         source_rows: Int,
         may_be_missing: Bool,
+        var reservation: Optional[_NativeReservation] = None,
     ) raises:
         if (
             rows < 0
@@ -80,11 +91,25 @@ struct NativeRowMap(Copyable):
             or len(values) < rows
         ):
             raise Error("Mojo GPU native row map shape is invalid")
+        var bytes = checked_mul(len(values), size_of[UInt32]())
+        if reservation:
+            if reservation.value().bytes != bytes or not scope.same_query(
+                reservation.value().scope
+            ):
+                raise Error("Mojo GPU native row map reservation mismatch")
+        else:
+            _ = scope.check(bytes)
+            reservation = Optional[_NativeReservation](
+                _NativeReservation(scope, bytes)
+            )
         self.scope = scope.copy()
         self.values = values^
         self.rows = rows
         self.source_rows = source_rows
         self.may_be_missing = may_be_missing
+        self._reservation = ArcPointer(
+            _NativeRowMapReservation(reservation.take())
+        )
 
 
 def raise_value_error(code: UInt32, message: String) raises:

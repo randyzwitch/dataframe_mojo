@@ -26,6 +26,7 @@ from dataframe.accelerator.code_domains import TextField
 from .runtime import _stage_category_column
 from . import category_keys
 from . import joins as j
+from . import native_hash_join
 
 
 @fieldwise_init
@@ -201,6 +202,21 @@ def execute_plan(
             )
         )
         return (empty[0].copy(), report^)
+    var native_hash = native_hash_join.try_execute(
+        task,
+        left,
+        right,
+        scope,
+        profiling,
+        left_resident,
+        right_resident,
+        Bool(text_remap) or len(source_text) > 0,
+        layout.probe,
+        layout.build,
+        layout.side,
+    )
+    if native_hash.used:
+        return (native_hash.table.take(), native_hash.report.take())
     var resident_workspace = _checked_mul(
         (left.width() if left_resident else 0)
         + (right.width() if right_resident else 0),
@@ -422,7 +438,7 @@ def execute_plan(
             UInt32(layout.probe),
             UInt32(layout.build),
             UInt32(task.how),
-            UInt32(task.how == 7),
+            UInt32(task.nulls_equal or task.how == 7),
             UInt64(layout.cells),
             grid_dim=pb,
             block_dim=256,
