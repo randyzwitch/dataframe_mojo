@@ -423,7 +423,7 @@ not prove that a tie caused a truncated-result difference. Missing certificates
 and secondary diagnostic failures remain explicit. Case audits are embedded in
 receipts, with their metadata hash, so a later checkout cannot silently replace
 the measured alignment or hybrid classification. The CPU-only literal entry
-`tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo` validates diagnostic
+[`mojo_cpu_metal_suite_diagnostics_probe`](https://github.com/randyzwitch/dataframe_mojo/blob/892b3626964719109af740703ee719b119bdc879/tests/tooling/mojo_cpu_metal_suite_diagnostics_probe.mojo) validated diagnostic
 behavior independently of GPU execution (include `-I benchmarks`). Collection
 durations remain diagnostic and are not performance measurements.
 
