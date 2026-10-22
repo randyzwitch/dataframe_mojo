@@ -838,8 +838,8 @@ def execute(
                         state[].record_final(domains)
                     if profiling:
                         var readback_started = Int(perf_counter_ns())
-                        var readback_ns = 0
-                        var result_ns = 0
+                        var readback_ns: Int
+                        var result_ns: Int
                         if len(executed[0].native_columns):
                             var host = rows._readback_native(executed[0])
                             readback_ns = (

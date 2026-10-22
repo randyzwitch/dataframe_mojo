@@ -160,8 +160,8 @@ def _compute[
         block_offsets = ctx.enqueue_create_buffer[DType.uint32](blocks)
         total = ctx.enqueue_create_buffer[DType.uint32](1)
         indices = ctx.enqueue_create_buffer[DType.uint32](rows)
-    var staging_ns = 0
-    var submit_ns = 0
+    var staging_ns: Int
+    var submit_ns: Int
     try:
         ctx.enqueue_copy(code, plan.code.unsafe_ptr())
         ctx.enqueue_copy(device_literals, literals.unsafe_ptr())

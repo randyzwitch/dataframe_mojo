@@ -950,7 +950,6 @@ def readback_native[
     """Bulk-read a native view and adopt values plus a compact validity bitmap."""
     var scope = column.scope()
     var validity = column.validity()
-    var errors = column.errors()
     var raw_validity_bytes = len(validity.value()) if validity else 0
     var packed_validity_bytes = checked_add(column.length, 7) // 8
     var needs_repacked_validity = validity and (

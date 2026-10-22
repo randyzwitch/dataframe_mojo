@@ -149,7 +149,7 @@ def analyze(
         var right_type = bound.dtypes[node.right]
         if not right_type.is_decimal():
             continue
-        var candidate = unknown()
+        var candidate: Magnitude
         if node.op == MUL and dtype.is_decimal():
             if dtype.scale() != left_type.scale() + right_type.scale():
                 continue
