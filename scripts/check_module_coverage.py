@@ -8,6 +8,10 @@ A module is directly tested when a tests/<area>/test_*.mojo file, or a
 tests/support module that such a test imports, imports it by name. The check
 fails when tests/COVERAGE.md is stale or when tests/coverage_gaps.txt
 disagrees with the modules no test imports.
+
+Edit tests/coverage_gaps.txt by hand, then run --write: it rewrites that file
+in the canonical sorted order (never adding or removing entries), so ordering
+alone never fails the check.
 """
 
 import re
@@ -114,12 +118,12 @@ def main():
     gaps = sorted(gaps)
     if "--write" in sys.argv[1:]:
         MAP.write_text(text)
+        if BASELINE.exists():
+            entries = {
+                l.strip() for l in BASELINE.read_text().splitlines() if l.strip()
+            }
+            BASELINE.write_text("".join(f"{e}\n" for e in sorted(entries)))
         print(f"wrote {MAP.relative_to(ROOT)} ({len(gaps)} gaps)")
-        print(
-            f"{BASELINE.relative_to(ROOT)} is separate: edit it by hand."
-            if BASELINE.exists()
-            else "tests/coverage_gaps.txt is missing: create it by hand."
-        )
         return 0
     errors = []
     if not MAP.exists() or MAP.read_text() != text:

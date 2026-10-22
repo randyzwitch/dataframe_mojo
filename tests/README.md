@@ -66,4 +66,6 @@ That is a proxy: tests that go through the public API reach far more code than
 direct imports show. `tests/coverage_gaps.txt` is the list of known gaps;
 `scripts/check_module_coverage.py` fails CI for a new module with no direct
 import, for a listed module that now has one, and for a stale COVERAGE.md.
-Regenerate the map with `python3 scripts/check_module_coverage.py --write`.
+Edit the gaps file by hand, then run `python3 scripts/check_module_coverage.py --write`:
+it regenerates the map and rewrites the gaps file in sorted order, without adding
+or removing entries.
