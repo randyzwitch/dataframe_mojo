@@ -17,9 +17,8 @@ The boundary is checked in CI by `scripts/check_accelerator_boundary.sh`.
 
 `dataframe/_accel_provider.mojo` is the only module the core calls to reach a
 backend. Only `dataframe/lazy.mojo` and `dataframe/execution_backend.mojo`
-import it. A provider is a module with these functions. `LazyFrame` and
-`DataFrame` are the core types; `PlanEstimate` and `CalibrationKey` are in
-`dataframe/accelerator/cost.mojo`.
+import it. A provider is a module with these six functions. Their signatures mention only
+core types: `LazyFrame`, `DataFrame`, `String`, `Bool` and `Int`.
 
 | Function | Signature | What the core expects |
 | --- | --- | --- |
@@ -27,17 +26,17 @@ import it. A provider is a module with these functions. `LazyFrame` and
 | `execute` | `(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]` | Run the whole plan. Returns the result and a report frame. Raises for unsupported work before submitting anything. Called for `engine="accel"`. |
 | `describe` | `(plan: LazyFrame) -> String` | Text for `explain`, as `ENGINE accel: ...` lines. Does not raise: errors become text. Must not execute the plan or initialize a device. |
 | `execute_profiled` | `(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]` | Same as `execute`, with measured data in the report. May return `execute`'s report unchanged. Called by `profile`. |
-| `calibration_runtime` | `() raises -> Runtime` | A runtime object for the calibration benchmark driver (`benchmarks/bench_accelerator_cost.mojo`). Not used by `collect`. The return type is backend-specific. |
-| `calibration_key` | `(optimize: Bool, streaming: Bool, batch_size: Int) raises -> CalibrationKey` | Identity of the provider, device, build and CPU thread budget under which a calibration is valid. No submission. |
-| `estimate_auto` | `(plan: LazyFrame) raises -> PlanEstimate` | Plan-time cost and peak-byte facts for the calibration runner. No device submission and no reads of source values. Raise if the plan has no estimate. |
 | `select_auto` | `(plan, optimize, streaming, batch_size) -> Tuple[String, String]` | Used only for `engine="auto"`. Returns `(engine, reason)` with engine `"cpu"`, `"accel"` or `"mixed"`; anything else is an error. Does not raise: a rejection becomes `("cpu", reason)`. Must not execute the plan. |
 | `execute_auto` | `(plan, optimize, streaming, batch_size, profiling: Bool) raises -> Tuple[DataFrame, DataFrame]` | Run a region `select_auto` chose. Errors propagate; the core does not retry on CPU (one exception, below). |
 
-The core calls `installed`, `execute`, `describe`, `execute_profiled`,
-`select_auto` and `execute_auto` during collection. `calibration_runtime`,
-`calibration_key` and `estimate_auto` are called only by benchmark and
-calibration code, but the provider slot must still define them so those
-programs compile.
+The core calls all six during collection.
+
+Three functions that earlier versions of the provider also carried are not part
+of the contract: `calibration_runtime`, `calibration_key` and `estimate_auto`.
+They return or involve backend types (`MetalRuntime`, `CalibrationKey`), and
+only benchmark and calibration code calls them. Calibration is backend-specific
+by nature, so those programs import them from the backend
+(`dataframe.metal`) instead.
 
 The same shapes exist as the `dataframe.lazy.AcceleratorBackend` trait, for an
 explicit runtime object passed by the application. Its methods other than
@@ -54,10 +53,10 @@ minimal backend implements only those two.
   `"accel"` requires `installed()`, then calls `execute` (or
   `execute_profiled`). An unknown name raises in the core.
 - `optimize`, `streaming`, `batch_size`: passed to `select_auto`,
-  `execute_auto` and `calibration_key`. They are the requested CPU-side
+  `execute_auto`. They are the requested CPU-side
   settings, carried in `ExecutionSettings`
   (`dataframe/execution_settings.mojo`). A backend must not treat `batch_size`
-  as an expression batch size. They are part of the calibration identity.
+  as an expression batch size. They are part of the calibration identity a backend computes.
 - `DATAFRAME_ACCEL_DEVICE` and `DATAFRAME_ACCEL_MEMORY_LIMIT`: read by the
   default provider, not by the core. A bad value raises; they never change
   results. A replacement provider should keep the names so applications can
@@ -112,8 +111,7 @@ minimal backend implements only those two.
   to call a vendor API, upload data or hold a device handle.
 - Run an unsupported part of a forced-accelerator plan on CPU without saying
   so, or retry on CPU after submitting work (except a data fault).
-- Open a device in `installed`, `describe`, `select_auto`, `estimate_auto` or
-  `calibration_key`.
+- Open a device in `installed`, `describe` or `select_auto`.
 - Free host memory or device scratch while queued work may still use it.
 
 ## Registration model
@@ -148,18 +146,17 @@ not match fails to compile in its own package, not in core.
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | In this repository: `dataframe/accelerator/`, `dataframe/metal.mojo` | Hard-imported by `_accel_provider.mojo` | Runs on Apple silicon through Mojo/MAX kernels. Implements all nine provider functions. Tested on a local Mac (hosted CI cannot run it). | Compiled on every platform. No registry. Core (`lazy.mojo`) imports five modules of the backend package for plan-node and estimate types. |
-| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It has no calibration functions. Pinned to an older core revision. |
+| Metal | In this repository: `dataframe/accelerator/`, `dataframe/metal.mojo` | Hard-imported by `_accel_provider.mojo` | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Tested on a local Mac (hosted CI cannot run it). | Compiled on every platform. No registry. Core no longer imports the backend package: the planner-owned types moved to core. |
+| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. Pinned to an older core revision. |
 | Other | Nothing | n/a | n/a | A third backend would have to replace the provider file too, so it could not coexist with either. |
 
-Known boundary violation. `dataframe/lazy.mojo` imports `PlanEstimate`,
-`WindowKey`, `KeyQuery`, `ByteDomain` and `TextField` from
+Former boundary violation, now removed. `dataframe/lazy.mojo` used to import
+`PlanEstimate`, `WindowKey`, `KeyQuery`, `ByteDomain` and `TextField` from
 `dataframe.accelerator`. They are plan-node field types and an estimate type
-that the planner and the `AcceleratorBackend` trait use, and they live in the
-backend package. The check lists these five imports as a known exception, in
-the script, so the boundary is enforced for everything else today. Step 2
-below moves these types to the core, and the exception list is then emptied.
-Do not add to it.
+that the planner and the `AcceleratorBackend` trait use. Step 2 moved them into
+core (`dataframe/plan_types.mojo`, `byte_domain.mojo`, `key_domains.mojo`,
+`key_query.mojo`), and the exception list in the check is empty. Do not add to
+it.
 
 ## Migration plan
 
@@ -167,13 +164,13 @@ Each step is its own pull request.
 
 1. **This note and the boundary check.** No code moves. The check passes on
    main with the one recorded exception.
-2. **Registry in `_accel_provider`, and shared types in core.** Replace the
-   hard-coded dispatch with a registry (a trait for the nine functions plus
-   `register`). The Metal import becomes one line in one file. Move
-   `PlanEstimate`, `CalibrationKey`, `WindowKey`, `KeyQuery`, `ByteDomain` and
-   `TextField` into core modules (they are value types the planner owns), and
-   empty the exception list in the check. The NVIDIA draft is updated to this
-   trait at the same time.
+2. **Shrink the provider and move planner types into core.** Done in two
+   parts. The provider drops `calibration_runtime`, `calibration_key` and
+   `estimate_auto`, leaving the six functions above (callers import the three
+   from `dataframe.metal`). The planner-owned types move into core modules and
+   the exception list in the check is emptied. Still to do: a registry (a trait
+   for the six functions plus `register`) so the Metal import becomes one line
+   in one file, and the NVIDIA draft updated to that trait.
 3. **Move the Metal backend into its own package.** `dataframe/accelerator/`
    and `dataframe/metal.mojo` go to a `dataframe_metal` package that registers
    itself on import. I recommend a top-level `dataframe_metal/` over

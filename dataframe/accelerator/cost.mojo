@@ -6,6 +6,7 @@ wall times and independently validated lower/upper residual envelopes.
 """
 from std.math import isfinite
 from ..json_value import JsonValue
+from ..plan_types import PlanEstimate
 
 comptime COST_FORMAT = "dataframe-analytical-cost-v1"
 comptime COST_FEATURE_COUNT = 15
@@ -31,15 +32,6 @@ def cost_feature_names() -> List[String]:
             "materializations",
         ]
     )
-
-
-@fieldwise_init
-struct PlanEstimate(Copyable):
-    var cpu: List[Float64]
-    var accelerator: List[Float64]
-    var peak_bytes: Int
-    var family: String
-    var placement: String
 
 
 @fieldwise_init
