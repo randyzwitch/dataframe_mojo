@@ -187,7 +187,7 @@ def test_grouping_sets_keep_duplicates() raises:
     assert_equal(frame.height(), 4)
     assert_equal(frame.columns(), ["a", "total", "gid"])
     assert_equal(frame.item(3, "total").int64(), 210)
-    # b is no key here, so it counts as rolled up in both sets: (a) is 1.
+    # b is no key here, so it counts as rolled up: the total row has gid 3.
     assert_equal(frame.item(3, "gid").int64(), 3)
 
 
