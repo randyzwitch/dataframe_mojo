@@ -93,7 +93,7 @@ from .expr import (
 )
 from .frame import concat
 from .frame import _describe_percentiles
-from .expr import null
+from .expr import null, is_grouping, has_grouping, grouping_value
 from .canonical_labels import label_map, remap_codes
 from .sorted_range import sorted_window
 from .time_windows import negate_period
@@ -2027,6 +2027,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             maintain_order,
             keys.copy() if computed else List[Expr](),
         )
+
+    def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets:
+        """DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets
+        (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (), as one plan.
+        Finish it with `agg`; see LazyGroupingSets for the output."""
+        var sets = List[List[String]]()
+        for n in range(len(keys), -1, -1):
+            sets.append(List[String](keys[:n]))
+        return LazyGroupingSets(self.copy(), sets^)
+
+    def group_by_cube(self, keys: List[String]) -> LazyGroupingSets:
+        """DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys
+        as a grouping set, 2^n of them (a key listed twice doubles them,
+        as in DuckDB). Finish it with `agg`."""
+        var sets = List[List[String]]()
+        var n = len(keys)
+        for mask in range((1 << n) - 1, -1, -1):
+            var members = List[String]()
+            for j in range(n):
+                if (mask >> (n - 1 - j)) & 1 == 1:
+                    members.append(keys[j])
+            sets.append(members^)
+        return LazyGroupingSets(self.copy(), sets^)
+
+    def group_by_grouping_sets(
+        self, sets: List[List[String]]
+    ) -> LazyGroupingSets:
+        """DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping
+        per listed set, an empty set being the grand total. A set listed
+        twice yields its rows twice, as in DuckDB. Finish it with `agg`."""
+        return LazyGroupingSets(self.copy(), sets.copy())
 
     def sort(
         self,
@@ -9761,6 +9792,97 @@ struct LazyGroupBy(Copyable):
     ) raises -> LazyFrame:
         """Each other column's quantile per group; see GroupBy.quantile."""
         return self._each("quantile", quantile, interpolation)
+
+
+@fieldwise_init
+struct LazyGroupingSets(Copyable):
+    """A pending `group_by_rollup`, `group_by_cube` or
+    `group_by_grouping_sets`; finish it with agg."""
+
+    var _frame: LazyFrame
+    var _sets: List[List[String]]
+
+    def agg(self, exprs: List[Expr]) raises -> LazyFrame:
+        """The rows of every grouping set, in set order: the keys (every
+        key any set names, in order of first appearance), then the
+        aggregations. A key a set does not group by is null in that set's
+        rows, and `grouping` / `grouping_id` in `exprs` tell those subtotal
+        nulls from null key values. Within a set the aggregations act as in
+        `group_by(set).agg(exprs)`; the empty set gives one row, over the
+        whole input, even when it has no rows. Row order is unspecified
+        unless the result is sorted.
+
+        Built as DuckDB's simplest plan is: one `group_by(set).agg` per
+        set, concatenated, each reading the input.
+        """
+        if len(self._sets) == 0:
+            raise Error("grouping sets need at least one set")
+        var keys = List[String]()
+        var sets = List[List[String]]()
+        for one in self._sets:
+            var members = List[String]()
+            for name in one:
+                if name not in members:
+                    members.append(name)
+                if name not in keys:
+                    keys.append(name)
+            sets.append(members^)
+        if len(keys) == 0:
+            raise Error("grouping sets need at least one key")
+        var schema = self._frame._input_schema()
+        var dtypes = List[DataType]()
+        for name in keys:
+            dtypes.append(schema.column(name).dtype())
+        var marked = False
+        for e in exprs:
+            if is_grouping(e):
+                marked = True
+            elif has_grouping(e):
+                raise Error(
+                    "grouping and grouping_id must be whole aggregation "
+                    "expressions, not parts of one"
+                )
+        var order = List[Expr]()
+        for name in keys:
+            order.append(col(name))
+        if marked:
+            # Output names are known only for single-output expressions.
+            for e in exprs:
+                order.append(col(e._name))
+        else:
+            order.append(exclude(keys))
+        var result = Optional[LazyFrame]()
+        for members in sets:
+            var aggregates = List[Expr](capacity=len(exprs))
+            var constants = List[Expr]()
+            for e in exprs:
+                if is_grouping(e):
+                    constants.append(
+                        lit(grouping_value(e, members)).alias(e._name)
+                    )
+                else:
+                    aggregates.append(e.copy())
+            var part: LazyFrame
+            if len(aggregates) == 0:
+                raise Error("agg needs an aggregation besides grouping")
+            if len(members) == 0:
+                part = self._frame.select_exprs(aggregates)
+            else:
+                part = self._frame.group_by(members).agg(aggregates)
+            for k in range(len(keys)):
+                if keys[k] not in members:
+                    constants.append(null(dtypes[k]).alias(keys[k]))
+            if len(constants) > 0:
+                part = part.with_columns(constants)
+            part = part.select_exprs(order)
+            if result:
+                result = result.take().concat(part)
+            else:
+                result = part^
+        return result.take()
+
+    def agg(self, expr: Expr) raises -> LazyFrame:
+        return self.agg([expr.copy()])
 
 
 @fieldwise_init

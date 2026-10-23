@@ -4,7 +4,7 @@ from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .nested_column import ListColumn, StructColumn
 from .series import Series
-from .frame import DataFrame, Field, GroupBy, TimeGroupBy, concat
+from .frame import DataFrame, Field, GroupBy, GroupingSets, TimeGroupBy, concat
 from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType
@@ -12,6 +12,7 @@ from .temporal_kernels import date_range, datetime_range
 from .lazy import (
     LazyFrame,
     LazyGroupBy,
+    LazyGroupingSets,
     LazyTimeGroupBy,
     scan_csv,
     scan_parquet,
@@ -29,6 +30,8 @@ from .expr import (
     by_dtype,
     exclude,
     first,
+    grouping,
+    grouping_id,
     last,
     nth,
     Then,

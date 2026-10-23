@@ -1918,6 +1918,63 @@ def _append_shifted(mut nodes: List[Node], other: List[Node], offset: Int):
         nodes.append(copied^)
 
 
+comptime _GROUPING_MARK = "\x01grouping:"
+
+
+def grouping_id(names: List[String]) -> Expr:
+    """DuckDB's `GROUPING(a, b, ...)` inside the `agg` of `group_by_rollup`,
+    `group_by_cube` or `group_by_grouping_sets`: an Int64 bit mask with one
+    bit per name, the first name the highest bit, set to 1 when that key is
+    aggregated away in the row (a subtotal) and 0 when the row groups by it.
+    It tells a subtotal null from a null key value. Elsewhere it is an
+    error: the expansion of the grouping sets replaces it with a literal
+    for each set."""
+    var label = String("grouping_id(")
+    for i in range(len(names)):
+        if i > 0:
+            label += ", "
+        label += names[i]
+    label += ")"
+    return Expr([_node(COL, text=_GROUPING_MARK + join_names(names))], label)
+
+
+def grouping(name: String) -> Expr:
+    """DuckDB's `GROUPING(a)`: 1 in rows where key `a` is aggregated away
+    (a subtotal row), else 0; Int64. See `grouping_id`."""
+    var result = grouping_id([name])
+    result._name = "grouping(" + name + ")"
+    return result^
+
+
+def is_grouping(expr: Expr) -> Bool:
+    """Whether `expr` is a bare `grouping` or `grouping_id`."""
+    return (
+        len(expr._nodes) == 1
+        and expr._nodes[0].op == COL
+        and expr._nodes[0].text.startswith(_GROUPING_MARK)
+    )
+
+
+def has_grouping(expr: Expr) -> Bool:
+    """Whether `expr` holds a `grouping` or `grouping_id` marker."""
+    for node in expr._nodes:
+        if node.op == COL and node.text.startswith(_GROUPING_MARK):
+            return True
+    return False
+
+
+def grouping_value(expr: Expr, grouped: List[String]) -> Int64:
+    """A bare grouping marker's bit mask for a row set that groups by
+    exactly `grouped`."""
+    var names = split_names(
+        String(expr._nodes[0].text.removeprefix(_GROUPING_MARK))
+    )
+    var bits = Int64(0)
+    for name in names:
+        bits = bits * 2 + Int64(0 if name in grouped else 1)
+    return bits
+
+
 def col(name: String) -> Expr:
     """One column, or a regex selector when name starts with ^ and ends with $."""
     if name.startswith("^") and name.endswith("$"):
