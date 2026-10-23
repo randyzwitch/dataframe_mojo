@@ -516,3 +516,27 @@ def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
     assert_equal(matcher.slots[62], 30)
     assert_equal(matcher.slots[63], 31)
     _ = text
+
+
+def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
+    var regex = Regex("^(a+)(β*)$")
+    assert_true(Bool(regex._compiled[].onepass))
+    var matcher = Matcher(regex)
+    var long = String("a") * 100000 + String("β") * 100000
+    for _ in range(2):
+        var short = String("aaa")
+        assert_true(matcher.captures(_span(short)))
+        assert_equal(matcher.slots[2], 0)
+        assert_equal(matcher.slots[3], 3)
+        assert_equal(matcher.slots[4], 3)
+        assert_equal(matcher.slots[5], 3)
+        _ = short
+        assert_true(matcher.captures(_span(long)))
+        assert_equal(matcher.slots[2], 0)
+        assert_equal(matcher.slots[3], 100000)
+        assert_equal(matcher.slots[4], 100000)
+        assert_equal(matcher.slots[5], 300000)
+        var bad = String("aaa!")
+        assert_false(matcher.captures(_span(bad)))
+        _ = bad
+    _ = long
