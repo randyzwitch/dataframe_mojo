@@ -558,11 +558,11 @@ performance admission.
 ### Regex engine comparison
 
 `benchmarks/tools/bench_regex_rebar.py` compares two frozen engine commits
-using all 47 workloads in rebar's literal, literal-alternation and imported
-Sherlock groups. It verifies base counts against the pinned upstream and
+using all 53 workloads in rebar's literal, literal-alternation, imported
+Sherlock, one-pass and capture groups. It verifies base counts against the pinned upstream and
 Polars, and checks reversed-line and doubled-input variants with Polars.
 Unsupported byte-pattern workloads stay visible. Each build gets three rounds
-of three samples, with 20 fully materialized count/span scans per sample.
+of three samples, with 20 fully materialized search/capture scans per sample.
 Compilation and input loading are untimed. Workers alternate build order, use
 one CPU where affinity is available, and reject compiler-overlapped samples.
 

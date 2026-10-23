@@ -31,6 +31,8 @@ GROUPS = (
     "curated/01-literal",
     "curated/02-literal-alternate",
     "imported/sherlock",
+    "opt/onepass",
+    "captures",
 )
 VARIANTS = ("base", "reverse-lines", "double")
 
@@ -46,14 +48,18 @@ def git(directory, *args):
 
 
 def compilers():
-    found = compiler_processes()
-    # mojo doc compiles too, but the shared helper does not include it.
-    for line in subprocess.check_output(
-        ["ps", "-eo", "pid,comm,args"], text=True
-    ).splitlines()[1:]:
-        fields = line.split(None, 2)
-        if len(fields) == 3 and fields[1] == "mojo" and " doc " in fields[2]:
-            found.append((fields[0], "mojo-doc"))
+    # macOS truncates `comm`; inspect the full executable/argument column.
+    found = []
+    for line in subprocess.check_output(["ps", "-axo", "pid=,args="], text=True).splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) < 2:
+            continue
+        name = Path(fields[1]).name
+        args = " " + (fields[2] if len(fields) > 2 else "") + " "
+        if name in {"clang", "clang++", "cc1", "cc1plus", "rustc"} or (
+            name == "mojo" and any(" " + verb + " " in args for verb in
+                                   ("build", "run", "doc", "test", "package", "precompile"))):
+            found.append((fields[0], name))
     return found
 
 
@@ -96,12 +102,25 @@ def prepare(upstream, output):
                 haystack_path.write_bytes(text.encode("utf-8"))
                 oracle_error = None
                 try:
-                    found = pl.Series([text]).str.extract_all(pattern)
-                    oracle = (
-                        found.list.eval(pl.element().str.len_bytes()).list.sum().item()
-                        if bench["model"] == "count-spans"
-                        else found.list.len().item()
-                    )
+                    if bench["model"] == "grep-captures":
+                        inputs = pl.Series(text.split("\n")).str.strip_suffix("\r")
+                        groups = inputs.str.extract_groups(pattern).struct.unnest()
+                        oracle = inputs.str.contains(pattern).sum() + sum(
+                            groups.height - value for value in groups.null_count().row(0)
+                        )
+                    elif bench["model"] == "count-captures":
+                        matches = pl.Series([text]).str.extract_all(pattern).explode().drop_nulls()
+                        groups = matches.str.extract_groups(pattern).struct.unnest()
+                        oracle = len(matches) + sum(
+                            groups.height - value for value in groups.null_count().row(0)
+                        )
+                    else:
+                        found = pl.Series([text]).str.extract_all(pattern)
+                        oracle = (
+                            found.list.eval(pl.element().str.len_bytes()).list.sum().item()
+                            if bench["model"] == "count-spans"
+                            else found.list.len().item()
+                        )
                     if variant == "base" and oracle != expected:
                         raise ValueError(f"upstream/Polars mismatch: {name}: {oracle} != {expected}")
                 except pl.exceptions.ComputeError as error:
