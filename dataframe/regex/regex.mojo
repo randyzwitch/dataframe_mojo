@@ -456,7 +456,7 @@ struct _Compiled(Movable):
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
-    var onepass: OnePass
+    var onepass: Optional[ArcPointer[OnePass]]
 
     def __init__(out self, pattern: String) raises:
         var ast = parse(pattern)
@@ -477,7 +477,12 @@ struct _Compiled(Movable):
             var extracted = _literal_prefixes(ast, ast.root)
             prefixes = extracted.values.copy()
         self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
-        self.onepass = compile_onepass(self.forward)
+        # Capture tables are cold for ordinary searches. Keep their seven
+        # vectors behind a pointer instead of widening the hot program object.
+        var onepass = compile_onepass(self.forward)
+        self.onepass = None
+        if onepass.active():
+            self.onepass = ArcPointer(onepass^)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
@@ -676,7 +681,6 @@ struct Matcher(Movable):
     var slots: List[Int]
     var _position: Int
     var _last_end: Int
-    var capture_scratch: List[Int]
 
     def __init__(out self, regex: Regex):
         self.regex = regex.copy()
@@ -689,9 +693,6 @@ struct Matcher(Movable):
         self.slots = List[Int](length=c.forward.slot_count, fill=-1)
         self._position = 0
         self._last_end = -1
-        self.capture_scratch = List[Int](
-            length=c.forward.slot_count if c.onepass.active() else 0, fill=-1
-        )
 
     def is_match(mut self, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
         """Whether the pattern matches anywhere in `text`."""
@@ -756,24 +757,26 @@ struct Matcher(Movable):
         if (
             c.anchored
             and start == 0
-            and c.onepass.active()
+            and Bool(c.onepass)
             and (len(text) == 0 or text[0] < 128)
         ):
             # The start state's ASCII table can reject impossible first
             # bytes before scanning a whole row for ASCII eligibility.
-            if len(text) > 0 and not c.onepass.matched[0]:
+            if len(text) > 0 and not c.onepass.value()[].matched[0]:
                 var cls = Int(c.forward.ascii_class[Int(text[0])])
-                if c.onepass.next[cls] < 0:
+                if c.onepass.value()[].next[cls] < 0:
                     return False
             if not _may_match(c, text):
                 return False
             if ascii_span(text, 0, len(text)):
-                return c.onepass.search(
+                # The capture engines run sequentially and initialize their
+                # scratch before use, so they can share this worker's slots.
+                return c.onepass.value()[].search(
                     c.forward,
                     text,
                     0,
                     len(text),
-                    self.capture_scratch,
+                    self.pike.scratch,
                     self.slots,
                 )
         if self._direct_captures(text):
@@ -814,9 +817,9 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
-        if c.onepass.active() and ascii_span(text, begin, end):
-            return c.onepass.search(
-                c.forward, text, begin, end, self.capture_scratch, self.slots
+        if Bool(c.onepass) and ascii_span(text, begin, end):
+            return c.onepass.value()[].search(
+                c.forward, text, begin, end, self.pike.scratch, self.slots
             )
         if Backtracker.fits(c.forward, begin, end):
             return self.backtracker.search(
