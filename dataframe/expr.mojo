@@ -30,6 +30,7 @@ comptime SELECT_COLS = 1
 comptime SELECT_EXCLUDE = 2
 comptime SELECT_DTYPE = 3
 comptime SELECT_NTH = 4
+comptime SELECT_REGEX = 5
 comptime SEP = "\x1f"
 # Lists of names (and labels, dtypes, numbers) are kept in one String,
 # joined by SEP. A name may hold any character, SEP included (#438), so
@@ -172,6 +173,8 @@ comptime INT_IS_IN = 172
 comptime STR_EXTRACT = 182
 # A list of every match (a nested op, see list_kernels.mojo).
 comptime STR_EXTRACT_ALL = 183
+comptime STR_EXTRACT_GROUPS = 241
+comptime STR_ESCAPE_REGEX = 242
 # Recode values (#789). text: the old values, text2: the new values, each a
 # list of literals (`replace_item`); right: the default, -1 for none;
 # dtypes: replace_strict's return_dtype, when given.
@@ -433,6 +436,7 @@ def is_string_op(op: Int) -> Bool:
         or op == STR_IS_IN
         or op == STR_LIKE
         or op == STR_EXTRACT
+        or op == STR_ESCAPE_REGEX
     )
 
 
@@ -467,7 +471,11 @@ def is_window(op: Int) -> Bool:
 
 def is_nested_op(op: Int) -> Bool:
     """Whether op is str.split, a .list operation, or struct field access."""
-    return (op >= STR_SPLIT and op <= STRUCT_FIELD) or op == STR_EXTRACT_ALL
+    return (
+        (op >= STR_SPLIT and op <= STRUCT_FIELD)
+        or op == STR_EXTRACT_ALL
+        or op == STR_EXTRACT_GROUPS
+    )
 
 
 def is_conditional(op: Int) -> Bool:
@@ -1911,6 +1919,9 @@ def _append_shifted(mut nodes: List[Node], other: List[Node], offset: Int):
 
 
 def col(name: String) -> Expr:
+    """One column, or a regex selector when name starts with ^ and ends with $."""
+    if name.startswith("^") and name.endswith("$"):
+        return _selector(SELECT_REGEX, name)
     return Expr([_node(COL, text=name)], name)
 
 
@@ -1943,6 +1954,15 @@ def _joined(items: List[String]) -> String:
 def col(names: List[String]) -> Expr:
     """Select several columns; operations apply to each one."""
     return _selector(SELECT_COLS, _joined(names))
+
+
+def columns(pattern: String) -> Expr:
+    """Columns matching a regular expression, in schema order.
+
+    Like DuckDB's COLUMNS('regex'), this searches anywhere in each name;
+    use ^ and $ to anchor the pattern. This is a Mojo selector, not SQL.
+    """
+    return _selector(SELECT_REGEX, pattern)
 
 
 def all() -> Expr:
@@ -2383,6 +2403,19 @@ struct StrNamespace(Copyable):
         """Capture group `group_index` of the first match (0 is the whole
         match); null when nothing matches or the group took no part."""
         return self._op(STR_EXTRACT, pattern, Int64(group_index))
+
+    def extract_groups(self, pattern: String) -> Expr:
+        """First match as a struct of String captures, in capture order.
+
+        Named groups keep their name; unnamed groups use their index as a
+        string. A missing match gives null fields; a null input gives a
+        null struct. A pattern without captures gives an empty struct.
+        """
+        return self._op(STR_EXTRACT_GROUPS, pattern)
+
+    def escape_regex(self) -> Expr:
+        """Escape regex metacharacters in every non-null string."""
+        return self._op(STR_ESCAPE_REGEX)
 
     def extract_all(self, pattern: String) -> Expr:
         """Every non-overlapping match, as a list of strings."""

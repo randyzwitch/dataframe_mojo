@@ -1,7 +1,7 @@
 """The regex engine agrees with Polars on a corpus of patterns and strings.
 
 tests/fixtures/regex/polars_corpus.tsv holds, for every pattern and
-haystack, what Polars 1.44.2 (Rust's `regex`) returns for `contains`,
+haystack, what Polars 2.0.0 (Rust's `regex`) returns for `contains`,
 `find`, `count_matches`, `extract_all`, `replace_all` with "<$0>" (which
 shows where every match is, empty ones included), `replace` with "[${1}]",
 `extract` of group 1, and `split` with `literal=False`; or ERROR for a
@@ -55,6 +55,11 @@ def _unescape(field: StringSlice) -> String:
 
 def _escape(text: StringSlice) -> String:
     var out = String()
+    var bytes = text.as_bytes()
+    var trailing_start = len(bytes)
+    while trailing_start > 0 and bytes[trailing_start - 1] == 32:
+        trailing_start -= 1
+    var at = 0
     for cp in text.codepoints():
         var c = Int(cp)
         if c == 92:
@@ -63,13 +68,14 @@ def _escape(text: StringSlice) -> String:
             out += "\\t"
         elif c == 10:
             out += "\\n"
-        elif c < 32 or c == 127:
+        elif c < 32 or c == 127 or (c == 32 and at >= trailing_start):
             var digits = "0123456789ABCDEF"
             out += "\\x"
             out += String(digits[byte=c >> 4])
             out += String(digits[byte=c & 15])
         else:
             out += String(cp)
+        at += 1 if c < 0x80 else 2 if c < 0x800 else 3 if c < 0x10000 else 4
     return out^
 
 

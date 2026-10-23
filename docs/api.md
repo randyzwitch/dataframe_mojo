@@ -171,7 +171,7 @@ def coalesce(exprs: List[Expr]) -> Expr
 
 ## `col`
 
-Select several columns; operations apply to each one.
+One column, or a regex selector when name starts with ^ and ends with $.
 
 ```mojo
 def col(name: String) -> Expr
@@ -211,6 +211,14 @@ no mutable buffers or implicit negative indexing are exposed.
   Gather rows, treating only -1 as a missing row (for outer joins).
 - `def slice(self, offset: Int, length: Int) -> Self`
   A zero-copy window sharing this column's buffers.
+
+## `columns`
+
+Columns matching a regular expression, in schema order.
+
+```mojo
+def columns(pattern: String) -> Expr
+```
 
 ## `concat`
 
@@ -1770,6 +1778,10 @@ is searched as a substring.
   Whether the regular expression matches anywhere in the string (with `literal`, whether the text occurs). An invalid pattern raises when `strict`, or gives null otherwise.
 - `def extract(self, pattern: String, group_index: Int = Int(1)) -> Expr`
   Capture group `group_index` of the first match (0 is the whole match); null when nothing matches or the group took no part.
+- `def extract_groups(self, pattern: String) -> Expr`
+  First match as a struct of String captures, in capture order.
+- `def escape_regex(self) -> Expr`
+  Escape regex metacharacters in every non-null string.
 - `def extract_all(self, pattern: String) -> Expr`
   Every non-overlapping match, as a list of strings.
 - `def like(self, pattern: String) -> Expr`
@@ -1829,8 +1841,8 @@ is searched as a substring.
 
 A window onto named child series of equal length and a validity.
 
-- `def __init__(out self, var fields: List[Series], var bits: List[UInt8] = List())`
-  Adopt named children (their names are the field names) and an optional prepacked validity bitmap for the struct rows.
+- `def __init__(out self, var fields: List[Series], var bits: List[UInt8] = List(), length: Int = Int(-1))`
+  Adopt named children (their names are the field names) and an optional prepacked validity bitmap for the struct rows. Empty structs require an explicit length.
 - `def __len__(self) -> Int`
 - `def dtype(self) -> DataType`
 - `def field_count(self) -> Int`

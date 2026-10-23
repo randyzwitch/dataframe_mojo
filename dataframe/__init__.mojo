@@ -35,6 +35,7 @@ from .expr import (
     When,
     coalesce,
     col,
+    columns,
     corr,
     cov,
     concat_str,

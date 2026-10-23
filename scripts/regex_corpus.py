@@ -53,6 +53,10 @@ HAYSTACKS = [
     "ababab",
     "https://www.example.com/a/b?q=1",
     "http://foo.org/",
+    "éfoo αbar β café aαb _é_",
+    "a\u0301 日本 あー カー 😀",
+    "A\t\n_0KkKéÉ",
+    "".join(chr(cp) for cp in range(128)),
 ]
 
 PATTERNS = [
@@ -94,6 +98,27 @@ PATTERNS = [
     r"[\w.]+@[\w.]+\.\w+", r"\d+-\d+", "special.*requests", r"^\s+|\s+$",
     r"(\w+)@(\w+)\.com", r"(\d{4})-(\d{2})-(\d{2})", r"[A-Z][a-z]+",
     r"\s{2,}", r"(?i)hello|world", r"^[a-z]+$", r"[^\x00-\x7F]+",
+    # Unicode properties, their aliases, set algebra and loose matching.
+    r"\p{Greek}+", r"\pL+", r"\PL+", r"\p{gc=Lu}+", r"\p{Lu}+",
+    r"\p{General_Category:Letter}+", r"\p{sc=Greek}+", r"\p{scx=Hira}+",
+    r"\p{IsGreek}+", r"\p{ greek }+", r"\p{White_Space}+", r"\p{Alphabetic}+",
+    r"\p{ASCII}+", r"\p{Any}+", r"\p{Assigned}+", r"\p{age=1.1}+",
+    r"\p{gcb=Extend}+", r"\p{wb=Katakana}+", r"\p{sb=Upper}+",
+    r"[\p{Greek}&&\pL]+", r"[\pL--\p{ASCII}]+", r"(?i)\p{Lu}+",
+    r"\P{^Greek}+", r"\p{sc!=Greek}+", r"\p{^Greek}+",
+    # Word starts/ends and ASCII-only, UTF-8-safe portions of regex syntax.
+    r"\<", r"\>", r"\<\w+\>", r"\<.+?\>", r"\<foo|bar\>",
+    r"(?-u)\w+", r"(?-u)\d+", r"(?-u)\s+", r"(?-u)\b", r"(?-u)\B",
+    r"(?-u)\<", r"(?-u)\>", r"(?-u)\b\w+\b", r"(?-u)\<\w+\>",
+    r"(?-u:\b)\w+", r"\w+(?-u:\b)", r"(?-u)(?u:\w+)\b",
+    r"(?i-u)k+", r"(?-u)é", r"(?-u)[\W&&[\x00-\x7F]]+",
+    r"(?-u)[^\x80-\xFF]", r"(?-u)[a-z]+", r"(?-u:[0-9]+)\pL+",
+    r"(?-u).", r"(?-u)\W", r"(?-u)\D", r"(?-u)[^a]", r"(?-u)\xFF",
+    r"(?-u)\pL", r"\p{NotAProperty}", r"\p{}", r"\p{gc=NotACategory}",
+    r"\p{Greek", r"[\<]", r"[\>]",
+    r"(?i)\P{Lu}+", r"(?i)[\P{Lu}]+", r"(?i-u)é", r"(?-u)\u00E9",
+    r"(?-u)\x{E9}", r"(?-u)[é]", r"(?-u)[aé&&a]", r"(?-u)\x{100}",
+    r"\<(\w+)\>", r"(?-u:\<)(\w+)\>", r"(?-u)\<(\w+)\>",
     # errors
     "(?=a)", "(?!a)", "(?<=a)b", "(?<!a)b", r"(a)\1", r"\0", "(?P=n)", "(",
     ")", "a)", "[a", "[]", "[^]", "[z-a]", "a{2,1}", "a{", "{", "*a", "+",
@@ -104,14 +129,15 @@ PATTERNS = [
 
 def escape(text: str) -> str:
     out = []
-    for ch in text:
+    trailing_space_start = len(text.rstrip(" "))
+    for i, ch in enumerate(text):
         if ch == "\\":
             out.append("\\\\")
         elif ch == "\t":
             out.append("\\t")
         elif ch == "\n":
             out.append("\\n")
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F or (ch == " " and i >= trailing_space_start):
             out.append("\\x%02X" % ord(ch))
         else:
             out.append(ch)

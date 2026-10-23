@@ -346,25 +346,27 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
         out self,
         var fields: List[Series],
         var bits: List[UInt8] = List[UInt8](),
+        length: Int = -1,
     ) raises:
         """Adopt named children (their names are the field names) and an
-        optional prepacked validity bitmap for the struct rows."""
-        if len(fields) == 0:
-            raise Error("A struct needs at least one field")
-        var length = len(fields[0])
+        optional prepacked validity bitmap for the struct rows. Empty
+        structs require an explicit length."""
+        var rows = len(fields[0]) if len(fields) else length
+        if rows < 0 or (length >= 0 and length != rows):
+            raise Error("Invalid struct length")
         for i in range(len(fields)):
-            if len(fields[i]) != length:
+            if len(fields[i]) != rows:
                 raise Error("Struct fields must have equal lengths")
             for j in range(i):
                 if fields[i].name() == fields[j].name():
                     raise Error(
                         "Struct field names must be unique: " + fields[i].name()
                     )
-        _check_bits(bits, length)
+        _check_bits(bits, rows)
         self._fields = _hold_many(fields^)
         self._bits = ArcPointer(bits^)
         self._offset = 0
-        self._length = length
+        self._length = rows
 
     @staticmethod
     def _nulls(length: Int, dtype: DataType) raises -> Self:
@@ -374,7 +376,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
         for i in range(len(names)):
             fields.append(Series.full_null(names[i], dtypes[i], length))
         var valid = List[Bool](length=length, fill=False)
-        return Self(fields^, _pack_bits(valid))
+        return Self(fields^, _pack_bits(valid), length=length)
 
     def __len__(self) -> Int:
         return self._length
@@ -442,6 +444,9 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
         return out^
 
     def take(self, indices: List[Int]) raises -> Self:
+        for i in indices:
+            if i < 0 or i >= self._length:
+                raise Error("Row index out of bounds")
         var fields = List[Series]()
         for field in self._windowed_fields():
             fields.append(field.take(indices))
@@ -453,7 +458,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
                     raise Error("Row index out of bounds")
                 valid.append(self._valid(i))
             bits = _pack_bits(valid)
-        return Self(fields^, bits^)
+        return Self(fields^, bits^, length=len(indices))
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
         var fields = List[Series]()
@@ -464,7 +469,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
             if i >= self._length:
                 raise Error("Row index out of bounds")
             valid.append(i >= 0 and self._valid(i))
-        return Self(fields^, _pack_bits(valid))
+        return Self(fields^, _pack_bits(valid), length=len(indices))
 
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1:
@@ -490,7 +495,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
             for i in range(other._length):
                 valid.append(other._valid(i))
             bits = _pack_bits(valid)
-        return Self(fields^, bits^)
+        return Self(fields^, bits^, length=self._length + other._length)
 
     def equals(self, other: Self) -> Bool:
         if (

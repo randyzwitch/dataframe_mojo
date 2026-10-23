@@ -26,6 +26,14 @@ from .syntax import (
     LOOK_START_LINE,
     LOOK_START_TEXT,
     LOOK_WORD,
+    LOOK_WORD_START,
+    LOOK_WORD_END,
+    LOOK_ASCII_WORD,
+    LOOK_ASCII_NOT_WORD,
+    LOOK_ASCII_WORD_START,
+    LOOK_ASCII_WORD_END,
+    LOOK_UNICODE_WORD,
+    LOOK_ASCII,
 )
 
 
@@ -77,6 +85,16 @@ def previous_start(text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
     return i
 
 
+@always_inline
+def _ascii_word(cp: UInt32) -> Bool:
+    return (
+        (cp >= 48 and cp <= 57)
+        or (cp >= 65 and cp <= 90)
+        or cp == 95
+        or (cp >= 97 and cp <= 122)
+    )
+
+
 def look_holds(
     program: Program, look: UInt32, text: Span[UInt8, ImmutAnyOrigin], at: Int
 ) -> Bool:
@@ -99,8 +117,19 @@ def look_holds(
     var after = False
     if at < n:
         after = program.is_word(UInt32(decode(text, at) >> 3))
-    if look == LOOK_WORD:
+    if look & LOOK_ASCII:
+        before = at > 0 and _ascii_word(
+            UInt32(text.unsafe_ptr()[unsafe_offset=at - 1])
+        )
+        after = at < n and _ascii_word(
+            UInt32(text.unsafe_ptr()[unsafe_offset=at])
+        )
+    if look == LOOK_WORD or look == LOOK_ASCII_WORD:
         return before != after
+    if look == LOOK_WORD_START or look == LOOK_ASCII_WORD_START:
+        return not before and after
+    if look == LOOK_WORD_END or look == LOOK_ASCII_WORD_END:
+        return before and not after
     return before == after
 
 

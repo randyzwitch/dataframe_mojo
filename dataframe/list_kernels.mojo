@@ -14,6 +14,7 @@ from .expr import (
     LIST_MIN,
     LIST_SUM,
     STR_EXTRACT_ALL,
+    STR_EXTRACT_GROUPS,
     STR_SPLIT,
     STRUCT_FIELD,
     Node,
@@ -23,6 +24,7 @@ from .regex import Regex
 from .regex_kernels import (
     compile_pattern,
     regex_extract_all,
+    regex_extract_groups,
     regex_split,
     split_codepoints,
 )
@@ -41,6 +43,10 @@ def nested_op(
         return _split(input, node.text, node.integer == 1)
     if node.op == STR_EXTRACT_ALL:
         return regex_extract_all(
+            input._data[StringColumn], compile_pattern(node.text, False)
+        )
+    if node.op == STR_EXTRACT_GROUPS:
+        return regex_extract_groups(
             input._data[StringColumn], compile_pattern(node.text, False)
         )
     if node.op == STRUCT_FIELD:

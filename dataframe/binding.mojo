@@ -134,6 +134,8 @@ from .expr import (
     STR_CONTAINS,
     STR_EXTRACT,
     STR_EXTRACT_ALL,
+    STR_EXTRACT_GROUPS,
+    STR_ESCAPE_REGEX,
     STR_REPLACE,
     STR_IS_IN,
     INT_IS_IN,
@@ -273,7 +275,11 @@ def _check_pattern(node: Node) raises:
         regex = node.integer == 1
     elif node.op == STR_FIND or node.op == STR_COUNT_MATCHES:
         regex = node.integer == 0
-    elif node.op == STR_EXTRACT or node.op == STR_EXTRACT_ALL:
+    elif (
+        node.op == STR_EXTRACT
+        or node.op == STR_EXTRACT_ALL
+        or node.op == STR_EXTRACT_GROUPS
+    ):
         regex = True
     elif node.op == STR_SPLIT:
         regex = node.min_count == 1 and node.text.byte_length() > 0
@@ -1693,7 +1699,19 @@ def bind(
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid list expression input")
             var input = types[node.left]
-            if node.op == STR_SPLIT or node.op == STR_EXTRACT_ALL:
+            if node.op == STR_EXTRACT_GROUPS:
+                if input != DataType.STRING:
+                    raise Error(
+                        "str.extract_groups requires a string expression, found "
+                        + input.name()
+                    )
+                var regex = compile_pattern(node.text, False)
+                var names = regex.group_names()
+                dtype = DataType.struct(
+                    names,
+                    List[DataType](length=len(names), fill=DataType.STRING),
+                )
+            elif node.op == STR_SPLIT or node.op == STR_EXTRACT_ALL:
                 if input != DataType.STRING:
                     raise Error(
                         (

@@ -2,7 +2,7 @@
 are never read."""
 from .bool_column import BoolColumn
 from .column import Column
-from .regex import Regex
+from .regex import Regex, escape
 from .string_column import StringColumn, StringBuilder
 from .expr import (
     Node,
@@ -15,6 +15,7 @@ from .expr import (
     STR_ENDS_WITH,
     STR_CONTAINS,
     STR_EXTRACT,
+    STR_ESCAPE_REGEX,
     STR_IS_IN,
     STR_LIKE,
     STR_REPLACE,
@@ -198,7 +199,9 @@ def string_op(node: Node, input: Series) raises -> Series:
             out.append_null()
             continue
         var text = String(column._get(i))
-        if op == STR_UPPER:
+        if op == STR_ESCAPE_REGEX:
+            out.append(escape(text))
+        elif op == STR_UPPER:
             out.append(text.upper())
         elif op == STR_LOWER:
             out.append(text.lower())

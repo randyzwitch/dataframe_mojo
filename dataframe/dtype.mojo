@@ -242,8 +242,6 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """A struct column with one field per name, in order."""
         if len(names) != len(dtypes):
             raise Error("struct needs one dtype per field name")
-        if len(names) == 0:
-            raise Error("struct needs at least one field")
         for i in range(len(names)):
             for j in range(i):
                 if names[i] == names[j]:
