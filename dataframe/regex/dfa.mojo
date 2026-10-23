@@ -909,8 +909,8 @@ def _literal_chunk[
     var candidates = UInt64(pack_bits[Mask](hits))
     if not candidates:
         return -1
-    if length <= 2:
-        return at + Int(count_trailing_zeros(candidates))
+    # A one- or two-byte needle has no interior bytes to verify. Let the
+    # empty verification loop handle it, keeping miss masks off that path.
     return _verify_literal(hay, needle, length, at, candidates)
 
 
