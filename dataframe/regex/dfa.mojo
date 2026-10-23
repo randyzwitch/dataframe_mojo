@@ -486,11 +486,18 @@ struct LazyDFA(Movable):
         var p = text.unsafe_ptr()
         var ascii = program.ascii_class.unsafe_ptr()
         var stride = self.stride
-        var s0 = Int(self.start_state(program, text, start, anchored))
+        var at = start
+        # Literal sets extend coverage when no cheap start-state scanner is
+        # available. Skip once before entering the DFA, leaving its cached
+        # transitions unchanged. Small inputs use the ordinary DFA directly.
+        if not anchored and len(prefilter.literals) > 0 and n - at >= 64:
+            at = prefilter._find_literals(text, at)
+            if at < 0:
+                return -1
+        var s0 = Int(self.start_state(program, text, at, anchored))
         if s0 == Int(DEAD):
             return -1
         var accel = not anchored and prefilter.active()
-        var at = start
         var off = s0 * stride
         if accel and self.accel[s0] and at < n:
             var candidate = prefilter.find(text, at)
@@ -647,24 +654,55 @@ struct Prefilter(Copyable, Movable):
     in its start state (RE2's prefix accel, regex-automata's prefilters):
     a literal every match starts with, or a sequence of small byte sets
     every match starts with (`(?i)ab` is {A, a} then {B, b}; `(fox|dog)`
-    is {f, d}, {o}, {x, g}), which plays the part of Rust's Teddy."""
+    is {f, d}, {o}, {x, g}). Literal alternatives preserve correlations
+    between positions and allow unequal lengths."""
 
     var prefix: List[UInt8]
     # Four bytes per position (a set of fewer repeats its first byte).
     var sets: List[UInt8]
+    var literals: List[List[UInt8]]
+    var literal_width: Int
+    var masks: List[SIMD[DType.uint8, 16]]
 
     def __init__(out self):
         self.prefix = List[UInt8]()
         self.sets = List[UInt8]()
+        self.literals = List[List[UInt8]]()
+        self.literal_width = 0
+        self.masks = List[SIMD[DType.uint8, 16]]()
 
-    def __init__(out self, var prefix: List[UInt8], var sets: List[UInt8]):
+    def __init__(
+        out self,
+        var prefix: List[UInt8],
+        var sets: List[UInt8],
+        var literals: List[List[UInt8]],
+    ):
         self.prefix = prefix^
         self.sets = sets^
+        self.literals = List[List[UInt8]]()
+        self.literal_width = 0
+        self.masks = List[SIMD[DType.uint8, 16]]()
         if len(self.sets) <= 4 * len(self.prefix):
-            # The literal is at least as selective.
             self.sets.clear()
         else:
             self.prefix.clear()
+        # Preserve the cheaper single-literal and byte-set scanners.
+        # The new path covers alternatives those analyses cannot represent.
+        if len(self.prefix) == 0 and len(self.sets) == 0 and len(literals) > 1:
+            var width = len(literals[0])
+            for literal in literals:
+                width = min(width, len(literal))
+            if width > 1:
+                self.literals = literals^
+                self.literal_width = min(width, 3)
+                for _ in range(6):
+                    self.masks.append(SIMD[DType.uint8, 16]())
+                for k in range(len(self.literals)):
+                    var bit = UInt8(1 << k)
+                    for j in range(self.literal_width):
+                        var byte = self.literals[k][j]
+                        self.masks[j * 2][Int(byte & 15)] |= bit
+                        self.masks[j * 2 + 1][Int(byte >> 4)] |= bit
 
     @always_inline
     def active(self) -> Bool:
@@ -674,6 +712,80 @@ struct Prefilter(Copyable, Movable):
         if len(self.prefix) > 0:
             return find_literal(text, self.prefix, at)
         return find_sets(text, self.sets, at)
+
+    def _find_literals(self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
+        if self.literal_width == 3:
+            return self._find_teddy[3](text, at)
+        return self._find_teddy[2](text, at)
+
+    def _find_teddy[
+        depth: Int
+    ](self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
+        """Nibble lookup masks test up to eight prefixes together. Each
+        bit names one literal, so intersecting all masks preserves byte
+        correlations without a loop over literals in the vector scan.
+        Full verification and the DFA retain regex priority/semantics."""
+        var n = len(text)
+        var p = text.unsafe_ptr()
+        var lo0 = self.masks[0]
+        var hi0 = self.masks[1]
+        var lo1 = self.masks[2]
+        var hi1 = self.masks[3]
+        var lo2 = self.masks[4]
+        var hi2 = self.masks[5]
+        var i = at
+        comptime lanes = 16
+        while i + lanes + depth - 1 <= n:
+            var a = p.unsafe_load[width=lanes](i)
+            var b = p.unsafe_load[width=lanes](i + 1)
+            var hits = (
+                lo0._dynamic_shuffle(a & 15)
+                & hi0._dynamic_shuffle(a >> 4)
+                & lo1._dynamic_shuffle(b & 15)
+                & hi1._dynamic_shuffle(b >> 4)
+            )
+            comptime if depth == 3:
+                var c = p.unsafe_load[width=lanes](i + 2)
+                hits &= lo2._dynamic_shuffle(c & 15) & hi2._dynamic_shuffle(
+                    c >> 4
+                )
+            if hits.ne(SIMD[DType.uint8, lanes]()).reduce_or():
+                for k in range(lanes):
+                    if hits[k] != 0:
+                        for literal in range(len(self.literals)):
+                            if hits[k] & UInt8(1 << literal):
+                                if _literal_matches(
+                                    text, self.literals[literal], i + k
+                                ):
+                                    return i + k
+            i += lanes
+        while i + depth <= n:
+            if _literal_at(text, self.literals, i):
+                return i
+            i += 1
+        return -1
+
+
+def _literal_at(
+    text: Span[UInt8, ImmutAnyOrigin], literals: List[List[UInt8]], at: Int
+) -> Bool:
+    for literal in literals:
+        if _literal_matches(text, literal, at):
+            return True
+    return False
+
+
+@always_inline
+def _literal_matches(
+    text: Span[UInt8, ImmutAnyOrigin], literal: List[UInt8], at: Int
+) -> Bool:
+    if len(literal) > len(text) - at:
+        return False
+    var p = text.unsafe_ptr()
+    for j in range(len(literal)):
+        if p[unsafe_offset=at + j] != literal[j]:
+            return False
+    return True
 
 
 @always_inline
