@@ -25,6 +25,8 @@ When the cache grows past its budget it is cleared and the search goes on
 from the current state, as RE2 does; if that happens too often, the search
 gives up and the caller falls back to the Pike VM.
 """
+from std.memory import pack_bits
+from std.bit import count_trailing_zeros
 from .pikevm import decode, previous_start, _ascii_word
 from .program import (
     OP_FAIL,
@@ -725,6 +727,7 @@ struct Prefilter(Copyable, Movable):
             return find_literal(text, self.prefix, at)
         return find_sets(text, self.sets, at)
 
+    @no_inline
     def _find_literals(self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
         if self.literal_width == 3:
             return self._find_teddy[3](text, at)
@@ -891,16 +894,17 @@ def find_literal(
         var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
             width=lanes
         ](i + m - 1).eq(lasts)
-        if hits.reduce_or():
-            for k in range(lanes):
-                if hits[k]:
-                    var same = True
-                    for j in range(1, m - 1):
-                        if h[unsafe_offset=i + k + j] != p[unsafe_offset=j]:
-                            same = False
-                            break
-                    if same:
-                        return i + k
+        var candidates = pack_bits[DType.uint32](hits)
+        while candidates:
+            var k = Int(count_trailing_zeros(candidates))
+            var same = True
+            for j in range(1, m - 1):
+                if h[unsafe_offset=i + k + j] != p[unsafe_offset=j]:
+                    same = False
+                    break
+            if same:
+                return i + k
+            candidates &= candidates - 1
         i += lanes
     while i + m <= n:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:
