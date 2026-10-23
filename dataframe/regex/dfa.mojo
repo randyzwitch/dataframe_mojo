@@ -400,6 +400,7 @@ struct LazyDFA(Movable):
             return 1
         return 2 if _ascii_word(cp) else 3 if program.is_word(cp) else 4
 
+    @always_inline
     def start_state(
         mut self,
         program: Program,
@@ -407,10 +408,21 @@ struct LazyDFA(Movable):
         at: Int,
         anchored: Bool,
     ) -> Int32:
-        var context = self._context(program, text, at)
+        # Without assertions, surrounding characters cannot affect the
+        # epsilon closure. Share one context instead of decoding a neighbor
+        # at every short match. Keep cache misses out of this hot lookup.
+        var context = 0
+        if program.looks != 0:
+            context = self._context(program, text, at)
         var key = context + (5 if anchored else 0)
-        if self.start_states[key] != UNKNOWN:
-            return self.start_states[key]
+        var cached = self.start_states[key]
+        if cached != UNKNOWN:
+            return cached
+        return self._new_start_state(program, context, key, anchored)
+
+    def _new_start_state(
+        mut self, program: Program, context: Int, key: Int, anchored: Bool
+    ) -> Int32:
         var flag: UInt32 = 0
         if context == 0:
             if self.reverse:
