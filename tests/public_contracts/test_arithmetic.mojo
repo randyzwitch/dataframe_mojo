@@ -6,7 +6,7 @@ expectations use exact Int128 references, never floating-point range checks.
 """
 # contract-group: expr.arithmetic
 # contract-group: reference.anchors
-from std.math import abs, isnan, isinf
+from std.math import abs, isnan, isinf, sqrt
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, Expr, col, lit, when
@@ -1652,7 +1652,8 @@ def power_anchors[D: DType]() raises -> Tuple[DataFrame, Series]:
         1,
         1,
         0,
-        inf,
+        # Polars squares roots with sqrt: (-inf) ** 0.5 is NaN, not +inf.
+        nan,
         0,
         -inf,
         -0.0,
@@ -1722,3 +1723,37 @@ def _floating_power_anchors[D: DType]() raises:
 def test_floating_power_independent_nan_infinity_zero_and_boundary_anchors() raises:
     _floating_power_anchors[DType.float32]()
     _floating_power_anchors[DType.float64]()
+
+
+def powers_by_multiplication[D: DType]() raises:
+    """Polars' pow_on_floats: x ** 0.5 is sqrt and x ** n, n in 2..9, is the
+    left-to-right product, never libm's pow."""
+    var values = List[Scalar[D]]()
+    var state = UInt64(0x9E3779B97F4A7C15)
+    for _ in range(5000):
+        state = state * 6364136223846793005 + 1442695040888963407
+        values.append(
+            Scalar[D](Float64(state >> 11) / 9007199254740992.0 + 0.01)
+        )
+    var frame = DataFrame([Series("x", Column[Scalar[D]](values.copy()))])
+    for n in range(2, 10):
+        var result = (
+            frame.select(col("x").pow(lit(Scalar[D](n))))
+            .column("x")
+            .numeric[D]()
+        )
+        for row in range(len(values)):
+            var product = values[row]
+            for _ in range(1, n):
+                product = product * values[row]
+            assert_equal(result._get(row), product)
+    var roots = (
+        frame.select(col("x").pow(lit(Scalar[D](0.5)))).column("x").numeric[D]()
+    )
+    for row in range(len(values)):
+        assert_equal(roots._get(row), sqrt(values[row]))
+
+
+def test_float_powers_follow_polars_multiplication_and_sqrt_special_cases() raises:
+    powers_by_multiplication[DType.float64]()
+    powers_by_multiplication[DType.float32]()

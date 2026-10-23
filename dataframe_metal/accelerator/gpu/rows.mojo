@@ -730,7 +730,7 @@ def _row_program[
                         if dtype == 1:
                             value = floating.from_float32(UInt32(value))
                     elif op == POW:
-                        value = floating.power(x, y)
+                        value = floating.power(x, y, dtype == 1)
                     else:
                         value = floating.div(x, y)
                         # Binary32 floor division floors its rounded quotient.
