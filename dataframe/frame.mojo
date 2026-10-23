@@ -186,7 +186,7 @@ from .indexed_reduce import (
 )
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
-from .lazy import LazyFrame, _concat_plans
+from .lazy import LazyFrame, LazyGroupingSets, _concat_plans
 from .display import render_frame, render_glimpse
 
 # A struct key groups, joins and deduplicates by its fields plus its own
@@ -3563,6 +3563,23 @@ struct DataFrame(Copyable, Sized, Writable):
             columns.append(self._columns[self._index(key)].copy())
         return GroupBy(self.copy(), _group_keys(columns), maintain_order)
 
+    def group_by_rollup(self, keys: List[String]) -> GroupingSets:
+        """DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets
+        (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (). Finish it with
+        `agg`; see GroupingSets for the output. Runs the lazy plan."""
+        return GroupingSets(self.lazy().group_by_rollup(keys))
+
+    def group_by_cube(self, keys: List[String]) -> GroupingSets:
+        """DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys
+        as a grouping set. Finish it with `agg`."""
+        return GroupingSets(self.lazy().group_by_cube(keys))
+
+    def group_by_grouping_sets(self, sets: List[List[String]]) -> GroupingSets:
+        """DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping
+        per listed set, an empty set being the grand total. Finish it with
+        `agg`."""
+        return GroupingSets(self.lazy().group_by_grouping_sets(sets))
+
     def group_indices(self, key: String) raises -> GroupIndices:
         return self.group_indices([key])
 
@@ -6078,6 +6095,24 @@ struct _HashedBucketJob(Job):
                     )
                 )
         self.firsts = firsts^
+
+
+@fieldwise_init
+struct GroupingSets(Copyable):
+    """A pending `group_by_rollup`, `group_by_cube` or
+    `group_by_grouping_sets`; finish it with agg."""
+
+    var _plan: LazyGroupingSets
+
+    def agg(self, exprs: List[Expr]) raises -> DataFrame:
+        """The rows of every grouping set, in set order: the keys (null in
+        the sets that do not group by them), then the aggregations. Use
+        `grouping` / `grouping_id` in `exprs` to tell subtotal rows from
+        null key values. See LazyGroupingSets.agg."""
+        return self._plan.agg(exprs).collect()
+
+    def agg(self, expr: Expr) raises -> DataFrame:
+        return self.agg([expr.copy()])
 
 
 @fieldwise_init

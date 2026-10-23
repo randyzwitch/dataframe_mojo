@@ -726,6 +726,51 @@ tolerances, not a promise of bitwise reproducibility. SIMD and parallel reductio
 scheduling can evolve without changing the public expression API. NaNs and
 infinities retain IEEE behavior, subject to reassociation.
 
+## Rollups, cubes and grouping sets
+
+`group_by_rollup(keys)`, `group_by_cube(keys)` and
+`group_by_grouping_sets(sets)` on `DataFrame` and `LazyFrame` are DuckDB's
+`GROUP BY ROLLUP`, `CUBE` and `GROUPING SETS`. Each returns an object whose
+`agg(exprs)` aggregates as `group_by(...).agg(...)` does, once per grouping
+set, and returns the rows of every set one after another (a `DataFrame` from
+the eager form, a `LazyFrame` from the lazy form).
+
+```mojo
+var report = sales.lazy().group_by_rollup(["region", "product"]).agg([
+    col("amount").sum().alias("total"),
+    grouping_id(["region", "product"]).alias("level"),
+]).collect()
+```
+
+- ROLLUP `(a, b)` is the sets `(a, b)`, `(a)`, `()`. CUBE `(a, b)` is all four
+  subsets. GROUPING SETS lists the sets itself; the empty set is the grand
+  total. A set listed twice gives its rows twice, a key listed twice in one
+  set counts once, and `rollup(a, a)` is `(a, a)`, `(a)`, `()` (all as in
+  DuckDB).
+- The output columns are the keys (every key any set names, in order of
+  first appearance), then the aggregations. In a set's rows the keys the set
+  does not group by are typed nulls.
+- `grouping(name)` is 1 in the rows where `name` is aggregated away and 0
+  where the row groups by it; `grouping_id([a, b, ...])` is the bit mask of
+  those, the first name the highest bit (3 for `(a, b)` in the grand total).
+  Both are Int64 and usable in `agg` only. They tell a subtotal's null from a
+  null key value: the rows `(x, null)` with `grouping_id` 0 and 1 are
+  different groups.
+- The empty set yields one row even over no rows (a sum there is 0, as `sum`
+  of no rows is everywhere in this library; DuckDB's is null); every other
+  set yields no rows over no rows.
+- Row order is unspecified unless the result is sorted.
+- Known limits: `grouping` and `grouping_id` must be a whole aggregation
+  expression (`grouping(a) + 1` raises), and when one is present every other
+  aggregation must produce a single column named by its output name (a
+  selector such as `all().sum()` next to `grouping` is not supported).
+
+The plan is `group_by(set).agg(...)` per set, each with its missing keys
+added as null columns, joined by `concat`. Every set reads the input, so the
+optimizer's pushdowns, common-subplan sharing and the accelerator see the
+same operators they see for hand-written queries. Aggregates for coarser sets
+are not yet merged from finer ones.
+
 ## Grouping and ordering
 
 `group_by` accepts one column name, a list of names, or a list of key

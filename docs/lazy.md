@@ -38,6 +38,9 @@ selections through (see Optimizations); a filter moved below a `rename`
 reads the input's names. `strict=False` makes `rename` ignore
 names the input lacks; a strict cast that fails raises when the plan runs.
 
+`group_by_rollup`, `group_by_cube` and `group_by_grouping_sets` expand to one
+`group_by` per grouping set, concatenated; see [Expressions](expressions.md).
+
 `group_by` takes column names or expressions, as `DataFrame.group_by` does.
 An expression key is evaluated once and named by its output name, and the
 aggregations still read the input's columns: computed keys become a
