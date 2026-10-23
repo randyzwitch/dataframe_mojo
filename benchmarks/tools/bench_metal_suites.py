@@ -226,6 +226,10 @@ def parse(output, query):
             if fields[1] not in {"True", "False"}:
                 raise ValueError("Invalid ordered equality")
             result["ordered_equal"] = fields[1] == "True"
+        elif len(fields) == 2 and fields[0] == "match":
+            if fields[1] not in {"exact", "within_float_tolerance"}:
+                raise ValueError("Invalid match kind")
+            result["match"] = fields[1]
         elif len(fields) == 2 and fields[0] == "cpu_repeat_equal":
             if fields[1] not in {"True", "False"}:
                 raise ValueError("Invalid CPU repeat equality")
@@ -320,7 +324,9 @@ def parse(output, query):
     elif status == "ok":
         raise ValueError("Successful outcome lacks per-collection runtime audit")
     if status == "ok" and (
-        result.get("collections", 0) < 1 or "ordered_equal" not in result
+        result.get("collections", 0) < 1
+        or "ordered_equal" not in result
+        or "match" not in result
     ):
         raise ValueError(
             "Successful outcome lacks correctness/repetition evidence"
@@ -501,7 +507,7 @@ def main():
             "scale": args.scale,
             "repetitions": args.reps,
             "evaluation": bench_policy.record(ROOT, selected, suites.SUITES),
-            "comparison": "Exact full schema and row multiset against original CPU query, retaining duplicate rows. Original-order equality recorded separately. No numerical tolerance, dtype conversion, or query rewriting for support. The requested Metal backend may use CPU data-fault adjudication according to its engine policy; collect-boundary audits do not certify GPU-only execution. Collection durations are diagnostic, not performance evidence.",
+            "comparison": "Full schema and row multiset against original CPU query, retaining duplicate rows. Original-order equality recorded separately. Every cell is bit-equal except floating cells, which may differ by |a-b| <= 1e-6 * max(1, |a|, |b|), the answer-check rule of bench_suites._close, when rows pair uniquely on non-floating columns or declared keys, because parallel float reductions add in a scheduler-chosen order on the CPU too; each case records match=exact or match=within_float_tolerance. No dtype conversion or query rewriting for support. The requested Metal backend may use CPU data-fault adjudication according to its engine policy; collect-boundary audits do not certify GPU-only execution. Collection durations are diagnostic, not performance evidence.",
         },
         "cases": [],
     }

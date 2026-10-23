@@ -4,8 +4,13 @@ Build with -I . -I benchmarks; no GPU context or accelerator is needed.
 """
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, Series, lit
-from metal_suite_diagnostics import align, column_metrics, emit_comparison
+from dataframe import Column, DataFrame, Series, col, lit
+from metal_suite_diagnostics import (
+    align,
+    column_metrics,
+    emit_comparison,
+    float_tolerance_match,
+)
 
 
 def source() raises -> DataFrame:
@@ -128,6 +133,22 @@ def main() raises:
     assert_equal(special.null_mismatches, 1)
     assert_equal(special.nonfinite_float_mismatches, 2)
     assert_equal(special.finite_float_mismatches, 0)
+    # Tolerance admission: one ulp passes, 1e-5 relative and non-float
+    # differences do not.
+    assert_true(float_tolerance_match(left, right, keys))
+    assert_true(float_tolerance_match(left, right, List[String]()))
+    var drift = left.with_columns(
+        [(col("floating_mean") * lit(Float64(1.00001))).alias("floating_mean")]
+    )
+    assert_true(not float_tolerance_match(left, drift, keys))
+    var other_key = left.with_columns([(col("k") + lit(Int32(1))).alias("k")])
+    assert_true(not float_tolerance_match(left, other_key, keys))
+    assert_true(float_tolerance_match(a32, b32, row_keys))
+    var wide = a32.with_columns(
+        [(col("value") * lit(Float32(1.0001))).alias("value")]
+    )
+    assert_true(not float_tolerance_match(a32, wide, row_keys))
+    assert_true(not float_tolerance_match(special_a, special_b, row_keys))
     # NaN payload changes and signed zero follow DataFrame.equals semantics.
     emit_comparison(left, right, "cpu_metal", keys, List[String]())
     emit_comparison(left, left, "cpu_repeat", keys, List[String]())
