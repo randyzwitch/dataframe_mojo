@@ -17,6 +17,10 @@ from dataframe import (
     StringColumn,
     Expr,
     col,
+    columns,
+    DataType,
+    StructColumn,
+    all_horizontal,
 )
 from dataframe.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
@@ -248,3 +252,176 @@ def test_invalid_regex_patterns_raise() raises:
         ]:
             with assert_raises():
                 _ = source.select(invalid)
+
+
+def test_regex_capture_struct_and_escaping_preserve_layouts_nulls_and_schema() raises:
+    var pattern = "(?P<head>\\w+)(?:-(\\d+))?"
+    var expected = DataFrame(
+        [
+            Series(
+                "captures",
+                StructColumn(
+                    [
+                        _strings(
+                            "head",
+                            ["id", "", "Straße", "no", "", "a"],
+                            [True, False, True, True, False, True],
+                        ),
+                        _strings(
+                            "2",
+                            ["12", "", "", "", "", ""],
+                            [True, False, False, False, False, False],
+                        ),
+                    ],
+                    [UInt8(61)],
+                ),
+            ),
+            _strings(
+                "escaped",
+                [
+                    "id\\-12 and id\\-7",
+                    "",
+                    "Straße 9",
+                    "no digits",
+                    "",
+                    "a\\.b a\\.b",
+                ],
+                _valid(),
+            ),
+        ]
+    )
+    var exprs: List[Expr] = [
+        col("s").str().extract_groups(pattern).alias("captures"),
+        col("s").str().escape_regex().alias("escaped"),
+    ]
+    for layout in range(4):
+        var source = _source(layout)
+        assert_frame(source.select_exprs(exprs, batch_size=1), expected)
+        for optimize in [False, True]:
+            for streaming in [False, True]:
+                var result = (
+                    source.lazy()
+                    .select_exprs(exprs)
+                    .collect(
+                        optimize=optimize, streaming=streaming, batch_size=1
+                    )
+                )
+                assert_frame(result, expected)
+        assert_frame(source.clear().select_exprs(exprs), expected.clear())
+        var fields = source.select(
+            col("s").str().extract_groups(pattern)
+        ).unnest("s")
+        assert_equal(fields.columns(), [String("head"), "2"])
+        assert_equal(fields.item(0, "2").string(), "12")
+        assert_true(fields.item(1, "head").is_null())
+        assert_true(fields.item(4, "head").is_null())
+        # A field access composes directly with the new struct operation.
+        var length = source.select(
+            col("s")
+            .str()
+            .extract_groups(pattern)
+            .field("head")
+            .str()
+            .len_chars()
+        )
+        assert_equal(length.item(2, "s").int64(), 6)
+
+
+def test_regex_without_captures_returns_empty_structs_with_row_count() raises:
+    var expr = col("s").str().extract_groups("x")
+    for layout in range(4):
+        var source = _source(layout)
+        for streaming in [False, True]:
+            var result = (
+                source.lazy()
+                .select(expr)
+                .collect(streaming=streaming, batch_size=1)
+            )
+            var series = result.column("s")
+            assert_equal(len(series), source.height())
+            assert_true(series.dtype().is_struct())
+            assert_equal(series.dtype().field_count(), 0)
+            assert_equal(series.null_count(), 0)
+            var taken = series.take([5, 1, 3])
+            assert_equal(len(taken), 3)
+            assert_equal(len(taken.slice(1, 1)), 1)
+            assert_equal(len(series.take_or_null([1, -1, 4])), 3)
+            assert_true(series.take_or_null([1, -1, 4]).get(1).is_null())
+        var empty = source.clear().select(expr)
+        assert_equal(empty.height(), 0)
+        assert_equal(empty.column("s").dtype().field_count(), 0)
+
+
+def test_regex_selectors_expand_in_schema_order_and_compose_with_expressions() raises:
+    var source = DataFrame(
+        [
+            Series("cost_b", Column[Int64]([3, 5])),
+            Series("id", Column[Int64]([1, 2])),
+            Series("cost_a", Column[Int64]([7, 11])),
+            Series("α", Column[Int64]([13, 17])),
+            Series("x\x1f.y", Column[Int64]([19, 23])),
+        ]
+    )
+    var expr = (col("^cost_.*$") + 1).name_suffix("_plus")
+    var expected = DataFrame(
+        [
+            Series("cost_b_plus", Column[Int64]([4, 6])),
+            Series("cost_a_plus", Column[Int64]([8, 12])),
+        ]
+    )
+    assert_frame(source.select(expr), expected)
+    for optimize in [False, True]:
+        for streaming in [False, True]:
+            assert_frame(
+                source.lazy()
+                .select(expr)
+                .collect(optimize=optimize, streaming=streaming, batch_size=1),
+                expected,
+            )
+    assert_equal(
+        source.select(columns("cost")).columns(), [String("cost_b"), "cost_a"]
+    )
+    assert_equal(source.select(columns("\\p{Greek}")).columns(), [String("α")])
+    assert_equal(
+        source.select(col(["id", "^cost_.*$"])).columns(),
+        [String("id"), "cost_b", "cost_a"],
+    )
+    assert_equal(source.select(columns("\\.")).columns(), [String("x\x1f.y")])
+    assert_equal(source.select(col("^nothing$")).width(), 0)
+    assert_equal(
+        source.select(col("^cost_.*$").sum()).item(0, "cost_b").int64(), 8
+    )
+    var kept = (
+        source.lazy().filter(all_horizontal([col("^cost_.*$") > 4])).collect()
+    )
+    assert_equal(kept.height(), 1)
+    assert_equal(kept.item(0, "id").int64(), 2)
+    for input in [source.copy(), source.clear()]:
+        with assert_raises():
+            _ = input.select(col("^[$"))
+        with assert_raises():
+            _ = input.select(columns("("))
+        with assert_raises():
+            _ = input.select(col("absent"))
+
+
+def test_new_regex_apis_validate_even_for_empty_or_unobserved_inputs() raises:
+    var source = _source(0)
+    for input in [source.copy(), source.clear()]:
+        with assert_raises():
+            _ = input.select(col("s").str().extract_groups("("))
+        with assert_raises():
+            _ = input.select(col("g").str().extract_groups("(a)"))
+        with assert_raises():
+            _ = input.select(col("g").str().escape_regex())
+        with assert_raises():
+            _ = input.select(col("s").str().contains("(?-u)."))
+    # All metacharacters, control bytes and Unicode round-trip literally.
+    var text = String("a.b*c+(d)|[e]{f}^$#&-~\\\t\nα😀")
+    var frame = DataFrame([Series("s", Column[String]([text.copy()]))])
+    var escaped = (
+        frame.select(col("s").str().escape_regex()).item(0, "s").string()
+    )
+    assert_equal(
+        frame.filter(col("s").str().contains("^" + escaped + "$")).height(), 1
+    )

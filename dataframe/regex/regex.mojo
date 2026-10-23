@@ -413,8 +413,10 @@ struct Regex(Copyable, Movable):
     and the flags `i m s U x` (as `(?flags)` or `(?flags:...)`).
 
     Rejected with an error, as Rust does: look-around and backreferences.
-    Also rejected here: Unicode property classes (`\\p{...}`), `\\<`/`\\>`,
-    `(?-u)` byte matching and CRLF mode `(?R)`.
+    Unicode properties (`\\p{Greek}`, `\\pL`, `\\P{...}`) and word-start/end
+    anchors (`\\<`, `\\>`) are supported. `(?-u)` selects ASCII classes,
+    boundaries and case folding, provided the pattern cannot match invalid
+    UTF-8, as in Rust's string regex. CRLF mode `(?R)` is not supported.
     """
 
     var _compiled: ArcPointer[_Compiled]
@@ -430,6 +432,14 @@ struct Regex(Copyable, Movable):
     def group_count(self) -> Int:
         """Capture groups, not counting the whole match (group 0)."""
         return len(self._compiled[].names) - 1
+
+    def group_names(self) -> List[String]:
+        """Capture field names in group order, using the index when unnamed."""
+        var out = List[String]()
+        ref names = self._compiled[].names
+        for i in range(1, len(names)):
+            out.append(names[i] if names[i] != "" else String(i))
+        return out^
 
     def group_index(self, name: String) -> Int:
         """The index of a named group, or -1."""

@@ -12,6 +12,7 @@ from .charclass import (
     MAX_CODEPOINT,
     ascii_class,
     canonical,
+    class_contains,
     difference,
     digit_class,
     intersect,
@@ -20,6 +21,7 @@ from .charclass import (
     symmetric_difference,
     union,
     word_class,
+    property_class,
 )
 
 comptime NODE_EMPTY = 0
@@ -38,13 +40,23 @@ comptime LOOK_START_LINE: UInt32 = 4
 comptime LOOK_END_LINE: UInt32 = 8
 comptime LOOK_WORD: UInt32 = 16
 comptime LOOK_NOT_WORD: UInt32 = 32
-comptime LOOK_MASK: UInt32 = 63
+comptime LOOK_WORD_START: UInt32 = 1 << 6
+comptime LOOK_WORD_END: UInt32 = 1 << 7
+# Bits 8 and 9 are DFA state flags, so additional look flags skip them.
+comptime LOOK_ASCII_WORD: UInt32 = 1 << 10
+comptime LOOK_ASCII_NOT_WORD: UInt32 = 1 << 11
+comptime LOOK_ASCII_WORD_START: UInt32 = 1 << 12
+comptime LOOK_ASCII_WORD_END: UInt32 = 1 << 13
+comptime LOOK_UNICODE_WORD: UInt32 = LOOK_WORD | LOOK_NOT_WORD | LOOK_WORD_START | LOOK_WORD_END
+comptime LOOK_ASCII: UInt32 = LOOK_ASCII_WORD | LOOK_ASCII_NOT_WORD | LOOK_ASCII_WORD_START | LOOK_ASCII_WORD_END
+comptime LOOK_MASK: UInt32 = 0x3CFF
 
 comptime _FLAG_CASE = 1
 comptime _FLAG_MULTILINE = 2
 comptime _FLAG_DOT_NEWLINE = 4
 comptime _FLAG_SWAP_GREED = 8
 comptime _FLAG_VERBOSE = 16
+comptime _FLAG_ASCII = 32
 
 # regex-syntax's default nesting limit.
 comptime _NEST_LIMIT = 250
@@ -233,6 +245,14 @@ struct _Parser(Movable):
     def fold(mut self, ranges: List[UInt32]) -> List[UInt32]:
         """Close a set under simple case folding, loading the orbit table
         on first use."""
+        if self.flags & _FLAG_ASCII:
+            var out = ranges.copy()
+            for cp in range(65, 91):
+                if class_contains(ranges, UInt32(cp)):
+                    out.extend([UInt32(cp + 32), UInt32(cp + 32)])
+                if class_contains(ranges, UInt32(cp + 32)):
+                    out.extend([UInt32(cp), UInt32(cp)])
+            return canonical(out)
         if len(self.folds) == 0:
             self.folds.append(CaseFolds())
         return self.folds[0].fold(ranges)
@@ -287,9 +307,13 @@ struct _Parser(Movable):
         if c == 40:
             return self.parse_group()
         if c == 91:
-            return self.class_node(self.parse_class())
+            var ranges = self.parse_class()
+            self.check_ascii(ranges)
+            return self.class_node(ranges^)
         if c == 46:
             self.pos += 1
+            if self.flags & _FLAG_ASCII:
+                self.fail("pattern can match invalid UTF-8")
             var any: List[UInt32] = [0, MAX_CODEPOINT]
             if not (self.flags & _FLAG_DOT_NEWLINE):
                 any = [0, 9, 11, MAX_CODEPOINT]
@@ -312,6 +336,7 @@ struct _Parser(Movable):
             if escape.kind == _ESC_LOOK:
                 return self.ast.add(NODE_LOOK, Int(escape.look))
             if escape.kind == _ESC_CLASS:
+                self.check_ascii(escape.ranges)
                 return self.class_node(escape.ranges.copy())
             return self.literal(escape.cp)
         if c == 42 or c == 43 or c == 63 or c == 123:
@@ -486,12 +511,11 @@ struct _Parser(Movable):
             elif c == 120:
                 bit = _FLAG_VERBOSE
             elif c == 117:
-                # Unicode mode is always on; `(?-u)` byte matching is not
-                # supported.
+                # Store the inverse flag so Unicode remains the default.
                 if negate:
-                    self.fail(
-                        "disabling Unicode mode with (?-u) is not supported"
-                    )
+                    flags |= _FLAG_ASCII
+                else:
+                    flags &= ~_FLAG_ASCII
                 self.pos += 1
                 any = True
                 continue
@@ -515,10 +539,13 @@ struct _Parser(Movable):
             any = True
             self.pos += 1
 
-    def parse_hex(mut self, digits: Int) raises -> UInt32:
+    def parse_hex(
+        mut self, digits: Int, in_class: Bool = False
+    ) raises -> UInt32:
         """`\\x`, `\\u` and `\\U` escapes: a fixed number of hex digits, or
         any number in braces."""
         var value = 0
+        var unicode_escape = digits != 2 or self.peek() == 123
         if self.peek() == 123:
             self.pos += 1
             var count = 0
@@ -543,6 +570,11 @@ struct _Parser(Movable):
                 self.pos += 1
         if value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF):
             self.fail("invalid Unicode scalar value")
+        if self.flags & _FLAG_ASCII and value > 127:
+            if not unicode_escape:
+                self.fail("pattern can match invalid UTF-8")
+            if in_class:
+                self.fail("Unicode not allowed here")
         return UInt32(value)
 
     def parse_escape(mut self, in_class: Bool) raises -> _Escape:
@@ -557,7 +589,14 @@ struct _Parser(Movable):
             var ranges = digit_class() if lower == 100 else (
                 word_class() if lower == 119 else space_class()
             )
+            if self.flags & _FLAG_ASCII:
+                ranges = ascii_class(
+                    "digit" if lower
+                    == 100 else "word" if lower
+                    == 119 else "space"
+                )
             result.ranges = negate(ranges) if c < 97 else ranges^
+            self.check_ascii(result.ranges)
             return result^
         if c == 98 or c == 66 or c == 65 or c == 122:
             if in_class:
@@ -566,17 +605,50 @@ struct _Parser(Movable):
                 LOOK_NOT_WORD if c
                 == 66 else (LOOK_START_TEXT if c == 65 else LOOK_END_TEXT)
             )
+            if self.flags & _FLAG_ASCII and (c == 98 or c == 66):
+                look = LOOK_ASCII_WORD if c == 98 else LOOK_ASCII_NOT_WORD
             return _Escape(_ESC_LOOK, look=look)
         if c == 112 or c == 80:
-            self.fail(
-                "Unicode property classes like \\p{...} are not supported"
-            )
+            if self.flags & _FLAG_ASCII:
+                self.fail("Unicode property not allowed with Unicode disabled")
+            var inverse = c == 80
+            var name: String
+            if self.peek() == 123:
+                self.pos += 1
+                var start = self.pos
+                while self.peek() >= 0 and self.peek() != 125:
+                    self.pos += 1
+                if self.peek() != 125:
+                    self.fail("unclosed Unicode property")
+                name = String(
+                    StringSlice(
+                        unsafe_from_utf8=Span(self.bytes)[start : self.pos]
+                    )
+                )
+                self.pos += 1
+            else:
+                if self.peek() < 0:
+                    self.fail("missing Unicode property")
+                name = chr(self.peek())
+                self.pos += 1
+            var unequal = "!=" in name
+            if unequal:
+                inverse = not inverse
+                name = name.replace("!=", "=")
+            else:
+                name = name.replace(":", "=")
+            var ranges = property_class(name)
+            if self.flags & _FLAG_CASE:
+                ranges = self.fold(ranges)
+            var result = _Escape(_ESC_CLASS)
+            result.ranges = negate(ranges) if inverse else ranges^
+            return result^
         if c == 120:
-            return _Escape(_ESC_LITERAL, self.parse_hex(2))
+            return _Escape(_ESC_LITERAL, self.parse_hex(2, in_class))
         if c == 117:
-            return _Escape(_ESC_LITERAL, self.parse_hex(4))
+            return _Escape(_ESC_LITERAL, self.parse_hex(4, in_class))
         if c == 85:
-            return _Escape(_ESC_LITERAL, self.parse_hex(8))
+            return _Escape(_ESC_LITERAL, self.parse_hex(8, in_class))
         if c == 110:
             return _Escape(_ESC_LITERAL, 10)
         if c == 116:
@@ -593,8 +665,12 @@ struct _Parser(Movable):
             self.pos -= 2
             self.fail("backreferences are not supported")
         if c == 60 or c == 62:
-            self.pos -= 2
-            self.fail("word boundary assertions \\< and \\> are not supported")
+            if in_class:
+                self.fail("unrecognized escape sequence in a character class")
+            var look = LOOK_WORD_START if c == 60 else LOOK_WORD_END
+            if self.flags & _FLAG_ASCII:
+                look = LOOK_ASCII_WORD_START if c == 60 else LOOK_ASCII_WORD_END
+            return _Escape(_ESC_LOOK, look=look)
         if c < 128 and not _is_alnum(c):
             # Any ASCII character other than [0-9A-Za-z<>] may be escaped.
             return _Escape(_ESC_LITERAL, UInt32(c))
@@ -631,7 +707,16 @@ struct _Parser(Movable):
             ranges = self.fold(ranges)
         if negated:
             ranges = negate(ranges)
+        self.check_ascii(ranges)
         return ranges^
+
+    def check_ascii(self, ranges: List[UInt32]) raises:
+        if (
+            self.flags & _FLAG_ASCII
+            and len(ranges)
+            and ranges[len(ranges) - 1] > 127
+        ):
+            self.fail("pattern can match invalid UTF-8")
 
     def class_operator_ahead(self) -> Bool:
         var c = self.peek()
@@ -646,7 +731,10 @@ struct _Parser(Movable):
         """One class member: an escape or a literal code point."""
         if self.peek() == 92:
             return self.parse_escape(True)
-        return _Escape(_ESC_LITERAL, self.next_codepoint())
+        var cp = self.next_codepoint()
+        if self.flags & _FLAG_ASCII and cp > 127:
+            self.fail("Unicode not allowed here")
+        return _Escape(_ESC_LITERAL, cp)
 
     def parse_class_union(
         mut self, first: Bool, open_at: Int
@@ -697,7 +785,7 @@ struct _Parser(Movable):
             items.append(high)
         return canonical(items)
 
-    def try_ascii_class(mut self) -> Optional[List[UInt32]]:
+    def try_ascii_class(mut self) raises -> Optional[List[UInt32]]:
         """`[:name:]` or `[:^name:]` at `pos`; None, with `pos` unchanged,
         when the text is not one."""
         var at = self.pos + 2
@@ -724,7 +812,9 @@ struct _Parser(Movable):
             # Not an ASCII class: `[[:foo:]]` is a nested class.
             return None
         self.pos = at + 2
-        return negate(ranges) if negated else ranges^
+        var result = negate(ranges) if negated else ranges^
+        self.check_ascii(result)
+        return result^
 
 
 def parse(pattern: String) raises -> Ast:

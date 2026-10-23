@@ -25,7 +25,7 @@ When the cache grows past its budget it is cleared and the search goes on
 from the current state, as RE2 does; if that happens too often, the search
 gives up and the caller falls back to the Pike VM.
 """
-from .pikevm import decode, previous_start
+from .pikevm import decode, previous_start, _ascii_word
 from .program import (
     OP_FAIL,
     OP_LOOK,
@@ -44,10 +44,19 @@ from .syntax import (
     LOOK_START_LINE,
     LOOK_START_TEXT,
     LOOK_WORD,
+    LOOK_WORD_START,
+    LOOK_WORD_END,
+    LOOK_ASCII_WORD,
+    LOOK_ASCII_NOT_WORD,
+    LOOK_ASCII_WORD_START,
+    LOOK_ASCII_WORD_END,
+    LOOK_UNICODE_WORD,
+    LOOK_ASCII,
 )
 
 comptime FLAG_MATCH: UInt32 = 1 << 8
 comptime FLAG_LAST_WORD: UInt32 = 1 << 9
+comptime FLAG_LAST_ASCII_WORD: UInt32 = 1 << 14
 comptime NEED_SHIFT: UInt32 = 16
 
 comptime UNKNOWN: Int32 = -1
@@ -127,7 +136,7 @@ struct LazyDFA(Movable):
         self.q0 = _Workq(len(program))
         self.q1 = _Workq(len(program))
         self.stack = List[Int32]()
-        self.start_states = List[Int32](length=8, fill=UNKNOWN)
+        self.start_states = List[Int32](length=10, fill=UNKNOWN)
         self.accel = List[Bool]()
         self.accel_enabled = False
         self.resets = 0
@@ -320,6 +329,23 @@ struct LazyDFA(Movable):
             before |= LOOK_NOT_WORD
         else:
             before |= LOOK_WORD
+        var left = word if self.reverse else last_word
+        var right = last_word if self.reverse else word
+        if not left and right:
+            before |= LOOK_WORD_START
+        if left and not right:
+            before |= LOOK_WORD_END
+        var ascii_word = cls < self.eot and _ascii_word(program.class_rep[cls])
+        var last_ascii = (state_flag & FLAG_LAST_ASCII_WORD) != 0
+        before |= (
+            LOOK_ASCII_NOT_WORD if ascii_word == last_ascii else LOOK_ASCII_WORD
+        )
+        left = ascii_word if self.reverse else last_ascii
+        right = last_ascii if self.reverse else ascii_word
+        if not left and right:
+            before |= LOOK_ASCII_WORD_START
+        if left and not right:
+            before |= LOOK_ASCII_WORD_END
         if before & ~old_before & need:
             self._run_on_empty(program, before)
         var matched = self._run_on_class(program, cls, after)
@@ -328,6 +354,8 @@ struct LazyDFA(Movable):
             flag |= FLAG_MATCH
         if word:
             flag |= FLAG_LAST_WORD
+        if ascii_word:
+            flag |= FLAG_LAST_ASCII_WORD
         var next = self._cached_state(program, False, flag)
         self.transitions[s * self.stride + cls] = self._entry(next)
         return next
@@ -355,7 +383,8 @@ struct LazyDFA(Movable):
         self, program: Program, text: Span[UInt8, ImmutAnyOrigin], at: Int
     ) -> Int:
         """The search context at `at`: 0 at the text's edge, 1 next to a
-        newline, 2 next to a word character, 3 otherwise. Forward looks at
+        newline, 2 next to an ASCII word character, 3 next to a Unicode-only
+        word character, 4 otherwise. Forward looks at
         the code point before `at`; reverse at the one after."""
         if not self.reverse:
             if at == 0:
@@ -363,13 +392,13 @@ struct LazyDFA(Movable):
             var cp = UInt32(decode(text, previous_start(text, at)) >> 3)
             if cp == 10:
                 return 1
-            return 2 if program.is_word(cp) else 3
+            return 2 if _ascii_word(cp) else 3 if program.is_word(cp) else 4
         if at == len(text):
             return 0
         var cp = UInt32(decode(text, at) >> 3)
         if cp == 10:
             return 1
-        return 2 if program.is_word(cp) else 3
+        return 2 if _ascii_word(cp) else 3 if program.is_word(cp) else 4
 
     def start_state(
         mut self,
@@ -379,7 +408,7 @@ struct LazyDFA(Movable):
         anchored: Bool,
     ) -> Int32:
         var context = self._context(program, text, at)
-        var key = context + (4 if anchored else 0)
+        var key = context + (5 if anchored else 0)
         if self.start_states[key] != UNKNOWN:
             return self.start_states[key]
         var flag: UInt32 = 0
@@ -391,6 +420,8 @@ struct LazyDFA(Movable):
         elif context == 1:
             flag = LOOK_END_LINE if self.reverse else LOOK_START_LINE
         elif context == 2:
+            flag = FLAG_LAST_WORD | FLAG_LAST_ASCII_WORD
+        elif context == 3:
             flag = FLAG_LAST_WORD
         self.q0.size = 0
         var pc = program.start if anchored else program.start_unanchored

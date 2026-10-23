@@ -195,9 +195,22 @@ def test_unsupported_syntax_is_rejected() raises:
         _ = Regex("(?<!x)y")
     with assert_raises(contains="backreferences are not supported"):
         _ = Regex("(a)\\1")
-    with assert_raises(contains="Unicode property classes"):
-        _ = Regex("\\p{Greek}")
+    with assert_raises(contains="Unknown Unicode property"):
+        _ = Regex("\\p{NotAProperty}")
     with assert_raises(contains="unclosed group"):
         _ = Regex("(ab")
     with assert_raises(contains="regex is too large"):
         _ = Regex("((a{100}){100}){100}")
+
+
+def test_unicode_properties_and_ascii_word_anchors_with_long_capture_spans() raises:
+    var regex = Regex("(?-u:\\<)(a+)(α+)\\>")
+    var matcher = Matcher(regex)
+    var text = "!" + String("a") * 100000 + String("α") * 100000 + "!"
+    assert_true(matcher.is_match(_span(text)))
+    assert_true(matcher.captures(_span(text)))
+    var expected: List[Int] = [1, 300001, 1, 100001, 100001, 300001]
+    for k in range(len(expected)):
+        assert_equal(matcher.slots[k], expected[k])
+    assert_equal(matcher.count(_span(text)), 1)
+    _ = text

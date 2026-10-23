@@ -318,3 +318,13 @@ prospectively choose to deem waived or otherwise exclude such Section(s) of
 the License, but only in their entirety and only with respect to the Combined
 Software.
 ```
+
+
+## Rust regex Unicode property data
+
+`dataframe/regex/property_tables.mojo` is generated from the Unicode 16.0
+property and alias tables in
+[`regex-syntax` 1.12.2](https://github.com/rust-lang/regex/tree/1.12.2/regex-syntax/src/unicode_tables).
+The source is dual licensed under MIT or Apache-2.0; license texts are in
+`scripts/vendor/regex-LICENSE-MIT` and `scripts/vendor/regex-LICENSE-APACHE`.
+The generator is `scripts/regex_property_tables.py`.

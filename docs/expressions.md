@@ -444,6 +444,8 @@ same method convention. Inputs must be String and nulls propagate.
 | `replace(p, v, literal=False, n=1)`, `replace_all(p, v, literal=False)` | String | regex; `v` may use `$1`, `${name}`; see below for when the pattern counts as literal; an empty pattern matches at every code point boundary |
 | `extract(p, group_index=1)` | String | capture group of the first match; null without a match or when the group took no part |
 | `extract_all(p)` | List[String] | every non-overlapping match |
+| `extract_groups(p)` | Struct | one String field per capture of the first match, named by capture name or numeric index; no match gives null fields; a null input gives a null struct; no captures gives a valid empty struct |
+| `escape_regex()` | String | escape regex metacharacters in each string; nulls propagate |
 | `slice(offset, length=-1)`, `head(n)`, `tail(n)` | String | by code point; a negative offset counts from the end; out-of-range parts clip |
 | `reverse()` | String | by code point |
 | `pad_start(w, c=" ")`, `pad_end(w, c)`, `zfill(w)` | String | pad to `w` code points with one fill character; `zfill` keeps a leading sign first |
@@ -481,7 +483,7 @@ them to the CPU.
 
 #### Regular expressions
 
-`contains`, `count_matches`, `extract`, `extract_all`, `replace`, `replace_all`
+`contains`, `count_matches`, `extract`, `extract_all`, `extract_groups`, `replace`, `replace_all`
 and `split(literal=False)` take patterns in the syntax of Rust's `regex` crate,
 which Polars uses, and return what Polars returns: leftmost-first matches,
 non-overlapping and searched left to right, with Rust's rule that an empty match
@@ -499,15 +501,21 @@ compiled pattern is shared by all workers; each worker has its own DFA cache.
 | `[[:alpha:]]`, `[[:^digit:]]` | ASCII classes: alnum alpha ascii blank cntrl digit graph lower print punct space upper word xdigit |
 | `\d \w \s`, `\D \W \S` | Unicode digits (Nd), word characters and white space, and their negations |
 | `^ $`, `\A \z` | start and end of text (start and end of line with `(?m)`) |
-| `\b \B` | Unicode word boundary and its negation |
+| `\b \B`, `\< \>` | Unicode word boundary and its negation; word start / end |
+| `\p{Greek}`, `\pL`, `\P{Greek}`, `\p{gc=Lu}`, `\p{scx=Hira}` | Unicode 16 properties: categories, scripts, script extensions, binary properties, age and break properties; negation with `\P` or `!=`; names ignore ASCII case, spaces, underscores and hyphens |
 | `x\|y`, `(x)`, `(?:x)`, `(?P<name>x)`, `(?<name>x)` | alternation; capturing, non-capturing and named groups |
 | `x* x+ x? x{n} x{n,} x{n,m}` and `x*? x+? x?? x{n,m}?` | greedy and lazy repetition |
 | `(?i) (?m) (?s) (?U) (?x)`, `(?i:x)`, `(?-i)` | case-insensitive (Unicode simple case folding), multi-line, dot matches newline, swap greed, verbose |
 
 Matching works on code points: `.` and classes consume a whole character, and
 matches start and end on character boundaries. Look-around and backreferences
-raise an error, as they do in Rust. Not supported yet: Unicode property classes
-(`\p{Greek}`, `\pL`), `\<` and `\>`, `(?-u)` byte matching and `(?R)`.
+raise an error, as they do in Rust. `(?-u)` switches Perl classes, word
+boundaries and case folding to ASCII semantics; scoped `(?-u:...)` can mix
+with Unicode parts. As in Polars' UTF-8 string regex, a pattern that could
+match invalid UTF-8 (such as `(?-u).`, `(?-u)\W`, or `(?-u)[^a]`) raises.
+Literal Unicode characters remain valid, as do Unicode escapes like
+`(?-u)\u00E9` and `(?-u)\x{E9}`; raw byte escapes above ASCII such as
+`(?-u)\xE9` are rejected. CRLF mode `(?R)` is not supported.
 
 Replacement values refer to groups as `$1`, `${1}`, `$name` or `${name}`;
 `$name` takes the longest run of letters, digits and `_`, so write `${1}x` for
@@ -515,6 +523,16 @@ group 1 followed by `x`; `$$` is a dollar sign. As in Polars, a pattern without
 ASCII punctuation is replaced literally and its value is not expanded, and
 `literal=True` treats any pattern as text. A pattern that matches one literal
 string is searched as a substring.
+
+Regex selection uses the same engine: `col("^cost_.*$")` expands to matching
+column names in schema order, as Polars does. Anchored patterns also work in
+`col(["id", "^cost_.*$"])`. Operations, name prefixes/suffixes, reductions,
+`with_columns` and horizontal inputs use the existing selector expansion.
+An ordinary `col("name")` still requires that exact column name.
+`columns("cost")` searches anywhere in each name, like DuckDB's
+`COLUMNS('cost')`; use anchors for a whole-name match. This library has no
+SQL text parser: `columns` is the Mojo expression equivalent. Invalid
+selector patterns raise even on an empty frame.
 
 ### Horizontal reductions
 

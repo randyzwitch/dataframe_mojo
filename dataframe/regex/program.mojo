@@ -9,11 +9,25 @@ classes that no instruction distinguishes, like RE2's bytemap and
 regex-automata's `ByteClasses`, so a DFA state has one transition per class
 instead of one per code point.
 """
-from .charclass import MAX_CODEPOINT, _sort, class_contains, word_class
+from .charclass import (
+    MAX_CODEPOINT,
+    _sort,
+    class_contains,
+    word_class,
+    ascii_class,
+)
 from .syntax import (
     Ast,
     LOOK_NOT_WORD,
     LOOK_WORD,
+    LOOK_WORD_START,
+    LOOK_WORD_END,
+    LOOK_ASCII_WORD,
+    LOOK_ASCII_NOT_WORD,
+    LOOK_ASCII_WORD_START,
+    LOOK_ASCII_WORD_END,
+    LOOK_UNICODE_WORD,
+    LOOK_ASCII,
     NODE_ALTERNATE,
     NODE_CLASS,
     NODE_CONCAT,
@@ -393,8 +407,10 @@ def _build_alphabet(mut program: Program):
         elif op == OP_CLASS:
             sets.append(program.class_ranges[Int(program.arg[pc])].copy())
     sets.append([10, 10])
-    if program.looks & (LOOK_WORD | LOOK_NOT_WORD):
+    if program.looks & LOOK_UNICODE_WORD:
         sets.append(program.word.copy())
+    if program.looks & LOOK_ASCII:
+        sets.append(ascii_class("word"))
     var cuts = List[UInt32]()
     cuts.append(0)
     for s in sets:

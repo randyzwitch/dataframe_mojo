@@ -17,12 +17,12 @@ from std.memory import Pointer
 
 from .bool_column import BoolColumn
 from .column import Column, _copy_validity
-from .nested_column import ListColumn
+from .nested_column import ListColumn, StructColumn
 from .parallel import Job, run_jobs, worker_count
 from .regex import Matcher, Regex, Template, escape
 from .series import Series
 from .string_bytes import _Bytes
-from .string_column import StringColumn
+from .string_column import StringColumn, StringBuilder
 from .string_predicates import string_contains
 
 comptime _CONTAINS = 0
@@ -427,3 +427,76 @@ def regex_split(
     if inclusive:
         return _lists[_SPLIT_INCLUSIVE](column, regex)
     return _lists[_SPLIT](column, regex)
+
+
+struct _GroupsJob(Job):
+    var rows: _Bytes
+    var regex: Regex
+    var first: Int
+    var last: Int
+    var fields: List[Series]
+
+    def __init__(
+        out self, column: StringColumn, regex: Regex, first: Int, last: Int
+    ):
+        self.rows = _Bytes(column)
+        self.regex = regex.copy()
+        self.first = first
+        self.last = last
+        self.fields = List[Series]()
+
+    def run(mut self) raises:
+        var names = self.regex.group_names()
+        var builders = List[StringBuilder]()
+        for _ in names:
+            builders.append(StringBuilder(self.last - self.first))
+        var matcher = Matcher(self.regex)
+        for row in range(self.first, self.last):
+            if not self.rows.column._valid(row):
+                for k in range(len(names)):
+                    builders[k].append_null()
+                continue
+            var text = self.rows.get(row)
+            var matched = matcher.captures(text)
+            for k in range(len(names)):
+                var start = matcher.slots[2 * (k + 1)] if matched else -1
+                if start < 0:
+                    builders[k].append_null()
+                else:
+                    var end = matcher.slots[2 * (k + 1) + 1]
+                    builders[k].append(
+                        StringSlice(unsafe_from_utf8=text[start:end])
+                    )
+        var reversed = List[Series]()
+        for k in range(len(names) - 1, -1, -1):
+            var builder = builders.pop()
+            reversed.append(Series(names[k], builder^.finish()))
+        for k in range(len(names)):
+            self.fields.append(reversed[len(names) - 1 - k].copy())
+
+
+def regex_extract_groups(column: StringColumn, regex: Regex) raises -> Series:
+    """One capture search per valid row; each worker builds all fields."""
+    var names = regex.group_names()
+    var n = len(column)
+    if not len(names):
+        # Polars returns a valid empty struct even for null input strings.
+        return Series("", StructColumn(List[Series](), length=n))
+    var workers = worker_count(n)
+    var jobs = List[_GroupsJob]()
+    for w in range(workers):
+        jobs.append(
+            _GroupsJob(column, regex, n * w // workers, n * (w + 1) // workers)
+        )
+    if workers == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var fields = List[Series]()
+    for k in range(len(names)):
+        var pieces = List[Series]()
+        for j in range(len(jobs)):
+            pieces.append(jobs[j].fields[k].copy())
+        fields.append(Series._from_chunks(pieces).rechunk())
+    var bits = _copy_validity(column._bits[], column._offset, n)
+    return Series("", StructColumn(fields^, bits^))
