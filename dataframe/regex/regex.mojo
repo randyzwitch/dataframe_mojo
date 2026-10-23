@@ -5,7 +5,8 @@ worker (an `ArcPointer`); `Matcher` is one worker's mutable scratch space:
 its two lazy DFAs and Pike VM. A search goes the way Rust's `regex` meta
 engine goes:
 
-1. A pattern that is one literal string is a substring search.
+1. A pattern that is one literal string is a substring search. A single
+   character class tests its membership bitmap directly.
 2. Otherwise a literal every match must contain rejects most
    non-matching rows with one substring search (RE2's prefilter idea, for
    a single pattern).
@@ -486,6 +487,7 @@ struct _Compiled(Movable):
     var names: List[String]
     var anchored: Bool
     var literal: Bool
+    var single_class: Bool
     var fixed_width: Int32
     var text: List[UInt8]
     var required: List[UInt8]
@@ -499,6 +501,12 @@ struct _Compiled(Movable):
         self.reverse = compile_program(ast, True)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
+        var root = ast.root
+        while ast.kind[root] == NODE_GROUP:
+            root = ast.kid(root, 0)
+        self.single_class = (
+            ast.kind[root] == NODE_CLASS and len(self.forward.class_ranges) == 1
+        )
         self.fixed_width = Int32(_fixed_width(ast, ast.root))
         var info = _analyze(ast, ast.root)
         # A pattern with assertions is not a plain substring search even
@@ -518,6 +526,32 @@ struct _Compiled(Movable):
         self.onepass = None
         if onepass.active():
             self.onepass = ArcPointer(onepass^)
+
+
+@no_inline
+def _find_class(
+    program: Program, text: Span[UInt8, ImmutAnyOrigin], at: Int
+) -> Tuple[Int, Int]:
+    """A whole pattern consisting of one class, with optional captures.
+    Its only consuming instruction uses class zero; no assertion or
+    alternative can change where that code point matches."""
+    var bytes = text.unsafe_ptr()
+    var membership = program.class_ascii.unsafe_ptr()
+    var i = at
+    while i < len(text):
+        var b = bytes[unsafe_offset=i]
+        if b < 128:
+            var word = membership[unsafe_offset=Int(b >> 6)]
+            if (word >> UInt64(b & 63)) & 1 != 0:
+                return (i, i + 1)
+            i += 1
+        else:
+            var packed = decode(text, i)
+            var width = packed & 7
+            if program.class_has(0, UInt32(packed >> 3)):
+                return (i, i + width)
+            i += width
+    return (-1, -1)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
@@ -733,6 +767,8 @@ struct Matcher(Movable):
         ref c = self.regex._compiled[]
         if c.literal:
             return find_literal(text, c.text, 0) >= 0
+        if c.single_class:
+            return _find_class(c.forward, text, 0)[0] >= 0
         if not _may_match(c, text):
             return False
         var end = self.forward.find_forward(
@@ -757,6 +793,8 @@ struct Matcher(Movable):
             if at < 0:
                 return (-1, -1)
             return (at, at + len(c.text))
+        if c.single_class:
+            return _find_class(c.forward, text, start)
         if c.anchored and start > 0:
             # Every match starts at the start of the text.
             return (-1, -1)

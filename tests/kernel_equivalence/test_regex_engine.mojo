@@ -735,6 +735,60 @@ def test_fixed_width_spans_match_vm_across_utf8_boundaries() raises:
     _ = text
 
 
+def test_single_class_searches_match_vm_without_dfa_passes() raises:
+    var patterns: List[String] = [
+        "\\w",
+        "\\d",
+        "\\s",
+        "\\pL",
+        "(?-u)\\w",
+        "(?-u)\\d",
+        "(?i)[a-z]",
+        "[α-ω]",
+        "[\\p{Greek}\\p{Han}]",
+        "([^a-z])",
+        "(([a-f]))",
+        "[^\\r\\n]",
+    ]
+    var texts: List[String] = [
+        "",
+        "α a9漢🙂",
+        "\n\r\t ١१\n",
+        "é߿ࠀ漢🙂",
+        chr(0x10FFFF),
+        String("a") * 96 + "3α漢🙂",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            var expected = matcher.pike.search(
+                program, span, 0, len(span), False, slots
+            )
+            assert_equal(matcher.is_match(span), expected, pattern)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+                assert_equal(matcher.captures(span, start), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+            _ = text
+        assert_equal(matcher.forward.state_count(), 0, pattern)
+        assert_equal(matcher.reverse.state_count(), 0, pattern)
+
+
 def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     from dataframe.regex.dfa import find_literal
 
