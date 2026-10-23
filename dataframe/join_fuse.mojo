@@ -20,17 +20,22 @@ from .gather import _RechunkJob, take_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
 
-# Probe rows per block: Polars' ideal morsel is about 100K rows, so the match
-# lists of a block stay in cache.
-comptime PROBE_BLOCK_ROWS = 131072
+# Probe rows per block. Polars' morsel is about 100K rows, but a block's output
+# columns are fresh buffers whose first touch faults every page, and only a
+# buffer that holds whole 2 MB pages (an 8-byte column of 1M rows is 8 MB) can
+# be backed by huge pages (`huge_pages.mojo`); with 128K-row blocks the
+# faults came back and the join was slower than with whole-output lists.
+comptime PROBE_BLOCK_ROWS = 1 << 20
 
 
 def probe_blocks(rows: Int) -> Int:
-    """Blocks to cut `rows` probe rows into: at least a block per worker's
-    share, and none longer than `PROBE_BLOCK_ROWS`."""
-    return max(
-        worker_count(rows), (rows + PROBE_BLOCK_ROWS - 1) // PROBE_BLOCK_ROWS
-    )
+    """Blocks to cut `rows` probe rows into: none longer than the block
+    size, and a whole number per worker so no worker runs a round alone."""
+    var workers = worker_count(rows)
+    var blocks = (rows + PROBE_BLOCK_ROWS - 1) // PROBE_BLOCK_ROWS
+    if blocks <= workers:
+        return workers
+    return (blocks + workers - 1) // workers * workers
 
 
 trait MatchJob(Job):

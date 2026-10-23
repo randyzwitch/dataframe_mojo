@@ -129,7 +129,7 @@ from .join_hash import (
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
-from .join_fuse import FusedJoin, PROBE_BLOCK_ROWS, MatchJob, fused_gather
+from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -4729,7 +4729,7 @@ def _bounded_int64_join_rows(
     var workers = worker_count(height)
     var step = max(1, (height + workers - 1) // workers)
     if request.enabled:
-        step = min(step, PROBE_BLOCK_ROWS)
+        step = min(step, (height + probe_blocks(height) - 1) // probe_blocks(height))
     var shared_heads = ArcPointer(heads^)
     var shared_next = ArcPointer(next_rows^)
     var jobs = List[_RangeJoinProbeJob]()
