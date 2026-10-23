@@ -242,10 +242,7 @@ def test_mojo_gpu_coded_sum_dictionary_admission_boundaries() raises:
         .agg(col("value").sum())
         .collect(accelerator=require_metal())
     )
-    # A retained code is the group's identity: two codes naming "same" are two
-    # groups, as on the CPU and on the general Metal grouping route (#740).
-    assert_equal(actual.height(), 2)
-    assert_equal(actual.item(0, "key").string(), "same")
-    assert_equal(actual.item(1, "key").string(), "same")
-    assert_equal(actual.item(0, "value").int64(), Int64(7))
-    assert_equal(actual.item(1, "value").int64(), Int64(8))
+    # Equal labels are one group: two codes naming "same" merge, as on the
+    # CPU and on the general Metal grouping route (#943).
+    assert_equal(actual.height(), 1)
+    assert_equal(actual.item(0, "value").int64(), Int64(15))

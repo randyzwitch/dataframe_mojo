@@ -96,6 +96,7 @@ def test_grouped_typed_expand_literal_raw_domains_and_consumers() raises:
 
 # requires: metal
 def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() raises:
+    # Codes naming one label are one group, as on the CPU (#943).
     var dictionary = CategoricalDictionary()
     dictionary.append("same")
     dictionary.append("same")
@@ -116,7 +117,7 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
         )
         var output = _collect(expanded)
         assert_equal(
-            output.column("items").int64().to_list(), [10, 30, 20, 40, 50]
+            output.column("items").int64().to_list(), [10, 20, 30, 40, 50]
         )
         assert_equal(output.column("k").dtype(), frame.column("k").dtype())
         if coded:
@@ -132,21 +133,15 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
                 col("items").sum().alias("answer")
             )
         )
-        assert_equal(grouped.height(), 2 if coded else 3)
-        var expected_grouped: List[Int64] = [100, 50] if coded else [40, 60, 50]
+        assert_equal(grouped.height(), 2)
+        var expected_grouped: List[Int64] = [100, 50]
         assert_equal(
             grouped.column("answer").int64().to_list(), expected_grouped
         )
         var over = _collect(
             expanded.with_columns(col("items").sum().over("k").alias("total"))
         )
-        var expected_over: List[Int64] = [
-            100,
-            100,
-            100,
-            100,
-            50,
-        ] if coded else [40, 40, 60, 60, 50]
+        var expected_over: List[Int64] = [100, 100, 100, 100, 50]
         assert_equal(over.column("total").int64().to_list(), expected_over)
 
 

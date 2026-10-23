@@ -43,7 +43,9 @@ def _expressions() -> List[Expr]:
     ]
 
 
-def _compare(frame: DataFrame) raises:
+def _compare(frame: DataFrame, merged: Bool = False) raises:
+    # merged: codes naming one label are one group (#943), so rows 0 to 3
+    # share a group; other key kinds keep two groups there.
     var query = (
         frame.lazy().group_by("k", maintain_order=True).agg(_expressions())
     )
@@ -55,16 +57,34 @@ def _compare(frame: DataFrame) raises:
     assert_equal(expected.column("sum").dtype(), DataType.INT32)
     assert_equal(actual.column("sum").dtype(), DataType.INT32)
     var lengths = actual.column("items").list_column()._offsets[].copy()
-    assert_equal(lengths, List[Int64]([Int64(0), Int64(2), Int64(4), Int64(5)]))
-    assert_equal(
-        actual.column("items").list_column().child().int32().to_list(),
-        List[Int32]([Int32(10), Int32(30), Int32(20), Int32(40), Int32(50)]),
-    )
-    assert_equal(
-        actual.column("sum").int32().to_list(),
-        List[Int32]([Int32(40), Int32(60), Int32(50)]),
-    )
-    assert_true(actual.item(2, "k").is_null())
+    if merged:
+        assert_equal(lengths, List[Int64]([Int64(0), Int64(4), Int64(5)]))
+        assert_equal(
+            actual.column("items").list_column().child().int32().to_list(),
+            List[Int32](
+                [Int32(10), Int32(20), Int32(30), Int32(40), Int32(50)]
+            ),
+        )
+        assert_equal(
+            actual.column("sum").int32().to_list(),
+            List[Int32]([Int32(100), Int32(50)]),
+        )
+        assert_true(actual.item(1, "k").is_null())
+    else:
+        assert_equal(
+            lengths, List[Int64]([Int64(0), Int64(2), Int64(4), Int64(5)])
+        )
+        assert_equal(
+            actual.column("items").list_column().child().int32().to_list(),
+            List[Int32](
+                [Int32(10), Int32(30), Int32(20), Int32(40), Int32(50)]
+            ),
+        )
+        assert_equal(
+            actual.column("sum").int32().to_list(),
+            List[Int32]([Int32(40), Int32(60), Int32(50)]),
+        )
+        assert_true(actual.item(2, "k").is_null())
     var cpu_key = expected.column("k")
     var gpu_key = actual.column("k")
     var input_key = frame.column("k")
@@ -99,7 +119,8 @@ def _compare(frame: DataFrame) raises:
             == frame.column("k").dtype().dictionary().ptr()
         )
         assert_equal(actual.column("k").uint32().value(0), UInt32(0))
-        assert_equal(actual.column("k").uint32().value(1), UInt32(1))
+        if not merged:
+            assert_equal(actual.column("k").uint32().value(1), UInt32(1))
     var consumed = query.select_exprs(
         [
             col("k").alias("key"),
@@ -242,10 +263,15 @@ def test_mojo_gpu_grouped_original_key_domains_duplicates_bytes_metadata_layouts
                     == 0 else offset_layout(frame) if layout
                     == 1 else chunk_layout(frame)
                 )
-                _compare(input)
+                _compare(
+                    input,
+                    merged=source.dtype().is_categorical()
+                    or Bool(coded_string_dtype(source)),
+                )
         _ = setting^
-    # Plain text with duplicate labels groups by raw text; duplicate original
-    # categorical codes above remain two distinct groups even with equal labels.
+    # Plain text with duplicate labels groups by raw text, and so do
+    # duplicate original categorical codes above: equal labels are equal
+    # keys (#943).
     var same = DataFrame(
         [
             Series(

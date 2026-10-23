@@ -236,8 +236,9 @@ consuming these dynamically generated labels remain explicitly unsupported.
 
 Categorical transport preserves original codes and dictionary owners through
 row, filter, sort, group, window, join and as-of operations. Duplicate category
-labels remain distinct codes. Temporary join dictionaries do not replace the
-output's original dictionary. Coded String grouping follows decoded byte
+labels remain distinct codes in the dictionary, but grouping and window
+partitions treat codes naming one label as one key, as the CPU does (#943).
+Temporary join dictionaries do not replace the output's original dictionary. Coded String grouping follows decoded byte
 equality and publishes ordinary String values; numeric UInt32 columns retain
 numeric semantics.
 

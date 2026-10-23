@@ -142,13 +142,12 @@ def test_grouped_key_domain_original_categorical_and_coded_string_identity() rai
                 .group_by("k", maintain_order=True)
                 .agg(col("x").implode().alias("xs"))
             )
-            assert_equal(grouped.height(), 3 if categorical else 2)
+            # Equal labels are one group whether the key is categorical,
+            # coded text or plain text (#943).
+            assert_equal(grouped.height(), 2)
             var lists = grouped.column("xs").list_column()
-            var offsets: List[Int64] = [0, 2, 4, 5]
-            var children: List[Int64] = [10, 30, 20, 40, 50]
-            if not categorical:
-                offsets = [0, 4, 5]
-                children = [10, 20, 30, 40, 50]
+            var offsets: List[Int64] = [0, 4, 5]
+            var children: List[Int64] = [10, 20, 30, 40, 50]
             assert_equal(lists._offsets[], offsets)
             assert_equal(lists.child().int64().to_list(), children)
             var domain = KeyDomain(input)
@@ -162,10 +161,19 @@ def test_grouped_key_domain_original_categorical_and_coded_string_identity() rai
                     == source._field_metadata.value().ptr()
                 )
             var restored = domain.restore(domain.encoded)
-            assert_true(restored.equals(input))
             if categorical:
+                # The device sees the first code of each label (#943); the
+                # restored key keeps the original dictionary and null.
                 assert_equal(domain.encoded.uint32().value(0), UInt32(0))
-                assert_equal(domain.encoded.uint32().value(1), UInt32(1))
+                assert_equal(domain.encoded.uint32().value(1), UInt32(0))
+                assert_true(restored.dtype() == input.dtype())
+                var labels = decode(
+                    restored
+                ) if restored.dtype().is_categorical() else restored.copy()
+                assert_true(labels.equals(text))
+            else:
+                assert_true(restored.equals(input))
+            if categorical:
                 assert_equal(
                     domain.provenance.values[],
                     List[UInt64]([UInt64(0), UInt64(1), UInt64(2)]),

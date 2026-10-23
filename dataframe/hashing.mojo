@@ -10,6 +10,7 @@ from std.memory import Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 from .aggregate import float_key
 from .bool_column import BoolColumn
+from .canonical_labels import label_map, remap_codes
 from .column import Column, _validity_at
 from .huge_pages import huge_list
 from .dtype import NUMERIC_DTYPES
@@ -739,12 +740,29 @@ def _encode_dense_chunks(
     return None
 
 
-def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
+def encode_rows(
+    keys: List[Series], nulls_equal: Bool, *, by_label: Bool = True
+) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
     With nulls_equal=True a null is an ordinary key value, equal only to
     other nulls in the same column. Otherwise any null key yields id -1.
+    Codes of a categorical key that name one label are one key (#943);
+    by_label=False numbers the codes themselves, for a caller that
+    separates the labels afterwards.
     """
+    if by_label:
+        var canonical = List[Series](capacity=len(keys))
+        var changed = False
+        for key in keys:
+            var map = label_map(key)
+            if map:
+                changed = True
+                canonical.append(remap_codes(key, map.value()))
+            else:
+                canonical.append(key.copy())
+        if changed:
+            return encode_rows(canonical, nulls_equal, by_label=False)
     for key in keys:
         if key.dtype().is_nested():
             raise Error(
@@ -778,7 +796,7 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             var contiguous = List[Series](capacity=len(keys))
             for item in keys:
                 contiguous.append(item.rechunk())
-            return encode_rows(contiguous, nulls_equal)
+            return encode_rows(contiguous, nulls_equal, by_label=False)
     var n = len(keys[0])
     for key in keys:
         if len(key) != n:

@@ -10,6 +10,7 @@ from std.memory import Pointer
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.binding import bind
+from dataframe.canonical_labels import canonical_code_map
 from dataframe.expr import COL, SUM, SELECTOR
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG
 from dataframe.string_column import StringColumn
@@ -79,11 +80,12 @@ def eligible(query: LazyFrame) raises -> Bool:
 
 
 def _code_map(dtype: DataType) raises -> List[UInt32]:
-    # A retained code is the group's identity, as on every other CPU and
-    # Metal grouping route: two codes naming one label stay two groups.
+    # Equal labels are equal groups (#943), as on the CPU: each code maps to
+    # the first code of its label.
     var result = List[UInt32](capacity=max(1, len(dtype.dictionary()[])))
+    var canonical = canonical_code_map(dtype.dictionary()[])
     for code in range(len(dtype.dictionary()[])):
-        result.append(UInt32(code))
+        result.append(canonical.value()[code] if canonical else UInt32(code))
     if not len(result):
         result.append(0)
     return result^
