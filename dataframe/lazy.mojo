@@ -149,6 +149,8 @@ from .io.parquet import (
 from .bool_column import true_count
 from .column import Column
 from .series import Series
+from .categorical import decode
+from .string_column import StringCodes, StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .frame import _pivot_aggregate
@@ -1904,6 +1906,24 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for c in range(result._frames[f].width()):
                 ref column = result._frames[f]._columns[c]
                 if column.name() not in keys:
+                    continue
+                var coded = column._dictionary_codes()
+                if coded:
+                    # Dictionary-coded text keeps its strings; only the codes
+                    # beside them move to the first code of each label.
+                    var map = label_map(coded.value())
+                    if map:
+                        var moved = remap_codes(coded.value(), map.value())
+                        var text = decode(moved)
+                        var rows = List[UInt32](capacity=len(moved))
+                        ref codes = moved.uint32()
+                        for row in range(len(moved)):
+                            rows.append(codes._get(row))
+                        text._data[StringColumn]._codes = ArcPointer(
+                            StringCodes(ArcPointer(rows^), moved.dtype())
+                        )
+                        text._field_metadata = column._field_metadata
+                        result._frames[f]._columns[c] = text^
                     continue
                 var map = label_map(column)
                 if map:
