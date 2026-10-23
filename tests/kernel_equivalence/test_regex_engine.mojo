@@ -667,7 +667,6 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
             _ = text
 
 
-<<<<<<< HEAD
 def test_search_engines_allocate_buffers_only_when_used() raises:
     var patterns: List[String] = ["abc", "([a-z])", "^(a+)(β*)$"]
     var texts: List[String] = ["xabcx", "!aβ", "aaaββ"]
@@ -717,8 +716,6 @@ def test_search_engines_allocate_buffers_only_when_used() raises:
     _ = text
 
 
-=======
->>>>>>> origin/main
 def test_cached_start_states_preserve_context_sensitive_matches() raises:
     from dataframe.regex.pikevm import PikeVM
 
