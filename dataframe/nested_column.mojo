@@ -22,7 +22,7 @@ from .series import Series
 
 
 def _leak[T: Movable](var value: T) -> Int:
-    var pointer = alloc(Layout[T](count=1)).unsafe_leak()
+    var pointer = alloc(Layout[T](length=1)).unsafe_leak()
     pointer.unsafe_write(value^)
     return Int(pointer)
 
@@ -30,7 +30,7 @@ def _leak[T: Movable](var value: T) -> Int:
 def _reclaim[T: Deinitable & Movable](address: Int) -> T:
     var pointer = Pointer[T, MutUntrackedOrigin](unsafe_from_address=address)
     var value = pointer.unsafe_take_pointee()
-    dealloc(Allocation[T](unsafe_owned_ptr=pointer, layout=Layout[T](count=1)))
+    dealloc(Allocation[T](unsafe_owned_ptr=pointer, layout=Layout[T](length=1)))
     return value^
 
 

@@ -123,8 +123,7 @@ def _hash_column(
         )
     var p = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=out_address)
 
-    @__parameter
-    def write(i: Int, key: UInt64):
+    def write(i: Int, key: UInt64) {imm p, imm output_offset, imm first}:
         var slot = p.unsafe_offset(i - output_offset)
         slot[] = _mix(key) if first else _combine(slot[], key)
 

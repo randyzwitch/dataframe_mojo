@@ -1,6 +1,6 @@
 # dataframe_mojo
 
-An experimental, native CPU dataframe library for **Mojo 1.2**. Import it as
+An experimental, native CPU dataframe library for **Mojo**. Import it as
 `dataframe`. Storage and computation use Mojo and its standard library; there
 is no Python, pandas, Polars, or Arrow runtime dependency.
 
@@ -53,6 +53,10 @@ interchange consumers, case selection and explicit hardware capability skips.
 Mojo 1.2 is required from 0.2.0. Release `v0.3.0` is built and tested with
 **Mojo 1.2.0**. A compiled package loads only in the Mojo version that built
 it, so a consumer on 1.1 stays on 0.1.3.
+
+This development checkout pins **Mojo 1.3.0.dev2026102305** with the matching
+**MAX SDK (max-core) 26.8.0.dev2026102305** from the nightly channel. `pixi install`
+installs the compiler and SDK recorded in `pixi.lock`.
 
 Supported platforms are Linux x86-64 and macOS arm64 (both tested in CI) and
 Linux aarch64 (resolved in `pixi.lock`, not yet tested in CI). Windows waits on

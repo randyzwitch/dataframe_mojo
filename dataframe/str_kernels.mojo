@@ -73,7 +73,7 @@ def _strip(text: String, characters: String, mode: Int64) -> String:
     var start = 0
     var end = len(parts)
 
-    def strippable(part: String) capturing -> Bool:
+    def strippable(part: String) {imm remove} -> Bool:
         if len(remove) == 0:
             return _is_space(part)
         for r in remove:
