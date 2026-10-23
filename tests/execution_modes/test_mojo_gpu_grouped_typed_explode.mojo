@@ -141,15 +141,9 @@ def test_grouped_typed_expand_duplicate_categorical_and_coded_string_identity() 
         var over = _collect(
             expanded.with_columns(col("items").sum().over("k").alias("total"))
         )
-        # over() partitions stay by code for a bare categorical key (#943
-        # covers group_by only).
-        var expected_over: List[Int64] = [
-            100,
-            100,
-            100,
-            100,
-            50,
-        ] if coded else [40, 40, 60, 60, 50]
+        # The grouped key already shows the first code of its label (#943),
+        # so the partitions after the group_by are one per label.
+        var expected_over: List[Int64] = [100, 100, 100, 100, 50]
         assert_equal(over.column("total").int64().to_list(), expected_over)
 
 
