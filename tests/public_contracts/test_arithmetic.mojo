@@ -1722,3 +1722,27 @@ def _floating_power_anchors[D: DType]() raises:
 def test_floating_power_independent_nan_infinity_zero_and_boundary_anchors() raises:
     _floating_power_anchors[DType.float32]()
     _floating_power_anchors[DType.float64]()
+
+
+def squares_by_multiplication[D: DType]() raises:
+    """pow(x, 2) is the correctly rounded product x * x, never libm's pow."""
+    var values = List[Scalar[D]]()
+    var state = UInt64(0x9E3779B97F4A7C15)
+    for _ in range(20000):
+        state = state * 6364136223846793005 + 1442695040888963407
+        values.append(
+            Scalar[D](Float64(state >> 11) / 9007199254740992.0 + 0.01)
+        )
+    var frame = DataFrame([Series("x", Column[Scalar[D]](values.copy()))])
+    var exponent = lit(Scalar[D](2))
+    var squared = frame.select(col("x").pow(exponent)).column("x").numeric[D]()
+    for row in range(len(values)):
+        assert_equal(
+            squared._get(row),
+            values[row] * values[row],
+        )
+
+
+def test_floating_square_is_the_exact_product_not_platform_pow() raises:
+    squares_by_multiplication[DType.float64]()
+    squares_by_multiplication[DType.float32]()

@@ -196,3 +196,24 @@ def test_native_metal_floating_power_profile_family_exact_budget_and_runtime_reu
                 )
             )
         check(query, exact)
+
+
+# requires: metal
+def test_native_metal_floating_square_is_bitwise_the_cpu_square() raises:
+    var runtime = require_metal()
+    var values = List[Float64]()
+    var state = UInt64(0x9E3779B97F4A7C15)
+    for _ in range(20000):
+        state = state * 6364136223846793005 + 1442695040888963407
+        values.append(Float64(state >> 11) / 9007199254740992.0 + 0.01)
+    var frame = DataFrame([Series("x", Column[Float64](values^))])
+    var query = frame.lazy().select(col("x").pow(lit(Float64(2.0))))
+    var actual = query.collect(accelerator=runtime).column("x").float64()
+    var expected = (
+        query.collect(engine="cpu", streaming=False).column("x").float64()
+    )
+    for row in range(frame.height()):
+        assert_equal(
+            bitcast[DType.uint64](actual._get(row)),
+            bitcast[DType.uint64](expected._get(row)),
+        )

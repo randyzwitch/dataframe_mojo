@@ -169,6 +169,12 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
             return Scalar[D](0) / Scalar[D](0)
         return x % y
     elif op == POW:
+        # A square is the exact product, as Polars computes it (integral
+        # exponents 2 to 9 multiply). The platform pow can miss the
+        # correctly rounded square by an ulp, which made pow(corr, 2) differ
+        # between the CPU and Metal in H2O q9.
+        if y == 2:
+            return x * x
         # The toolchain approximation violates NaN/infinity rules and loses
         # accuracy even for 10**0.5. Use the platform floating implementation.
         comptime if D == DType.float32:
