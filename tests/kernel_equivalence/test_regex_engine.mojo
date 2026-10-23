@@ -452,6 +452,15 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
     assert_equal(matcher.slots[66], 32)
     assert_equal(matcher.slots[67], 33)
     _ = text
+    # The largest accepted next-state id must survive action encoding.
+    var edge = Regex("(a{255})")
+    assert_true(Bool(edge._compiled[].onepass))
+    matcher = Matcher(edge)
+    text = String("a") * 255
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 255)
+    _ = text
 
 
 def test_unicode_captures_over_the_backtracker_budget() raises:

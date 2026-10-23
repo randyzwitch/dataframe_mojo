@@ -19,21 +19,24 @@ from .program import (
     OP_NOP,
 )
 from .pikevm import decode, look_holds
+from .syntax import LOOK_MASK
 
 comptime _MAX_STATES = 256
 comptime _MAX_CELLS = 32768
 comptime _MAX_PROGRAM = 512
 comptime _MAX_SLOTS = 64
+# LOOK_MASK occupies bits 0..13. An edge's next state plus one occupies
+# the upper bits, leaving zero as a dead edge. The state's match tag uses
+# the same spare bit as an edge's priority tag, in a separate table.
+comptime _MATCH_TAG: UInt32 = 1 << 14
+comptime _NEXT_SHIFT = 15
 
 
 struct OnePass(Movable):
-    var next: List[Int32]
+    var actions: List[UInt32]
     var save: List[UInt64]
-    var looks: List[UInt32]
-    var match_first: List[Bool]
-    var matched: List[Bool]
+    var match_cond: List[UInt32]
     var match_save: List[UInt64]
-    var match_looks: List[UInt32]
     # Unicode edges refer to the same actions as the dense ASCII table.
     # Their predicates are disjoint, as checked during construction.
     var terminal_starts: List[Int32]
@@ -41,20 +44,17 @@ struct OnePass(Movable):
     var terminal_edge: List[Int32]
 
     def __init__(out self):
-        self.next = List[Int32]()
+        self.actions = List[UInt32]()
         self.save = List[UInt64]()
-        self.looks = List[UInt32]()
-        self.match_first = List[Bool]()
-        self.matched = List[Bool]()
+        self.match_cond = List[UInt32]()
         self.match_save = List[UInt64]()
-        self.match_looks = List[UInt32]()
         self.terminal_starts = List[Int32]()
         self.terminal_pc = List[Int32]()
         self.terminal_edge = List[Int32]()
 
     @always_inline
     def active(self) -> Bool:
-        return len(self.matched) > 0
+        return len(self.match_cond) > 0
 
     def search[
         unicode_input: Bool
@@ -71,13 +71,10 @@ struct OnePass(Movable):
         # instantiations inspect the full text when checking assertions.
         # All tables are immutable and all scratch storage is fixed for
         # this search. Hoist their addresses out of the per-byte loop.
-        var nexts = self.next.unsafe_ptr()
+        var actions = self.actions.unsafe_ptr()
         var saves = self.save.unsafe_ptr()
-        var looks = self.looks.unsafe_ptr()
-        var first = self.match_first.unsafe_ptr()
-        var matched = self.matched.unsafe_ptr()
+        var conditions = self.match_cond.unsafe_ptr()
         var match_saves = self.match_save.unsafe_ptr()
-        var match_looks = self.match_looks.unsafe_ptr()
         var classes = program.ascii_class.unsafe_ptr()
         var terminal_starts = self.terminal_starts.unsafe_ptr()
         var terminal_pc = self.terminal_pc.unsafe_ptr()
@@ -122,23 +119,23 @@ struct OnePass(Movable):
                         classes[unsafe_offset=Int(bytes[unsafe_offset=at])]
                     )
                     edge = state * alphabet + cls
-            var accepts = matched[unsafe_offset=state] and _holds(
-                program, match_looks[unsafe_offset=state], text, at
+            var condition = conditions[unsafe_offset=state]
+            var accepts = condition & _MATCH_TAG != 0 and _holds(
+                program, condition & LOOK_MASK, text, at
             )
             var advances = edge >= 0
             var next = -1
+            var action: UInt32 = 0
             if advances:
-                next = Int(nexts[unsafe_offset=edge])
+                action = actions[unsafe_offset=edge]
+                next = Int(action >> _NEXT_SHIFT) - 1
                 advances = next >= 0 and _holds(
-                    program, looks[unsafe_offset=edge], text, at
+                    program, action & LOOK_MASK, text, at
                 )
-            if accepts and advances and not first[unsafe_offset=edge]:
+            if accepts and advances and action & _MATCH_TAG == 0:
                 # A certain higher-priority acceptance supersedes this
                 # snapshot on the next iteration.
-                if (
-                    matched[unsafe_offset=next]
-                    and match_looks[unsafe_offset=next] == 0
-                ):
+                if conditions[unsafe_offset=next] == _MATCH_TAG:
                     accepts = False
             if accepts:
                 for k in range(count):
@@ -149,7 +146,7 @@ struct OnePass(Movable):
                     output[unsafe_offset=k] = at
                     mask &= mask - 1
                 found = True
-                if not advances or first[unsafe_offset=edge]:
+                if not advances or action & _MATCH_TAG != 0:
                     return True
             if not advances:
                 return found
@@ -244,9 +241,10 @@ def compile_onepass(program: Program) -> OnePass:
                 pcs.append(Int(program.out[pc]))
                 saves.append(save)
                 looks.append(flags)
-        result.matched.append(match_rank >= 0)
+        result.match_cond.append(
+            (_MATCH_TAG | match_looks) if match_rank >= 0 else UInt32(0)
+        )
         result.match_save.append(match_save)
-        result.match_looks.append(match_looks)
         result.terminal_starts.append(Int32(len(result.terminal_pc)))
         var edges = List[Int](length=len(terminals), fill=-1)
         for cls in range(alphabet):
@@ -262,7 +260,7 @@ def compile_onepass(program: Program) -> OnePass:
             var first = False
             if terminal >= 0:
                 if edges[terminal] < 0:
-                    edges[terminal] = len(result.next)
+                    edges[terminal] = len(result.actions)
                 var pc = Int(program.out[terminals[terminal]])
                 next = state_of[pc]
                 if next < 0:
@@ -272,10 +270,12 @@ def compile_onepass(program: Program) -> OnePass:
                 save = terminal_save[terminal]
                 flags = terminal_looks[terminal]
                 first = match_rank >= 0 and match_rank <= terminal
-            result.next.append(Int32(next))
+            var action = UInt32(next + 1) << _NEXT_SHIFT
+            action |= flags
+            if first:
+                action |= _MATCH_TAG
+            result.actions.append(action)
             result.save.append(save)
-            result.looks.append(flags)
-            result.match_first.append(first)
         for k in range(len(terminals)):
             if edges[k] >= 0:
                 result.terminal_pc.append(Int32(terminals[k]))

@@ -759,10 +759,10 @@ struct Matcher(Movable):
             if (
                 len(text) > 0
                 and text[0] < 128
-                and not c.onepass.value()[].matched[0]
+                and c.onepass.value()[].match_cond[0] == 0
             ):
                 var cls = Int(c.forward.ascii_class[Int(text[0])])
-                if c.onepass.value()[].next[cls] < 0:
+                if c.onepass.value()[].actions[cls] == 0:
                     return False
             if not _may_match(c, text):
                 return False
