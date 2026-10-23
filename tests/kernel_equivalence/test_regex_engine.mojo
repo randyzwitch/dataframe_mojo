@@ -81,6 +81,7 @@ def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
     # `a`: up to 2^25 DFA states over random a/b text, past the cache.
     var regex = Regex("a(a|b){24}c")
     var matcher = Matcher(regex)
+    assert_equal(len(matcher.pike.current.dense), 0)
     var bytes = List[UInt8]()
     var state: UInt64 = 12345
     for _ in range(250_000):
@@ -90,6 +91,7 @@ def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
     var tail = text + "a" + String("b") * 24 + "c"
     assert_false(matcher.is_match(_span(text)))
     assert_true(matcher.forward.resets > 0)
+    assert_true(len(matcher.pike.current.dense) > 0)
     assert_true(matcher.is_match(_span(tail)))
     var m = matcher.find(_span(tail))
     assert_equal(m[0], text.byte_length())
@@ -662,6 +664,55 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
                     for k in range(len(slots)):
                         assert_equal(matcher.slots[k], slots[k], pattern)
             _ = text
+
+
+def test_search_engines_allocate_buffers_only_when_used() raises:
+    var patterns: List[String] = ["abc", "([a-z])", "^(a+)(β*)$"]
+    var texts: List[String] = ["xabcx", "!aβ", "aaaββ"]
+    var starts: List[Int] = [1, 1, 0]
+    var ends: List[Int] = [4, 2, 7]
+    for k in range(len(patterns)):
+        var regex = Regex(patterns[k])
+        var matcher = Matcher(regex)
+        var text = texts[k]
+        for _ in range(2):
+            matcher.forward.clear()
+            matcher.reverse.clear()
+            assert_true(matcher.captures(_span(text)))
+            assert_equal(matcher.slots[0], starts[k])
+            assert_equal(matcher.slots[1], ends[k])
+            assert_equal(len(matcher.forward.table), 0)
+            assert_equal(len(matcher.reverse.table), 0)
+            assert_equal(len(matcher.forward.q0.dense), 0)
+            assert_equal(len(matcher.reverse.q1.dense), 0)
+            assert_equal(len(matcher.pike.current.slots), 0)
+        _ = text
+    # Variable-width unanchored matches use both directions. A cleared
+    # cache keeps its allocated buffers and reconstructs the same spans.
+    var regex = Regex("(a+)(β+)")
+    var matcher = Matcher(regex)
+    var text = String("xaaaββ!")
+    for _ in range(2):
+        assert_true(matcher.captures(_span(text)))
+        assert_equal(matcher.slots[0], 1)
+        assert_equal(matcher.slots[1], 8)
+        assert_equal(matcher.slots[2], 1)
+        assert_equal(matcher.slots[3], 4)
+        assert_equal(matcher.slots[4], 4)
+        assert_equal(matcher.slots[5], 8)
+        assert_true(matcher.forward.state_count() > 0)
+        assert_true(matcher.reverse.state_count() > 0)
+        assert_true(len(matcher.forward.table) >= 1024)
+        assert_true(len(matcher.reverse.table) >= 1024)
+        assert_equal(
+            len(matcher.forward.q0.dense), len(regex._compiled[].forward)
+        )
+        assert_equal(
+            len(matcher.reverse.q1.dense), len(regex._compiled[].reverse)
+        )
+        matcher.forward.clear()
+        matcher.reverse.clear()
+    _ = text
 
 
 def test_cached_start_states_preserve_context_sensitive_matches() raises:
