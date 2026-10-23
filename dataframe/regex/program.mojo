@@ -123,25 +123,32 @@ struct Program(Movable, Sized):
 
     @always_inline
     def class_has(self, id: Int, cp: UInt32) -> Bool:
+        var membership = self.class_ascii.unsafe_ptr()
         if cp < 128:
-            var word = self.class_ascii[2 * id + Int(cp >> 6)]
+            var word = membership[unsafe_offset=2 * id + Int(cp >> 6)]
             return (word >> UInt64(cp & 63)) & 1 == 1
         if cp < 0x800:
             var bit = Int(cp) - 128
-            var word = self.class_ascii[
-                2 * len(self.class_ranges) + 30 * id + (bit >> 6)
+            var word = membership[
+                unsafe_offset=2 * len(self.class_ranges) + 30 * id + (bit >> 6)
             ]
             return (word >> UInt64(bit & 63)) & 1 == 1
-        return class_contains(self.class_ranges[id], cp)
+        return class_contains(
+            self.class_ranges.unsafe_ptr()[unsafe_offset=id], cp
+        )
 
     @always_inline
     def step(self, pc: Int, cp: UInt32) -> Bool:
         """Whether consuming instruction `pc` accepts `cp`."""
-        var op = self.op[pc]
+        # Consuming instruction and class ids come from the compiler's
+        # bounded program. Its immutable buffers stay fixed during search.
+        var op = self.op.unsafe_ptr()[unsafe_offset=pc]
         if op == OP_CHAR:
-            return UInt32(self.arg[pc]) == cp
+            return UInt32(self.arg.unsafe_ptr()[unsafe_offset=pc]) == cp
         if op == OP_CLASS:
-            return self.class_has(Int(self.arg[pc]), cp)
+            return self.class_has(
+                Int(self.arg.unsafe_ptr()[unsafe_offset=pc]), cp
+            )
         if op == OP_ANY:
             return True
         return cp != 10
@@ -149,14 +156,14 @@ struct Program(Movable, Sized):
     @always_inline
     def is_word(self, cp: UInt32) -> Bool:
         if cp < 128:
-            return self.word_ascii[Int(cp)]
+            return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
         return class_contains(self.word, cp)
 
     @always_inline
     def class_of(self, cp: UInt32) -> Int:
         """The DFA alphabet class of a code point."""
         if cp < 128:
-            return Int(self.ascii_class[Int(cp)])
+            return Int(self.ascii_class.unsafe_ptr()[unsafe_offset=Int(cp)])
         var points = self.boundaries.unsafe_ptr()
         var classes = self.interval_class.unsafe_ptr()
         var lo = 0
