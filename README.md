@@ -21,7 +21,7 @@ preview = ["pixi-build"]
 
 [dependencies]
 mojo = ">=1.2,<1.3"
-dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.2.0" }
+dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.3.0" }
 ```
 
 ```mojo
@@ -30,7 +30,7 @@ from dataframe import DataFrame, Series, Column, col
 
 A compiled Mojo package only loads in the Mojo version that produced it, and
 pixi builds this package with the newest Mojo that `[package.host-dependencies]`
-in `pixi.toml` allows, so each tag targets one Mojo version. `v0.2.0` targets
+in `pixi.toml` allows, so each tag targets one Mojo version. `v0.3.0` targets
 **1.2**; `v0.1.3` is the last tag for **1.1**.
 
 ## Run
@@ -50,9 +50,8 @@ pixi run bench-csv      # CSV reader benchmark; docs/design/benchmarks.md covers
 See the [testing guide](docs/testing.md) for native prerequisites, independent
 interchange consumers, case selection and explicit hardware capability skips.
 
-Mojo 1.2 is required from 0.2.0. It is a nightly series today, so the
-nightly channel is one of the workspace channels and `pixi install`
-resolves it; a compiled package loads only in the Mojo version that built
+Mojo 1.2 is required from 0.2.0. Release `v0.3.0` is built and tested with
+**Mojo 1.2.0**. A compiled package loads only in the Mojo version that built
 it, so a consumer on 1.1 stays on 0.1.3.
 
 Supported platforms are Linux x86-64 and macOS arm64 (both tested in CI) and
