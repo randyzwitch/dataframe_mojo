@@ -540,3 +540,42 @@ def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
         assert_false(matcher.captures(_span(bad)))
         _ = bad
     _ = long
+
+
+def test_cached_start_states_preserve_context_sensitive_matches() raises:
+    from dataframe.regex.pikevm import PikeVM
+
+    var patterns: List[String] = [
+        "(a+)",
+        "(a*)",
+        "([a-z])",
+        "(a|β)+",
+        ".*?",
+        "[ab]+",
+        "\\ba\\b",
+        "\\Ba",
+        "(?m)^a",
+        "a$",
+        "\\<a\\>",
+    ]
+    var texts: List[String] = ["", "a a\na! βa!aβ\n", "βaβ a", "\na\n", "bbb"]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var vm = PikeVM(program, program.slot_count)
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = vm.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+            _ = text
