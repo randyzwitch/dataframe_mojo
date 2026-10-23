@@ -57,6 +57,8 @@ from .expr import (
     ANY,
     ALL,
     NULL_COUNT,
+    MEDIAN,
+    QUANTILE,
     N_UNIQUE,
     col,
     lit,
@@ -6243,7 +6245,7 @@ struct GroupBy(Copyable):
     def _table_supported(self, expressions: List[Expr]) raises -> Bool:
         """Whether the aggregate table (`aggregate_table.mojo`) groups these
         keys and reduces these expressions."""
-        if len(self._keys) == 0 or not _stream_reductions(expressions):
+        if len(self._keys) == 0 or not _stream_reductions(expressions, True):
             return False
         for expression in expressions:
             for node in expression._nodes:
@@ -7021,7 +7023,7 @@ def _row_local(exprs: List[Expr]) -> Bool:
     return True
 
 
-def _stream_reductions(expressions: List[Expr]) -> Bool:
+def _stream_reductions(expressions: List[Expr], holistic: Bool = False) -> Bool:
     if len(expressions) == 0:
         return False
     for expression in expressions:
@@ -7037,7 +7039,9 @@ def _stream_reductions(expressions: List[Expr]) -> Bool:
             if not reachable[i]:
                 continue
             if is_reduction(node.op):
-                if node.op not in [
+                if holistic and (node.op == MEDIAN or node.op == QUANTILE):
+                    pass
+                elif node.op not in [
                     SUM,
                     COUNT,
                     MIN,
@@ -7440,7 +7444,7 @@ def table_supported(
     """Whether the aggregate table groups `frame` (empty is enough: only
     types are read) by `keys` and keeps every reduction's state of
     `expressions` inline."""
-    if len(keys) == 0 or not _stream_reductions(expressions):
+    if len(keys) == 0 or not _stream_reductions(expressions, True):
         return False
     for expression in expressions:
         for node in expression._nodes:
