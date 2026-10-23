@@ -1885,8 +1885,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._prefetched = None
 
     def _by_label(self) raises -> Self:
-        """This plan with each categorical scan column that a group_by or an
-        over() names as a key put on the first code of every label, so the
+        """This plan with each categorical scan column that a group_by names
+        as a key put on the first code of every label, so the
         device groups equal labels together as the CPU does (#943). Other
         columns keep their original codes."""
         var keys = Dict[String, Bool]()
@@ -1894,11 +1894,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if node.kind == AGG:
                 for name in node.names:
                     keys[name] = True
-            for expression in node.exprs:
-                for operand in expression._nodes:
-                    if operand.op == OVER:
-                        for part in split_names(operand.text2):
-                            keys[part] = True
         var result = self.copy()
         if len(keys) == 0:
             return result^

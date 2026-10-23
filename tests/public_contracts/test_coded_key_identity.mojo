@@ -68,19 +68,6 @@ def _check(frame: DataFrame, expected: List[String]) raises:
         assert_equal(_summary(lazy), expected)
     var indices = frame.group_indices("k")
     assert_equal(indices.count(), len(expected))
-    # A window partition is a grouping too.
-    var totals = frame.with_columns(col("x").sum().over("k").alias("t"))
-    var seen = List[String]()
-    for row in range(totals.height()):
-        var key = frame.column("k")
-        if key.dtype().is_categorical():
-            key = decode(key)
-        var text = key.string()
-        var label = String(text._get(row)) if text._valid(row) else "<null>"
-        var line = label + ":" + String(totals.item(row, "t").int64())
-        if line not in seen:
-            seen.append(line)
-    assert_equal(len(seen), len(expected))
 
 
 def _frame(key: Series, x: List[Int64]) raises -> DataFrame:

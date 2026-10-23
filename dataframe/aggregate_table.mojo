@@ -62,7 +62,6 @@ from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
-from .canonical_labels import canonical_labels
 from .aggregate import Reducer, _from_canonical, float_key
 from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
@@ -3108,10 +3107,7 @@ def table_row_keys(keys: List[Series]) raises -> RowKeys:
     var n = len(keys[0])
     var flat = List[Series](capacity=len(keys))
     for key in keys:
-        # Codes naming one label are one key (#943).
-        flat.append(
-            canonical_labels(key.rechunk() if key.is_chunked() else key.copy())
-        )
+        flat.append(key.rechunk() if key.is_chunked() else key.copy())
     var layout = aggregate_layout(flat, List[Series](), List[ReducerSpec]())
     layout.state_words = 1
     var sink = AggregateSink(layout, 1)

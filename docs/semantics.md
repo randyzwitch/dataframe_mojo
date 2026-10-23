@@ -218,7 +218,7 @@ same label are one group, whichever route runs (eager, lazy with or without
 `maintain_order`, windows, Metal), as in Polars, where a category never
 repeats a string. Arrow and Parquet dictionaries may repeat a label and are
 kept as given; only grouping merges the codes, and the group's key shows the
-first code of its label.
+first code of its label. `over()` partitions are not covered yet.
 Categorical expressions operate on decoded String values, so expression
 reductions such as first/last and min/max return String. A bare column selection
 and direct table row operations retain categorical metadata.

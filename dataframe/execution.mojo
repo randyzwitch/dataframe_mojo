@@ -99,7 +99,6 @@ from .replace import replace_values
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
-from .canonical_labels import canonical_labels
 from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import (
@@ -2836,8 +2835,7 @@ def _over[
     for part in split_names(node.text2):
         for column in columns:
             if column.name() == part:
-                # Codes naming one label are one partition (#943).
-                keys.append(canonical_labels(column))
+                keys.append(column.copy())
     # Whole partitions laid out contiguously and evaluated many at once,
     # when the rows fill more than one block per thread. A nested over()
     # partitions differently, so it keeps the row-order route.

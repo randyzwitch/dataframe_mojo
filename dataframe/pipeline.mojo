@@ -2010,9 +2010,7 @@ struct _GroupedSink(Movable):
                     break
                 local_columns.append(codes.take())
             if coded:
-                var local = encode_rows(
-                    local_columns, nulls_equal=True, by_label=False
-                )
+                var local = encode_rows(local_columns, nulls_equal=True)
                 for k in range(len(key_columns)):
                     unit_columns[k] = key_columns[k].take(local.representatives)
                 unit_of = local^.into_ids()

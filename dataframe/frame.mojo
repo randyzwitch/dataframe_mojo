@@ -7067,10 +7067,7 @@ def _encode_in_order(keys: List[Series]) raises -> RowKeys:
     var workers = worker_count(n)
     if workers <= 1 or low_cardinality(keys):
         return encode_rows(keys, nulls_equal=True)
-    var labeled = List[Series](capacity=len(keys))
-    for key in keys:
-        labeled.append(canonical_labels(key))
-    var encoded = encode_partitioned(labeled, workers, nulls_equal=True)
+    var encoded = encode_partitioned(keys, workers, nulls_equal=True)
     var renumbered = List[Int](length=encoded.count(), fill=-1)
     var ids = List[Int](capacity=n)
     var representatives = List[Int](capacity=encoded.count())
