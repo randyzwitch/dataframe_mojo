@@ -1768,12 +1768,13 @@ struct Expr(Copyable):
         return DtNamespace(self.copy())
 
     def min(self) -> Self:
-        """Smallest non-null value. NaN sorts above every number, so it is
+        """Smallest non-null value. NaN is skipped, as in Polars, so it is
         the minimum only when every valid value is NaN."""
         return self._unary(MIN)
 
     def max(self) -> Self:
-        """Largest non-null value; any valid NaN makes the maximum NaN."""
+        """Largest non-null value. NaN is skipped, as in Polars, so it is
+        the maximum only when every valid value is NaN."""
         return self._unary(MAX)
 
     def mean(self) -> Self:

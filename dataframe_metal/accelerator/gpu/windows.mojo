@@ -142,10 +142,12 @@ def _partition_end(
 
 @always_inline
 def _extrema_better(a: UInt64, b: UInt64, dtype: Int64, maximum: Bool) -> Bool:
+    """Whether a beats b. NaN gives way to any number, as in Polars (#816);
+    rolling windows override this so that a NaN in the window is the result."""
     var an = _nan(a, dtype)
     var bn = _nan(b, dtype)
     if an or bn:
-        return an != bn and (an if maximum else bn)
+        return an != bn and bn
     return _word_less(b, a, dtype) if maximum else _word_less(a, b, dtype)
 
 
@@ -233,9 +235,9 @@ def _aggregate_window(
                 ) if method == 3 else decimal.signed_less(
                     decimal.Wide(word, upper), decimal.Wide(state, high)
                 )
-            if duration and (dtype == 1 or dtype == 11):
-                # Duration extrema propagate the last source NaN for both
-                # min and max, as window.rolling_by_op does.
+            if dtype == 1 or dtype == 11:
+                # A NaN in the window is the result of both rolling_min and
+                # rolling_max, as in Polars and window.rolling_by_op (#816).
                 better = _nan(word, dtype) or (
                     not _nan(state, dtype) and better
                 )

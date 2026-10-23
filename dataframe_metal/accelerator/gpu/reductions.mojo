@@ -58,10 +58,11 @@ def _better(a: UInt64, b: UInt64, op: Int64, dtype: Int64) -> Bool:
         var x = f.word(a, dtype)
         var y = f.word(b, dtype)
         if op == MIN or op == MAX:
+            # NaN gives way to any number, as in Polars (#816).
             if f.is_nan(x):
-                return maximum and not f.is_nan(y)
+                return False
             if f.is_nan(y):
-                return not maximum
+                return True
         return f.less(y, x) if maximum else f.less(x, y)
     if unsigned_type(dtype) or dtype == 4:
         return a > b if maximum else a < b

@@ -1,6 +1,7 @@
 """Kernels for list and struct expressions: str.split, the .list namespace,
 and struct field access. Nulls propagate: a null list row gives a null
 result, and a null struct row makes every field null."""
+from std.math import isnan
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -249,10 +250,23 @@ def _reduce(lists: ListColumn, op: Int) raises -> Series:
             for i in range(n):
                 var found = False
                 var best = Scalar[D](0)
+                var only_nan = False
                 for r in range(lists._start(i), lists._end(i)):
                     if not column._valid(r):
                         continue
                     var value = column._get(r)
+                    comptime if D.is_floating_point():
+                        # NaN gives way to any number, as in Polars (#816).
+                        if isnan(value):
+                            if not found:
+                                best = value
+                                found = True
+                                only_nan = True
+                            continue
+                        if only_nan:
+                            best = value
+                            only_nan = False
+                            continue
                     if not found:
                         best = value
                         found = True

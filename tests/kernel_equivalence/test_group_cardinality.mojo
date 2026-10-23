@@ -172,6 +172,7 @@ struct HashStats(Copyable, Movable):
     var float_least: Float64
     var float_most: Float64
     var nan: Bool
+    var numbers: Int
 
     def __init__(out self) raises:
         self.first = -1
@@ -185,6 +186,7 @@ struct HashStats(Copyable, Movable):
         self.float_least = Float64("inf")
         self.float_most = -Float64("inf")
         self.nan = False
+        self.numbers = 0
 
 
 def test_inplace_hash_aggregation_merges_complete_scalar_states_and_declines_unsupported_shapes() raises:
@@ -227,6 +229,7 @@ def test_inplace_hash_aggregation_merges_complete_scalar_states_and_declines_uns
             if isnan(floating):
                 state.nan = True
             else:
+                state.numbers += 1
                 state.float_least = min(state.float_least, floating)
                 state.float_most = max(state.float_most, floating)
     var frame = DataFrame(
@@ -296,10 +299,15 @@ def test_inplace_hash_aggregation_merges_complete_scalar_states_and_declines_uns
                 assert_equal(part[4].get(row).int64(), state.count)
                 assert_equal(part[5].get(row).int64(), state.rows)
                 assert_float(part[6].get(row).float64(), state.float_total)
-                assert_float(part[7].get(row).float64(), state.float_least)
+                # NaN is the min or max only when no number was seen (#816).
+                var only_nan = state.nan and state.numbers == 0
+                assert_float(
+                    part[7].get(row).float64(),
+                    Float64("nan") if only_nan else state.float_least,
+                )
                 assert_float(
                     part[8].get(row).float64(),
-                    Float64("nan") if state.nan else state.float_most,
+                    Float64("nan") if only_nan else state.float_most,
                 )
                 for column in part:
                     assert_equal(len(column), len(part[0]))
