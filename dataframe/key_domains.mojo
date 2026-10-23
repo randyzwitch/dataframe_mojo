@@ -1,7 +1,8 @@
 """Original CPU GroupBy key domains for GPU primitive grouped List producers.
 
-Categorical and explicitly admitted dictionary-backed String keys preserve
-original code identity, including duplicate labels. Ordinary text and opaque
+Categorical and explicitly admitted dictionary-backed String keys keep their
+original dictionary; codes naming one label are one group, as on every CPU
+grouping (#943). Ordinary text and opaque
 keys use separate per-field byte dictionaries: their hashes remain original
 raw bytes, and invalid UTF8 from another field cannot enter String restoration.
 This module stages keys only; it never groups or evaluates query operands.
@@ -13,6 +14,7 @@ from .dtype import DataType
 from .series import Series
 from .string_column import StringColumn
 from .categorical import decode
+from .canonical_labels import canonical_labels
 from .plan_types import WindowKey
 from .byte_domain import ByteDomain
 from .checked_math import checked_add, checked_mul
@@ -80,7 +82,7 @@ def direct_category_codes(
 
     For OVER, call this ONLY when its captured WindowKey requires categorical
     code semantics. GroupBy additionally invokes it for same-dictionary String
-    codes, exactly as CPU GroupBy._coded_keys does. Text-reading expressions
+    codes made canonical per label, as CPU GroupBy._coded_keys does. Text-reading expressions
     must decode separately and continue to hash their original String bytes.
     """
     var original = source.dtype()
@@ -102,6 +104,9 @@ def direct_category_codes(
                 raise Error("String key lost its original code dictionary")
             encoded = held.take()
         _validate_codes(encoded, dtype.value())
+        # Equal labels are equal keys (#943): every code of a repeated label
+        # becomes the first one, so the device groups by label.
+        encoded = canonical_labels(encoded.with_dtype(dtype.value()))
         encoded = encoded.with_dtype(DataType.UINT32)
         var values = List[UInt64](
             length=len(dtype.value().dictionary()[]), fill=0

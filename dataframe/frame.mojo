@@ -19,6 +19,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _pack_bits
 from .string_column import StringColumn
 from .series import Series, sort_indices, smallest_indices
+from .canonical_labels import canonical_labels
 from .distinct_statistics import TableStatistics
 from .fused_compare import (
     SelectionTree,
@@ -230,6 +231,16 @@ def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
                 BoolColumn(structs.validity()),
             )
         )
+    return out^
+
+
+def _group_keys(columns: List[Series]) raises -> List[Series]:
+    """`_expand_struct_keys` for a grouping. A categorical key whose
+    dictionary repeats a label has its codes made canonical, so equal labels
+    are equal groups (#943)."""
+    var out = _expand_struct_keys(columns)
+    for i in range(len(out)):
+        out[i] = canonical_labels(out[i])
     return out^
 
 
@@ -3548,9 +3559,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Duplicate group_by key: " + key)
             seen[key] = True
             columns.append(self._columns[self._index(key)].copy())
-        return GroupBy(
-            self.copy(), _expand_struct_keys(columns), maintain_order
-        )
+        return GroupBy(self.copy(), _group_keys(columns), maintain_order)
 
     def group_indices(self, key: String) raises -> GroupIndices:
         return self.group_indices([key])
@@ -3573,7 +3582,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Duplicate group_indices key: " + key)
             seen[key] = True
             columns.append(self._columns[self._index(key)].copy())
-        var encoded = encode_rows(_expand_struct_keys(columns), True)
+        var encoded = encode_rows(_group_keys(columns), True)
         return GroupIndices(encoded.ids.copy(), encoded.representatives.copy())
 
     def group_by(
@@ -3598,9 +3607,7 @@ struct DataFrame(Copyable, Sized, Writable):
             if expression.shape() != ROWS:
                 result = result._broadcast(self._height)
             columns.append(result^)
-        return GroupBy(
-            self.copy(), _expand_struct_keys(columns), maintain_order
-        )
+        return GroupBy(self.copy(), _group_keys(columns), maintain_order)
 
 
 def _pivot_aggregate(values: String, aggregate_function: String) raises -> Expr:
@@ -6090,7 +6097,7 @@ struct GroupBy(Copyable):
         for key in self._keys:
             var codes = key._dictionary_codes()
             if codes:
-                keys.append(codes.take())
+                keys.append(canonical_labels(codes.take()))
                 any = True
             else:
                 keys.append(key.copy())
@@ -7575,7 +7582,7 @@ struct _StreamReduction(Movable):
     ) raises:
         var keys = List[Series]()
         if len(names) > 0:
-            keys = _expand_struct_keys(frame._subset_keys(names))
+            keys = _group_keys(frame._subset_keys(names))
         var key_names = Dict[String, Bool]()
         for name in names:
             key_names[name] = True

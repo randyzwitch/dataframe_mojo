@@ -11,6 +11,7 @@ from std.memory import Pointer, unsafe_stack_allocation
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.binding import bind
+from dataframe.canonical_labels import canonical_code_map
 from dataframe.expr import COL, SUM, SELECTOR
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG
 from dataframe.string_column import StringColumn
@@ -217,11 +218,14 @@ def execute(
             ),
         )
         _ = scope.check(reserved)
-        # A retained code is the group's identity, as on every other CPU and
-        # Metal grouping route: two codes naming one label stay two groups.
+        # Equal labels are equal groups (#943), as on the CPU: each code maps
+        # to the first code of its label. Row codes stay immutable.
         var code_map = List[UInt32](capacity=max(1, groups - 1))
+        var canonical = canonical_code_map(dictionary.dictionary()[])
         for code in range(groups - 1):
-            code_map.append(UInt32(code))
+            code_map.append(
+                canonical.value()[code] if canonical else UInt32(code)
+            )
         if not len(code_map):
             code_map.append(0)
         var retained = key._dictionary_codes()

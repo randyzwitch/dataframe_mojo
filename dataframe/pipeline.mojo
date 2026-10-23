@@ -20,6 +20,7 @@ from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from std.time import perf_counter_ns
 
+from .canonical_labels import canonical_labels
 from .bool_column import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from .aggregate import Reducer
@@ -58,6 +59,7 @@ from .frame import (
     table_supported,
     _equality_words,
     _expand_struct_keys,
+    _group_keys,
     _finish_parts,
     _rows_mask,
     _word_hash,
@@ -1956,9 +1958,7 @@ struct _GroupedSink(Movable):
         if self.collecting:
             self.collected.append(input.copy())
             return True
-        var key_columns = _expand_struct_keys(
-            input._subset_keys(self.key_names)
-        )
+        var key_columns = _group_keys(input._subset_keys(self.key_names))
         for k in range(len(key_columns)):
             ref column = key_columns[k]
             if column.dtype().is_nested():
@@ -2594,7 +2594,9 @@ struct _PipelineJob(Job):
                 ) if _reads(self.expressions) else morsel.materialized()
                 var keys = List[Series](capacity=len(self.keys))
                 for name in self.keys:
-                    keys.append(_unchunked(source.column(name)))
+                    keys.append(
+                        canonical_labels(_unchunked(source.column(name)))
+                    )
                 var inputs = table_inputs(source, keys, self.expressions)
                 for k in range(len(inputs)):
                     inputs[k] = _unchunked(inputs[k])
@@ -2778,7 +2780,9 @@ def _in_place_table_rows(
         var at = morsel._index(name)
         if morsel.compact[at]:
             return None
-        key_columns.append(_unchunked(morsel.frame._columns[at]))
+        key_columns.append(
+            canonical_labels(_unchunked(morsel.frame._columns[at]))
+        )
     # Plain inputs are taken before any computed input compacts a column.
     var inputs = List[Series]()
     var computed = List[Int]()

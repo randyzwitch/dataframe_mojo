@@ -94,6 +94,7 @@ from .expr import (
 from .frame import concat
 from .frame import _describe_percentiles
 from .expr import null
+from .canonical_labels import label_map, remap_codes
 from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
@@ -148,6 +149,8 @@ from .io.parquet import (
 from .bool_column import true_count
 from .column import Column
 from .series import Series
+from .categorical import decode
+from .string_column import StringCodes, StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .frame import _pivot_aggregate
@@ -1881,10 +1884,53 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._schema_memo = None
         self._prefetched = None
 
+    def _by_label(self) raises -> Self:
+        """This plan with each categorical scan column that a group_by names
+        as a key put on the first code of every label, so the
+        device groups equal labels together as the CPU does (#943). Other
+        columns keep their original codes."""
+        var keys = Dict[String, Bool]()
+        for node in self._nodes:
+            if node.kind == AGG:
+                for name in node.names:
+                    keys[name] = True
+        var result = self.copy()
+        if len(keys) == 0:
+            return result^
+        for f in range(len(result._frames)):
+            for c in range(result._frames[f].width()):
+                ref column = result._frames[f]._columns[c]
+                if column.name() not in keys:
+                    continue
+                var coded = column._dictionary_codes()
+                if coded:
+                    # Dictionary-coded text keeps its strings; only the codes
+                    # beside them move to the first code of each label.
+                    var map = label_map(coded.value())
+                    if map:
+                        var moved = remap_codes(coded.value(), map.value())
+                        var text = decode(moved)
+                        var rows = List[UInt32](capacity=len(moved))
+                        ref codes = moved.uint32()
+                        for row in range(len(moved)):
+                            rows.append(codes._get(row))
+                        text._data[StringColumn]._codes = ArcPointer(
+                            StringCodes(ArcPointer(rows^), moved.dtype())
+                        )
+                        text._field_metadata = column._field_metadata
+                        result._frames[f]._columns[c] = text^
+                    continue
+                var map = label_map(column)
+                if map:
+                    result._frames[f]._columns[c] = remap_codes(
+                        column, map.value()
+                    )
+        return result^
+
     def _with_accelerator_settings(
         self, optimize: Bool, streaming: Bool, batch_size: Int
-    ) -> Self:
-        var configured = self.copy()
+    ) raises -> Self:
+        var configured = self._by_label()
         configured._accelerator_settings = ExecutionSettings(
             optimize, streaming, batch_size
         )

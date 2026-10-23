@@ -107,8 +107,10 @@ def test_mojo_gpu_categorical_original_rows_filter_sort_group_and_over() raises:
                 .agg(col("v").sum()),
                 gpu,
             )
-            _codes(grouped.column("k"), [0, 1, 2, -1], labels)
-            _integers(grouped, "v", [33, 18, 4, 8])
+            # Codes naming one label are one group, shown by the first code
+            # (#943).
+            _codes(grouped.column("k"), [0, 2, -1], labels)
+            _integers(grouped, "v", [51, 4, 8])
             var window = _collect(
                 source.lazy().select_exprs(
                     [col("k"), col("v").sum().over("k").alias("sum")]
@@ -358,13 +360,13 @@ def test_mojo_gpu_coded_string_group_publication_drops_original_code_identity() 
     )
     for gpu in [False, True]:
         var grouped = _collect(query, gpu)
-        assert_equal(grouped.height(), 2)
+        # Two codes naming "dup" are one group (#943).
+        assert_equal(grouped.height(), 1)
         assert_equal(grouped.column("k").dtype(), DataType.STRING)
         assert_equal(grouped.item(0, "k").string(), "dup")
-        assert_equal(grouped.item(1, "k").string(), "dup")
         assert_false(Bool(grouped.column("k")._dictionary_codes()))
         assert_false(Bool(grouped.column("k")._field_metadata))
-        _integers(grouped, "v", [5, 2])
+        _integers(grouped, "v", [7])
         var regrouped = _collect(
             query.group_by("k", maintain_order=True).agg(col("v").sum()), gpu
         )

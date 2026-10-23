@@ -688,14 +688,13 @@ def test_mojo_gpu_decimal_group_feed_coded_keys_publish_plain_strings() raises:
                 ) if gpu else query.collect(
                     engine="cpu", optimize=False, streaming=streaming
                 )
-                # Independent original-code partitions, including nulls and
-                # two distinct codes sharing one decoded label.
-                assert_equal(grouped.height(), 3)
+                # Two codes sharing one decoded label are one group (#943),
+                # and nulls their own.
+                assert_equal(grouped.height(), 2)
                 assert_equal(grouped.item(0, "k").string(), "dup")
-                assert_equal(grouped.item(1, "k").string(), "dup")
-                assert_true(grouped.item(2, "k").is_null())
-                var expected: List[Int128] = [50, 20, 80]
-                for row in range(3):
+                assert_true(grouped.item(1, "k").is_null())
+                var expected: List[Int128] = [70, 80]
+                for row in range(2):
                     assert_equal(
                         grouped.column("total")._decimal_raw(row), expected[row]
                     )

@@ -214,6 +214,13 @@ the final result overflows. Grouped output order is unspecified unless
 that is not a key (Polars' `all()` reduced, keys excluded); a key computed
 from an expression keeps its output name, so `group_by([col("a") % 2]).sum()`
 does not sum `a`.
+A categorical or dictionary-coded key groups by its label: codes that name the
+same label are one group, whichever route runs (eager, lazy with or without
+`maintain_order`, Metal), as in Polars, where a category never
+repeats a string. Arrow and Parquet dictionaries may repeat a label and are
+kept as given; only grouping merges the codes, and the group's key shows the
+first code of its label. `over()` partitions and row numbering for `unique`
+still compare codes.
 Categorical expressions operate on decoded String values, so expression
 reductions such as first/last and min/max return String. A bare column selection
 and direct table row operations retain categorical metadata.

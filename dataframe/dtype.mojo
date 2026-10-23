@@ -72,14 +72,55 @@ struct CategoricalDictionary(Movable, Sized):
 
     var bytes: List[UInt8]
     var offsets: List[Int64]
+    # For each code, the first code holding the same label; empty when no
+    # label repeats, which is every dictionary this library builds itself.
+    # Set once by `DataType.categorical` (#943).
+    var canonical: List[UInt32]
 
     def __init__(out self):
         self.bytes = List[UInt8]()
         self.offsets = [0]
+        self.canonical = List[UInt32]()
 
     def __init__(out self, var bytes: List[UInt8], var offsets: List[Int64]):
         self.bytes = bytes^
         self.offsets = offsets^
+        self.canonical = List[UInt32]()
+
+    def find_repeated_labels(mut self):
+        """Fill `canonical` if some label appears under two codes: Arrow and
+        Parquet dictionaries may repeat an entry, and so may one built with
+        `append`. Polars' categories never repeat a string, so equal labels
+        are equal group keys (#943)."""
+        self.canonical = List[UInt32]()
+        var n = len(self)
+        var size = 16
+        while size < 2 * n:
+            size *= 2
+        var table = List[Int32](length=size, fill=-1)
+        var result = List[UInt32](capacity=n)
+        var repeated = False
+        for code in range(n):
+            var label = self.get(code)
+            var hash = UInt64(14695981039346656037)
+            for byte in label.as_bytes():
+                hash = (hash ^ UInt64(byte)) * UInt64(1099511628211)
+            hash ^= hash >> 29
+            var slot = Int(hash) & (size - 1)
+            var found = -1
+            while table[slot] >= 0:
+                if self.get(Int(table[slot])) == label:
+                    found = Int(table[slot])
+                    break
+                slot = (slot + 1) & (size - 1)
+            if found < 0:
+                table[slot] = Int32(code)
+                result.append(UInt32(code))
+            else:
+                result.append(UInt32(found))
+                repeated = True
+        if repeated:
+            self.canonical = result^
 
     def __len__(self) -> Int:
         return len(self.offsets) - 1
@@ -347,8 +388,13 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return self._nested.value()[].text
 
     @staticmethod
-    def categorical(var dictionary: CategoricalDictionary) -> DataType:
-        """A categorical whose codes index `dictionary`."""
+    def categorical(
+        var dictionary: CategoricalDictionary, *, distinct: Bool = False
+    ) -> DataType:
+        """A categorical whose codes index `dictionary`. `distinct` says the
+        caller built it from distinct labels, so no repeat is looked for."""
+        if not distinct:
+            dictionary.find_repeated_labels()
         var dtype = DataType(_CATEGORICAL, 0)
         dtype._dictionary = ArcPointer(dictionary^)
         return dtype^
