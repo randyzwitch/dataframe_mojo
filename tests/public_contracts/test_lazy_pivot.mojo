@@ -1,6 +1,6 @@
 """Lazy pivot gives DataFrame.pivot's cells under every executor setting,
-with its columns named up front (Polars 1.44's `on_columns`): listed names
-in their order, a name no row has as a column of nulls of the aggregate's
+with its columns named up front: listed names are kept in their given
+order, and a name no row has becomes a column of nulls of the aggregate's
 type. Filters on index columns move below it; other filters stay above."""
 # contract-group: lazy.pivot
 from std.testing import assert_equal, assert_true, assert_raises

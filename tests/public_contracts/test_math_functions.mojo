@@ -1,9 +1,8 @@
-"""Elementwise math functions, product and cum_prod against Polars 1.44.
+"""Elementwise math functions, product and cum_prod.
 
-Expected values were computed by Polars 1.44.2 (`pl.col(c).<function>()`,
-`pl.arctan2`) on the same inputs. Transcendental results come from the
-platform libm on both sides, so finite values agree to a few ulps (log10 and
-log(2) are exact here where Polars divides natural logarithms); NaN,
+Expected values are checked on identical inputs. Transcendental results
+come from platform libm, so finite values agree to a few ulps; log10 and
+log(2) are exact here because they divide natural logarithms. NaN,
 infinities and signed zeros must match exactly.
 """
 # contract-group: expr.arithmetic

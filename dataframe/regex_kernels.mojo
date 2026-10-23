@@ -1,11 +1,10 @@
 """Regular-expression string kernels (#219): `str.contains`,
 `count_matches`, `extract`, `extract_all`, `replace`, `replace_all` and
-`split`, with Polars' semantics (Rust `regex`).
+`split`.
 
 The pattern is compiled once into a `Regex` whose programs every worker
 shares; each worker takes a range of rows and searches them with its own
-`Matcher` (its DFA caches and Pike VM), as Polars' kernels each use a
-compiled `regex::Regex` from a thread-local cache. Row bytes are read in
+`Matcher` (its DFA caches and Pike VM). Row bytes are read in
 place (`_Bytes`). Predicates write whole bitmap bytes; string and list
 results are built per worker and joined once.
 
@@ -45,8 +44,8 @@ def compile_pattern(pattern: String, literal: Bool) raises -> Regex:
 
 
 def is_literal_pattern(pattern: String) -> Bool:
-    """Polars' `is_literal_pat`: a pattern with no ASCII punctuation is
-    replaced as a literal (and its replacement is not expanded)."""
+    """A pattern with no ASCII punctuation is replaced as a literal (and
+    its replacement is not expanded)."""
     for b in pattern.as_bytes():
         if (
             (b >= 33 and b <= 47)
@@ -192,8 +191,7 @@ struct _RegexJob[mode: Int](Job):
         mut self, mut matcher: Matcher, text: Span[UInt8, ImmutAnyOrigin]
     ):
         """One row's list: every match (extract_all), or the text between
-        matches (split, `regex::Regex::split`), or each piece through its
-        match (inclusive split, Polars' `split_inclusive`)."""
+        matches (split), or each piece through its match (inclusive split)."""
         var parts = 0
         var last = 0
         matcher.reset()
@@ -410,7 +408,7 @@ def _strings_without_nulls[
 
 def split_codepoints(column: StringColumn) raises -> Series:
     """Each row as a list of its code points (an empty row gives an empty
-    list), Polars' split on an empty pattern."""
+    list) when splitting on an empty pattern."""
     return _lists[_SPLIT_INCLUSIVE](column, Regex("(?s)."), -1)
 
 
@@ -422,8 +420,7 @@ def regex_extract_all(column: StringColumn, regex: Regex) raises -> Series:
 def regex_split(
     column: StringColumn, regex: Regex, inclusive: Bool
 ) raises -> Series:
-    """Each row split on the pattern's matches, as Polars'
-    `str.split(literal=False)`."""
+    """Each row split on the pattern's matches."""
     if inclusive:
         return _lists[_SPLIT_INCLUSIVE](column, regex)
     return _lists[_SPLIT](column, regex)

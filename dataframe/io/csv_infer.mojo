@@ -10,8 +10,8 @@ Datetime[us], and Time forms. Date inference is opt-in and defaults to false.
 Decimal-comma, Null, optional Int128, per-column
 null values, and column-name replacement are outside this API; ``CsvOptions``
 has all-column null tokens and ``schema_overrides`` is the existing
-name-to-dtype adapter. As in Polars, header names are always converted with
-UTF-8 loss replacement; body UTF-8 checking belongs to the later decoder path.
+name-to-dtype adapter. Header names are always converted with UTF-8 loss
+replacement; body UTF-8 checking belongs to the later decoder path.
 """
 from std.collections import Dict
 
@@ -56,7 +56,8 @@ def _quote(options: CsvOptions) -> Tuple[UInt8, Bool]:
 def _record_end(
     bytes: Span[UInt8, ImmutAnyOrigin], start: Int, options: CsvOptions
 ) -> Int:
-    """Find one source record with the same SplitFields parity as Polars."""
+    """Find one source record using the same quote-parity rule as
+    `SplitFields`."""
     var quote = _quote(options)
     var fields = CsvSplitFields(
         options.separator.as_bytes()[0], quote[0], quote[1]
@@ -149,7 +150,7 @@ def _digits(bytes: Span[UInt8, ImmutAnyOrigin], start: Int, end: Int) -> Bool:
 
 
 def _float_regex(bytes: Span[UInt8, ImmutAnyOrigin]) -> Bool:
-    """Byte equivalent of Polars' FLOAT_RE in utils/other.rs.
+    """Recognize the accepted floating-point token spellings.
 
     ``^[-+]?((\\d*\\.\\d+)([eE][-+]?\\d+)?|inf|NaN|(\\d+)[eE][-+]?\\d+|\\d+\\.)$``
     is intentionally narrower than the numeric parser: integers are handled
@@ -199,9 +200,8 @@ def _float_regex(bytes: Span[UInt8, ImmutAnyOrigin]) -> Bool:
 
 
 def _infer_temporal(raw: Span[UInt8, ImmutAnyOrigin]) -> Int:
-    """The ISO subset of polars_time infer_pattern_single.
-
-    Polars reaches this branch only after Boolean, Float, and Integer regexes.
+    """Infer the supported ISO date/time subset after Boolean, Float, and
+    Integer patterns have been checked.
     It tries Date, Time, then Datetime. The existing temporal parser supplies
     that ISO subset; non-ISO DMY and compact chrono patterns stay String until
     the public CSV API exposes matching format support.
@@ -322,10 +322,10 @@ def infer_csv_schema(
 ) raises -> CsvInference:
     """Infer the clean CSV schema and return the prelude's content offset.
 
-    ``infer_schema_length`` follows Polars' ``Option<usize>`` adaptation:
-    ``-1`` samples every data record, ``0`` samples enough width but forces
-    String, and a positive value caps sampled non-comment records.
-    ``try_parse_dates`` is Polars' opt-in temporal inference switch.
+    ``infer_schema_length`` controls the sample: ``-1`` samples every data
+    record, ``0`` samples enough width but forces String, and a positive
+    value caps sampled non-comment records. ``try_parse_dates`` enables
+    temporal inference.
     """
     # Options are validated by the reader before inference.
     if infer_schema_length < -1:

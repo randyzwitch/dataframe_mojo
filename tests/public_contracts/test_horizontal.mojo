@@ -1,4 +1,6 @@
-"""Row-wise reductions across columns follow Polars' null and type rules."""
+"""Row-wise reductions across columns: sums replace nulls with zero;
+min/max preserve the non-null value; any/all use Kleene logic. Input types
+are promoted to a common type before reduction."""
 # contract-group: expr.horizontal
 from std.math import isnan
 from std.testing import assert_equal, assert_true, assert_false, assert_raises

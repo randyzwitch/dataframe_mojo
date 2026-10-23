@@ -1,7 +1,7 @@
 """Row-wise reductions across columns (#221): types and kernels.
 
-A port of Polars' polars-ops/src/series/ops/horizontal.rs. The inputs are
-cast to their supertype and reduced pairwise: sums fill nulls with zero and
+A horizontal reduction casts inputs to a common type and reduces them
+pairwise: sums fill nulls with zero and
 add (`binary[ADD]`, so integers keep their overflow checks), min and max keep
 the other side's value where one side is null, and any/all are Kleene `|`
 and `&`. Float sums and means, and numeric min and max, accumulate into one
@@ -35,8 +35,8 @@ from .series import Series
 
 
 def _integer_digits(dtype: DataType) -> Int:
-    """The decimal digits DuckDB gives an integer type when it meets a
-    decimal (`GetDecimalProperties`)."""
+    """The decimal digits needed to represent an integer type combined
+    with a decimal."""
     var bits = dtype.bit_width()
     if bits == 8:
         return 3
@@ -62,9 +62,9 @@ def _primitive(dtype: DataType) -> Bool:
 def horizontal_supertype(
     kind: Int, left: DataType, right: DataType
 ) raises -> DataType:
-    """The type two inputs are read at: Polars' supertype for integers,
-    floats and Bool (`get_supertype`), and DuckDB's for decimals, where an
-    integer is the decimal of its digits (`MaxLogicalType`)."""
+    """The common input type: promote integers, floats, and Bool to their
+    numeric supertype. For decimals, retain decimal scale and widen an
+    integer to enough digits to hold its values."""
     if left == right:
         return left
     if left.is_decimal() or right.is_decimal():
@@ -115,8 +115,8 @@ def horizontal_supertype(
 
 
 def horizontal_input(kind: Int, dtype: DataType) raises:
-    """Check one input of any_horizontal/all_horizontal: Bool or a number,
-    read as Bool (nonzero is true), as Polars casts it."""
+    """Check one input of any_horizontal/all_horizontal: Bool or a number
+    that can be converted to Bool (nonzero is true)."""
     if (kind == H_ANY or kind == H_ALL) and not _primitive(dtype):
         raise Error(
             horizontal_name(kind)
@@ -128,9 +128,9 @@ def horizontal_input(kind: Int, dtype: DataType) raises:
 def horizontal_result(
     kind: Int, common: DataType, inputs: Int
 ) raises -> DataType:
-    """The result type of a reduction of `inputs` inputs whose supertype is
-    `common` (Polars' schema rules; decimal sums take the type DuckDB gives
-    the same chain of `+`)."""
+    """The result type of a reduction of `inputs` values with common type
+    `common`; decimal sums use the type produced by repeated decimal
+    addition."""
     if kind == H_ANY or kind == H_ALL:
         return DataType.BOOL
     if kind == H_MIN or kind == H_MAX:
@@ -214,8 +214,8 @@ struct _Input[D: DType](Movable):
 def _takes_right[
     D: DType, W: Int, is_max: Bool
 ](x: SIMD[D, W], y: SIMD[D, W]) -> SIMD[DType.bool, W]:
-    """Where y replaces x as the running min/max. NaN is skipped, as in
-    Polars' `min_ignore_nan`/`max_ignore_nan`: a NaN x always gives way."""
+    """Where y replaces x as the running min/max. Skip NaN; a NaN x always
+    gives way to a non-NaN y."""
     var better = y.gt(x) if is_max else y.lt(x)
     comptime if D.is_floating_point():
         return better | isnan(x)
@@ -259,9 +259,9 @@ def _extreme[
 
 
 def _extreme_rows[is_max: Bool](inputs: List[Series], n: Int) raises -> Series:
-    """Min or max of Bool or String inputs: Polars' fallback for types
-    without primitive storage. Each step compares, keeps the left value
-    where it is the better non-null one, and picks with `choose`."""
+    """Min or max of Bool or String inputs, which lack primitive numeric
+    storage. Each step compares values, keeps the better non-null value,
+    and picks with `choose`."""
     var result = inputs[0].copy()
     for k in range(1, len(inputs)):
         ref right = inputs[k]
@@ -286,9 +286,9 @@ def _extreme_rows[is_max: Bool](inputs: List[Series], n: Int) raises -> Series:
 def _float_fold[
     D: DType, mean: Bool
 ](inputs: List[Series], n: Int, ignore_nulls: Bool) raises -> Series:
-    """Sum or mean of float inputs: one pass per input adding its valid
-    values and counting them, then one pass dividing. A null adds nothing;
-    NaN propagates, as in Polars."""
+    """Sum or mean of float inputs: one pass per input adds valid values
+    and counts them, then one pass divides. Null adds nothing; NaN
+    propagates."""
     comptime W = 8
     var sums = List[Scalar[D]](length=n, fill=0)
     var counts = List[Scalar[D]](length=n, fill=0)

@@ -1,9 +1,9 @@
 """Equal labels are equal categorical group keys (#943).
 
-Polars' categories never repeat a string, so a categorical key there groups by
-label. Arrow and Parquet dictionaries may repeat one, and this library keeps
-the dictionary it was given (codes round-trip). Grouping therefore replaces
-each code by the first code of its label before it numbers the keys.
+Categorical dictionaries may repeat a string label, so grouping uses labels
+rather than raw codes. The original dictionary is retained so codes
+round-trip. Before numbering groups, each repeated code is replaced by the
+first code with the same label.
 """
 from .column import Column
 from .dtype import CategoricalDictionary

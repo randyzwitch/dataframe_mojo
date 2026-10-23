@@ -1,8 +1,7 @@
 """NaN and null placement in sort, top_k, bottom_k and rank (#808).
 
-The expected orders are what Polars 1.44 (`sort(..., maintain_order=True)`,
-`top_k`, `bottom_k`, `rank`) and DuckDB 1.5 (`ORDER BY ... NULLS FIRST|LAST`
-with the row number last) give for the same input. NaN is the largest value:
+Expected orders cover `sort(..., maintain_order=True)`, `top_k`, `bottom_k`
+and `rank` on the same input. NaN is the largest value:
 it follows the numbers ascending and precedes them descending. Nulls go first
 or last as asked, in either direction.
 """

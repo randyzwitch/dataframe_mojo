@@ -696,8 +696,8 @@ def power_exp(a: Double) -> UInt64:
 
 
 def power(a: UInt64, b: UInt64, single: Bool = False) -> UInt64:
-    """Polars' pow_on_floats: sqrt for 0.5, left-to-right products for the
-    integral exponents 2 to 9 (rounded to binary32 at each step when single),
+    """Square root for exponent 0.5; left-to-right products for integral
+    exponents 2 to 9 (rounded to binary32 at each step when single);
     otherwise the compensated general power."""
     comptime ONE = UInt64(0x3FF0000000000000)
     var x = absolute(a)

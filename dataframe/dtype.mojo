@@ -90,8 +90,8 @@ struct CategoricalDictionary(Movable, Sized):
     def find_repeated_labels(mut self):
         """Fill `canonical` if some label appears under two codes: Arrow and
         Parquet dictionaries may repeat an entry, and so may one built with
-        `append`. Polars' categories never repeat a string, so equal labels
-        are equal group keys (#943)."""
+        `append`. Repeated labels are represented by their first code, so
+        equal labels are equal group keys (#943)."""
         self.canonical = List[UInt32]()
         var n = len(self)
         var size = 16
@@ -793,8 +793,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
 
     def sum_type(self) -> DataType:
         """The result type of sum and cumulative sums: 8- and 16-bit
-        integers widen to INT64 (as in Polars), decimals to decimal(38) at
-        their scale (as in DuckDB); other types keep their type."""
+        integers widen to INT64, decimals to decimal(38) at their scale,
+        and other types retain their type."""
         if self.is_integer() and self.bit_width() <= 16:
             return DataType.INT64
         if self.is_decimal():
@@ -805,11 +805,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return self
 
     def product_type(self) -> DataType:
-        """The result type of product and cum_prod, as in Polars: INT64 for
-        Bool and integers up to 32 bits, which would soon overflow their
-        own width, and the type itself for Int64, UInt64 and floats. A
-        decimal's product has a scale no column of it shares, so FLOAT64,
-        as DuckDB's product is."""
+        """The result type of product and cum_prod: INT64 for Bool and
+        integers up to 32 bits, which would soon overflow their own width;
+        retain Int64, UInt64, and floating types. Decimal products use
+        FLOAT64 because the product's scale may exceed the input scale."""
         if self.is_decimal():
             return DataType.FLOAT64
         if self == DataType.BOOL or (

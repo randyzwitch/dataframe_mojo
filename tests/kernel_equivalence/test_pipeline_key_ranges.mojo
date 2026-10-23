@@ -1,5 +1,5 @@
 """A pipeline narrows its morsels by each join build's key range before
-any step runs (DuckDB's min-max runtime join filter), deciding whole
+any step runs, deciding whole
 morsels from the zone maps of the probe key's buffer. Joins against a
 scalar model: sorted keys (morsels wholly outside, wholly inside, or
 straddling the range) and scattered ones, nullable probe keys, a build

@@ -244,8 +244,8 @@ def localize(
     non_existent: Int,
 ) raises -> Optional[Int64]:
     """The UTC ticks of wall-clock ticks `local` in `zone`; None when the
-    options ask for null. Raises, as Polars does, for a non-existent or
-    ambiguous time under the "raise" options."""
+    options ask for null. Raises for a non-existent or ambiguous time when
+    the corresponding option is set to "raise"."""
     var per_second = dtype.per_second()
     var seconds = floor_div(local, per_second)
     var fraction = local - seconds * per_second
@@ -296,7 +296,7 @@ def _naive_text(local: Int64, dtype: DataType) -> String:
 
 def strptime_target(target: DataType, format: String) raises -> DataType:
     """The dtype strptime produces: a naive datetime format with %z gives
-    UTC-aware values, as in Polars."""
+    UTC-aware values."""
     if (
         target.is_datetime()
         and target.time_zone().byte_length() == 0

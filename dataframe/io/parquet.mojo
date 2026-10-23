@@ -898,7 +898,8 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
     whatever its precision, and at 128 bits every kernel takes its
     per-row path (PDS-H decimal q6: 32 ms against 6 for the DOUBLE
     variant), while at 64 bits the typed compare and arithmetic kernels
-    apply, as DuckDB stores a DECIMAL of up to 18 digits in an int64.
+    apply because precision of at most 18 digits fits in a signed 64-bit
+    integer.
     One chunk a job."""
     var jobs = List[_NarrowDecimalJob]()
     var at = List[Int]()

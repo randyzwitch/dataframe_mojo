@@ -213,9 +213,8 @@ struct MomentState(Copyable):
         self.count += other.count
 
     def skew(self, bias: Bool) -> Optional[Float64]:
-        """Sample skewness as scipy and Polars define it: null with no
-        values, or with fewer than three when bias is corrected; NaN for
-        constant input."""
+        """Sample skewness: null with no values, or with fewer than three
+        when bias is corrected; NaN for constant input."""
         if self.count == 0 or (not bias and self.count < 3):
             return None
         var n = Float64(self.count)
@@ -292,8 +291,8 @@ struct CoMomentState(Copyable):
         return self.cxy / sqrt(self.m2x * self.m2y)
 
     def covariance(self, ddof: Int) -> Optional[Float64]:
-        """Null with no pairs; 0.0 when pairs do not exceed ddof, as Polars
-        returns; otherwise the co-moment over (pairs - ddof)."""
+        """Null with no pairs; 0.0 when pairs do not exceed ddof;
+        otherwise the co-moment over (pairs - ddof)."""
         if self.count == 0:
             return None
         if self.count <= Int64(ddof):

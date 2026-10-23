@@ -269,7 +269,7 @@ def _text_function_name(op: Int) -> String:
 
 def _check_pattern(node: Node) raises:
     """Raise now for an invalid regular expression in a strict regex
-    string operation, as Polars does when the expression runs."""
+    string operation, rather than waiting until execution."""
     var regex = False
     if node.op == STR_CONTAINS:
         regex = node.integer == 1
@@ -1135,7 +1135,7 @@ def _replace_dtype(
     """The result dtype of a REPLACE or REPLACE_STRICT node, checking its
     values. `replace` keeps the input dtype, and a categorical stays one
     when it is the result. `replace_strict` takes `return_dtype`, or the
-    type of the new values and the default together, as Polars does."""
+    common type of the new values and the default."""
     var node = nodes[i].copy()
     if node.left < 0 or node.left >= i or node.right >= i:
         raise Error("Invalid " + op_name(node.op) + " input")

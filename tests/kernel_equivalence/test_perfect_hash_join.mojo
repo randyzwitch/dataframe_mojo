@@ -1,5 +1,5 @@
 """Unique integer build keys over a small span join through slots indexed
-by `key - least` (DuckDB's perfect hash join): inner, left, semi and anti
+by `key - least`: inner, left, semi and anti
 joins against a scalar model, with null probe keys, probe keys outside
 the span, a build whose keys repeat (which keeps the hash table), and
 probes where every row matches once."""

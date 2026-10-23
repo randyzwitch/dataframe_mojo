@@ -1,16 +1,15 @@
 """Recoding values: `replace` and `replace_strict` (#789).
 
-Polars recodes by a left join of the input against the old values
-(polars-ops `replace_by_multiple`), with null matching null, then picks the
-new value or the fallback per row. Here the same work is two passes over
-row ranges, one worker each: every row probes a table built once from the
-old values (a direct table for integers in a small span, as the join's
-perfect hash, else open addressing; every NaN is one value and -0.0 equals
-0.0, as join keys) and records the old position, then the result is
-written from those positions: the new value, else the input (`replace`),
-the default, or null. String results are views that share the new values'
-and the fallback's bytes, as Polars zips string views. Over a categorical
-the whole expression runs once per dictionary value (`_on_dictionary` in
+Recoding matches each input against the old values, with null matching
+null, then picks the new value or the fallback per row. Here the work is
+two passes over row ranges: each worker probes a table built once from the
+old values (a direct table for integers in a small span, otherwise open
+addressing; every NaN is one value and -0.0 equals 0.0) and records each
+match's old position. The result is written from those positions: the new
+value, else the input (`replace`), the default, or null. String results are
+views that share the new values'
+and the fallback's bytes. Over a categorical, the whole expression runs
+once per dictionary value (`_on_dictionary` in
 execution), so a recode costs a lookup per distinct value and a gather of
 the codes.
 """
@@ -63,8 +62,8 @@ def _literal_dtype(node: Node) raises -> DataType:
 
 
 def values_dtype(values: List[Node]) raises -> Optional[DataType]:
-    """The dtype a list of literals has as one column, as Polars builds a
-    Series from a list: strings, Bools or numbers. Integers keep the type
+    """The dtype a list of literals has as one column: strings, Bools or
+    numbers. Integers keep the type
     they share, else Int64; any float makes the list Float64 (Float32 when
     every value is one). Nulls take the others' type, and a list of nulls
     its first null's. None for no values, or for anything but literals."""
@@ -127,9 +126,8 @@ def values_dtype(values: List[Node]) raises -> Optional[DataType]:
 
 
 def replace_supertype(first: DataType, second: DataType) raises -> DataType:
-    """The dtype that holds values of both, as Polars' supertype: strings
-    hold anything, integers widen (signed when either is), and floats hold
-    integers."""
+    """The dtype that holds values of both: strings hold anything,
+    integers widen (signed when either is), and floats hold integers."""
     if first == second:
         return first
     if first == DataType.STRING or second == DataType.STRING:
@@ -278,9 +276,8 @@ def _wide_word(value: Int128) -> UInt64:
 
 struct _Lookup(Copyable, Movable):
     """The old values' positions by key, built once and probed by every
-    worker. Integers within a small span index a table directly, as the
-    join's perfect hash does (`_perfect_slots`, DuckDB's perfect hash join);
-    anything else goes to an open-addressing table of key words."""
+    worker. Integers within a small span index a table directly; anything
+    else goes to an open-addressing table of key words."""
 
     var kind: Int
     var old: Series
@@ -647,7 +644,7 @@ struct _ViewJob(Job):
     the new values and of the fallback instead of copying them: a matched
     row takes its new value's view, any other the fallback's, whose long
     values point into the fallback's buffers, listed after the new
-    values' (`shift`). As Polars zips string views."""
+    values' (`shift`)."""
 
     var rows: Int
     var new: List[StringView]

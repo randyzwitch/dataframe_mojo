@@ -985,8 +985,8 @@ def decimal_series_for_rows[
 def duckdb_decimal_type(
     operation: Int, left: DataType, right: DataType
 ) raises -> DataType:
-    """DuckDB's result type: a sum or difference at the larger scale with
-    one more integer digit, a product at the scales added, a quotient as
+    """A sum or difference at the larger scale with one more integer digit,
+    a product at the scales added, a quotient as
     DOUBLE; at most 38 digits (18 for 64-bit inputs), stored at the width
     the precision needs."""
     if operation == 3:
