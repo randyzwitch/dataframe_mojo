@@ -2,8 +2,8 @@
 
 Most operations choose, for every output row, a source row to gather (or
 none). Ordering uses the same dense sort ranks as `sort`, so ties keep the
-earlier row. cum_min and cum_max skip NaN, as in Polars: a NaN row gets the
-running value so far, and is NaN only before the first number (#816). A
+earlier row. cum_min and cum_max skip NaN: a NaN row gets the running
+value so far, and is NaN only before the first number (#816). A
 rolling_min or rolling_max window holding a NaN is NaN.
 """
 from .column import Column, _copy_validity

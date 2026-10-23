@@ -1,11 +1,10 @@
-"""Regex syntax: a recursive-descent parser for the syntax of Rust's `regex`
-crate (which Polars uses), producing a flat syntax tree.
+"""Regex syntax: a recursive-descent parser producing a flat syntax tree.
 
-Following regex-syntax, case-insensitive literals become classes closed
-under simple case folding, `.` and the Perl classes are Unicode-aware, and
-look-around and backreferences are rejected: the engine has no backtracking,
-so every search stays linear in the haystack. Nodes live in parallel lists
-and refer to their children by index, so the tree has no recursive types.
+Case-insensitive literals become classes closed under simple case folding,
+`.` and the Perl classes are Unicode-aware, and look-around and backreferences
+are rejected: the engine has no backtracking, so every search stays linear
+in the haystack. Nodes live in parallel lists and refer to their children
+by index, so the tree has no recursive types.
 """
 from .charclass import (
     CaseFolds,

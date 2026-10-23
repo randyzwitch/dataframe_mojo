@@ -1,14 +1,12 @@
-"""Distinct-count statistics of a loaded table's columns, as DuckDB keeps
-them for its join order optimizer (`DistinctStatistics`, DuckDB 1.4).
+"""Approximate distinct-count statistics for columns in loaded tables.
 
-DuckDB hashes a sample of every column as rows are appended to a table:
-the first 614 rows of each 2,048-row chunk for integer types, the first 204
-for every other type. The hashes go into a 64-register HyperLogLog, and
-the sketch's count over the sample becomes an estimate for the whole
-column by a Good-Turing correction. A table loaded here (`read_parquet`,
-`read_csv`) gets the same estimate on the planner's first request, kept
-with the table (`TableStatistics`). Frames built any other way have none,
-as a DuckDB scan of anything but its own tables has none.
+As rows are appended, each column hashes a sample: the first 614 rows of
+each 2,048-row chunk for integer types and the first 204 rows for other
+types. A 64-register HyperLogLog sketch summarizes those hashes. A
+Good-Turing correction scales the sample estimate to the full column.
+Statistics are computed on first planner request and shared with copies
+of the loaded table. Frames built by other routes do not carry these
+statistics.
 """
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
@@ -37,7 +35,7 @@ comptime _MULTIPLIER = UInt64(0xD6E8FEB86659FD93)
 
 @always_inline
 def _mix(value: UInt64) -> UInt64:
-    """DuckDB's 64-bit hash finalizer (`MurmurHash64`)."""
+    """Mix a 64-bit value with xor-shifts and odd multiplications."""
     var x = value
     x ^= x >> 32
     x *= _MULTIPLIER
@@ -48,8 +46,8 @@ def _mix(value: UInt64) -> UInt64:
 
 
 def _hash_bytes(bytes: Span[UInt8, _]) -> UInt64:
-    """DuckDB's string hash (`HashBytes`): little-endian 8-byte words, the
-    last one zero-padded."""
+    """Hash bytes as little-endian 8-byte words, zero-padding the last
+    partial word."""
     var n = len(bytes)
     var h = UInt64(0xE17A1465) ^ (UInt64(n) * UInt64(0xC6A4A7935BD1E995))
     var at = 0
@@ -71,9 +69,9 @@ def _hash_bytes(bytes: Span[UInt8, _]) -> UInt64:
 
 @always_inline
 def _hash_value[D: DType](value: Scalar[D]) -> UInt64:
-    """DuckDB's hash of one fixed-width value: 32-bit and narrower values
-    through `uint32`, 64-bit values as they are, 128-bit values as the mix
-    of each half; floats with -0.0 as 0.0 and every NaN as one."""
+    """Hash one fixed-width value: 32-bit and narrower values through
+    `uint32`, 64-bit values directly, and 128-bit values by mixing each
+    half. Treat -0.0 as 0.0 and all NaNs as one value."""
     comptime if D == DType.int128:
         var wide = rebind[Int128](value)
         var low = UInt64(UInt128(wide) & UInt128(0xFFFFFFFFFFFFFFFF))
@@ -102,8 +100,7 @@ def _hash_value[D: DType](value: Scalar[D]) -> UInt64:
 
 
 struct HyperLogLog(Copyable, Movable):
-    """DuckDB's 64-register HyperLogLog (`HyperLogLog`, after Ertl,
-    "New cardinality estimation algorithms for HyperLogLog sketches")."""
+    """A 64-register HyperLogLog cardinality sketch."""
 
     var registers: List[UInt8]
 
@@ -119,8 +116,8 @@ struct HyperLogLog(Copyable, Movable):
             self.registers[index] = rank
 
     def count(self) -> Int:
-        """The sketch's estimate (`EstimateCardinality`), DuckDB's quirk
-        kept: the high-range term reads register value Q, not Q + 1."""
+        """Estimate cardinality from the harmonic register sum, with the
+        high-range correction using register value Q."""
         var c = List[Float64](length=_Q + 2, fill=0)
         for r in self.registers:
             c[Int(r)] += 1
@@ -164,15 +161,15 @@ def _tau(value: Float64) -> Float64:
 
 
 def _integral(series: Series) -> Bool:
-    """DuckDB samples integer types more (`IsIntegral`): by logical type,
-    so decimals, dates and timestamps take the base rate."""
+    """Select the higher sampling rate for integer logical types;
+    decimals, dates, and timestamps use the base rate."""
     var dtype = series.dtype()
     return dtype.is_integer()
 
 
 def distinct_estimate(series: Series) raises -> Int:
-    """The column's distinct count as DuckDB's statistics would give it
-    after appending its rows, or -1 for a type without them (Boolean,
+    """The column's distinct-count estimate after appending its rows,
+    or -1 for a type without statistics (Boolean,
     nested). Every 2,048 rows of each chunk give their first 614 rows
     (integers) or 204 (anything else) to the sketch; nulls count as
     sampled rows but are not hashed. The estimate is `u + u^3 (n - s) /

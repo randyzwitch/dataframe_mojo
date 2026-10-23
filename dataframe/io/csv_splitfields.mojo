@@ -55,8 +55,8 @@ struct CsvFieldSpan(Copyable):
 struct CsvSplitFields:
     """Iterate fields in one complete CSV record or byte range.
 
-    This is intentionally a tokenizer primitive. It accepts Polars'
-    quote-parity splitting behavior and reports the raw quoted field; callers
+    This is intentionally a tokenizer primitive. It uses quote-parity
+    splitting and reports the raw quoted field; callers
     enforcing stricter CSV grammar validate the returned span before decoding.
     """
 

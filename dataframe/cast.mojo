@@ -150,12 +150,11 @@ def _read_source(
 def _integers_to_decimal(
     input: Series, target: DataType, strict: Bool, offset: Int
 ) raises -> Optional[Series]:
-    """An integer column as a decimal, in one typed pass (DuckDB's
-    `TryCastToDecimal` loop per source type): each value times the scale's
-    power of ten, both it and the precision's limit computed once, written
-    at the target's width, with the source's validity. A value past the
-    precision raises when `strict`, as the row path does, and is null
-    otherwise. None for storage this does not read."""
+    """Convert an integer column to decimal in one typed pass per source
+    type: multiply each value by the scale's power of ten, compute the
+    precision limit once, then write at the target width with the source's
+    validity. A value beyond the precision raises when `strict` and is
+    null otherwise. Return None for storage this path does not read."""
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if D.is_integral():
@@ -257,9 +256,9 @@ def _cast_binary(
     offset: Int,
     mask: List[Bool],
 ) raises -> Series:
-    """Binary casts, as in Polars: anything that casts to string casts to
-    binary as its UTF-8 bytes; binary casts only to string, and each value
-    must be valid UTF-8 (strict raises, otherwise the row is null)."""
+    """Convert string-like inputs to their UTF-8 bytes. Binary values cast
+    only to string, and each must be valid UTF-8 (strict raises, otherwise
+    the row is null)."""
     if target.is_binary():
         var text = input.copy() if source == DataType.STRING else cast_series(
             input, DataType.STRING, strict, offset, mask

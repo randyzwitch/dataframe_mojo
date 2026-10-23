@@ -227,12 +227,12 @@ def _validate_explicit_header(
     options: CsvOptions,
     has_header: Bool,
 ) raises:
-    """Match Polars' explicit-schema width check without legacy name checks.
+    """Validate explicit-schema width without legacy name checks.
 
     An explicit schema labels output positionally, so file header spelling and
-    order are ignored. Polars still rejects a header that defines more input
-    columns than that schema; a shorter header is permitted because data rows
-    can legitimately supply trailing null fields.
+        order are ignored. Reject a header that defines more input columns than
+        the schema; a shorter header is permitted because data rows can
+        legitimately supply trailing null fields.
     """
     if not has_header:
         return
@@ -316,8 +316,8 @@ def read_csv_explicit(
     """Read an explicit schema through the source-mapped CSV pipeline.
 
     ``buffer_size`` remains a validated public compatibility keyword. Mapped
-    input is range-split directly, as in Polars, so it does not set the mmap
-    chunk size; unmapped input is decoded as one owned byte span.
+    input is range-split directly, so it does not set the mmap chunk size;
+    unmapped input is decoded as one owned byte span.
     """
     var options = _options(
         separator,

@@ -361,9 +361,8 @@ struct DataFrame(Copyable, Sized, Writable):
         self._statistics = None
 
     def _with_statistics(var self) -> Self:
-        """This frame as a loaded table: its columns' distinct counts are
-        estimated on first request and kept for every copy (DuckDB keeps
-        them with each table it stores)."""
+        """Mark this as a loaded table so column distinct counts are
+        estimated on first request and shared across copies."""
         self._statistics = Optional(ArcPointer(TableStatistics()))
         return self^
 
@@ -603,7 +602,7 @@ struct DataFrame(Copyable, Sized, Writable):
         self, n: Int = 1, *, fill_value: Optional[Expr] = None
     ) raises -> Self:
         """Every column's values moved n rows later (earlier when n is
-        negative), as Polars' DataFrame.shift. Height and schema stay the
+        negative). Height and schema stay the
         same. The min(|n|, height) rows left empty at the start (or, for
         a negative n, the end) are null, or `fill_value` cast to each
         column's type. `fill_value` is a scalar expression evaluated
@@ -655,8 +654,7 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.hstack(Self(columns.copy(), height=self._height))
 
     def clear(self, n: Int = 0) raises -> Self:
-        """The same schema with n rows of nulls (zero rows by default), as
-        Polars' clear."""
+        """The same schema with n rows of nulls (zero rows by default)."""
         if n < 0:
             raise Error("clear: n must be nonnegative")
         if n == 0:
@@ -687,7 +685,7 @@ struct DataFrame(Copyable, Sized, Writable):
         self, mapping: Dict[String, String], *, strict: Bool = True
     ) raises -> Self:
         """Rename columns by old name; all names are validated first. With
-        strict=False, names this frame lacks are ignored, as in Polars."""
+        strict=False, names this frame lacks are ignored."""
         if strict:
             for item in mapping.items():
                 _ = self._index(item.key)
@@ -739,10 +737,9 @@ struct DataFrame(Copyable, Sized, Writable):
 
         Without replacement no row repeats and asking for more rows than the
         frame has raises. Rows keep their original order unless shuffle is
-        set (Polars' order without shuffle is unspecified). A seed makes the
-        sample reproducible across runs and platforms; without one the
-        generator is seeded from the clock. The generator is SplitMix64, so
-        seeded samples differ from Polars' for the same seed.
+        set. A seed makes the sample reproducible across runs and
+        platforms; without one the generator is seeded from the clock.
+        The generator is SplitMix64.
         """
         var count = sample_size(self._height, n, fraction, with_replacement)
         return self.take(
@@ -754,7 +751,7 @@ struct DataFrame(Copyable, Sized, Writable):
         percentiles: List[Float64] = [0.25, 0.5, 0.75],
         interpolation: String = "nearest",
     ) raises -> Self:
-        """Summary statistics per column, laid out as Polars' describe().
+        """Summary statistics per column.
 
         Rows: count, null_count, mean, std, min, one row per percentile in
         ascending order (labelled like "25%"), then max. Pass an empty list
@@ -957,7 +954,7 @@ struct DataFrame(Copyable, Sized, Writable):
     def gather(
         self, indices: List[Int], *, null_on_oob: Bool = False
     ) raises -> Self:
-        """The rows at `indices`, in that order, as Polars' gather: a
+        """The rows at `indices`, in that order: a
         negative index counts from the end. An index out of range raises,
         or with null_on_oob=True gives a row of nulls."""
         return self._gather(indices, List[Bool](), null_on_oob)
@@ -1307,8 +1304,8 @@ struct DataFrame(Copyable, Sized, Writable):
     def top_k(
         self, k: Int, by: List[String], *, reverse: Bool = False
     ) raises -> Self:
-        """The k rows that sort(by, descending=True) would put first
-        (sort(by) with reverse=True, as Polars' reverse flips the order).
+        """The k rows with greatest values by `by` (ascending when
+        `reverse=True`).
 
         Nulls rank last. Selection is about one pass rather than a full sort.
         """
@@ -1825,7 +1822,7 @@ struct DataFrame(Copyable, Sized, Writable):
         right and full joins), the right keys are kept as columns of their
         own instead, after the left columns and suffixed where their names
         collide, and the left keys keep the left side's values: a left
-        join's unmatched rows then have a null right key, as in Polars.
+        join's unmatched rows then have a null right key.
         Semi and anti joins output left columns only, so the flag does not
         apply to them.
         """
@@ -2958,8 +2955,7 @@ struct DataFrame(Copyable, Sized, Writable):
         self, parts: List[Expr], batch_size: Int
     ) raises -> BoolColumn:
         """The mask of the AND of row-local `parts`, each evaluated only on
-        the rows the earlier ones kept, as DuckDB's conjunction filters
-        narrow a selection vector: ClickBench q37 compared all 10M titles
+        rows kept by earlier parts: ClickBench q37 compared all 10M titles
         with "" although its counter and date parts keep few rows.
 
         Parts reading only numbers run before parts reading strings, and
@@ -3240,8 +3236,8 @@ struct DataFrame(Copyable, Sized, Writable):
     def _subset_row_keys(self, subset: List[String]) raises -> RowKeys:
         """Ids for subset's distinct rows, with each id's representative its
         first row. The numbering is first-occurrence on one worker; across
-        workers a high-cardinality key encodes one hash bucket at a time, as
-        Polars partitions a group-by, so ids are in no particular order."""
+        workers a high-cardinality key encodes one hash bucket at a time,
+        so ids are in no particular order."""
         var keys = self._subset_keys(subset)
         var workers = worker_count(self._height)
         if workers > 1 and not low_cardinality(keys):
@@ -3582,18 +3578,18 @@ struct DataFrame(Copyable, Sized, Writable):
         return GroupBy(self.copy(), _group_keys(columns), maintain_order)
 
     def group_by_rollup(self, keys: List[String]) -> GroupingSets:
-        """DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets
-        (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (). Finish it with
-        `agg`; see GroupingSets for the output. Runs the lazy plan."""
+        """Group by the rollup sets (k1, k2, ...), (k1, ..., k(n-1)),
+        ..., (k1), and (). Finish with `agg`; see GroupingSets for the
+        output. Runs the lazy plan."""
         return GroupingSets(self.lazy().group_by_rollup(keys))
 
     def group_by_cube(self, keys: List[String]) -> GroupingSets:
-        """DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys
+        """Every subset of the keys
         as a grouping set. Finish it with `agg`."""
         return GroupingSets(self.lazy().group_by_cube(keys))
 
     def group_by_grouping_sets(self, sets: List[List[String]]) -> GroupingSets:
-        """DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping
+        """One grouping
         per listed set, an empty set being the grand total. Finish it with
         `agg`."""
         return GroupingSets(self.lazy().group_by_grouping_sets(sets))
@@ -3608,7 +3604,7 @@ struct DataFrame(Copyable, Sized, Writable):
         per group: `take(groups.rows(g))` builds a sub-frame, and
         `representative(g)` says where to read that group's key values.
         Groups are numbered in first-occurrence order, and null keys form
-        their own group, both as in `group_by`.
+        their own group, as in `group_by`.
         """
         if len(keys) == 0:
             raise Error("group_indices requires at least one key")
@@ -4580,10 +4576,10 @@ struct _RangeIndexBuildJob(Job):
 
 
 def _left_builds(left: DataFrame, right: DataFrame) -> Bool:
-    """Whether a join builds its hash table on the left input: DuckDB's
-    build side (`BuildProbeSideOptimizer`), the input of fewer rows times
-    columns, the right on a tie, as the lazy planner chooses it. A left of
-    747 rows against a right of 159K (PDS-H q2) built the right before."""
+    """Whether a join builds its hash table on the left input: choose the
+    input with fewer rows times columns, choosing the right on a tie, as
+    the lazy planner does. For example, a 747-row left input and a 159K-row
+    right input (PDS-H q2) select the right side to build."""
     var left_rows = left.height()
     if left_rows == 0 or left_rows > Int(Int32.MAX):
         return False
@@ -5724,8 +5720,8 @@ def concat(
     """Combine lazy plans into one plan, with the eager concat's results
     and errors for 'vertical', 'diagonal' and 'horizontal'.
 
-    As Polars plans them, a diagonal concat is a vertical one over inputs
-    each selected to the union of the columns (nulls filling those an
+    A diagonal concat is a vertical one over inputs each selected to
+    the union of the columns (nulls filling those an
     input lacks), so filters and column selections above it reach every
     input, and a horizontal one is its own operator. The inputs' names and
     types are resolved here, as collect_schema resolves them.
@@ -5885,8 +5881,7 @@ comptime _PERFECT_WINDOW = 16384
 struct _PerfectAggJob(Job):
     """Reduce rows [start, end) into the slots of a perfect hash table
     (`perfect_aggregate.mojo`): each window of rows gets its slots, then
-    every reduction folds the window in, as DuckDB's
-    `PerfectAggregateHashTable::AddChunk` does a vector. `firsts` keeps
+    every reduction folds the window in one vector at a time. `firsts` keeps
     each slot's first row, -1 while it is empty."""
 
     var frame: DataFrame
@@ -6278,8 +6273,7 @@ struct GroupBy(Copyable):
         """Grouped reductions through the aggregate table: each worker
         hashes its morsels' keys where they are and probes its own table,
         updating its states by group; partitions of the groups then merge
-        across workers in parallel (`aggregate_table.mojo`, after DuckDB's
-        radix-partitioned hash aggregate). None when some reduction's
+        across workers in parallel (`aggregate_table.mojo`). None when some reduction's
         state does not fit inline in a group row."""
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
@@ -6388,8 +6382,7 @@ struct GroupBy(Copyable):
         key_names: Dict[String, Bool],
         workers: Int,
     ) raises -> Optional[DataFrame]:
-        """DuckDB's perfect hash aggregate (`PhysicalPerfectHashAggregate`):
-        integer keys spanning few enough values (`perfect_layout`) give each
+        """Integer keys spanning few enough values (`perfect_layout`) give each
         row its group's slot directly, with no table to probe and no group
         ids to number or store; each worker reduces its range into its own
         slots, the workers' slots merge in row order, and the occupied
@@ -6820,8 +6813,7 @@ struct GroupBy(Copyable):
         quantile: Float64 = 0.5,
         interpolation: String = "nearest",
     ) raises -> DataFrame:
-        """`reduction` of every column that is not a key, as Polars builds
-        these methods: an agg of `all()` reduced, keys excluded."""
+        """Apply `reduction` to every non-key column."""
         var keys = self._key_names()
         var exprs = List[Expr]()
         for column in self._frame._columns:
@@ -6871,8 +6863,8 @@ struct GroupBy(Copyable):
     def quantile(
         self, quantile: Float64, interpolation: String = "nearest"
     ) raises -> DataFrame:
-        """Each other column's quantile per group, as Float64; the
-        interpolation defaults to "nearest", as in Polars."""
+        """Each other column's quantile per group, as Float64; interpolation
+        defaults to "nearest"."""
         return self._each("quantile", quantile, interpolation)
 
 
@@ -7483,7 +7475,7 @@ def table_frame(
 ) raises -> DataFrame:
     """The aggregate table's partitions finished into a frame: each part's
     states loaded into a `_StreamReduction` like `template`, finished on
-    its own thread (DuckDB scans its partitions out in parallel), each
+    its own thread, each
     output column keeping the parts as its chunks; in first-occurrence
     order when `ordered`."""
     var parts = List[_StreamReduction](capacity=len(result.firsts))

@@ -1,11 +1,10 @@
-"""Write tests/fixtures/regex/polars_corpus.tsv: regex results from Polars
-for the differential test of the regex engine.
+"""Generate the regex behavior corpus used to compare the regex engine.
 
-Each row is a pattern and a haystack, then what Polars returns for them:
+Each row records a pattern and haystack, then results for:
 `contains`, `find` (byte offset of the first match), `count_matches`,
 `extract_all`, `replace_all` with "<$0>" (which shows where every match
 is), `replace` with "[${1}]", `extract` of group 1, and `split` with
-`literal=False`. A pattern Polars rejects has the single result ERROR.
+`literal=False`. Unsupported patterns have the single result ERROR.
 
 Fields escape backslash, tab, newline and other control characters as
 `\\\\`, `\\t`, `\\n` and `\\xHH`; `\\N` is null; a list is its length then

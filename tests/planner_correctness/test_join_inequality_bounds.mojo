@@ -1,6 +1,6 @@
 """An inner join's inequality between its sides, written as a filter above
 it, bounds the large side by the small side's least or greatest value
-(DuckDB's join filters for <, <=, > and >=): the large side then holds
+for <, <=, > and >= comparisons: the large side then holds
 only rows under that bound, and every result equals the unoptimized
 plan's (TPC-DS q72's stock on hand below the quantity ordered)."""
 # contract-group: planner.relational

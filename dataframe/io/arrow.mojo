@@ -641,7 +641,7 @@ def export_arrow(
     frame: DataFrame, mut array: ArrowArray, mut schema: ArrowSchema
 ) raises:
     """Export a frame as an Arrow struct array (format `+s`), the shape
-    pyarrow and Polars import as a RecordBatch."""
+    used for a record batch."""
     _export_frame(frame, array, schema, 0)
 
 
@@ -1067,8 +1067,8 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
 def _ticks(
     array: ArrowArray, length: Int, offset: Int, format: String
 ) raises -> List[Int64]:
-    """Timestamp or duration values; seconds become milliseconds (the
-    coarsest unit here), as Polars imports them."""
+    """Timestamp or duration values; seconds become milliseconds, the
+    coarsest unit supported here."""
     if String(format[byte=2]) != "s":
         return _import_fixed[Int64](array, length, offset)
     var values = List[Int64](capacity=length)

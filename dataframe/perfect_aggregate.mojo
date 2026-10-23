@@ -1,13 +1,11 @@
-"""Group ids for a perfect hash aggregate, after DuckDB's
-`PerfectAggregateHashTable` (src/execution/perfect_aggregate_hashtable.cpp).
+"""Group ids for a perfect hash aggregate.
 
 When every grouping key is an integer whose values span a small range, a
 row's group is its position in a table holding every combination: each key
 contributes `value - min + 1` (0 for a null) shifted into its own bits, so
-no table is probed and no group is numbered. The bounds come from the key
-buffers' zone maps (`pipeline._ensure_zones`), kept with the buffers as
-DuckDB keeps a table's statistics, and the keys together may need at most
-`PERFECT_HASH_BITS` bits, DuckDB's `perfect_ht_threshold`.
+no table is probed and no group is numbered. the bounds come from the key buffers' zone maps
+(`pipeline._ensure_zones`), kept with the buffers. The keys together may
+need at most `PERFECT_HASH_BITS` bits.
 """
 from std.memory import Pointer
 
@@ -35,7 +33,7 @@ struct PerfectLayout(Copyable, Movable):
 
 
 def _required_bits(n: UInt64) -> Int:
-    """DuckDB's `RequiredBitsForValue`: the bits that hold n."""
+    """The number of bits needed to represent n."""
     var bits = 0
     var rest = n
     while rest > 0:
@@ -47,7 +45,7 @@ def _required_bits(n: UInt64) -> Int:
 def perfect_layout(keys: List[Series]) raises -> Optional[PerfectLayout]:
     """The perfect hash layout of these keys, or None when one is not an
     integer stored as Int64 or Int32 or they need more than
-    `PERFECT_HASH_BITS` bits (DuckDB's `CanUsePerfectHashAggregate`)."""
+    `PERFECT_HASH_BITS` bits."""
     if len(keys) == 0:
         return None
     for key in keys:
@@ -93,8 +91,8 @@ def perfect_slots(
     mut slots: List[Int],
 ) raises:
     """The group slot of rows [start, start + length) of the keys, into
-    slots[0, length) (DuckDB's `ComputeGroupLocation`). A null adds
-    nothing, so it lands in its key's slot 0."""
+    slots[0, length). A null adds nothing, so it lands in its key's slot
+    0."""
     var all = slots.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
     for k in range(len(keys)):
         var window = keys[k].slice(start, length)

@@ -1,6 +1,7 @@
 """CSV reading and writing for native Mojo dataframes.
 
-All public read_csv overloads use the same Polars-derived pipeline.
+All public read_csv overloads use the same range-splitting scanner and
+typed column builders.
 """
 from std.collections import Dict
 from .csv_types import CsvField, CsvSchema, CsvOptions
@@ -34,10 +35,11 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
 ) raises -> DataFrame:
-    """Read CSV through the Polars-derived scanner and typed builders.
+    """Read CSV through the range-splitting scanner and typed builders.
 
     Schema names label columns positionally. Null and conversion behavior
-    follows Polars; CsvField.nullable is metadata, not a parsing guard.
+    is controlled by the options; CsvField.nullable is metadata, not a
+    parsing guard.
     buffer_size remains a positive compatibility argument; mapped reads use
     the pipeline's row-aligned chunk sizing. See docs/csv.md.
     """
@@ -127,7 +129,7 @@ def read_csv(
 
     Sample 100 rows by default; -1 scans all rows for inference. Temporal
     inference is enabled by try_parse_dates. schema_overrides sets explicit
-    output dtypes. See docs/csv.md for Polars-compatible inference rules.
+    output dtypes. See docs/csv.md for the inference rules.
     """
     var table = read_csv_inferred(
         path,

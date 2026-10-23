@@ -3,11 +3,10 @@ from .dtype import DataType
 
 
 def common_decimal(left: DataType, right: DataType) raises -> DataType:
-    """The type of a value taken from either of two decimal inputs, as a
-    conditional's branches or `fill_null`'s operands are: their own type
-    when they share one, else DuckDB's (`MaxLogicalType`): the larger
-    scale with the larger integer part, at most 38 digits, which holds
-    either side's values without rounding."""
+    """The common type for either of two decimal inputs, such as the
+    branches of a conditional or the operands of `fill_null`: preserve an
+    identical type, otherwise use the larger scale and larger integer
+    part, capped at 38 digits so either value fits without rounding."""
     if left == right:
         return left
     var scale = max(left.scale(), right.scale())
@@ -19,9 +18,8 @@ def common_decimal(left: DataType, right: DataType) raises -> DataType:
 
 
 def decimal_width_for(precision: Int) -> Int:
-    """The storage width DuckDB gives a decimal of `precision` digits (its
-    INT16 width folded into 32 bits): 32 up to 9 digits, 64 up to 18, else
-    128."""
+    """Storage width for a decimal with `precision` digits: 32 bits up to
+    9 digits, 64 bits up to 18, and 128 bits above that."""
     if precision <= 9:
         return 32
     if precision <= 18:
@@ -30,10 +28,9 @@ def decimal_width_for(precision: Int) -> Int:
 
 
 def decimal_add_type(left: DataType, right: DataType) raises -> DataType:
-    """DuckDB's type of a decimal sum or difference
-    (`DecimalArithmeticBind`): the larger scale, and room for the larger
-    integer part plus a carry digit, at most 38 digits (18 when both
-    inputs fit 64 bits)."""
+    """Result type for a decimal sum or difference: the larger scale,
+    with room for the larger integer part plus a carry digit, capped at 38
+    digits (18 when both inputs fit 64 bits)."""
     var scale = max(left.scale(), right.scale())
     var integral = max(
         left.precision() - left.scale(), right.precision() - right.scale()
@@ -47,9 +44,9 @@ def decimal_add_type(left: DataType, right: DataType) raises -> DataType:
 
 
 def decimal_mul_type(left: DataType, right: DataType) raises -> DataType:
-    """DuckDB's type of a decimal product: the scales and precisions
-    added, exact, the precision at most 38 (18 when both inputs fit 64
-    bits and the scale is under 18)."""
+    """Result type for a decimal product: add input scales and precisions
+    exactly, with precision capped at 38 (18 when both inputs fit 64 bits
+    and the scale is below 18)."""
     var scale = left.scale() + right.scale()
     if scale > 38:
         raise Error(
@@ -194,9 +191,9 @@ def decimal_mean(total: Int128, count: Int64, scale: Int) -> Float64:
 def round_half_even(
     magnitude: Int128, remainder: Int128, divisor: Int128
 ) -> Int128:
-    """The quotient `magnitude` rounded half to even, given the nonnegative
-    `remainder` left over from dividing by `divisor` (#342). Polars rounds
-    decimal products, quotients and scale-reducing casts this way."""
+    """Round `magnitude` half to even using the nonnegative `remainder`
+    from division by `divisor` (#342). Decimal products, quotients, and
+    scale-reducing casts use this rule."""
     var rest = (
         divisor - remainder
     )  # compared without doubling, which could overflow

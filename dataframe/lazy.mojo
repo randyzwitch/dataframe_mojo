@@ -26,9 +26,8 @@ the plan before execution:
   hold a match (see `parquet._pruned_row_groups`).
 
 Filters never move past a slice, unique, right/full join, a group_by
-whose aggregates they read, or a group_by_dynamic or rolling (as in
-Polars, whose predicate pushdown stops at dynamic and rolling group_bys),
-because that would change which rows those operators see.
+whose aggregates they read, or a group_by_dynamic or rolling, because
+that would change which rows those operators see.
 """
 from std.os import getenv
 from std.time import perf_counter_ns
@@ -361,10 +360,9 @@ def _references(expr: Expr) -> Optional[List[String]]:
 def _comparison_edge(
     expr: Expr, provider: Dict[String, Int]
 ) raises -> Optional[FilterEdge]:
-    """A comparison whose two sides each read one column, of two different
-    relations (`provider` maps each column to its relation), as a join
-    graph edge on those columns (DuckDB's `GetColumnBinding` per side);
-    None for anything else."""
+    """A comparison whose two sides each read one column from different
+    relations (`provider` maps each column to its relation), represented
+    as a join-graph edge between those columns; None for anything else."""
     ref root = expr._nodes[len(expr._nodes) - 1]
     var op = root.op
     if not (
@@ -470,8 +468,7 @@ def _fold_constants(expr: Expr) -> Expr:
     two literals (a projection's constant substituted into a filter,
     `_through_projection`), and AND, OR and NOT over known values, under
     SQL's three-valued logic (false AND null is false, true OR null is
-    true). DuckDB's planner folds constants the same way before filters
-    move."""
+    true). This allows filters to be simplified before they move."""
     ref nodes = expr._nodes
     var n = len(nodes)
     # -1 unknown, 0 false, 1 true.
@@ -776,11 +773,10 @@ def _emit_folded(
 
 
 def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
-    """A filter's, select's or with_columns' result on a zero-row `input`
-    from the types its expressions bind to, as DuckDB and Polars resolve
-    a plan's types without running it; None when that is not certain to
-    match running it (a select of scalars has a row; anything that does
-    not bind cleanly), which the caller then does."""
+    """A filter's, select's or with_columns' result on a zero-row `input`,
+    derived from the bound expression types. Return None when this cannot
+    be known to match execution (a select of scalars has a row, or an
+    expression does not bind cleanly), so the caller can execute the node."""
     try:
         if node.kind == FILTER:
             if len(node.exprs) != 1:
@@ -828,9 +824,9 @@ def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
 def _aggregate_schema(
     node: PlanNode, input: DataFrame
 ) raises -> Optional[DataFrame]:
-    """A group_by's result on a zero-row `input`: its key columns as they
-    are, then each aggregation's name and bound type, as Polars derives a
-    group_by's schema from its expressions' fields. Running one on no rows
+    """A group_by's result on a zero-row `input`: its key columns, then
+    each aggregation's name and type bound from its expression. Running
+    one on no rows
     sets up a whole grouping for nothing (TPC-DS q4: 170 us a group_by,
     each planned several times). None without keys (a global aggregation
     has one row), for keys or results of nested or categorical type, and
@@ -858,11 +854,11 @@ def _aggregate_schema(
 def _join_schema(
     node: PlanNode, left: DataFrame, right: DataFrame
 ) raises -> Optional[DataFrame]:
-    """An inner, left, semi or anti join's result on zero-row inputs from
-    their columns alone, by the rules `DataFrame._join_impl` names its
-    output with (the left's columns, then the right's but its coalesced
-    keys, a name the left holds taking the suffix), as Polars derives a
-    join's schema from its inputs' without running it. Running one on no
+    """An inner, left, semi or anti join's result on zero-row inputs,
+    derived from the input columns without executing the join. The schema
+    contains the left columns, followed by non-coalesced right columns; a
+    right name that collides with a left name receives the suffix.
+    Running one on no
     rows prepares a hash join for nothing (TPC-DS q4: 60 us a join). None
     for other join types, keys of differing, nested or categorical types,
     and output names that still collide, which the caller then runs to
@@ -952,8 +948,8 @@ def _implied_filters(predicate: Expr) -> List[Expr]:
 
     `(a1 & b1) | (a2 & b2)` keeps a row only if some branch holds, and so
     only if `a1 | a2` holds, where a1 and a2 read one set of columns: that
-    filter can move into the join input owning those columns, as DuckDB
-    derives it. A branch with no part on those columns implies nothing.
+    filter can move into the join input owning those columns. A branch
+    with no part on those columns implies nothing.
     Under SQL's three-valued logic a true branch has every part true, so
     the derived filter keeps every row the predicate keeps.
     """
@@ -1563,9 +1559,8 @@ def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's results are the same whatever order
     its rows arrive in: the aggregate table's states, and distinct counts,
     medians and quantiles, which depend on each group's values only. Its
-    input join may then build on either side (DuckDB's build side
-    optimizer and Polars' join pick the smaller one whatever the
-    aggregate)."""
+    input join may then build on either side; choosing the smaller input
+    for the hash table does not change these order-independent results."""
     if len(keys) == 0 or len(expressions) == 0:
         return False
     for expression in expressions:
@@ -2029,18 +2024,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
 
     def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets:
-        """DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets
-        (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (), as one plan.
-        Finish it with `agg`; see LazyGroupingSets for the output."""
+        """Expand to the rollup sets (k1, k2, ...), (k1, ..., k(n-1)),
+        ..., (k1), and () in one plan. Finish with `agg`; see
+        LazyGroupingSets for the output."""
         var sets = List[List[String]]()
         for n in range(len(keys), -1, -1):
             sets.append(List[String](keys[:n]))
         return LazyGroupingSets(self.copy(), sets^)
 
     def group_by_cube(self, keys: List[String]) -> LazyGroupingSets:
-        """DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys
-        as a grouping set, 2^n of them (a key listed twice doubles them,
-        as in DuckDB). Finish it with `agg`."""
+        """Every subset of the keys as a grouping set, for 2^n sets. A
+        repeated key in `keys` yields repeated sets. Finish with `agg`."""
         var sets = List[List[String]]()
         var n = len(keys)
         for mask in range((1 << n) - 1, -1, -1):
@@ -2054,9 +2048,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def group_by_grouping_sets(
         self, sets: List[List[String]]
     ) -> LazyGroupingSets:
-        """DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping
-        per listed set, an empty set being the grand total. A set listed
-        twice yields its rows twice, as in DuckDB. Finish it with `agg`."""
+        """One grouping per listed set; an empty set produces the grand
+        total. A set listed twice yields its rows twice. Finish with `agg`."""
         return LazyGroupingSets(self.copy(), sets.copy())
 
     def sort(
@@ -2067,9 +2060,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         *,
         maintain_order: Bool = False,
     ) -> Self:
-        """Sort by `by`. Rows with equal keys come out in no particular order
-        unless `maintain_order` keeps their input order (Polars'
-        `maintain_order`; DuckDB's ORDER BY makes no promise either)."""
+        """Sort by `by`. Rows with equal keys have unspecified order unless
+        `maintain_order` preserves their input order."""
         var n = len(by)
         return self._push(
             _plan_node(
@@ -2131,7 +2123,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         aggregate_function: String = "",
     ) raises -> Self:
         """Long to wide, as DataFrame.pivot, with the new columns named up
-        front, as Polars' LazyFrame.pivot takes them, so the plan's schema
+        front so the plan's schema
         is known before it runs: one column per entry of `on_columns`, in
         that order, holding the cells whose `on` value reads as that name
         ("null" for a null). A name no row has gives a column of nulls;
@@ -2196,7 +2188,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, mapping: Dict[String, String], *, strict: Bool = True
     ) raises -> Self:
         """Rename columns by old name, with the result and errors of
-        DataFrame.rename. As Polars builds it, this is a select of every
+        DataFrame.rename. This is a select of every
         input column, aliased where renamed, so filters and column
         selections above it move below it in the input's names. The
         input's names are resolved here, as collect_schema resolves them,
@@ -2228,7 +2220,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, dtypes: Dict[String, String], *, strict: Bool = True
     ) -> Self:
         """Cast named columns in place, as DataFrame.cast: a with_columns of
-        `col(name).cast(dtype, strict)` per entry, as Polars builds it, so
+        `col(name).cast(dtype, strict)` per entry, so
         filters on other columns move below it and a cast column nothing
         above reads is not computed. An unknown name raises when the plan
         runs."""
@@ -2276,9 +2268,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         percentiles: List[Float64] = [0.25, 0.5, 0.75],
         interpolation: String = "nearest",
     ) raises -> DataFrame:
-        """DataFrame.describe's summary of this plan's result, computed as
-        Polars computes it: one select of the summary reductions over the
-        plan, collected, so the rows are never materialized whole."""
+        """DataFrame.describe's summary of this plan's result: one select of
+        the summary reductions over the plan, collected without
+        materializing all rows."""
         var schema = self._input_schema()
         var qs = _describe_percentiles(percentiles)
         var exprs = schema._describe_exprs(qs, interpolation)
@@ -2289,7 +2281,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def clear(self, n: Int = 0) raises -> Self:
         """This plan's schema with n rows of nulls, as DataFrame.clear. With
-        n = 0 it is head(0) of this plan; otherwise, as in Polars, a new
+        n = 0 it is head(0) of this plan; otherwise a new
         plan over a frame of nulls built from the schema."""
         if n < 0:
             raise Error("clear: n must be nonnegative")
@@ -2311,7 +2303,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def gather(self, indices: Self, *, null_on_oob: Bool = False) -> Self:
         """The rows at the positions `indices` (a plan with one integer
-        column) lists, in its order, as Polars' gather: a negative index
+        column) lists, in its order: a negative index
         counts from the end, a null index gives a row of nulls, and an
         index out of range raises when the plan runs, or with
         null_on_oob=True gives a row of nulls. Filters and slices above it
@@ -2321,9 +2313,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def top_k(
         self, k: Int, by: List[String], *, reverse: Bool = False
     ) raises -> Self:
-        """The k rows DataFrame.top_k gives: as Polars builds it, a sort by
-        `by` descending (ascending with reverse=True), nulls last, then
-        head(k), which the optimizer runs as one top-k selection."""
+        """The k rows with greatest keys in `by`, using descending order
+        (ascending with reverse=True), nulls last, and a top-k selection."""
         if k < 0:
             raise Error("k must be nonnegative")
         var n = len(by)
@@ -2415,11 +2406,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
 
     def _input_schema(self) raises -> DataFrame:
-        """This plan's output names and types with no rows, computed as
-        `collect_schema` computes them (every scan yields no rows), for
+        """This plan's output names and types with no rows, using
+        `collect_schema` (every scan yields no rows), for
         the methods below that choose columns by type or take every
-        column, as Polars expands their selectors against the input
-        schema."""
+        column, by expanding selectors against the input schema."""
         return self._execute(len(self._nodes) - 1, True).clear()
 
     def fill_null(
@@ -2432,10 +2422,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def fill_null(
         self, value: Expr, subset: List[String] = List[String]()
     ) raises -> Self:
-        """Fill nulls with a scalar value, choosing the columns as
-        DataFrame.fill_null does from this plan's schema: a with_columns of
-        `col(c).fill_null(value)` for each, as Polars' LazyFrame.fill_null
-        is a with_columns over the columns its dtype selector matches.
+        """Fill nulls with a scalar value, choosing columns from this plan's
+        schema: a with_columns of `col(c).fill_null(value)` for each
+        selected column.
         Unknown subset names raise here, while the plan is built."""
         var fills = self._input_schema()._fill_null_exprs(value, subset)
         if len(fills) == 0:
@@ -2443,8 +2432,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         return self.with_columns(fills)
 
     def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
-        """Keep rows with no null in subset (default: every column), as a
-        filter on each column's `is_not_null`, as Polars builds it."""
+        """Keep rows with no null in subset (default: every column), using
+        each column's `is_not_null` predicate."""
         var names = subset.copy()
         if len(names) == 0:
             names = self._input_schema().columns()
@@ -2458,7 +2447,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def null_count(self) raises -> Self:
         """One row holding each column's null count as Int64, as
         DataFrame.null_count: a select of `col(c).null_count()` per
-        column, as Polars builds it."""
+        column."""
         var counts = List[Expr]()
         for name in self._input_schema().columns():
             counts.append(col(name).null_count())
@@ -3569,8 +3558,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _input_name(self, index: Int, name: String) -> Optional[String]:
         """The name column `name` has in the input of row-local node
         `index` when the node passes it on unchanged, under that name or
-        renamed (`col(a).alias(name)`, a projection of a column reference,
-        which DuckDB's join filters pass through); None when the node
+        renamed (`col(a).alias(name)`, a projection of a column reference);
+        None when the node
         computes or drops it."""
         ref node = self._nodes[index]
         if node.kind == FILTER:
@@ -3640,19 +3629,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _reduce_by_probe_keys(
         self, top: Int, index: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
-        """Semi-join reduction (magic sets) for aggregates built on: when
-        a stream's inner or semi joins build on aggregates grouped by the
-        join keys (one or several), the probe side below the lowest of them
-        runs first, and its distinct key tuples filter each aggregate's
-        input through a semi join. A group whose key the probe side lacks joins nothing, and a
-        filter on a group key drops whole groups, so every result is
-        unchanged. DuckDB decorrelates EXISTS this way, over the outer
-        rows' distinct keys (its delim joins); PDS-H q21 counted the
-        suppliers of all 1.5M orders to join with the 76K lines its
-        supplier and order filters keep. Applied to an aggregate when the
-        keys are no more than its input's rows, as DuckDB builds a join
-        filter only from a side no larger than the probe. None when the
-        stream has no such join or no filter narrows its probe side."""
+        """Reduce aggregate input with a semi-join when a streaming join
+        builds on aggregates grouped by the join keys. Run the probe-side
+        filters first, then restrict each aggregate input to the probe
+        side's distinct key tuples. Missing keys cannot contribute to the
+        join, and filtering a group key removes whole groups without
+        changing the result. For example, PDS-H q21 reduces 1.5M orders to
+        the 76K lines retained by supplier and order filters. Apply this
+        when the key count does not exceed the aggregate input row count.
+        Return None when there is no such join or no probe-side filter."""
         var joins = List[Int]()
         var aggregates = List[Int]()
         # Each aggregate's names for the join's right keys.
@@ -3785,7 +3770,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         unique, a sort or a row-order operator such as tail), or row-local
         steps over one: it is computed in full before any of its rows stream
         on. A selection that reads its whole input (aggregates over all
-        rows, as DuckDB's ungrouped aggregate sink, or windows) is one too:
+        rows, or windows) is one too:
         TPC-DS q28's six one-row bands, cross joined, ran one after
         another."""
         var at = index
@@ -3815,8 +3800,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         and its source, where each ends in a pipeline breaker. TPC-DS q78
         aggregated web and catalog sales to build on, then store sales to
         probe with, one after another on a crew that the aggregates'
-        serial phases left partly idle. Polars and DuckDB run such
-        independent pipelines at once. The stream's decisions do not
+        serial phases left partly idle. These independent inputs can run
+        concurrently. The stream's decisions do not
         change: each result waits in `_prefetched` for the `_execute` call
         that would have computed it."""
         var ahead = self._prefetched.value()
@@ -5284,8 +5269,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         independent, so outside the empty-schema run, and when no
         execution report is kept, each runs as a job on its own copy of
         the plan: a worker runs one while the caller runs the other, and
-        both share the crew's thread budget (as Polars runs a union's
-        inputs at once). A worker the budget cannot cover leaves both on
+        both share the crew's thread budget. A worker the budget cannot
+        cover leaves both on
         the caller, one after the other."""
         var both = self._both_inputs(index, empty, streaming, batch_size)
         var input = both[0].copy()
@@ -5598,12 +5583,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         return plan^
 
     def _eliminate_common_subexpressions(mut self) raises:
-        """Common subexpression elimination (DuckDB's
-        `CommonSubExpressionOptimizer`, Polars' `comm_subexpr_elim`): a
-        row-local subexpression an aggregation or a projection reads more
-        than once is computed once, as a column of a with_columns below
-        it, and read from there. TPC-DS q99's five delay buckets compared
-        the same date difference nine times."""
+        """Compute a repeated row-local subexpression once. An aggregation
+        or projection that reads it multiple times uses a temporary column
+        produced by a `with_columns` node below it. For example, TPC-DS
+        q99's five delay buckets compare the same date difference nine
+        times."""
         var count = len(self._nodes)
         var changed = False
         for i in range(count):
@@ -5663,11 +5647,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             self._reorder()
 
     def _fold_casts(mut self) raises:
-        """Constant folding (DuckDB's `ConstantFoldingRule`): a cast of an
-        expression that reads no column is evaluated once, here, and
-        becomes a literal of its type, rather than being evaluated again
-        for every batch or morsel the expression meets (a decimal written
-        as a cast string literal was parsed per morsel)."""
+        """Evaluate a cast expression that reads no column once and
+        replace it with a typed literal, rather than repeating the work for
+        every batch or morsel. For example, a decimal written as a cast
+        string literal is parsed only once."""
         for i in range(len(self._nodes)):
             var kind = self._nodes[i].kind
             if not (
@@ -5683,9 +5666,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     self._nodes[i].exprs[k] = folded.take()
 
     def _share_subplans(mut self, streaming: Bool, batch_size: Int) raises:
-        """Execute a subplan used in two places once (common-subplan
-        elimination, as Polars' `comm_subplan_elim` and DuckDB's shared
-        CTEs do). Two nodes whose subtrees read the same (`_signature`)
+        """Execute a subplan used in two places once. Two nodes whose
+        subtrees read the same (`_signature`)
         would compute the same frame twice: PDS-H q21 filters lineitem
         for late shipments both as a join input and under a grouped
         n_unique, TPC-DS q39 joins and groups inventory once per month
@@ -5703,15 +5685,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         (`_read_whole`): as a join's build side, materialized in any case
         (TPC-DS q83 builds one date subquery three times), or as the
         direct input of an aggregation when it holds joins (q27's rollup
-        aggregates one five-way join three ways). DuckDB turns common
-        subplans into materialized CTEs and Polars caches a repeated
-        subplan.
+        aggregates one five-way join three ways). The shared result is
+        materialized once and scanned by each consumer.
         Other joins and filters are not shared, since their output can
         be as large as their input and a consumer's filter above one
         copy would have narrowed it (TPC-DS q39's two branches agree only
         on the 11.7M-row joins below their date filters, and holding
-        those doubled the query; Polars likewise drops a cache whose
-        consumers filter differently)."""
+        those doubled the query; copies with different consumer filters
+        therefore remain separate)."""
         var computed = self._subplan_classes()
         ref classes = computed[0]
         ref sizes = computed[1]
@@ -5795,8 +5776,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         whole: as a join's build side, which the executor materializes in
         any case, or, when the subtree holds a join, as the direct input of
         a grouped aggregation or a selection of reductions. One result then
-        serves every copy (DuckDB's common subplans become materialized
-        CTEs). A chain of row steps over a scan under aggregations reads
+        serves every copy. A chain of row steps over a scan under aggregations reads
         its input once either way and is not worth holding."""
         if self._nodes[index].kind == SCAN_FRAME:
             return False
@@ -5874,8 +5854,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, a: Int, b: Int, classes: List[Int], canonical: List[Int]
     ) -> Bool:
         """Whether nodes `a` and `b` compute the same thing: every setting
-        and expression equal, and inputs of the same classes (Polars'
-        `is_ir_equal_shallow` with equal child ids)."""
+        and expression is equal, and their inputs have the same classes."""
         ref x = self._nodes[a]
         ref y = self._nodes[b]
         if (
@@ -5934,13 +5913,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         return self._execute(index, True).columns()
 
     def _unique_as_aggregate(mut self) raises:
-        """A unique over every column of its input, keeping any row of
-        each set of equal rows (or the first, in input order), is a
-        group_by on all of them: DuckDB plans DISTINCT as a hash
-        aggregate without aggregates, which then runs as the pipeline's
-        aggregate table, on every worker, rather than on the collected
-        rows. The table needs one aggregate, so a row count is added and
-        dropped again."""
+        """A unique over every column keeps one row per set of equal rows
+        (or the first in input order). Implement it as a group_by on all
+        columns and run it through the parallel aggregate table rather
+        than deduplicating collected rows. The table needs one aggregate,
+        so add and then drop a row count."""
         var count = len(self._nodes)
         var changed = False
         var owned = self._remember_schemas()
@@ -6012,9 +5989,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """The order projection pushdown visits nodes in, and for each node
         the first node of the repeated subplan it is a copy of (-1 if
         none). A subtree written in several places (a CTE read twice) is
-        one cached subplan to Polars (`comm_subplan_elim` puts an
-        `IR::Cache` on the topmost repeated node), and its projection
-        pushdown merges what every reader of the cache needs before
+        one cached subplan, and projection pushdown merges what every
+        reader of the cache needs before
         pushing down into it once. Here each copy is pruned to that union,
         so the copies stay alike and `_share_subplans` still runs them
         once: a node comes after every node above it, by height, and the
@@ -6085,8 +6061,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ) -> Tuple[List[Int], List[Int], List[Bool]]:
         """Each node's class, its subtree's node count, and whether the
         subtree holds an aggregation or a unique. Two nodes share a class
-        exactly when their subtrees compute the same thing, as Polars'
-        `CanonicalIRMap` assigns ids: a node is hashed with its inputs'
+        exactly when their subtrees compute the same thing: hash a node
+        with its inputs'
         classes, and compared only with the earlier nodes of its hash,
         setting by setting (`_same_node`). A class is named by its first
         node."""
@@ -6144,8 +6120,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         row-local filters, needs only the rows some reader keeps: the OR
         of the readers' filters goes above every copy and moves into it,
         while each reader's own filters are pinned where they are, so the
-        copies stay alike and are still computed once (DuckDB pushes the
-        disjunction of a CTE's consumers' filters into the CTE). TPC-DS
+        copies stay alike and are still computed once. TPC-DS
         q4, q11 and q74 read one yearly total per channel and year from a
         table of every channel and year."""
         # Copies need two aggregations alike in their kind, keys,
@@ -6327,8 +6302,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         along left inputs, over one base input. Run when the plan executes,
         not in `explain`: a join's right input is executed first when it
         is a known table narrowed by filters or joins, and how many of the
-        table's rows it kept is its selectivity, as DuckDB's join order
-        optimizer estimates it from statistics. Then:
+        table's rows it kept is its selectivity, estimated from available
+        statistics. Then:
 
         - A join whose keys come from one earlier join's right input, that
           keeps under half its table and holds at most a quarter as many
@@ -6382,8 +6357,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             self._push_projections()
 
     def _push_join_key_sets(mut self, streaming: Bool, batch_size: Int) raises:
-        """Sideways information passing (DuckDB's join filter pushdown):
-        an inner or semi join where one input is a filtered in-memory
+        """An inner or semi join where one input is a filtered in-memory
         table or a join chain over tables at most a quarter the size of
         the other side's largest runs that input first, and each key's
         values become a filter on the other side's key when a sample of the table
@@ -6391,8 +6365,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         predicate pushdown then moves it toward that table. Rows whose key no left
         row has join nothing, so the result is unchanged. Up to 50
         distinct keys filter as a list (an equality per value per row);
-        more as their min-max range, as DuckDB does
-        (`dynamic_or_filter_threshold`). The left input is replaced by its
+        larger sets use their min-max range. The left input is replaced by its
         result, so it does not run twice. Only for a right side with a
         join of its own, which the filter then reaches first. TPC-DS q37
         and q82 join four items to an 11.7M-row inventory that is joined
@@ -6614,8 +6587,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, j: Int, small_left: Bool
     ) raises -> List[Tuple[String, Int, String]]:
         """The inequalities between a column of each input of the inner
-        join at `j` in the filters right above it, which DuckDB plans as
-        join conditions: each as (large side column, its comparison with
+        join at `j` in filters directly above it, represented as join
+        conditions: each as (large side column, its comparison with
         the small side column, small side column), the large side being
         the right input when `small_left`. Only columns that one input
         alone names."""
@@ -6997,7 +6970,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         mut filters: List[Int],
     ):
         """The relations, key pairs and filters of the join graph under
-        node `index` (DuckDB's `ExtractJoinRelations`): both inputs of each
+        node `index`: both inputs of each
         inner join, through filters (kept to place again) and plain column
         selections; anything else is a relation."""
         ref node = self._nodes[index]
@@ -7044,13 +7017,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         mut self, root: Int, streaming: Bool, batch_size: Int
     ) raises -> Bool:
         """Order each join graph of three or more relations by estimated
-        cost, as DuckDB's join order optimizer does (`join_order.mojo`):
+        cost (`join_order.mojo`):
         inner joins flattened across nested inputs into relations and key
         pairs, each relation's rows counted after its own filters (run
         when they cannot be counted otherwise, as `_order_chain` measures
-        them), and the cheapest tree built, each join hashing the side
-        DuckDB's build side optimizer would (fewer rows times columns,
-        with a lone relation on the build side 15% dearer when the other
+        them), and the cheapest tree built. Choose each hash-build side
+        using rows times columns, with a lone relation costing 15% more
+        when the other
         side is a join). Filters between joins follow the lowest join
         holding their columns; a selection restores the graph's output,
         a key a join dropped read from the key it matched.
@@ -7353,11 +7326,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ) raises -> Bool:
         """Start each chain of inner joins from its largest input.
 
-        A chain runs by streaming its first input through hash tables built
-        on every other input, so the first input is the only one never
-        hashed. Written as `small.join(large)`, a plan hashes the large
-        table. Polars and DuckDB choose the build side of each join by
-        size; here the chain is re-rooted at its largest input, and the
+        A chain streams its first input through hash tables built on every
+        other input, so the first input is the only one never hashed.
+        Re-root the chain at its largest input, and let the
         other inputs join outward from it along the same key pairs.
 
         Only where the rows' order cannot show (`_order_free_above`): an
@@ -7593,10 +7564,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _relation_estimate(self, index: Int) raises -> Int:
         """Rows a join-graph relation yields, estimated without running it:
-        `_estimated_rows`, else, for a join the order cannot reorder, DuckDB's
-        combination of its inputs' estimates
-        (`CombineStatsOfNonReorderableOperator`): a semi or anti join keeps
-        its left input's rows, any other the larger input's. -1 when an
+        `_estimated_rows`, else, for a join the order cannot reorder,
+        combine its inputs' estimates: a semi or anti join keeps its left
+        input's rows; other joins use the larger input's estimate. -1 when an
         input has no estimate."""
         var known = self._estimated_rows(index)
         if known >= 0:
@@ -8024,8 +7994,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _drop_constant_filters(mut self) raises:
         """A filter folded to true (`_fold_constants`) keeps every row
         and goes; one folded to false keeps none, and it and its input
-        become an empty frame of their columns (DuckDB's empty result):
-        a UNION ALL branch whose constant fails a filter is never run."""
+        become an empty frame with the same columns. A UNION ALL branch
+        whose constant fails a filter is never run."""
         var parents = self._parents()
         var changed = False
         for i in range(len(self._nodes)):
@@ -8264,9 +8234,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """A filter moving into one input of an equi-join that reads only
         that input's join keys also holds for the other input's keys:
         a row there whose key fails it matches no row the filter keeps.
-        So a copy in the other input's key names filters that input too
-        (DuckDB derives it through the filter combiner's equivalence
-        sets). TPC-DS q78's `ss_sold_year = 2000`, above two left joins
+        So a copy in the other input's key names filters that input too:
+        join keys in both inputs belong to the same equivalence set.
+        TPC-DS q78's `ss_sold_year = 2000`, above two left joins
         on the year, then also narrows the web and catalog totals."""
         ref node = self._nodes[join]
         if len(node.names) != len(node.right_keys) or len(node.names) == 0:
@@ -8333,8 +8303,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _reorder(mut self, root: Int = -1):
         """Restore children-before-parents order after rewiring. Nodes
         move to their new places rather than being copied, and remembered
-        schemas move with them: renumbering changes no node's output, as
-        Polars' IR nodes keep their schemas wherever the arena holds them.
+        schemas move with them, so renumbering changes no node's output.
         Unreachable nodes and their schemas are dropped."""
         var order = self._topological(root)
         var position = List[Int](length=len(self._nodes), fill=-1)
@@ -8690,8 +8659,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _prune_outputs(mut self, index: Int, wanted: List[String]):
         """Drop the expressions of a select or with_columns whose outputs
-        nothing above reads, as Polars' projection pushdown prunes a
-        projection's expressions, so the columns only they read are not
+        nothing above reads, so the columns only they read are not
         scanned (a rename's select, a cast's with_columns). A select keeps
         its row count: it is pruned only when every expression is
         row-local and one it keeps reads a column."""
@@ -9315,8 +9283,8 @@ def _merge_copy_needs(
     mut all_needed: List[Bool],
 ):
     """Give every copy of the repeated subplan `head` the union of what
-    its copies' readers need, as Polars' projection pushdown merges the
-    projections of every parent of a cache."""
+    its copies' readers need, by merging the projections of all parents
+    that read the shared subplan."""
     var whole = False
     var read = False
     var union = List[String]()
@@ -9348,8 +9316,7 @@ def _is_time_window(kind: Int) -> Bool:
 
 def _time_window_reads(node: PlanNode) -> Optional[List[String]]:
     """The input columns a time window node reads: its index column, its
-    `by` keys and the columns its aggregations reference, as Polars'
-    projection pushdown keeps for a dynamic or rolling group_by. None
+    `by` keys and the columns its aggregations reference. None
     when an aggregation reads columns through a selector."""
     var reads = node.names.copy()
     for e in node.exprs:
@@ -9661,9 +9628,8 @@ struct LazyGroupBy(Copyable):
         """The input with computed keys added as columns, the names to
         group by, and whether some key has a placeholder name.
 
-        Computed keys become a with_columns below the group_by, as DuckDB
-        moves group expressions into a projection under its aggregate
-        (`ExtractAggregateExpressions`). A key named like a column the
+        Computed keys become a with_columns below the group_by. A key
+        named like a column the
         aggregations read (`reads`, or any column when `every_column`)
         would hide that column from them, so it is computed under a
         placeholder name and renamed after."""
@@ -9737,9 +9703,8 @@ struct LazyGroupBy(Copyable):
         quantile: Float64 = 0.5,
         interpolation: String = "nearest",
     ) raises -> LazyFrame:
-        """`reduction` of every column that is not a key, as Polars builds
-        these methods (an agg of `all()` reduced, keys excluded); the
-        columns are resolved here from the input's schema."""
+        """Apply `reduction` to every non-key column. Resolve the columns
+        from the input schema."""
         var columns = self._frame._input_schema().columns()
         var exprs = List[Expr]()
         for name in columns:
@@ -9807,8 +9772,8 @@ struct LazyGroupingSets(Copyable):
         whole input, even when it has no rows. Row order is unspecified
         unless the result is sorted.
 
-        Built as DuckDB's simplest plan is: one `group_by(set).agg` per
-        set, concatenated, each reading the input.
+        The plan contains one `group_by(set).agg` per set, concatenated;
+        each grouping reads the input.
         """
         if len(self._sets) == 0:
             raise Error("grouping sets need at least one set")
@@ -10082,8 +10047,8 @@ def _gathered(
     frame: DataFrame, indices: DataFrame, null_on_oob: Bool
 ) raises -> DataFrame:
     """A GATHER node's result: `frame`'s rows at the positions in the one
-    integer column of `indices`, checked as Polars checks its indices
-    plan."""
+    integer column of `indices`. Null and out-of-range handling is
+    determined by `null_on_oob`."""
     if indices.width() != 1:
         raise Error("gather indices must be a single column")
     var column = indices._columns[0].copy()

@@ -845,10 +845,10 @@ struct _Crew(Movable):
         A thread takes its budget slot as it joins, not the caller when it
         posts: a call made while every helper is busy still posts, and the
         threads another call gives back join it and claim its remaining
-        jobs (a pipeline's morsels come from a shared cursor), as DuckDB's
-        and Polars' schedulers hand a freed thread whatever work is
-        waiting. Joined at post time only, the first of two concurrent
-        pipelines took every helper and the other ran on its caller."""
+        jobs (a pipeline's morsels come from a shared cursor), so freed
+        threads claim waiting work. Post-time-only joining allowed the
+        first of two concurrent pipelines to take every helper, forcing the
+        other to run on its caller."""
         var starved = False
         for p in range(_POSTINGS):
             var state = self._state(p).load()

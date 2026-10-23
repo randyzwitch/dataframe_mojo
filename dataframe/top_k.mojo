@@ -253,9 +253,7 @@ def _table_top_rows(
     height: Int,
     workers: Int,
 ) raises -> Optional[List[Int]]:
-    """The kept rows through the aggregate table's top-rows state, as
-    DuckDB plans the idiom (its TopN window elimination makes a grouped
-    `arg_max(row, value, k)`, and Polars' H2O q8 is a grouped `top_k`):
+    """The kept rows through the aggregate table's top-rows state:
     each worker hashes its morsels' keys where they are and keeps every
     group's k best pairs in the group's row, so no partition ids are made
     for every row and no column is gathered into partition order. None

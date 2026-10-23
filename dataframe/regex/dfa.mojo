@@ -25,6 +25,8 @@ When the cache grows past its budget it is cleared and the search goes on
 from the current state, as RE2 does; if that happens too often, the search
 gives up and the caller falls back to the Pike VM.
 """
+from std.memory import pack_bits
+from std.bit import count_trailing_zeros
 from .pikevm import decode, previous_start, _ascii_word
 from .program import (
     OP_FAIL,
@@ -400,6 +402,7 @@ struct LazyDFA(Movable):
             return 1
         return 2 if _ascii_word(cp) else 3 if program.is_word(cp) else 4
 
+    @always_inline
     def start_state(
         mut self,
         program: Program,
@@ -407,10 +410,21 @@ struct LazyDFA(Movable):
         at: Int,
         anchored: Bool,
     ) -> Int32:
-        var context = self._context(program, text, at)
+        # Without assertions, surrounding characters cannot affect the
+        # epsilon closure. Share one context instead of decoding a neighbor
+        # at every short match. Keep cache misses out of this hot lookup.
+        var context = 0
+        if program.looks != 0:
+            context = self._context(program, text, at)
         var key = context + (5 if anchored else 0)
-        if self.start_states[key] != UNKNOWN:
-            return self.start_states[key]
+        var cached = self.start_states[key]
+        if cached != UNKNOWN:
+            return cached
+        return self._new_start_state(program, context, key, anchored)
+
+    def _new_start_state(
+        mut self, program: Program, context: Int, key: Int, anchored: Bool
+    ) -> Int32:
         var flag: UInt32 = 0
         if context == 0:
             if self.reverse:
@@ -713,6 +727,7 @@ struct Prefilter(Copyable, Movable):
             return find_literal(text, self.prefix, at)
         return find_sets(text, self.sets, at)
 
+    @no_inline
     def _find_literals(self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
         if self.literal_width == 3:
             return self._find_teddy[3](text, at)
@@ -879,16 +894,17 @@ def find_literal(
         var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
             width=lanes
         ](i + m - 1).eq(lasts)
-        if hits.reduce_or():
-            for k in range(lanes):
-                if hits[k]:
-                    var same = True
-                    for j in range(1, m - 1):
-                        if h[unsafe_offset=i + k + j] != p[unsafe_offset=j]:
-                            same = False
-                            break
-                    if same:
-                        return i + k
+        var candidates = pack_bits[DType.uint32](hits)
+        while candidates:
+            var k = Int(count_trailing_zeros(candidates))
+            var same = True
+            for j in range(1, m - 1):
+                if h[unsafe_offset=i + k + j] != p[unsafe_offset=j]:
+                    same = False
+                    break
+            if same:
+                return i + k
+            candidates &= candidates - 1
         i += lanes
     while i + m <= n:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:

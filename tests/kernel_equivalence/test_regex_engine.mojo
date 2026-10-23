@@ -1,5 +1,5 @@
-"""Regex engine properties the Polars corpus does not reach: one compiled
-regex shared by several workers, the DFA cache overflowing on a pattern
+"""Regex engine properties beyond the corpus: one compiled regex shared by
+several workers, the DFA cache overflowing on a pattern
 with many states (and the Pike VM taking over), prefilters on long
 haystacks, capture slots, replacement templates, escaping and the errors
 for unsupported syntax."""
@@ -329,3 +329,288 @@ def test_literal_alternative_analysis_matches_unfiltered_vm() raises:
                         for k in range(len(slots)):
                             assert_equal(matcher.slots[k], slots[k], pattern)
                 _ = input
+
+
+def test_onepass_captures_preserve_priority_assertions_and_optional_groups() raises:
+    var patterns: List[String] = [
+        "^(a+)(b*)$",
+        "(a+)(b*)",
+        "(a*?)(b*)",
+        "(a+)|(b+)",
+        "(a(b)?)+",
+        "^(\\d{4})-(\\d{2})-(\\d{2})$",
+        "^ *(\\w+) +(\\w+) +(\\w+)",
+        "^(\\S{8})(\\S)\\b",
+        "\\b(a+)(b*)\\b",
+        "\\B(a+)\\B",
+        "(?m)^(a+)(b*)$",
+        "()",
+        "(a??)",
+    ]
+    var texts: List[String] = [
+        "",
+        "a",
+        "b",
+        "aaab",
+        "ababaa",
+        "!aabb!",
+        "aab\naabb\n",
+        "2024-12-31",
+        "one two three",
+        "  один два три",
+        "abcdefgh9!",
+        "abcdefghié",
+        "abcdefghé!",
+        "αaaβ",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var slots = List[Int](length=program.slot_count, fill=-1)
+                var expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                assert_equal(matcher.captures(span, start), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+            _ = text
+    # Ambiguous consuming paths retain the existing capture engines.
+    var ambiguous: List[String] = ["(a*)(a*)", "(a|aa)", "(a?)*"]
+    for pattern in ambiguous:
+        assert_false(Bool(Regex(pattern)._compiled[].onepass), pattern)
+    assert_equal(_replace("(a(b)?)+", "abaaa", "<$1:$2>"), "<a:b>")
+    var long = Regex("^(a+)(b*)$")
+    var matcher = Matcher(long)
+    var text = String("a") * 300000 + "bbb"
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 300000)
+    assert_equal(matcher.slots[4], 300000)
+    assert_equal(matcher.slots[5], 300003)
+    _ = text
+
+
+struct _CaptureJob(Job):
+    var regex: Regex
+    var first: Int
+    var last: Int
+    var count: Int
+
+    def __init__(out self, regex: Regex, first: Int, last: Int):
+        self.regex = regex.copy()
+        self.first = first
+        self.last = last
+        self.count = 0
+
+    def run(mut self) raises:
+        var matcher = Matcher(self.regex)
+        for row in range(self.first, self.last):
+            var text = String("key ") + String(row)
+            assert_true(matcher.captures(_span(text)))
+            assert_equal(matcher.slots[2], 0)
+            assert_equal(matcher.slots[3], 3)
+            assert_equal(matcher.slots[4], 4)
+            assert_equal(matcher.slots[5], text.byte_length())
+            self.count += 1
+            _ = text
+
+
+def test_onepass_shared_workers_and_resource_fallbacks() raises:
+    var regex = Regex("^([a-z]+) ([0-9]+)$")
+    assert_true(Bool(regex._compiled[].onepass))
+    var jobs = List[_CaptureJob]()
+    for k in range(8):
+        jobs.append(_CaptureJob(regex, k * 500, (k + 1) * 500))
+    run_jobs(jobs)
+    var count = 0
+    for k in range(len(jobs)):
+        count += jobs[k].count
+    assert_equal(count, 4000)
+    # A deterministic program beyond the state budget still captures via
+    # the original engines. Too many capture slots also stays supported.
+    var large = Regex("(a{300})")
+    assert_false(Bool(large._compiled[].onepass))
+    var matcher = Matcher(large)
+    var text = String("a") * 300
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 300)
+    _ = text
+    var many = Regex(String("(a)") * 33)
+    assert_false(Bool(many._compiled[].onepass))
+    matcher = Matcher(many)
+    text = String("a") * 33
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[66], 32)
+    assert_equal(matcher.slots[67], 33)
+    _ = text
+
+
+def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
+    var regex = Regex("^(a+)(β+)$")
+    assert_true(Bool(regex._compiled[].onepass))
+    var matcher = Matcher(regex)
+    var text = String("a") * 100000 + String("β") * 100000
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 100000)
+    assert_equal(matcher.slots[4], 100000)
+    assert_equal(matcher.slots[5], 300000)
+    _ = text
+
+
+def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
+    # Exhaustive short inputs force accepted snapshots to be superseded,
+    # abandoned, and followed by matches with different participating groups.
+    var patterns: List[String] = [
+        "^(a+)(b*)$",
+        "(a+)(b*)",
+        "(a*?)(b*)",
+        "(a+)|(b+)",
+        "(a(b)?)+",
+        "(?m)^(a+)(b*)$",
+        "()",
+        "(a??)",
+    ]
+    var alphabet: List[UInt8] = [97, 98, 32, 10]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for length in range(6):
+            for encoded in range(1 << (2 * length)):
+                var bytes = List[UInt8]()
+                var digits = encoded
+                for _ in range(length):
+                    bytes.append(alphabet[digits & 3])
+                    digits >>= 2
+                var text = String(unsafe_from_utf8=bytes)
+                var span = _span(text)
+                for start in range(length + 1):
+                    var expected = matcher.pike.search(
+                        program, span, start, length, False, slots
+                    )
+                    assert_equal(
+                        matcher.captures(span, start), expected, pattern
+                    )
+                    if expected:
+                        for k in range(len(slots)):
+                            assert_equal(matcher.slots[k], slots[k], pattern)
+                _ = text
+    # The last bit of a 64-bit SAVE mask is a real slot, not a sentinel.
+    var regex = Regex(String("(a)") * 31)
+    assert_true(Bool(regex._compiled[].onepass))
+    var matcher = Matcher(regex)
+    var text = String("a") * 31
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[62], 30)
+    assert_equal(matcher.slots[63], 31)
+    _ = text
+
+
+def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
+    var regex = Regex("^(a+)(β*)$")
+    assert_true(Bool(regex._compiled[].onepass))
+    var matcher = Matcher(regex)
+    var long = String("a") * 100000 + String("β") * 100000
+    for _ in range(2):
+        var short = String("aaa")
+        assert_true(matcher.captures(_span(short)))
+        assert_equal(matcher.slots[2], 0)
+        assert_equal(matcher.slots[3], 3)
+        assert_equal(matcher.slots[4], 3)
+        assert_equal(matcher.slots[5], 3)
+        _ = short
+        assert_true(matcher.captures(_span(long)))
+        assert_equal(matcher.slots[2], 0)
+        assert_equal(matcher.slots[3], 100000)
+        assert_equal(matcher.slots[4], 100000)
+        assert_equal(matcher.slots[5], 300000)
+        var bad = String("aaa!")
+        assert_false(matcher.captures(_span(bad)))
+        _ = bad
+    _ = long
+
+
+def test_cached_start_states_preserve_context_sensitive_matches() raises:
+    from dataframe.regex.pikevm import PikeVM
+
+    var patterns: List[String] = [
+        "(a+)",
+        "(a*)",
+        "([a-z])",
+        "(a|β)+",
+        ".*?",
+        "[ab]+",
+        "\\ba\\b",
+        "\\Ba",
+        "(?m)^a",
+        "a$",
+        "\\<a\\>",
+    ]
+    var texts: List[String] = ["", "a a\na! βa!aβ\n", "βaβ a", "\na\n", "bbb"]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var vm = PikeVM(program, program.slot_count)
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = vm.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+            _ = text
+
+
+def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
+    from dataframe.regex.dfa import find_literal
+
+    var needles: List[String] = [
+        "",
+        "a",
+        "ab",
+        "abbbbbc",
+        "β",
+        "éé",
+        String("a") * 40,
+    ]
+    for needle in needles:
+        var bytes = List[UInt8]()
+        for k in range(needle.byte_length()):
+            bytes.append(_span(needle)[k])
+        for offset in range(65):
+            var text = String("x") * offset + needle + String("x") * 40 + needle
+            var span = _span(text)[: text.byte_length() - needle.byte_length()]
+            assert_equal(
+                find_literal(span, bytes, 0), 0 if len(bytes) == 0 else offset
+            )
+            assert_equal(find_literal(span, bytes, offset), offset)
+            assert_equal(
+                find_literal(span, bytes, offset + 1),
+                offset + 1 if len(bytes) == 0 else -1,
+            )
+            _ = text
+        _ = needle
+    var needle: List[UInt8] = [97, 100, 99, 97]
+    var text = String("abca ") * 32 + "adca"
+    assert_equal(find_literal(_span(text), needle, 0), 160)
+    _ = text

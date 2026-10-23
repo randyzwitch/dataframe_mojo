@@ -1,7 +1,9 @@
-"""Polars CSV SIMD masks and target-selected inclusive quote parity.
+"""SIMD masks and target-selected inclusive quote parity for CSV parsing.
 
-Maps Rust Mask::to_bitmask and polars-utils/src/clmul.rs. The private target
-feature query is pinned to this repository's Mojo compiler version.
+The masks pack one Boolean result per byte. Prefix XOR computes quote parity
+through each byte, using carry-less multiplication when the target supports
+it and a shift-and-XOR sequence otherwise. The private target feature query
+is pinned to this repository's Mojo compiler version.
 """
 from std.memory import bitcast, pack_bits
 from std.sys import CompilationTarget, llvm_intrinsic

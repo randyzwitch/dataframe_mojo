@@ -12,12 +12,10 @@ sort at all. The result has the same shape `sort_indices` already takes --
 one Int per row per word, compared lexicographically -- so the parallel
 sort itself is unchanged.
 
-The mapping is Polars' row encoding (`crates/polars-row`), with one change:
-Polars encodes to a byte string and compares it with `memcmp`, which is
-vectorised in Rust. Comparing bytes one at a time here cost 1,000 ms for
-1M rows, so keys go into whole 64-bit words instead -- big-endian byte
+Keys go into whole 64-bit words rather than a byte string: big-endian byte
 order and word order agree, so a word compare gives byte-string order at
-one comparison per eight bytes.
+one comparison per eight bytes. This reduces 1M two-key rows from about
+1,000 ms to the word-based parallel sort.
 
 Per key:
 
@@ -26,10 +24,9 @@ Per key:
   UInt64 has its top bit toggled, since values at or above 2**63 would
   otherwise be negative.
 - Floats use the IEEE-754 total order (flip every bit of a negative, the
-  sign bit of a positive), which also puts NaN above every number, as
-  Polars and DuckDB order it. Getting this half right -- the total
-  order without the sign toggle -- sorts every positive below every
-  negative, so the tests below check signs explicitly.
+  sign bit of a positive), which also puts NaN above every number. Without
+  this sign transformation, positive values sort below negative values, so
+  the tests below check both signs explicitly.
 - Booleans are 0 and 1.
 - `descending` inverts the bits rather than negating, because negating
   Int64.MIN overflows while inversion is total and order-reversing.
@@ -83,9 +80,9 @@ def encodable(column: Series) -> Bool:
 def _float_order[D: DType](value: Scalar[D]) -> Int:
     """IEEE-754 total order as an Int whose signed order is float order.
 
-    The value is canonicalised first, as Polars' encoder does: sorting
-    treats -0.0 as equal to 0.0 and every NaN as equal to every other, but
-    their bit patterns differ, so encoding the raw bits would order -0.0
+    The value is canonicalised first: sorting treats -0.0 as equal to 0.0
+    and every NaN as equal to every other, but their bit patterns differ,
+    so encoding the raw bits would order -0.0
     below 0.0. The reference comparator in test_sort.mojo caught exactly
     that.
     """

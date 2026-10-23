@@ -3,10 +3,10 @@ prefix and suffix stripping, find, count_matches, contains_any,
 replace_many, hex and base64, to_integer, split_exact/splitn,
 concat_str(ignore_nulls) and str.join.
 
-Expected values are Polars 1.44 results for the same input, written out as
-literals. Every function runs over offsets, a sliced window, chunks and
-string views (rows past 12 bytes reference a buffer), with and without
-nulls, eagerly and through LazyFrame.
+Expected values for the same input are written out as literals. Every
+function runs over offsets, a sliced window, chunks and string views (rows
+past 12 bytes reference a buffer), with and without nulls, eagerly and
+through LazyFrame.
 """
 # contract-group: expr.text_binary
 from std.testing import assert_equal, assert_true, assert_raises

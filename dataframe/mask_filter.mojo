@@ -2,10 +2,9 @@
 
 `DataFrame.filter` used to turn the mask into a `List[Int]` of kept row
 numbers (8 bytes a row, built per worker and concatenated) and then gather
-every column from that list. Polars filters each column from the mask
-itself (polars-compute's filter/primitive.rs): it reads the mask 64 bits at
-a time, skips empty words, copies full words in bulk and walks the set bits
-of the rest. This does the same:
+every column from that list. This implementation instead reads the mask 64
+bits at a time, skips empty words, copies full words in bulk and walks the
+set bits of the rest:
 
 1. The mask's values and validity are ANDed into 64-bit words (a null
    entry drops its row), and a popcount per word gives every word's first

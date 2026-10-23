@@ -1,11 +1,10 @@
 """Write dataframe/regex/unicode_tables.mojo: the code point sets behind the
 regex engine's Unicode \\w, \\d and \\s, and its simple case-folding orbits.
 
-Polars matches with Rust's `regex` crate, whose tables come from the Unicode
-Character Database. Rather than re-deriving them from the UCD (and risking a
-different Unicode version), this asks Polars itself: every scalar value is
-tested against `^\\w$`, `^\\d$` and `^\\s$`, and every code point with a case
-mapping against `(?i)^\\x{...}$`. Run it in the oracle environment:
+The generator tests every scalar value against `^\\w$`, `^\\d$` and `^\\s$`,
+and every code point with a case mapping against `(?i)^\\x{...}$`. Matching
+code points are compressed into range sets, preserving the Unicode behavior
+of the generated tables. Run it in the oracle environment:
 
     pixi run -e oracle python3 scripts/regex_unicode_tables.py
 """

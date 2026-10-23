@@ -3,10 +3,8 @@
 Comparing a string column with a literal used to build a `StringSlice` per
 row, append to a `List[Bool]` of results and another of validity, and pack
 both afterwards, on one thread: about 60 ns a row. `is_in` was a chain of
-`==`, `fill_null` and `|` per value. Polars compares each row's 16-byte view
-against the scalar and writes a bitmap (`tot_eq_kernel_broadcast` in
-polars-compute's comparisons/view.rs), and builds a hash set once for
-`is_in`. Here each worker takes a range of rows (a multiple of 8, so whole
+`==`, `fill_null` and `|` per value. Here each worker takes a range of rows
+(a multiple of 8, so whole
 bitmap bytes), reads row bytes from the buffers directly (`_Bytes`), and
 writes the result bitmap; validity is the input's, copied once. Equality
 checks the length before any byte; `is_in` with more than eight values

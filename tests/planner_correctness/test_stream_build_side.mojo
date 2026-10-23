@@ -1,5 +1,5 @@
 """A stream builds a join on its left side when that side, estimated, is the
-smaller (DuckDB's build side): the join's result keeps the left's row order
+smaller: the join's result keeps the left's row order
 and every row the written join gives, and a join whose left cannot be the
 smaller keeps building on its right."""
 # contract-group: planner.relational

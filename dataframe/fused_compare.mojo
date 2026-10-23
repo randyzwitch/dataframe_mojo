@@ -7,8 +7,8 @@ back, about 2 ns a row a comparison. Here every comparison of a numeric
 column against a constant of the column's own type runs over
 cache-sized blocks of rows, and each block's bits are ANDed in a buffer that
 stays in L1, so each column is read from memory once and one bitmap is
-written. DuckDB evaluates such conjunctions on one selection vector the same
-way. Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
+written. The combined bitmap is the selection for the next pipeline step.
+Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
 floats, so a NaN compares false except with `!=`.
 """
 from std.memory import pack_bits
