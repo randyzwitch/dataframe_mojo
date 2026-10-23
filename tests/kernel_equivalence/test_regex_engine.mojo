@@ -579,3 +579,38 @@ def test_cached_start_states_preserve_context_sensitive_matches() raises:
                     assert_equal(result[0], slots[0], pattern)
                     assert_equal(result[1], slots[1], pattern)
             _ = text
+
+
+def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
+    from dataframe.regex.dfa import find_literal
+
+    var needles: List[String] = [
+        "",
+        "a",
+        "ab",
+        "abbbbbc",
+        "β",
+        "éé",
+        String("a") * 40,
+    ]
+    for needle in needles:
+        var bytes = List[UInt8]()
+        for k in range(needle.byte_length()):
+            bytes.append(_span(needle)[k])
+        for offset in range(65):
+            var text = String("x") * offset + needle + String("x") * 40 + needle
+            var span = _span(text)[: text.byte_length() - needle.byte_length()]
+            assert_equal(
+                find_literal(span, bytes, 0), 0 if len(bytes) == 0 else offset
+            )
+            assert_equal(find_literal(span, bytes, offset), offset)
+            assert_equal(
+                find_literal(span, bytes, offset + 1),
+                offset + 1 if len(bytes) == 0 else -1,
+            )
+            _ = text
+        _ = needle
+    var needle: List[UInt8] = [97, 100, 99, 97]
+    var text = String("abca ") * 32 + "adca"
+    assert_equal(find_literal(_span(text), needle, 0), 160)
+    _ = text
