@@ -870,6 +870,7 @@ def find_sets(
     return -1
 
 
+@no_inline
 def find_literal(
     text: Span[UInt8, ImmutAnyOrigin], needle: List[UInt8], at: Int
 ) -> Int:
