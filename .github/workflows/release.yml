@@ -17,6 +17,9 @@ jobs:
         with:
           cache: true
 
+      - name: Check release version matches the tag
+        run: pixi run --locked check-version "$GITHUB_REF_NAME"
+
       - name: Install independent format consumers
         run: |
           pixi install --locked -e oracle
@@ -50,5 +53,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/dataframe.mojoc docs/api.md LICENSE THIRD_PARTY_NOTICES.md \
+            dist/dataframe.mojoc dist/dataframe_provider.mojoc \
+            dist/cpu-build.json dist/provider.json \
+            docs/api.md LICENSE THIRD_PARTY_NOTICES.md \
+            scripts/vendor/regex-LICENSE-MIT scripts/vendor/regex-LICENSE-APACHE \
             --title "$GITHUB_REF_NAME" --generate-notes
