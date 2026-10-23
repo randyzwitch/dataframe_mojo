@@ -563,7 +563,7 @@ def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
         )
         _ = observed^
         assert_frame(ordered, expected)
-        assert_frame(unordered.sort("k"), expected)
+        assert_frame(unordered.sort("k"), expected.sort("k"))
         observed = StrategyTrace()
         var piped = (
             frame.lazy()
@@ -577,6 +577,6 @@ def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
             "quantiles did not reach the aggregate table sink",
         )
         _ = observed^
-        assert_frame(piped.sort("k"), expected)
+        assert_frame(piped.sort("k"), expected.sort("k"))
         _ = trace^
         _ = workers^
