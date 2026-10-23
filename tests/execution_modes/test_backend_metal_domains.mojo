@@ -325,7 +325,8 @@ def bool_and_float_cases(runtime: MetalRuntime, native: Bool) raises:
         [
             Series("g", Column[Int32]([0, 1, 2, 3])),
             Series("lo", Column[Float32]([2, nan, -0.0, -tiny])),
-            Series("hi", Column[Float32]([nan, nan, -0.0, tiny])),
+            # NaN gives way to a number in min and max (#816).
+            Series("hi", Column[Float32]([2, nan, -0.0, tiny])),
             Series("argmin", Column[UInt32]([1, 0, 0, 1])),
             Series("argmax", Column[UInt32]([1, 0, 0, 0])),
         ]
