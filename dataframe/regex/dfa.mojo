@@ -662,12 +662,14 @@ struct Prefilter(Copyable, Movable):
     var sets: List[UInt8]
     var literals: List[List[UInt8]]
     var literal_width: Int
+    var masks: List[SIMD[DType.uint8, 16]]
 
     def __init__(out self):
         self.prefix = List[UInt8]()
         self.sets = List[UInt8]()
         self.literals = List[List[UInt8]]()
         self.literal_width = 0
+        self.masks = List[SIMD[DType.uint8, 16]]()
 
     def __init__(
         out self,
@@ -679,6 +681,7 @@ struct Prefilter(Copyable, Movable):
         self.sets = sets^
         self.literals = List[List[UInt8]]()
         self.literal_width = 0
+        self.masks = List[SIMD[DType.uint8, 16]]()
         if len(self.sets) <= 4 * len(self.prefix):
             self.sets.clear()
         else:
@@ -691,7 +694,15 @@ struct Prefilter(Copyable, Movable):
                 width = min(width, len(literal))
             if width > 1:
                 self.literals = literals^
-                self.literal_width = width
+                self.literal_width = min(width, 3)
+                for _ in range(6):
+                    self.masks.append(SIMD[DType.uint8, 16]())
+                for k in range(len(self.literals)):
+                    var bit = UInt8(1 << k)
+                    for j in range(self.literal_width):
+                        var byte = self.literals[k][j]
+                        self.masks[j * 2][Int(byte & 15)] |= bit
+                        self.masks[j * 2 + 1][Int(byte >> 4)] |= bit
 
     @always_inline
     def active(self) -> Bool:
@@ -703,29 +714,52 @@ struct Prefilter(Copyable, Movable):
         return find_sets(text, self.sets, at)
 
     def _find_literals(self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
-        """Scan 32 candidate starts at once. Pair masks retain each
-        literal's first and common-width last byte together; verify the
-        entire literal before handing the candidate to the regex engine.
-        Loads and tail checks stay within the supplied span."""
+        if self.literal_width == 3:
+            return self._find_teddy[3](text, at)
+        return self._find_teddy[2](text, at)
+
+    def _find_teddy[
+        depth: Int
+    ](self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
+        """Nibble lookup masks test up to eight prefixes together. Each
+        bit names one literal, so intersecting all masks preserves byte
+        correlations without a loop over literals in the vector scan.
+        Full verification and the DFA retain regex priority/semantics."""
         var n = len(text)
-        var width = self.literal_width
         var p = text.unsafe_ptr()
+        var lo0 = self.masks[0]
+        var hi0 = self.masks[1]
+        var lo1 = self.masks[2]
+        var hi1 = self.masks[3]
+        var lo2 = self.masks[4]
+        var hi2 = self.masks[5]
         var i = at
-        comptime lanes = 32
-        while i + width - 1 + lanes <= n:
-            var first = p.unsafe_load[width=lanes](i)
-            var last = p.unsafe_load[width=lanes](i + width - 1)
-            var hits = SIMD[DType.bool, lanes](fill=False)
-            for literal in self.literals:
-                hits |= first.eq(SIMD[DType.uint8, lanes](literal[0])) & (
-                    last.eq(SIMD[DType.uint8, lanes](literal[width - 1]))
+        comptime lanes = 16
+        while i + lanes + depth - 1 <= n:
+            var a = p.unsafe_load[width=lanes](i)
+            var b = p.unsafe_load[width=lanes](i + 1)
+            var hits = (
+                lo0._dynamic_shuffle(a & 15)
+                & hi0._dynamic_shuffle(a >> 4)
+                & lo1._dynamic_shuffle(b & 15)
+                & hi1._dynamic_shuffle(b >> 4)
+            )
+            comptime if depth == 3:
+                var c = p.unsafe_load[width=lanes](i + 2)
+                hits &= lo2._dynamic_shuffle(c & 15) & hi2._dynamic_shuffle(
+                    c >> 4
                 )
-            if hits.reduce_or():
+            if hits.ne(SIMD[DType.uint8, lanes]()).reduce_or():
                 for k in range(lanes):
-                    if hits[k] and _literal_at(text, self.literals, i + k):
-                        return i + k
+                    if hits[k] != 0:
+                        for literal in range(len(self.literals)):
+                            if hits[k] & UInt8(1 << literal):
+                                if _literal_matches(
+                                    text, self.literals[literal], i + k
+                                ):
+                                    return i + k
             i += lanes
-        while i + width <= n:
+        while i + depth <= n:
             if _literal_at(text, self.literals, i):
                 return i
             i += 1
@@ -735,18 +769,23 @@ struct Prefilter(Copyable, Movable):
 def _literal_at(
     text: Span[UInt8, ImmutAnyOrigin], literals: List[List[UInt8]], at: Int
 ) -> Bool:
-    var p = text.unsafe_ptr()
     for literal in literals:
-        if len(literal) > len(text) - at:
-            continue
-        var same = True
-        for j in range(len(literal)):
-            if p[unsafe_offset=at + j] != literal[j]:
-                same = False
-                break
-        if same:
+        if _literal_matches(text, literal, at):
             return True
     return False
+
+
+@always_inline
+def _literal_matches(
+    text: Span[UInt8, ImmutAnyOrigin], literal: List[UInt8], at: Int
+) -> Bool:
+    if len(literal) > len(text) - at:
+        return False
+    var p = text.unsafe_ptr()
+    for j in range(len(literal)):
+        if p[unsafe_offset=at + j] != literal[j]:
+            return False
+    return True
 
 
 @always_inline
