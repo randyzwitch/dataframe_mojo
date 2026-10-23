@@ -19,6 +19,7 @@ from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn, _bits64
 from .column import Column
+from .huge_pages import huge_uninit
 
 # Fixed-width payloads a gather copies: the numeric types plus Int128, the
 # storage of decimal columns, which joins used to return as nulls.
@@ -924,7 +925,7 @@ def _allocate(column: Series, m: Int) raises -> Series:
         if column._data.isa[Column[Scalar[D]]]():
             var output = Series(
                 column.name(),
-                Column[Scalar[D]](List[Scalar[D]](unsafe_uninit_length=m)),
+                Column[Scalar[D]](huge_uninit[Scalar[D]](m)),
             )
             output._dtype = column.dtype()
             output._field_metadata = column._field_metadata
