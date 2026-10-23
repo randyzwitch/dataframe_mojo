@@ -554,3 +554,26 @@ values. If the comparison exceeds its candidate-pair limit, it reports
 numerical result. Agreement with CPU under this policy is not an independent
 query oracle or a certificate of output ordering, and does not itself change
 performance admission.
+
+### Regex engine comparison
+
+`benchmarks/tools/bench_regex_rebar.py` compares two frozen engine commits
+using all 47 workloads in rebar's literal, literal-alternation and imported
+Sherlock groups. It verifies base counts against the pinned upstream and
+Polars, and checks reversed-line and doubled-input variants with Polars.
+Unsupported byte-pattern workloads stay visible. Each build gets three rounds
+of three samples, with 20 fully materialized count/span scans per sample.
+Compilation and input loading are untimed. Workers alternate build order, use
+one CPU where affinity is available, and reject compiler-overlapped samples.
+
+```bash
+git clone https://github.com/BurntSushi/rebar.git /tmp/regex-rebar
+git -C /tmp/regex-rebar checkout 463d00f31887e84c38467805b9e3122c314b9521
+pixi run -e oracle python3 benchmarks/tools/bench_regex_rebar.py \
+  --rebar-dir /tmp/regex-rebar --baseline BASE_COMMIT --candidate CANDIDATE_COMMIT
+```
+
+Raw samples, source/binary hashes, expected outputs, unsupported cases, and a
+report containing every workload and its worst variant stay in
+`build/regex-rebar/`. These are regex engine measurements, not a claim about
+whole DataFrame queries. Keep this benchmark adapter separate from engine PRs.
