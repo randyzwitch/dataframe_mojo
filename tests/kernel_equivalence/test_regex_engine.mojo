@@ -800,12 +800,14 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
         "β",
         "éé",
         String("a") * 40,
+        String("ab") * 32 + "Z",
+        String("a") * 257,
     ]
     for needle in needles:
         var bytes = List[UInt8]()
         for k in range(needle.byte_length()):
             bytes.append(_span(needle)[k])
-        for offset in range(65):
+        for offset in range(130):
             var text = String("x") * offset + needle + String("x") * 40 + needle
             var span = _span(text)[: text.byte_length() - needle.byte_length()]
             assert_equal(
@@ -821,6 +823,10 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     var needle: List[UInt8] = [97, 100, 99, 97]
     var text = String("abca ") * 32 + "adca"
     assert_equal(find_literal(_span(text), needle, 0), 160)
+    _ = text
+    needle = [97, 98, 97]
+    text = String("a") * 300 + "aba"
+    assert_equal(find_literal(_span(text), needle, 0), 300)
     _ = text
 
 

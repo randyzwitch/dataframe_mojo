@@ -25,7 +25,7 @@ When the cache grows past its budget it is cleared and the search goes on
 from the current state, as RE2 does; if that happens too often, the search
 gives up and the caller falls back to the Pike VM.
 """
-from std.memory import pack_bits
+from std.memory import Pointer, pack_bits
 from std.bit import count_trailing_zeros
 from .pikevm import decode, previous_start, _ascii_word
 from .program import (
@@ -871,12 +871,56 @@ def find_sets(
 
 
 @no_inline
+def _verify_literal(
+    hay: Pointer[UInt8, ImmutAnyOrigin],
+    needle: Pointer[UInt8, ImmutAnyOrigin],
+    length: Int,
+    base: Int,
+    var candidates: UInt64,
+) -> Int:
+    while candidates:
+        var k = Int(count_trailing_zeros(candidates))
+        var same = True
+        for j in range(1, length - 1):
+            if hay[unsafe_offset=base + k + j] != needle[unsafe_offset=j]:
+                same = False
+                break
+        if same:
+            return base + k
+        candidates &= candidates - 1
+    return -1
+
+
+@always_inline
+def _literal_chunk[
+    lanes: Int
+](
+    hay: Pointer[UInt8, ImmutAnyOrigin],
+    needle: Pointer[UInt8, ImmutAnyOrigin],
+    length: Int,
+    at: Int,
+    firsts: SIMD[DType.uint8, lanes],
+    lasts: SIMD[DType.uint8, lanes],
+) -> Int:
+    var hits = hay.unsafe_load[width=lanes](at).eq(firsts) & hay.unsafe_load[
+        width=lanes
+    ](at + length - 1).eq(lasts)
+    comptime Mask = DType.uint64 if lanes == 64 else DType.uint32
+    var candidates = UInt64(pack_bits[Mask](hits))
+    if not candidates:
+        return -1
+    if length <= 2:
+        return at + Int(count_trailing_zeros(candidates))
+    return _verify_literal(hay, needle, length, at, candidates)
+
+
+@no_inline
 def find_literal(
     text: Span[UInt8, ImmutAnyOrigin], needle: List[UInt8], at: Int
 ) -> Int:
     """memmem: the first occurrence of `needle` at or after `at`, or -1.
-    Candidates are found 32 at a time on the needle's first and last
-    bytes."""
+    Check the first 32 candidates before scanning long misses 64 at a time,
+    filtering on the needle's first and last bytes."""
     var m = len(needle)
     var n = len(text)
     if m == 0:
@@ -884,7 +928,7 @@ def find_literal(
     if m > n - at:
         return -1
     var h = text.unsafe_ptr()
-    var p = needle.unsafe_ptr()
+    var p = needle.unsafe_ptr().unsafe_origin_cast[ImmutAnyOrigin]()
     var first = p[]
     var last = p[unsafe_offset=m - 1]
     comptime lanes = 32
@@ -895,21 +939,25 @@ def find_literal(
     var last_start = n - m
     var vector_end = last_start - (lanes - 1)
     var i = at
-    while i <= vector_end:
-        var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
-            width=lanes
-        ](i + m - 1).eq(lasts)
-        var candidates = pack_bits[DType.uint32](hits)
-        while candidates:
-            var k = Int(count_trailing_zeros(candidates))
-            var same = True
-            for j in range(1, m - 1):
-                if h[unsafe_offset=i + k + j] != p[unsafe_offset=j]:
-                    same = False
-                    break
-            if same:
-                return i + k
-            candidates &= candidates - 1
+    if i <= vector_end:
+        var found = _literal_chunk[32](h, p, m, i, firsts, lasts)
+        if found >= 0:
+            return found
+        i += lanes
+    # Keep verification out of the bulk miss loop. Two vectors per load
+    # amortize its cursor, mask and branch work over twice as many bytes.
+    var wide_firsts = SIMD[DType.uint8, 64](first)
+    var wide_lasts = SIMD[DType.uint8, 64](last)
+    var bulk_end = last_start - 63
+    while i <= bulk_end:
+        var found = _literal_chunk[64](h, p, m, i, wide_firsts, wide_lasts)
+        if found >= 0:
+            return found
+        i += 64
+    if i <= vector_end:
+        var found = _literal_chunk[32](h, p, m, i, firsts, lasts)
+        if found >= 0:
+            return found
         i += lanes
     while i <= last_start:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:
