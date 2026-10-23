@@ -14,12 +14,11 @@ engine goes:
    start state.
 4. The reverse DFA, run back from that end, finds where it starts; a
    pattern anchored at the start of the text needs no reverse pass.
-5. Only when capture groups are needed does a capture engine run.
-   Eligible deterministic programs use one-pass tables on ASCII spans;
-   other spans use the bounded backtracker when its visited set fits in
-   256 KiB, the Pike VM otherwise. Anchored ASCII one-pass captures skip
-   the DFAs. As in RE2, anchored captures also skip the DFAs when the
-   backtracker can cover the whole text.
+5. Only when capture groups are needed does a capture engine run,
+   anchored to the match just found: the bounded backtracker for spans
+   whose visited set fits in 256 KiB, the Pike VM otherwise. As in RE2,
+   an anchored pattern over a text the backtracker covers skips steps
+   3 and 4 and goes straight to the backtracker.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
@@ -27,7 +26,6 @@ instead, so every search stays linear in the haystack.
 from std.memory import ArcPointer
 
 from .backtrack import Backtracker
-from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode
@@ -450,7 +448,6 @@ struct _Compiled(Movable):
     var pattern: String
     var forward: Program
     var reverse: Program
-    var onepass: OnePass
     var names: List[String]
     var anchored: Bool
     var literal: Bool
@@ -463,7 +460,6 @@ struct _Compiled(Movable):
         self.pattern = pattern
         self.forward = compile_program(ast, False)
         self.reverse = compile_program(ast, True)
-        self.onepass = compile_onepass(self.forward)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
         var info = _analyze(ast, ast.root)
@@ -673,7 +669,6 @@ struct Matcher(Movable):
     var reverse: LazyDFA
     var pike: PikeVM
     var backtracker: Backtracker
-    var capture_scratch: List[Int]
     var slots: List[Int]
     var _position: Int
     var _last_end: Int
@@ -686,9 +681,6 @@ struct Matcher(Movable):
         self.reverse = LazyDFA(c.reverse, True)
         self.pike = PikeVM(c.forward, c.forward.slot_count)
         self.backtracker = Backtracker()
-        self.capture_scratch = List[Int](
-            length=c.forward.slot_count if c.onepass.active() else 0, fill=-1
-        )
         self.slots = List[Int](length=c.forward.slot_count, fill=-1)
         self._position = 0
         self._last_end = -1
@@ -752,30 +744,6 @@ struct Matcher(Movable):
         """Find the leftmost-first match at or after `start` and fill
         `slots`: group g spans `slots[2g] : slots[2g + 1]`, -1 when it took
         no part."""
-        ref c = self.regex._compiled[]
-        if (
-            c.anchored
-            and start == 0
-            and c.onepass.active()
-            and (len(text) == 0 or text[0] < 128)
-        ):
-            # The start state's ASCII table can reject impossible first
-            # bytes before scanning a whole row for ASCII eligibility.
-            if len(text) > 0 and not c.onepass.matched[0]:
-                var cls = Int(c.forward.ascii_class[Int(text[0])])
-                if c.onepass.next[cls] < 0:
-                    return False
-            if not _may_match(c, text):
-                return False
-            if ascii_span(text, 0, len(text)):
-                return c.onepass.search(
-                    c.forward,
-                    text,
-                    0,
-                    len(text),
-                    self.capture_scratch,
-                    self.slots,
-                )
         if self._direct_captures(text):
             return start == 0 and self._anchored_captures(text)
         var m = self.find(text, start)
@@ -814,10 +782,6 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
-        if c.onepass.active() and ascii_span(text, begin, end):
-            return c.onepass.search(
-                c.forward, text, begin, end, self.capture_scratch, self.slots
-            )
         if Backtracker.fits(c.forward, begin, end):
             return self.backtracker.search(
                 c.forward, text, begin, end, self.slots
