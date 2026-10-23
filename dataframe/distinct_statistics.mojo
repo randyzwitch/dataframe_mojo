@@ -236,18 +236,31 @@ struct _ColumnCount(Copyable, Movable):
     var count: Int
 
 
+@fieldwise_init
+struct _ColumnSample(Copyable, Movable):
+    var name: String
+    var identity: Int
+    var rows: Int
+    var runs: Int
+    var run: Int
+    var sample: Series
+
+
 struct TableStatistics(Movable):
-    """Distinct counts of one loaded table's columns, shared by every copy
-    of the table and filled on first request (`TableStatistics`). Each
-    count remembers the storage it was taken over, so a column replaced in
-    a copy is counted again rather than read from the original."""
+    """Distinct counts and row samples of one loaded table's columns,
+    shared by every copy of the table and filled on first request
+    (`TableStatistics`; DuckDB keeps a sample with each table's statistics
+    too). Each entry remembers the storage it was taken over, so a column
+    replaced in a copy is taken again rather than read from the original."""
 
     var lock: Atomic[Int64]
     var counts: List[_ColumnCount]
+    var samples: List[_ColumnSample]
 
     def __init__(out self):
         self.lock = Atomic[Int64](0)
         self.counts = List[_ColumnCount]()
+        self.samples = List[_ColumnSample]()
 
     def _acquire(mut self):
         while True:
@@ -277,6 +290,40 @@ struct TableStatistics(Movable):
         self.counts.append(_ColumnCount(series.name(), identity, rows, count))
         self._release()
         return count
+
+    def sample(mut self, series: Series, runs: Int, run: Int) raises -> Series:
+        """`runs` evenly spaced runs of `run` rows of the column, end to
+        end in one array. Evenly spaced runs, not a prefix: tables are often
+        stored in date or key order, which a prefix would misjudge. The
+        zero-copy slices are merged once; the planner's row estimates read
+        the kept copy afterwards instead of merging them again."""
+        var identity = _identity(series)
+        var rows = len(series)
+        self._acquire()
+        for entry in self.samples:
+            if (
+                entry.name == series.name()
+                and entry.identity == identity
+                and entry.rows == rows
+                and entry.runs == runs
+                and entry.run == run
+            ):
+                var known = entry.sample.copy()
+                self._release()
+                return known^
+        self._release()
+        var parts = List[Series](capacity=runs)
+        for k in range(runs):
+            parts.append(series.slice(k * (rows // runs), run))
+        var merged = Series._from_chunks(parts).rechunk()
+        self._acquire()
+        self.samples.append(
+            _ColumnSample(
+                series.name(), identity, rows, runs, run, merged.copy()
+            )
+        )
+        self._release()
+        return merged^
 
 
 def _identity(series: Series) -> Int:
