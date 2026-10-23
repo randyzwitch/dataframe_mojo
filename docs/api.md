@@ -491,8 +491,8 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def is_geometry(self) -> Bool`
 - `def geometry_metadata(self) -> String`
   The GeoArrow JSON metadata; raises for non-geometry types.
-- `def categorical(var dictionary: CategoricalDictionary) -> Self`
-  A categorical whose codes index `dictionary`.
+- `def categorical(var dictionary: CategoricalDictionary, *, distinct: Bool = False) -> Self`
+  A categorical whose codes index `dictionary`. `distinct` says the caller built it from distinct labels, so no repeat is looked for.
 - `def is_categorical(self) -> Bool`
 - `def has_dictionary(self) -> Bool`
 - `def dictionary(self) -> ArcPointer[CategoricalDictionary]`
