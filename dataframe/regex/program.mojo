@@ -157,15 +157,19 @@ struct Program(Movable, Sized):
         """The DFA alphabet class of a code point."""
         if cp < 128:
             return Int(self.ascii_class[Int(cp)])
+        var points = self.boundaries.unsafe_ptr()
+        var classes = self.interval_class.unsafe_ptr()
         var lo = 0
         var hi = len(self.boundaries)
         while hi - lo > 1:
-            var mid = (lo + hi) // 2
-            if self.boundaries[mid] <= cp:
+            # Every compiled alphabet starts at zero. The search keeps
+            # lo < hi <= len(boundaries), with nonnegative midpoints.
+            var mid = (lo + hi) >> 1
+            if points[unsafe_offset=mid] <= cp:
                 lo = mid
             else:
                 hi = mid
-        return Int(self.interval_class[lo])
+        return Int(classes[unsafe_offset=lo])
 
 
 def _build_two_byte_membership(mut program: Program):

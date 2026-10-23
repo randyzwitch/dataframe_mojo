@@ -628,6 +628,7 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
         "([\\u{7ff}-\\u{801}])",
         "(\\p{Greek}+)",
         "(\\p{Cyrillic}+)",
+        "(\\w+)(\\d+)([^a-z])",
     ]
     for pattern in patterns:
         var regex = Regex(pattern)
@@ -647,3 +648,43 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
                     class_contains(ranges, cp),
                     pattern,
                 )
+
+
+def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
+    from dataframe.regex.charclass import class_contains
+
+    var patterns: List[String] = [
+        "(\\w+)(\\d+)([^a-z])",
+        "\\b([\\u{7f}-\\u{81}\\u{7ff}-\\u{801}])\\b",
+        "([\\p{Greek}\\p{Cyrillic}\\p{Han}])",
+        "([\\u{10FFFF}])",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        ref program = regex._compiled[].forward
+        var points = List[UInt32]()
+        for cp in range(0x840):
+            points.append(UInt32(cp))
+        for boundary in program.boundaries:
+            points.append(boundary)
+            if boundary > 0:
+                points.append(boundary - 1)
+        points.append(0x10FFFF)
+        for cp in points:
+            var interval = 0
+            for k in range(1, len(program.boundaries)):
+                if program.boundaries[k] > cp:
+                    break
+                interval = k
+            assert_equal(
+                program.class_of(cp), Int(program.interval_class[interval])
+            )
+            for cls in range(len(program.class_ranges)):
+                ref ranges = program.class_ranges[cls]
+                var expected = False
+                for k in range(0, len(ranges), 2):
+                    if ranges[k] <= cp and cp <= ranges[k + 1]:
+                        expected = True
+                        break
+                assert_equal(class_contains(ranges, cp), expected)
+    assert_false(class_contains(List[UInt32](), 0))
