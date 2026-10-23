@@ -1,7 +1,7 @@
-"""ClickBench's 43 queries over the `hits` table, expressed as lazy plans so
-projection pushdown reads only the columns each query uses. `engines.py`
-contains the corresponding SQL and expression-query forms; output columns
-follow the SQL. Usage: see
+"""ClickBench's 43 queries over the `hits` table, written with this
+library's lazy API so projection pushdown reads only the columns each query
+uses, as Polars' lazy versions do. engines.py holds ClickBench's DuckDB SQL
+and the Polars versions; output columns follow the SQL. Usage: see
 suite_common.mojo."""
 from std.collections import Dict
 

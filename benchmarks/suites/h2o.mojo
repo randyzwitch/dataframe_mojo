@@ -1,5 +1,5 @@
-"""H2O.ai db-benchmark group-by and join queries (see `engines.py` for the
-reference SQL and expression-query translations). Usage: see suite_common.mojo."""
+"""H2O.ai db-benchmark group-by and join queries (see engines.py for the
+reference SQL and the Polars versions). Usage: see suite_common.mojo."""
 from std.collections import Dict
 from std.sys import argv
 

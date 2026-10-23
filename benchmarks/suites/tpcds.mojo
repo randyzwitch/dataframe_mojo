@@ -1,6 +1,7 @@
-"""TPC-DS queries expressed as lazy plans. Each query builds one plan over
-the tables and collects it, as the PDS-H runner does. `engines.py` holds
-the expression-query translations; the reference queries are in SQL text.
+"""TPC-DS: queries from DuckDB's `tpcds_queries()`, written with this
+library's lazy API. Each query builds one plan over the tables and collects
+it, as the PDS-H runner does. engines.py holds the Polars versions; DuckDB
+runs the SQL text.
 
 Translated so far, each batch chosen by a rule on the SQL text and not by
 timings: the 23 single-block queries (one SELECT, no window, rollup or set
@@ -23,8 +24,8 @@ translated`, so it is counted in every report instead of dropped. The same queri
 literals compared with them must be decimals too (`like`). Usage: see
 suite_common.mojo.
 
-SQL ORDER BY puts nulls last unless the query says NULLS FIRST; `ordered`
-takes the placement because a LIMIT follows most sorts.
+SQL ORDER BY puts nulls last in DuckDB unless the query says NULLS FIRST;
+`ordered` takes the placement because a LIMIT follows most sorts.
 """
 from std.collections import Dict, Optional
 

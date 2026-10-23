@@ -1,4 +1,4 @@
-"""Expression-query and SQL workers for the external benchmark suites.
+"""Polars and DuckDB workers for the external benchmark suites.
 
 Usage (oracle environment):
 
@@ -6,15 +6,16 @@ Usage (oracle environment):
 
 QUERIES is comma-separated. The worker loads every table into memory once
 (untimed), then for each query runs it once to warm up and times REPS runs.
-Each timed run materializes the full result: the expression-query worker
-collects a DataFrame, while the SQL worker creates a temporary table, as
-the H2O.ai db-benchmark does. It prints the lines documented in
-suite_common.mojo, each tagged with its query, so the driver checks every
-answer the same way.
+Each timed run materializes the full result: Polars collects a DataFrame and
+DuckDB creates a temporary table, as the H2O.ai db-benchmark does. It prints
+the lines documented in suite_common.mojo, each tagged with its query, so
+the driver checks every engine's answer the same way.
 
-The SQL worker runs each suite's reference query text; the expression-query
-worker runs translations of those queries. A TPC-DS query without a
-translation yet is reported as unsupported, not dropped.
+DuckDB runs the reference SQL for each suite: db-benchmark's queries,
+`tpch_queries()` for PDS-H, `tpcds_queries()` for TPC-DS, and ClickBench's
+`queries.sql`. The Polars versions are idiomatic translations of the same
+queries. A TPC-DS query without a translation yet is reported as
+unsupported, not dropped.
 """
 
 from datetime import date
@@ -47,8 +48,8 @@ def _row_number(frame, name):
 
 
 def summary(frame) -> tuple:
-    """Order-insensitive summary of a result: its height, one number per
-    column (the sum of its per-row numbers, nulls skipped) and one per
+    """Order-insensitive summary of a Polars result: its height, one number
+    per column (the sum of its per-row numbers, nulls skipped) and one per
     pair of neighbouring columns (the sum of the products of their per-row
     numbers, a null counting as 0). The pair sums keep rows together:
     results that swap values between rows, such as [(1, 0), (2, 2)] and

@@ -1,4 +1,4 @@
-"""Issue #224: 10M-left/1M-right as-of join comparison.
+"""Issue #224: 10M-left/1M-right as-of join versus Polars.
 
 Development mechanism measurement, not an external-suite headline. Both
 engines read the same Parquet inputs before timing, use the same thread

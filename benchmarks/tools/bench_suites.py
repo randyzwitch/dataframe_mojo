@@ -1,26 +1,25 @@
-"""Run the external benchmark suites.
+"""Run the external benchmark suites against Polars and DuckDB.
 
 See docs/design/benchmarks.md for the rules these measurements serve. Run under the
 oracle environment, after building libdfparquet (pixi run -e native
 build-dfparquet):
 
     # A code change, in minutes: development suites (H2O at 1M rows, PDS-H
-    # and TPC-DS at scale factor 0.1), this build against main and cached
-    # reference outcomes.
+    # and TPC-DS at scale factor 0.1), this build against main, Polars/DuckDB
+    # from the reference cache.
     pixi run -e oracle python3 benchmarks/tools/bench_suites.py --baseline main
 
     # A report: 10M rows, three rounds, fast-path coverage, development and
     # held-out suites (ClickBench).
     pixi run -e oracle python3 benchmarks/tools/bench_suites.py --tier full --all-suites
 
-One worker process per (suite, variant, implementation, round) loads the
-tables once (untimed), then warms up and times --reps runs of each query;
-the per-round figure is the fastest run, the report shows the median over
-rounds, and the order of implementations under test rotates. Every answer
-is checked against a reference result (see `engines.py` `summary`); a wrong
-answer is reported as such and excluded from ratios. Unsupported queries
-are counted, not dropped. Data lives outside the repository
-(`benchmarks/suites/datagen.py`).
+One worker process per (suite, variant, engine, round) loads the tables once
+(untimed), then warms up and times --reps runs of each query; the per-round
+figure is the fastest run, the report shows the median over rounds, and the
+order of the engines under test rotates. Every answer is checked against
+DuckDB (see engines.py `summary`); a wrong answer is reported as such and
+excluded from ratios. Unsupported queries are counted, not dropped. Data
+lives outside the repository (benchmarks/suites/datagen.py).
 """
 
 import argparse
@@ -645,9 +644,8 @@ def _cache_key(engine, paths, args):
 
 
 def load_reference(suite, variant, engine, paths, args):
-    """Cached reference outcomes for this data, implementation version and
-    thread count, or None. Their code does not change when this library
-    does."""
+    """Cached Polars/DuckDB outcomes for this data, engine version and thread
+    count, or None. Their code does not change when this library does."""
     path = _cache_file(suite, variant, engine)
     if not path.exists():
         return None
@@ -814,8 +812,8 @@ def _median_ms(runs):
 
 
 def evaluate(result):
-    """Per (suite, variant, query, implementation): status and median time,
-    with answers checked against an available reference result."""
+    """Per (suite, variant, query, engine): status and median time, with
+    answers checked against DuckDB (or Polars when DuckDB did not run)."""
     grouped = {}
     for run in result["runs"]:
         key = (run["suite"], run["variant"], run["query"], run["engine"])
