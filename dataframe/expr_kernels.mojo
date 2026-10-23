@@ -169,12 +169,18 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
             return Scalar[D](0) / Scalar[D](0)
         return x % y
     elif op == POW:
-        # A square is the exact product, as Polars computes it (integral
-        # exponents 2 to 9 multiply). The platform pow can miss the
-        # correctly rounded square by an ulp, which made pow(corr, 2) differ
-        # between the CPU and Metal in H2O q9.
-        if y == 2:
-            return x * x
+        # Polars' pow_on_floats (crates/polars-expr/src/dispatch/pow.rs):
+        # exponent 0.5 is sqrt, and an integral exponent from 2 to 9
+        # multiplies left to right. The platform pow can miss the correctly
+        # rounded square by an ulp, which made pow(corr, 2) differ between
+        # the CPU and Metal in H2O q9. Metal's power does the same.
+        if y == 0.5:
+            return sqrt(x)
+        if y > 1 and y < 10 and y == floor(y):
+            var product = x
+            for _ in range(1, Int(y)):
+                product = product * x
+            return product
         # The toolchain approximation violates NaN/infinity rules and loses
         # accuracy even for 10**0.5. Use the platform floating implementation.
         comptime if D == DType.float32:

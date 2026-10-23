@@ -199,21 +199,35 @@ def test_native_metal_floating_power_profile_family_exact_budget_and_runtime_reu
 
 
 # requires: metal
-def test_native_metal_floating_square_is_bitwise_the_cpu_square() raises:
+def test_native_metal_polars_power_special_cases_are_bitwise_the_cpu_result() raises:
     var runtime = require_metal()
     var values = List[Float64]()
     var state = UInt64(0x9E3779B97F4A7C15)
-    for _ in range(20000):
+    for _ in range(5000):
         state = state * 6364136223846793005 + 1442695040888963407
         values.append(Float64(state >> 11) / 9007199254740992.0 + 0.01)
-    var frame = DataFrame([Series("x", Column[Float64](values^))])
-    var query = frame.lazy().select(col("x").pow(lit(Float64(2.0))))
-    var actual = query.collect(accelerator=runtime).column("x").float64()
-    var expected = (
-        query.collect(engine="cpu", streaming=False).column("x").float64()
-    )
-    for row in range(frame.height()):
-        assert_equal(
-            bitcast[DType.uint64](actual._get(row)),
-            bitcast[DType.uint64](expected._get(row)),
-        )
+    values.append(-3.5)
+    values.append(0.0)
+    values.append(-0.0)
+    for dtype in [DataType.FLOAT64, DataType.FLOAT32]:
+        var frame = DataFrame([Series("x", Column[Float64](values.copy()))])
+        frame = frame.with_columns(col("x").cast(dtype))
+        for exponent in [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]:
+            var power = lit(
+                Float32(exponent)
+            ) if dtype == DataType.FLOAT32 else lit(exponent)
+            var query = frame.lazy().select(col("x").pow(power))
+            var actual = query.collect(accelerator=runtime).column("x")
+            var expected = query.collect(engine="cpu", streaming=False).column(
+                "x"
+            )
+            var a = actual.cast(DataType.FLOAT64).float64()
+            var b = expected.cast(DataType.FLOAT64).float64()
+            for row in range(frame.height()):
+                if a.is_valid(row) and isnan(b._get(row)):
+                    assert_true(isnan(a._get(row)))
+                    continue
+                assert_equal(
+                    bitcast[DType.uint64](a._get(row)),
+                    bitcast[DType.uint64](b._get(row)),
+                )

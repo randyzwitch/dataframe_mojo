@@ -695,7 +695,10 @@ def power_exp(a: Double) -> UInt64:
     return pack(0, p[1] + Int32(k), sig)
 
 
-def power(a: UInt64, b: UInt64) -> UInt64:
+def power(a: UInt64, b: UInt64, single: Bool = False) -> UInt64:
+    """Polars' pow_on_floats: sqrt for 0.5, left-to-right products for the
+    integral exponents 2 to 9 (rounded to binary32 at each step when single),
+    otherwise the compensated general power."""
     comptime ONE = UInt64(0x3FF0000000000000)
     var x = absolute(a)
     var y = absolute(b)
@@ -705,6 +708,8 @@ def power(a: UInt64, b: UInt64) -> UInt64:
         return quiet(a)
     if is_nan(b):
         return quiet(b)
+    if b == 0x3FE0000000000000:
+        return sqrt(a)
     if y == INF:
         if x == ONE:
             return ONE
@@ -727,8 +732,14 @@ def power(a: UInt64, b: UInt64) -> UInt64:
         return a
     if b == (ONE | SIGN):
         return div(ONE, a)
-    if b == 0x3FE0000000000000:
-        return sqrt(x)
+    for count in range(2, 10):
+        if b == from_unsigned(UInt64(count)):
+            var product = a
+            for _ in range(1, count):
+                product = mul(product, a)
+                if single:
+                    product = from_float32(to_float32(product))
+            return product
     var base = parts(x)
     if integral_exponent and base[0] == HIDDEN:
         var p = mul(from_signed(Int64(base[1])), b)
@@ -741,8 +752,6 @@ def power(a: UInt64, b: UInt64) -> UInt64:
             Int32(to_integer(p, 64, False)[0].cast[DType.int64]()),
             0x0080000000000000,
         )
-    if b == 0x4000000000000000:
-        return mul(a, a)
     var approximate = mul(b, log(x))
     if less(0x408F400000000000, absolute(approximate)):
         return sign | (UInt64(0) if approximate >> 63 else INF)
