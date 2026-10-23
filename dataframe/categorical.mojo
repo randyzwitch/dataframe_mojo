@@ -59,7 +59,7 @@ def encode(values: Series) raises -> Series:
             codes[i] = UInt32(id)
             valid[i] = True
     return Series(values.name(), Column[UInt32](codes^, valid)).with_dtype(
-        DataType.categorical(dictionary^)
+        DataType.categorical(dictionary^, distinct=True)
     )
 
 

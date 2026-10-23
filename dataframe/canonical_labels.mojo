@@ -6,7 +6,6 @@ the dictionary it was given (codes round-trip). Grouping therefore replaces
 each code by the first code of its label before it numbers the keys.
 """
 from .column import Column
-from .distinct_statistics import _hash_bytes
 from .dtype import CategoricalDictionary
 from .series import Series
 
@@ -14,35 +13,12 @@ from .series import Series
 def canonical_code_map(
     dictionary: CategoricalDictionary,
 ) -> Optional[List[UInt32]]:
-    """For each code, the first code holding the same label (#943). Equal
-    labels are equal group keys, as in Polars, whose categories never repeat
-    a string. None when no label repeats, which is every dictionary this
-    library builds itself; Arrow and Parquet dictionaries may repeat one."""
-    var n = len(dictionary)
-    var size = 16
-    while size < 2 * n:
-        size *= 2
-    var table = List[Int32](length=size, fill=-1)
-    var result = List[UInt32](capacity=n)
-    var repeated = False
-    for code in range(n):
-        var label = dictionary.get(code)
-        var slot = Int(_hash_bytes(label.as_bytes())) & (size - 1)
-        var found = -1
-        while table[slot] >= 0:
-            if dictionary.get(Int(table[slot])) == label:
-                found = Int(table[slot])
-                break
-            slot = (slot + 1) & (size - 1)
-        if found < 0:
-            table[slot] = Int32(code)
-            result.append(UInt32(code))
-        else:
-            result.append(UInt32(found))
-            repeated = True
-    if not repeated:
+    """For each code, the first code holding the same label (#943); None
+    when no label repeats. Read from the dictionary, where
+    `DataType.categorical` computed it once."""
+    if len(dictionary.canonical) == 0:
         return None
-    return result^
+    return dictionary.canonical.copy()
 
 
 def label_map(values: Series) -> Optional[List[UInt32]]:
