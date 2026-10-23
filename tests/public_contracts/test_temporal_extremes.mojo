@@ -1,6 +1,6 @@
 """Extreme date fields keep Gregorian meaning without signed epoch-shift wrap."""
 # contract-group: expr.temporal
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col
 
 
@@ -133,3 +133,35 @@ def test_date_fields_match_independent_calendar_across_full_storage_domain() rai
         frame.lazy().select_exprs(full_date_fields()).collect(engine="cpu"),
         expected,
     )
+
+
+def _date_frame(day: Int64) raises -> DataFrame:
+    return DataFrame(
+        [Series("t", Column[Int64]([day])).with_dtype(DataType.DATE)]
+    )
+
+
+def test_date_offsets_and_truncation_raise_when_the_result_leaves_int64() raises:
+    # Pins the boundary the Metal calendar contracts follow (#939): a Date
+    # result outside Int64 raises on the CPU instead of wrapping.
+    for day in List[Int64]([Int64.MAX - 1, Int64.MAX]):
+        for interval in List[String](["1mo", "1y"]):
+            with assert_raises(contains="overflows Int64"):
+                _ = _date_frame(day).select(col("t").dt().offset_by(interval))
+    for day in List[Int64]([Int64.MIN, Int64.MIN + 1]):
+        for interval in List[String](["-1mo", "-1y"]):
+            with assert_raises(contains="overflows Int64"):
+                _ = _date_frame(day).select(col("t").dt().offset_by(interval))
+        with assert_raises(contains="overflows Int64"):
+            _ = _date_frame(day).select(col("t").dt().truncate("1mo"))
+    for day in List[Int64]([Int64.MIN, Int64.MIN + 1, -719528, 0, Int64.MAX]):
+        for interval in List[String](
+            ["749999999999999999y", "-749999999999999999y"]
+        ):
+            with assert_raises(contains="overflows Int64"):
+                _ = _date_frame(day).select(col("t").dt().offset_by(interval))
+    # The far ends still move toward the middle and truncate backwards.
+    var low = _date_frame(Int64.MIN).select(col("t").dt().offset_by("1mo"))
+    assert_true(low.item(0, "t").to_physical() > Int64.MIN)
+    var high = _date_frame(Int64.MAX).select(col("t").dt().truncate("1mo"))
+    assert_true(high.item(0, "t").to_physical() < Int64.MAX)
