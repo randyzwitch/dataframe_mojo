@@ -180,7 +180,7 @@ from .aggregate_table import (
     reduction_supported,
     states_supported,
 )
-from .huge_pages import huge_list
+from .huge_pages import huge_capacity, huge_list, huge_uninit
 from .row_sort import row_arg_sort
 from .indexed_reduce import (
     indexed_reductions,
@@ -4524,8 +4524,8 @@ struct _RangeJoinProbeJob(MatchJob):
         self.start = start
         self.end = end
         self.include_unmatched = include_unmatched
-        self.left_rows = List[Int](capacity=end - start)
-        self.right_rows = List[Int](capacity=end - start)
+        self.left_rows = huge_capacity[Int](end - start)
+        self.right_rows = huge_capacity[Int](end - start)
 
     def take_matches(
         mut self, mut left: List[Int], mut right: List[Int]
@@ -4769,8 +4769,8 @@ def _bounded_int64_join_rows(
     for job in range(len(jobs)):
         offsets.append(offsets[job] + len(jobs[job].left_rows))
     var total = offsets[len(jobs)]
-    left_rows = List[Int](unsafe_uninit_length=total)
-    right_rows = List[Int](unsafe_uninit_length=total)
+    left_rows = huge_uninit[Int](total)
+    right_rows = huge_uninit[Int](total)
     var copies = List[RowsCopyJob](capacity=len(jobs))
     for job in range(len(jobs)):
         copies.append(
