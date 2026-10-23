@@ -448,7 +448,9 @@ def test_public_float_stream_extrema_exact_zero_nan_inf_and_null_bits() raises:
                                 assert_equal(
                                     bits, sign if negative else UInt64(0)
                                 )
-                            elif group == 1 or (group == 2 and name == "mx"):
+                            elif group == 1:
+                                # Only group 1 is all NaN; NaN gives way to
+                                # the zeros in group 2 (#816).
                                 assert_equal(bits, nan)
                             elif group == 4:
                                 assert_equal(
