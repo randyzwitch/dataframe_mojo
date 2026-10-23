@@ -378,6 +378,24 @@ struct DataFrame(Copyable, Sized, Writable):
                 return box[].distinct(column)
         return -1
 
+    def _sampled(self, names: List[String], runs: Int, run: Int) raises -> Self:
+        """The named columns' rows at `runs` evenly spaced runs of `run`
+        rows. A loaded table keeps each column's merged runs with its
+        statistics and reads them back; any other frame merges them
+        again."""
+        var columns = List[Series](capacity=len(names))
+        for name in names:
+            var column = self[name]
+            if self._statistics:
+                var box = self._statistics.value()
+                columns.append(box[].sample(column, runs, run))
+            else:
+                var parts = List[Series](capacity=runs)
+                for k in range(runs):
+                    parts.append(column.slice(k * (self._height // runs), run))
+                columns.append(Series._from_chunks(parts).rechunk())
+        return Self(columns^, height=runs * run)
+
     def rechunk(self) raises -> Self:
         """Return one contiguous array per column, copying only chunked
         data; chunked columns merge in parallel, one job each (a 159K-row
