@@ -12,13 +12,13 @@ engine goes:
 3. The forward DFA finds where the leftmost-first match ends, skipping
    input with literal prefixes or a byte-set prefilter while it sits in its
    start state.
-4. The reverse DFA, run back from that end, finds where it starts; a
-   pattern anchored at the start of the text needs no reverse pass.
+4. The reverse DFA, run back from that end, finds where it starts. Anchored
+   patterns and patterns with a fixed code-point length need no reverse DFA.
 5. Only when capture groups are needed does a capture engine run.
-   Eligible deterministic programs use one-pass tables on ASCII spans;
-   other spans use the bounded backtracker when its visited set fits in
-   256 KiB, the Pike VM otherwise. Anchored ASCII one-pass captures skip
-   the DFAs. As in RE2, anchored captures also skip the DFAs when the
+   Eligible deterministic programs use one-pass tables; other programs use
+   the bounded backtracker when its visited set fits in 256 KiB, the Pike VM
+   otherwise. Anchored one-pass captures skip the DFAs. As in RE2, anchored
+   captures also skip the DFAs when the
    backtracker can cover the whole text.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
@@ -30,7 +30,7 @@ from .backtrack import Backtracker
 from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
-from .pikevm import PikeVM, decode
+from .pikevm import PikeVM, decode, previous_start
 from .program import Program, compile_program
 from .syntax import (
     Ast,
@@ -429,6 +429,39 @@ def _flat_sets(sets: _Sets) -> List[UInt8]:
     return out^
 
 
+def _fixed_width(ast: Ast, node: Int) -> Int:
+    """The number of code points in every match, or -1 when it varies."""
+    var kind = ast.kind[node]
+    if kind == NODE_LITERAL or kind == NODE_CLASS:
+        return 1
+    if kind == NODE_LOOK or kind == NODE_EMPTY:
+        return 0
+    if kind == NODE_GROUP:
+        return _fixed_width(ast, ast.kid(node, 0))
+    if kind == NODE_CONCAT:
+        var total = 0
+        for k in range(ast.count[node]):
+            var width = _fixed_width(ast, ast.kid(node, k))
+            if width < 0:
+                return -1
+            total += width
+        return total
+    if kind == NODE_ALTERNATE:
+        var width = _fixed_width(ast, ast.kid(node, 0))
+        for k in range(1, ast.count[node]):
+            if _fixed_width(ast, ast.kid(node, k)) != width:
+                return -1
+        return width
+    if ast.b[node] == 0:
+        return 0
+    var width = _fixed_width(ast, ast.kid(node, 0))
+    if width == 0:
+        return 0
+    if width < 0 or ast.a[node] != ast.b[node]:
+        return -1
+    return width * ast.a[node]
+
+
 def _anchored(ast: Ast, node: Int) -> Bool:
     """Whether every match starts at the start of the text."""
     var kind = ast.kind[node]
@@ -453,6 +486,7 @@ struct _Compiled(Movable):
     var names: List[String]
     var anchored: Bool
     var literal: Bool
+    var fixed_width: Int32
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
@@ -465,6 +499,7 @@ struct _Compiled(Movable):
         self.reverse = compile_program(ast, True)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
+        self.fixed_width = Int32(_fixed_width(ast, ast.root))
         var info = _analyze(ast, ast.root)
         # A pattern with assertions is not a plain substring search even
         # when it matches only one string.
@@ -736,6 +771,13 @@ struct Matcher(Movable):
             # The anchored forward search already knows where the match
             # starts; RE2 runs the reverse DFA only for unanchored ones.
             return (start, end)
+        if end != GAVE_UP and c.fixed_width >= 0:
+            # The forward match's end and its code-point count determine
+            # the start. Walk UTF-8 boundaries instead of replaying the NFA.
+            var begin = end
+            for _ in range(Int(c.fixed_width)):
+                begin = previous_start(text, begin)
+            return (begin, end)
         if end != GAVE_UP:
             var begin = self.reverse.find_reverse(c.reverse, text, end, start)
             if begin >= 0:

@@ -678,6 +678,63 @@ def test_cached_start_states_preserve_context_sensitive_matches() raises:
             _ = text
 
 
+def test_fixed_width_spans_match_vm_across_utf8_boundaries() raises:
+    var patterns: List[String] = [
+        "\\pL",
+        "\\p{Ll}",
+        "(\\pL)",
+        "(\\w{2})",
+        "(?i)(ab|κλ)",
+        "(?:a|β){2}",
+        "[\\p{Greek}\\p{Han}]{3}",
+        "\\b\\w\\b",
+        "(?m)^\\w{2}$",
+        "\\b",
+        "(?:\\b)*",
+        "(?:a+){0}",
+        "(a|ββ)",
+        "(a?)(b*)",
+    ]
+    var texts: List[String] = [
+        "",
+        "a",
+        "β",
+        " aa ββ κλ AB 漢字仮 🙂",
+        "\nαβ\nab\n",
+        "aβaβ",
+        "é߿ࠀ漢🙂",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+            _ = text
+    # Mixed byte widths still have one fixed code-point count. The reverse
+    # DFA stays unused even on a long successful span.
+    var regex = Regex("[αB]{255}")
+    var matcher = Matcher(regex)
+    var text = String("α") * 254 + "B"
+    var result = matcher.find(_span(text))
+    assert_equal(result[0], 0)
+    assert_equal(result[1], text.byte_length())
+    assert_equal(matcher.reverse.state_count(), 0)
+    _ = text
+
+
 def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     from dataframe.regex.dfa import find_literal
 
