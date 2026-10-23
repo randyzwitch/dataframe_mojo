@@ -563,7 +563,7 @@ def _validity_bytes(series: Series, n: Int) -> List[UInt8]:
 
 def _null_test[present: Bool](input: Series) -> Series:
     """IS NOT NULL (present) or IS NULL, read from the validity bitmap a
-    byte at a time, as DuckDB's IsNull reads a vector's validity mask; the
+    byte at a time; the
     result is never null. No decimal widening: only validity is read."""
     var n = len(input)
     var count = (n + 7) // 8
@@ -707,8 +707,8 @@ def _decimal_output(
 
 
 def _decimal_quotient(left: Series, right: Series) raises -> Series:
-    """A decimal quotient as DuckDB computes it: both sides as DOUBLE,
-    null where the divisor is zero or either side is null."""
+    """Compute a decimal quotient after converting both sides to Float64;
+    return null where the divisor is zero or either side is null."""
     var x = _decimal_to_float(left)
     var y = _decimal_to_float(right)
     ref a = x._data[Column[Float64]]
@@ -766,11 +766,11 @@ def _largest_magnitude[D: DType](column: Column[Scalar[D]]) -> Int128:
 def _decimal_mul_narrow[
     divisor: Int, A: DType, B: DType
 ](a: Column[Scalar[A]], b: Column[Scalar[B]], n: Int) -> Optional[List[Int128]]:
-    """A decimal product rounded half-even by `divisor` (a power of ten,
-    or 1), in 64-bit arithmetic when the operands' largest magnitudes say
-    no product can pass Int64 (DuckDB proves the same from column
-    statistics): the multiply cannot overflow and the division by a
-    constant is a multiply and shift. None when it could."""
+    """Compute a decimal product rounded half-even by `divisor` (a power
+    of ten or 1) in 64-bit arithmetic when the operands' largest
+    magnitudes guarantee the product fits Int64. Division by a constant
+    then reduces to a multiply and shift. Return None when it could
+    overflow."""
     var x_most = _largest_magnitude(a)
     var y_most = _largest_magnitude(b)
     if x_most > Int128(Int64.MAX) or y_most > Int128(Int64.MAX):
@@ -925,8 +925,8 @@ def _decimal_dense64[
     right: DataType,
     dtype: DataType,
 ) raises -> Optional[Series]:
-    """Decimal ADD, SUB or MUL with a result of at most 18 digits, from
-    64-bit operands without nulls, in 64-bit arithmetic as DuckDB does.
+    """Decimal ADD, SUB, or MUL with a result of at most 18 digits, from
+    64-bit operands without nulls, in 64-bit arithmetic.
     Results are checked against their bound precision; raw physical
     operands may exceed their declared digits after with_dtype. The check
     folds into one flag, and on overflow the 128-bit path reruns to name
@@ -1503,8 +1503,8 @@ def _sign_ints[D: DType](input: Column[Scalar[D]]) raises -> Series:
 
 
 def _decimal_sign_or_truncate(op: Int, input: Series) raises -> Series:
-    """A decimal's sign (-1, 0 or 1 at its scale) or its value truncated
-    toward zero, in its own type, as in Polars."""
+    """A decimal's sign (-1, 0, or 1 at its scale) or its value truncated
+    toward zero, in its own type."""
     var dtype = input.dtype()
     var wide = input._decimal128()
     ref column = wide._data[Column[Int128]]

@@ -113,10 +113,9 @@ def places(value: Int128, digits: Int) -> String:
 
 
 def test_decimal_products_agree_in_64_and_128_bits() raises:
-    """Products of two-place decimals, exact at four places (DuckDB's
-    decimal(18, 4) for decimal(18, 2) operands): from operands small
-    enough for 64 bits, and the same rows next to one huge price, which
-    makes the overflow check run; the same products either way."""
+    """Products of two-place decimals are exact at four places. Test
+    operands small enough for 64 bits and the same rows beside one huge
+    price, which exercises the overflow check without changing products."""
     var prices = List[Int64]()
     var rates = List[Int64]()
     for row in range(ROWS):

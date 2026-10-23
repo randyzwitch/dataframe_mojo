@@ -4,10 +4,9 @@ The partitioned group-by (`group_by.partitioned`) orders row numbers by key
 hash into buckets and, before #426, gathered every aggregated column into
 that order so each bucket could reduce a contiguous slice. For a plain
 reduction of a column that copy is not needed: the bucket reads each value
-at its source row (`order[lo + p]`) and updates its group's state in place,
-as Polars' and DuckDB's hash aggregates update states from the rows they
-are handed. The states and `finish` are `Reducer`'s, so results are those
-of the gathered path.
+at its source row (`order[lo + p]`) and updates its group's state in place.
+The states and `finish` are `Reducer`'s, so results match the gathered
+path.
 
 Plain numeric reductions update shared Reducer states directly, including
 first/last, moments and distinct counts. A median or quantile lays the

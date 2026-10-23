@@ -3,12 +3,10 @@
 A filter part comparing a column with a constant (`col == v`, `<`, `<=`,
 `>`, `>=`, and so a `between`) keeps one contiguous run of rows when the
 column is in ascending order with no nulls, so the run's bounds come from
-two binary searches and the rows are a zero-copy slice, as DuckDB's zone
-maps and ClickHouse's primary key skip whole blocks. Order is checked, not
-assumed: one pass over the column's whole buffer the first time, stopping
+two binary searches and the rows are a zero-copy slice. Order is checked,
+not assumed: one pass over the column's whole buffer the first time, stopping
 at the first descent, kept in the buffer's order cell (`Column._facts`)
-for every later filter on any window onto it, as DuckDB keeps zone maps
-with its row groups. Data stored in key order is
+for every later filter on any window onto it. Data stored in key order is
 common (ClickBench's hits table is ordered by CounterID and EventDate);
 after one column narrows the window, the next is checked on that window,
 where a secondary sort key is in order again.

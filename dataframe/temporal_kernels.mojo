@@ -152,10 +152,10 @@ def _days(value: Int64, dtype: DataType) -> Int64:
 
 @fieldwise_init
 struct Truncation(Copyable):
-    """`truncate(every)` for one column, its interval parsed once (as
-    Polars parses a `Duration` once per expression): calendar months, or a
-    fixed step in the column's ticks from an origin. Parsing per value was
-    half of ClickBench q42, a minute truncation of 560K timestamps."""
+    """`truncate(every)` for one column, its interval parsed once:
+    calendar months, or a fixed step in the column's ticks from an origin.
+    Parsing per value took half the time in ClickBench q42, a minute
+    truncation of 560K timestamps."""
 
     var dtype: DataType
     var months: Int64
@@ -228,7 +228,7 @@ def _truncate(value: Int64, dtype: DataType, every: String) raises -> Int64:
 struct ZonedOffset(Copyable):
     """An offset_by for a zone-aware datetime, its interval parsed once:
     months and days move the local wall-clock time, then fixed units move
-    the UTC instant (as Polars)."""
+    the UTC instant."""
 
     var dtype: DataType
     var months: Int64
@@ -1007,7 +1007,7 @@ def _zoned_range(
     start: String, end: String, interval: String, dtype: DataType, name: String
 ) raises -> Series:
     """A range in a time zone: calendar steps (d, w, mo, y) move the local
-    time from start, fixed steps move the instant, as in Polars."""
+    time from start, fixed steps move the instant."""
     var zone = zone_of(dtype)
     var first = parse_in(start, dtype, "", zone)
     var last = parse_in(end, dtype, "", zone)

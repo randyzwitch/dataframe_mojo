@@ -1,5 +1,5 @@
-"""String functions that need no regular expressions (#798), following
-Polars 1.44: to_titlecase, strip_prefix/strip_suffix, find, count_matches,
+"""String functions that need no regular expressions (#798):
+to_titlecase, strip_prefix/strip_suffix, find, count_matches,
 contains_any, replace_many, encode/decode, to_integer and split_exact/splitn.
 Nulls propagate; payloads of null rows are never read.
 
@@ -9,8 +9,7 @@ affix, a split field) are views into the source's buffers, so no row's bytes
 are copied, as `slice_strings` does; other string results are appended to one
 `StringBuilder` without a `String` per row (only `to_titlecase` allocates, for
 each code point past ASCII). `contains_any` and `replace_many` match every
-pattern in one pass with an Aho-Corasick automaton over byte classes, the
-structure of the aho-corasick crate Polars uses.
+pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
@@ -347,9 +346,8 @@ def _split_into[
     remainder: Bool,
     mut parts: List[P],
 ):
-    """Each row's parts into the fields in order, as Rust's `str::split`,
-    `split_inclusive` and `splitn` give them (Polars' split_to_struct); an
-    empty separator takes one code point per field. Fields past the row's
+    """Each row's parts into the fields in order; an empty separator takes
+    one code point per field. Fields past the row's
     parts are null."""
     var rows = _Bytes(column)
     var nulls = column.null_count() > 0
@@ -457,9 +455,9 @@ struct _Automaton(Movable):
     class, so the table stays small; with ASCII case folding an upper-case
     byte takes its lower-case byte's class.
 
-    Standard semantics (Polars' default): scanning from a position, the
-    first state that ends a pattern reports the longest pattern ending
-    there. Leftmost-first (`leftmost`): the match that starts first, the
+    Standard semantics: scanning from a position, the first state that
+    ends a pattern reports the longest pattern ending there. Leftmost-first
+    (`leftmost`): the match that starts first, the
     earlier pattern among those starting at one position."""
 
     var patterns: List[String]
@@ -621,9 +619,9 @@ def _contains_any(column: StringColumn, automaton: _Automaton) raises -> Series:
 def _replace_many(
     column: StringColumn, automaton: _Automaton, replacements: List[String]
 ) raises -> Series:
-    """Every match replaced, scanning left to right without overlaps. An
-    empty match is not taken where the previous match ended, and after one
-    the scan moves on by a code point, as in Polars."""
+    """Every match is replaced, scanning left to right without overlaps.
+    An empty match is not taken where the previous match ended, and after
+    one the scan moves on by a code point."""
     var n = len(column)
     var rows = _Bytes(column)
     var nulls = column.null_count() > 0
@@ -926,8 +924,8 @@ def _ends_word(row: _Row, at: Int, width: Int, ranges: List[UInt32]) -> Bool:
 
 
 def _titlecase(column: StringColumn) raises -> Series:
-    """Polars' `to_titlecase`: the row lowercased, then each character that
-    follows a non-alphabetic one (or starts the row) uppercased. ASCII is
+    """The row is lowercased, then each character that follows a
+    non-alphabetic one (or starts the row) is uppercased. ASCII is
     done byte by byte; other code points go through the Unicode case maps
     of `String.lower` and `String.upper` (full mappings: "ß" uppercases to
     "SS")."""

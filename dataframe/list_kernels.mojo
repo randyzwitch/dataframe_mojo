@@ -208,8 +208,8 @@ def _join(lists: ListColumn, separator: String) raises -> Series:
 
 def _reduce(lists: ListColumn, op: Int) raises -> Series:
     """sum/min/max/mean over each list's valid elements; a list with no
-    valid element gives null (sum gives 0 for an empty valid list, as
-    Polars does, but null for a null list)."""
+    valid element gives null (sum gives 0 for an empty valid list, but
+    null for a null list)."""
     var child = lists.child()
     var n = len(lists)
     comptime for k in range(len(NUMERIC_DTYPES)):

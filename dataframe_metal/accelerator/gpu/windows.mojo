@@ -142,8 +142,8 @@ def _partition_end(
 
 @always_inline
 def _extrema_better(a: UInt64, b: UInt64, dtype: Int64, maximum: Bool) -> Bool:
-    """Whether a beats b. NaN gives way to any number, as in Polars (#816);
-    rolling windows override this so that a NaN in the window is the result."""
+    """Whether a beats b. NaN gives way to any number (#816); rolling
+    windows override this so that a NaN in the window is the result."""
     var an = _nan(a, dtype)
     var bn = _nan(b, dtype)
     if an or bn:

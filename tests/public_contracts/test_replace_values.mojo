@@ -1,4 +1,4 @@
-"""replace and replace_strict recode values as Polars does (#789)."""
+"""replace and replace_strict recode values (#789)."""
 # contract-group: expr.null_logic
 # contract-group: execution.backends
 from std.collections import Dict

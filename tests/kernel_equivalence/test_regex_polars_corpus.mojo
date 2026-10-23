@@ -1,13 +1,13 @@
-"""The regex engine agrees with Polars on a corpus of patterns and strings.
+"""The regex engine is checked against a corpus of patterns and strings.
 
 tests/fixtures/regex/polars_corpus.tsv holds, for every pattern and
-haystack, what Polars 2.0.0 (Rust's `regex`) returns for `contains`,
+haystack, results for `contains`,
 `find`, `count_matches`, `extract_all`, `replace_all` with "<$0>" (which
 shows where every match is, empty ones included), `replace` with "[${1}]",
 `extract` of group 1, and `split` with `literal=False`; or ERROR for a
-pattern Polars rejects. The haystacks cover Unicode, newlines, empty text
+pattern with unsupported syntax. The haystacks cover Unicode, newlines, empty text
 and no-match cases; the patterns cover the supported syntax, anchors,
-empty matches, case folding and the errors. Regenerate it with
+empty matches, case folding and error cases. Regenerate it with
 `pixi run -e oracle python3 scripts/regex_corpus.py`.
 """
 # contract-group: kernel.regex
@@ -92,7 +92,7 @@ def _listing(items: List[String]) -> String:
 
 
 def _expands(pattern: String) -> Bool:
-    """Polars replaces a pattern with no ASCII punctuation as a literal,
+    """A pattern with no ASCII punctuation is replaced as a literal,
     without expanding `$` references in the replacement."""
     for b in pattern.as_bytes():
         if (
@@ -106,7 +106,7 @@ def _expands(pattern: String) -> Bool:
 
 
 def _results(pattern: String, text: String) raises -> List[String]:
-    """What Polars would return, computed with the engine."""
+    """The expected result computed with the engine."""
     var regex = Regex(pattern)
     var matcher = Matcher(regex)
     var t = _span(text)

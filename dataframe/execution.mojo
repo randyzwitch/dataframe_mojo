@@ -2621,10 +2621,8 @@ comptime _WINDOW_BLOCK = 2048
 
 
 struct WindowLayouts(Movable):
-    """Partition layouts of one frame's window expressions, by partition
-    keys, so every `over()` on the same keys in a `with_columns` lays the
-    rows out once (as DuckDB sorts once per PhysicalWindow and Polars
-    caches its window groups by key names)."""
+    """Partition layouts for a frame's window expressions. Expressions
+    using the same keys in a `with_columns` share one row layout."""
 
     var keys: List[String]
     var layouts: List[PartitionLayout]
@@ -2748,9 +2746,9 @@ def _over_contiguous[
     lanes: Int,
     batch_size: Int,
 ) raises -> Optional[Series]:
-    """`over()` evaluated on contiguous partitions, runs of partitions in
-    parallel (DuckDB's window tasks per hash group); None when the rows
-    make a single run, which the row-order route evaluates as well."""
+    """Evaluate `over()` on contiguous partitions, processing runs of
+    partitions in parallel. Return None when the rows make a single run,
+    which the row-order route can evaluate directly."""
     ref node = bound.expr._nodes[index]
     # Runs of whole partitions of about a quarter of a worker's share.
     var target = max(_WINDOW_BLOCK, (height + 4 * lanes - 1) // (4 * lanes))
@@ -3234,10 +3232,9 @@ def _whole_masked_branch[
     workers: Int,
 ) raises -> Optional[Series]:
     """`when(c).then(x)` with null other rows over every row, when `x` is a
-    whole numeric column: `x`'s values as they are, under a validity that
-    adds the predicate's, as Polars' `zip_with` does when the other side
-    is a null scalar (`combine_validities_and`), rather than its values
-    copied batch by batch into a new column (TPC-DS q2's seven weekday
+    whole numeric column: reuse `x`'s values with a validity mask that
+    includes the predicate, rather than copying values batch by batch
+    into a new column (TPC-DS q2's seven weekday
     sums copied their input seven times a morsel, 14% of the query). Only
     the predicate is evaluated in batches. None otherwise."""
     ref node = bound.expr._nodes[index]

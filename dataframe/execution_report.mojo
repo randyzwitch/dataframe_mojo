@@ -6,8 +6,8 @@ rows it read and wrote, how many times it ran, and for a join the rows it
 built an index over, how many indexes it built, the build side and the
 algorithm, and the time it took. The counts are observed, never
 estimated, so tests can assert one build per streaming join and one
-execution per input without timing; the times are for finding where a
-query spends its time, as Polars' and DuckDB's profiles show.
+execution per input without timing. The recorded durations help identify
+where a query spends its time.
 Without a report attached, the executors only test a flag.
 """
 

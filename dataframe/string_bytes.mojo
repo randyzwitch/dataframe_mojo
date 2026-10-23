@@ -44,10 +44,10 @@ struct _Bytes(Copyable, Movable):
     """Row bytes of one string chunk, read through pointers taken once, for
     either storage: offsets and bytes, or Arrow views (16-byte descriptors:
     length and a four-byte prefix, then eight more inline bytes up to
-    twelve or a buffer and an offset), the layout of DuckDB's `string_t`.
-    The column's own accessor re-checks its storage kind and copies the
-    view storage handle, whose reference count every worker shares, per
-    row; that made every kernel slower on views than on offsets."""
+    twelve or a buffer and an offset). The column's own accessor re-checks
+    its storage kind and copies the view storage handle, whose reference
+    count every worker shares, per row; that made every kernel slower on
+    views than on offsets."""
 
     var column: StringColumn
     var views: Int

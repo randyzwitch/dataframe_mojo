@@ -14,11 +14,12 @@ engine goes:
    start state.
 4. The reverse DFA, run back from that end, finds where it starts; a
    pattern anchored at the start of the text needs no reverse pass.
-5. Only when capture groups are needed does a capture engine run,
-   anchored to the match just found: the bounded backtracker for spans
-   whose visited set fits in 256 KiB, the Pike VM otherwise. As in RE2,
-   an anchored pattern over a text the backtracker covers skips steps
-   3 and 4 and goes straight to the backtracker.
+5. Only when capture groups are needed does a capture engine run.
+   Eligible deterministic programs use one-pass tables on ASCII spans;
+   other spans use the bounded backtracker when its visited set fits in
+   256 KiB, the Pike VM otherwise. Anchored ASCII one-pass captures skip
+   the DFAs. As in RE2, anchored captures also skip the DFAs when the
+   backtracker can cover the whole text.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
@@ -26,6 +27,7 @@ instead, so every search stays linear in the haystack.
 from std.memory import ArcPointer
 
 from .backtrack import Backtracker
+from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode
@@ -454,6 +456,7 @@ struct _Compiled(Movable):
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
+    var onepass: Optional[ArcPointer[OnePass]]
 
     def __init__(out self, pattern: String) raises:
         var ast = parse(pattern)
@@ -474,6 +477,12 @@ struct _Compiled(Movable):
             var extracted = _literal_prefixes(ast, ast.root)
             prefixes = extracted.values.copy()
         self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
+        # Capture tables are cold for ordinary searches. Keep their seven
+        # vectors behind a pointer instead of widening the hot program object.
+        var onepass = compile_onepass(self.forward)
+        self.onepass = None
+        if onepass.active():
+            self.onepass = ArcPointer(onepass^)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
@@ -495,10 +504,9 @@ def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
 
 
 struct Regex(Copyable, Movable):
-    """A compiled regular expression in the syntax of Rust's `regex` crate,
-    which Polars uses. Cheap to copy: the compiled programs are shared and
-    never change, so any number of workers can match with one `Regex`, each
-    through its own `Matcher`.
+    """A compiled regular expression. Cheap to copy: the compiled programs
+    are shared and never change, so any number of workers can match with one
+    `Regex`, each through its own `Matcher`.
 
     Supported: literals and escapes (`\\n`, `\\x7F`, `\\u{1F600}`, escaped
     punctuation), `.`, classes with ranges, negation, nesting, `&&`, `--`,
@@ -744,6 +752,32 @@ struct Matcher(Movable):
         """Find the leftmost-first match at or after `start` and fill
         `slots`: group g spans `slots[2g] : slots[2g + 1]`, -1 when it took
         no part."""
+        ref c = self.regex._compiled[]
+        if (
+            c.anchored
+            and start == 0
+            and Bool(c.onepass)
+            and (len(text) == 0 or text[0] < 128)
+        ):
+            # The start state's ASCII table can reject impossible first
+            # bytes before scanning a whole row for ASCII eligibility.
+            if len(text) > 0 and not c.onepass.value()[].matched[0]:
+                var cls = Int(c.forward.ascii_class[Int(text[0])])
+                if c.onepass.value()[].next[cls] < 0:
+                    return False
+            if not _may_match(c, text):
+                return False
+            if ascii_span(text, 0, len(text)):
+                # The capture engines run sequentially and initialize their
+                # scratch before use, so they can share this worker's slots.
+                return c.onepass.value()[].search(
+                    c.forward,
+                    text,
+                    0,
+                    len(text),
+                    self.pike.scratch,
+                    self.slots,
+                )
         if self._direct_captures(text):
             return start == 0 and self._anchored_captures(text)
         var m = self.find(text, start)
@@ -782,6 +816,10 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
+        if Bool(c.onepass) and ascii_span(text, begin, end):
+            return c.onepass.value()[].search(
+                c.forward, text, begin, end, self.pike.scratch, self.slots
+            )
         if Backtracker.fits(c.forward, begin, end):
             return self.backtracker.search(
                 c.forward, text, begin, end, self.slots
@@ -892,8 +930,7 @@ struct Matcher(Movable):
 
 def escape(text: String) -> String:
     """Escape every regex metacharacter (`\\.+*?()|[]{}^$#&-~`), so the
-    result matches `text` literally, like `regex::escape` and Polars'
-    `escape_regex`."""
+    result matches `text` literally."""
     var out = String()
     for cp in text.codepoints():
         var c = Int(cp)

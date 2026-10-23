@@ -1,16 +1,13 @@
 """Thread-owned pipelines over morsels (docs/design/executor-design.md, #538).
 
-A pipeline is a source, a list of row-local steps and a sink. Every worker
-thread runs the whole pipeline on the morsels it takes from the source's
-cursor and pushes into its own sink state; the states are combined once
-when the source is exhausted. The main thread does no per-morsel work.
-DuckDB's `PipelineExecutor` runs one per thread the same way, and Polars'
-streaming engine one task per lane per node.
+A pipeline is a source, a list of row-local steps, and a sink. Each worker
+thread takes morsels from the source cursor, runs the full sequence of
+steps, and updates its own sink state. Sink states are combined once the
+source is exhausted; the main thread does no per-morsel work.
 
-A morsel is a frame and a selection. A filter narrows the selection and
-copies nothing; a column is gathered through the selection when a step
-reads it, once, and the gathered column replaces the shared one. DuckDB
-slices a chunk into dictionary vectors the same way.
+A morsel is a frame and a selection. A filter narrows the selection
+without copying data. When a step reads a column, that column is gathered
+through the selection once and replaces its shared version.
 """
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
@@ -273,8 +270,8 @@ comptime _ZONE_ALL = 2
 
 def _zoned_top(frame: DataFrame, bound: _TopBound) raises -> Int:
     """Whether a morsel's rows can enter a top-k, from the zone maps of
-    its integer key's buffers (DuckDB's dynamic top-k filter, checked
-    against row-group statistics): `_ZONE_NONE` when every value is worse
+    its integer key's buffers and row-group statistics: `_ZONE_NONE` when
+    every value is worse
     than the bound and no row is null (nulls always pass), `_ZONE_ALL`
     when every value passes, `_ZONE_SOME` otherwise or without a usable
     range. A morsel no row of which can enter is skipped unread
@@ -314,8 +311,7 @@ def _bare_columns(exprs: List[Expr]) -> Bool:
 
 @fieldwise_init
 struct _KeyRange(Copyable, Movable):
-    """A finished join build's key range on a source column (DuckDB's
-    min-max runtime join filter, `CreateDynamicMinMaxFilters`): a row
+    """A finished join build's key range on a source column: a row
     whose key is null or outside it joins nothing. `any` is false when the
     build holds no non-null key, so no row joins."""
 
@@ -575,8 +571,7 @@ def _key_ranges(
     """The key ranges of the inner and semi joins among `steps` whose
     probe key is a source column no earlier step replaces: every build is
     finished before the first morsel, so its range can narrow the morsel
-    before any step runs, as DuckDB pushes a build's min-max filter into
-    the probe side's scan."""
+    before any step runs."""
     var ranges = List[_KeyRange]()
     # Names the steps so far show for untouched source columns.
     var source = Dict[String, String]()
@@ -862,8 +857,7 @@ struct Morsel(Movable):
     ) raises -> Bool:
         """Row-local columns computed over every row of a morsel whose
         selection keeps at least half of it, joining it uncompacted and
-        read through the selection like the columns it shares, as DuckDB
-        projects over a selection vector: the selection survives, so the
+        read through the selection: the selection survives, so the
         aggregate table can still read the morsel in place
         (`_in_place_table_rows`). A common subexpression computed below
         an aggregation (PDS-H q1's discounted prices) compacted the whole
@@ -1013,8 +1007,7 @@ struct Morsel(Movable):
         indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
     ) raises -> Bool:
         """An inner, semi or anti join through its prepared index, kept as a
-        selection when each probe row matches at most once (DuckDB's
-        `NextInnerJoin` slices the probe chunk the same way): the probe
+        selection when each probe row matches at most once: the probe
         reads the key columns only, the matched rows narrow the morsel's
         selection, and only the build side's output columns are gathered,
         for the matched rows. The probe side's columns stay where they are
@@ -1123,8 +1116,8 @@ struct Morsel(Movable):
         indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
     ) raises:
         """Probe the join's prepared index with this morsel's rows: the
-        output is the matched rows of both sides (DuckDB's `NextInnerJoin`
-        over one chunk; the probe runs on this worker alone)."""
+        output is the matched rows of both sides; the probe runs on this
+        worker alone."""
         var input = self.materialized()
         var joined = input._join_impl(
             joins[][step.join],
@@ -1256,8 +1249,8 @@ def _float_order(value: Float64) -> Int64:
 struct _SharedBound(Copyable, Movable):
     """The tightest top-k bound any worker has found, shared by all: a
     worker folding its candidates publishes its k-th key, and every
-    worker narrows its next morsel by the tightest (DuckDB's top-n shares
-    its heap boundary across threads). Two atomics: whether a bound is
+    worker narrows its next morsel by the tightest bound. Two atomics:
+    whether a bound is
     set, and the key as an Int64 that orders as the key does."""
 
     var address: Int
@@ -1409,9 +1402,9 @@ struct _PartIndex(Movable):
 
     A String key's words are its length and either its bytes (up to 8,
     exact) or a hash of all of them; for a longer one, equal words are
-    compared once more on the bytes, which the index finds by address in
-    the part's stored key frames, as DuckDB's aggregate table points into
-    its string heap."""
+    compared once more on the bytes, found by address in the part's stored
+    key frames, so long strings are compared by reading their original
+    bytes."""
 
     var slots: List[Int32]
     var hashes: List[UInt64]
@@ -1785,16 +1778,14 @@ struct _GroupedSink(Movable):
     hash part, and inserted into that part's index; the reducer states of
     plain reductions update in place per row, other reductions reduce the
     part's rows into a local state merged by id. No state is built per
-    morsel: DuckDB's thread-local aggregate table, radix-partitioned.
+    morsel; each worker owns a radix-partitioned aggregate table.
 
-    Many groups: the morsels' rows are kept as they come, and the finish
-    runs the eager partitioned group-by over all the workers' rows: one
-    scatter of every row into buckets and cache-local bucket encodes,
-    which inserting rows one at a time into tables that outgrow the
-    caches does not match (ClickBench q32, 10M groups: 850 ms inserted
-    against 300 scattered). Polars' streaming group-by and DuckDB's sink
-    partition and finalize the same way once their tables grow. When the
-    steps only filter, what is kept is each morsel's selection over the
+    Many groups: keep morsel rows as they come, then finish with one
+    scatter of every row into buckets and cache-local bucket encodes.
+    This avoids inserting rows one at a time into tables that outgrow
+    the caches (ClickBench q32, 10M groups: 850 ms inserted against
+    300 scattered). When the steps only filter, what is kept is each
+    morsel's selection over the
     source frame, and the rows are gathered once at the finish (late
     materialization); otherwise the morsels' output frames.
     """
@@ -2246,11 +2237,9 @@ struct _GroupedSink(Movable):
     def into_parts(
         mut self, sample: DataFrame, split: Bool
     ) raises -> List[List[_GroupPart]]:
-        """The inserted parts, in part order, for combining: one when no
-        worker's table grew past the split (small aggregates combine
-        and finish as one table, as DuckDB's do before they partition),
-        otherwise 2^_PART_BITS, so every worker's parts line up; each
-        with the tables flushed from it."""
+        """Number of inserted parts in hash order: one when no worker's
+        table exceeds the split threshold; otherwise 2^_PART_BITS, so
+        corresponding partitions from every worker line up when combined."""
         if split and len(self.parts) == 1:
             self._repartition(sample)
         var parts = List[_GroupPart]()
@@ -2453,7 +2442,7 @@ struct _PipelineJob(Job):
         return names^
 
     def _fold_candidates(mut self) raises:
-        """Fold this worker's candidates to the k best (DuckDB's heap), and
+        """Fold this worker's candidates into a size-k heap, and
         tighten the bound from the k-th, shared with every worker."""
         var merged = _top_rows(
             concat(self.parts),
@@ -3409,8 +3398,7 @@ def _combine_grouped(
     """Combine the workers' inserted parts, the same hash parts on every
     worker: the parts of one hash merge on their own worker (they never
     share a key) and finish in parallel, interleaved by first occurrence
-    when `ordered`. DuckDB combines its thread-local aggregate tables
-    partition by partition the same way."""
+    when `ordered`."""
     var count = len(parts)
     var job_count = max(1, min(workers, count))
     var jobs = List[_PartJob](capacity=job_count)
