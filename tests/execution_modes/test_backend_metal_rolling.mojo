@@ -431,7 +431,7 @@ def test_native_metal_rolling_nested_scopes_consumers_cost_budget_and_reuse() ra
     check(
         frame.lazy()
         .with_columns(col("x").rolling_sum(3, 1).alias("w"))
-        .group_by("k")
+        .group_by("k", maintain_order=True)
         .agg(col("w").sum()),
         runtime,
     )

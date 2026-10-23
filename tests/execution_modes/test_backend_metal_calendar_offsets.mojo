@@ -13,6 +13,7 @@ from dataframe_metal.accelerator.rows import lower_rows, ROW_CALENDAR_OFFSET
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_empty_inputs import check
 from tests.execution_modes.test_backend_metal_calendar_truncation import fixture
+from tests.support.metal_outcomes import overflowed
 from tests.support.temporal_reference import civil_days
 
 
@@ -138,6 +139,8 @@ def test_native_metal_calendar_offsets_extreme_dates_checked_datetime_reconstruc
         [Int64.MIN, Int64.MIN + 1, Int64.MAX - 1, Int64.MAX, -719528, 0],
         [True, True, True, True, True, True],
     )
+    var days: List[Int64] = [Int64.MIN, Int64.MIN + 1, Int64.MAX - 1, Int64.MAX]
+    days.extend([-719528, 0])
     for interval in List[String](
         [
             "1mo",
@@ -148,7 +151,27 @@ def test_native_metal_calendar_offsets_extreme_dates_checked_datetime_reconstruc
             "-749999999999999999y",
         ]
     ):
-        check(dates.lazy().select(col("t").dt().offset_by(interval)), runtime)
+        # A date that leaves the Int64 day range raises on both engines (#932
+        # rejects it instead of wrapping). The other rows still run together.
+        var fits = List[Int64]()
+        for day in days:
+            var one = tagged(DataType.DATE, [day], [True])
+            if not overflowed(
+                one.lazy().select(col("t").dt().offset_by(interval)), runtime
+            ):
+                fits.append(day)
+        var every = dates.lazy().select(col("t").dt().offset_by(interval))
+        if len(fits) < len(days):
+            assert_true(overflowed(every, runtime))
+        if len(fits):
+            check(
+                tagged(
+                    DataType.DATE, fits, List[Bool](length=len(fits), fill=True)
+                )
+                .lazy()
+                .select(col("t").dt().offset_by(interval)),
+                runtime,
+            )
     for dtype in List[DataType](
         [
             DataType.datetime("ms"),

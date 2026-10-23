@@ -174,6 +174,10 @@ def test_mojo_gpu_qcut_default_breakpoints_over_keys_and_exact_controls() raises
     assert_equal(actual.item(0, "total").int64(), Int64(21))
     assert_equal(actual.item(2, "total").int64(), Int64(25))
     # Same query graph/width/cardinality: only default labels download K edges.
+    # The custom labels' last region remaps no codes, so it is a view of the
+    # resident table (#857). The default labels' dictionary is built from the
+    # edges, so that region remaps its text codes into it: two more
+    # synchronizations, no more.
     var defaults = source.lazy().select(col("x").qcut([0.5]).alias("bin"))
     var custom = source.lazy().select(
         col("x").qcut([0.5], ["a", "b"]).alias("bin")
@@ -184,8 +188,9 @@ def test_mojo_gpu_qcut_default_breakpoints_over_keys_and_exact_controls() raises
     var cd = c[1].item(0, "query_download_bytes").int64()
     assert_equal(dd - cd, Int64(8))
     assert_equal(
-        d[1].item(0, "query_synchronizations").int64(),
-        c[1].item(0, "query_synchronizations").int64(),
+        d[1].item(0, "query_synchronizations").int64()
+        - c[1].item(0, "query_synchronizations").int64(),
+        Int64(2),
     )
     var peak = Int(d[1].item(0, "query_peak_requested_bytes").int64())
     var exact = MetalRuntime(memory_limit_bytes=peak)
