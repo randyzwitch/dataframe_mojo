@@ -465,3 +465,54 @@ def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
     assert_equal(matcher.slots[4], 100000)
     assert_equal(matcher.slots[5], 300000)
     _ = text
+
+
+def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
+    # Exhaustive short inputs force accepted snapshots to be superseded,
+    # abandoned, and followed by matches with different participating groups.
+    var patterns: List[String] = [
+        "^(a+)(b*)$",
+        "(a+)(b*)",
+        "(a*?)(b*)",
+        "(a+)|(b+)",
+        "(a(b)?)+",
+        "(?m)^(a+)(b*)$",
+        "()",
+        "(a??)",
+    ]
+    var alphabet: List[UInt8] = [97, 98, 32, 10]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(regex._compiled[].onepass.active(), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for length in range(6):
+            for encoded in range(1 << (2 * length)):
+                var bytes = List[UInt8]()
+                var digits = encoded
+                for _ in range(length):
+                    bytes.append(alphabet[digits & 3])
+                    digits >>= 2
+                var text = String(unsafe_from_utf8=bytes)
+                var span = _span(text)
+                for start in range(length + 1):
+                    var expected = matcher.pike.search(
+                        program, span, start, length, False, slots
+                    )
+                    assert_equal(
+                        matcher.captures(span, start), expected, pattern
+                    )
+                    if expected:
+                        for k in range(len(slots)):
+                            assert_equal(matcher.slots[k], slots[k], pattern)
+                _ = text
+    # The last bit of a 64-bit SAVE mask is a real slot, not a sentinel.
+    var regex = Regex(String("(a)") * 31)
+    assert_true(regex._compiled[].onepass.active())
+    var matcher = Matcher(regex)
+    var text = String("a") * 31
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[62], 30)
+    assert_equal(matcher.slots[63], 31)
+    _ = text
