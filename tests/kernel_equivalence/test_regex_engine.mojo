@@ -365,7 +365,7 @@ def test_onepass_captures_preserve_priority_assertions_and_optional_groups() rai
     ]
     for pattern in patterns:
         var regex = Regex(pattern)
-        assert_true(regex._compiled[].onepass.active(), pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
         var matcher = Matcher(regex)
         ref program = regex._compiled[].forward
         for text in texts:
@@ -385,7 +385,7 @@ def test_onepass_captures_preserve_priority_assertions_and_optional_groups() rai
     # Ambiguous consuming paths retain the existing capture engines.
     var ambiguous: List[String] = ["(a*)(a*)", "(a|aa)", "(a?)*"]
     for pattern in ambiguous:
-        assert_false(Regex(pattern)._compiled[].onepass.active(), pattern)
+        assert_false(Bool(Regex(pattern)._compiled[].onepass), pattern)
     assert_equal(_replace("(a(b)?)+", "abaaa", "<$1:$2>"), "<a:b>")
     var long = Regex("^(a+)(b*)$")
     var matcher = Matcher(long)
@@ -425,7 +425,7 @@ struct _CaptureJob(Job):
 
 def test_onepass_shared_workers_and_resource_fallbacks() raises:
     var regex = Regex("^([a-z]+) ([0-9]+)$")
-    assert_true(regex._compiled[].onepass.active())
+    assert_true(Bool(regex._compiled[].onepass))
     var jobs = List[_CaptureJob]()
     for k in range(8):
         jobs.append(_CaptureJob(regex, k * 500, (k + 1) * 500))
@@ -437,7 +437,7 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
     # A deterministic program beyond the state budget still captures via
     # the original engines. Too many capture slots also stays supported.
     var large = Regex("(a{300})")
-    assert_false(large._compiled[].onepass.active())
+    assert_false(Bool(large._compiled[].onepass))
     var matcher = Matcher(large)
     var text = String("a") * 300
     assert_true(matcher.captures(_span(text)))
@@ -445,7 +445,7 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
     assert_equal(matcher.slots[3], 300)
     _ = text
     var many = Regex(String("(a)") * 33)
-    assert_false(many._compiled[].onepass.active())
+    assert_false(Bool(many._compiled[].onepass))
     matcher = Matcher(many)
     text = String("a") * 33
     assert_true(matcher.captures(_span(text)))
@@ -456,7 +456,7 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
 
 def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
     var regex = Regex("^(a+)(β+)$")
-    assert_true(regex._compiled[].onepass.active())
+    assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
     var text = String("a") * 100000 + String("β") * 100000
     assert_true(matcher.captures(_span(text)))
@@ -483,7 +483,7 @@ def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
     var alphabet: List[UInt8] = [97, 98, 32, 10]
     for pattern in patterns:
         var regex = Regex(pattern)
-        assert_true(regex._compiled[].onepass.active(), pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
         var matcher = Matcher(regex)
         ref program = regex._compiled[].forward
         var slots = List[Int](length=program.slot_count, fill=-1)
@@ -509,7 +509,7 @@ def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
                 _ = text
     # The last bit of a 64-bit SAVE mask is a real slot, not a sentinel.
     var regex = Regex(String("(a)") * 31)
-    assert_true(regex._compiled[].onepass.active())
+    assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
     var text = String("a") * 31
     assert_true(matcher.captures(_span(text)))
