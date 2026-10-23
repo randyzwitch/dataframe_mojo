@@ -905,7 +905,11 @@ def _literal_chunk[
     var hits = hay.unsafe_load[width=lanes](at).eq(firsts) & hay.unsafe_load[
         width=lanes
     ](at + length - 1).eq(lasts)
-    comptime Mask = DType.uint64 if lanes == 64 else DType.uint32
+    comptime Mask = (
+        DType.uint64 if lanes
+        == 64 else DType.uint32 if lanes
+        == 32 else DType.uint16
+    )
     var candidates = UInt64(pack_bits[Mask](hits))
     if not candidates:
         return -1
@@ -959,6 +963,18 @@ def find_literal(
         if found >= 0:
             return found
         i += lanes
+    if i <= last_start - 15:
+        var found = _literal_chunk[16](
+            h,
+            p,
+            m,
+            i,
+            SIMD[DType.uint8, 16](first),
+            SIMD[DType.uint8, 16](last),
+        )
+        if found >= 0:
+            return found
+        i += 16
     while i <= last_start:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:
             var same = True
