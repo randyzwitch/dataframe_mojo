@@ -79,6 +79,13 @@ struct OnePass(Movable):
                 advances = self.next[edge] >= 0 and _holds(
                     program, self.looks[edge], text, at
                 )
+            if accepts and advances and not self.match_first[edge]:
+                var next = Int(self.next[edge])
+                # A certain, higher-priority acceptance after consuming
+                # this byte dominates the current match. Avoid copying a
+                # snapshot that the next iteration must supersede.
+                if self.matched[next] and self.match_looks[next] == 0:
+                    accepts = False
             if accepts:
                 for k in range(len(slots)):
                     slots[k] = current[k]
