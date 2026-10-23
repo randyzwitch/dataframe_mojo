@@ -452,9 +452,18 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
     assert_equal(matcher.slots[66], 32)
     assert_equal(matcher.slots[67], 33)
     _ = text
+    # Exercise the largest accepted deterministic capture state id.
+    var edge = Regex("(a{255})")
+    assert_true(Bool(edge._compiled[].onepass))
+    matcher = Matcher(edge)
+    text = String("a") * 255
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 255)
+    _ = text
 
 
-def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
+def test_unicode_captures_over_the_backtracker_budget() raises:
     var regex = Regex("^(a+)(β+)$")
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
@@ -464,6 +473,18 @@ def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
     assert_equal(matcher.slots[3], 100000)
     assert_equal(matcher.slots[4], 100000)
     assert_equal(matcher.slots[5], 300000)
+    # Ambiguous Unicode captures still use the bounded engines, including
+    # the Pike VM when the visited-bit budget cannot cover the span.
+    var ambiguous = Regex("^(a+)(β*)(β*)$")
+    assert_false(Bool(ambiguous._compiled[].onepass))
+    matcher = Matcher(ambiguous)
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 100000)
+    assert_equal(matcher.slots[4], 100000)
+    assert_equal(matcher.slots[5], 300000)
+    assert_equal(matcher.slots[6], 300000)
+    assert_equal(matcher.slots[7], 300000)
     _ = text
 
 
@@ -518,7 +539,7 @@ def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
     _ = text
 
 
-def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
+def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
     var regex = Regex("^(a+)(β*)$")
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
@@ -540,6 +561,82 @@ def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
         assert_false(matcher.captures(_span(bad)))
         _ = bad
     _ = long
+
+
+def test_onepass_unicode_predicates_match_independent_vm() raises:
+    var patterns: List[String] = [
+        "^(α+)(β*)$",
+        "(α+)(β*)",
+        "(α*?)(β*)",
+        "(α+)|(β+)",
+        "(α(β)?)+",
+        "(?m)^(α+)(β*)$",
+        "()",
+        "(α??)",
+        "^(\\w+) (\\w+) (\\w+)",
+        "^(\\S{2})(\\S)\\b",
+        "^(\\p{Greek}+)(\\p{Cyrillic}*)$",
+        "^([\\u{7f}-\\u{7ff}]+)([\\u{800}-\\u{10ffff}]+)$",
+    ]
+    var alphabet: List[String] = ["α", "β", " ", "\n"]
+    var texts: List[String] = [
+        "один два три",
+        "αβγδ",
+        "éαβγ",
+        "αβγé",
+        "αβ!",
+        "αβ漢",
+        "é߿ࠀ漢🙂",
+        "αβЖ",
+    ]
+    for length in range(5):
+        for encoded in range(1 << (2 * length)):
+            var text = String()
+            var digits = encoded
+            for _ in range(length):
+                text += alphabet[digits & 3]
+                digits >>= 2
+            texts.append(text^)
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                assert_equal(matcher.captures(span, start), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+                # Exercise the deterministic executor directly too: it is
+                # anchored at start even when the pattern itself is not.
+                expected = matcher.pike.search(
+                    program, span, start, len(span), True, slots
+                )
+                var found = (
+                    regex._compiled[]
+                    .onepass.value()[]
+                    .search[True](
+                        program,
+                        span,
+                        start,
+                        len(span),
+                        matcher.pike.scratch,
+                        matcher.slots,
+                    )
+                )
+                assert_equal(found, expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+            _ = text
 
 
 def test_cached_start_states_preserve_context_sensitive_matches() raises:
@@ -581,6 +678,118 @@ def test_cached_start_states_preserve_context_sensitive_matches() raises:
             _ = text
 
 
+def test_fixed_width_spans_match_vm_across_utf8_boundaries() raises:
+    var patterns: List[String] = [
+        "\\pL",
+        "\\p{Ll}",
+        "(\\pL)",
+        "(\\w{2})",
+        "(?i)(ab|κλ)",
+        "(?:a|β){2}",
+        "[\\p{Greek}\\p{Han}]{3}",
+        "\\b\\w\\b",
+        "(?m)^\\w{2}$",
+        "\\b",
+        "(?:\\b)*",
+        "(?:a+){0}",
+        "(a|ββ)",
+        "(a?)(b*)",
+    ]
+    var texts: List[String] = [
+        "",
+        "a",
+        "β",
+        " aa ββ κλ AB 漢字仮 🙂",
+        "\nαβ\nab\n",
+        "aβaβ",
+        "é߿ࠀ漢🙂",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+            _ = text
+    # Mixed byte widths still have one fixed code-point count. The reverse
+    # DFA stays unused even on a long successful span.
+    var regex = Regex("[αB]{255}")
+    var matcher = Matcher(regex)
+    var text = String("α") * 254 + "B"
+    var result = matcher.find(_span(text))
+    assert_equal(result[0], 0)
+    assert_equal(result[1], text.byte_length())
+    assert_equal(matcher.reverse.state_count(), 0)
+    _ = text
+
+
+def test_single_class_searches_match_vm_without_dfa_passes() raises:
+    var patterns: List[String] = [
+        "\\w",
+        "\\d",
+        "\\s",
+        "\\pL",
+        "(?-u)\\w",
+        "(?-u)\\d",
+        "(?i)[a-z]",
+        "[α-ω]",
+        "[\\p{Greek}\\p{Han}]",
+        "([^a-z])",
+        "(([a-f]))",
+        "[^\\r\\n]",
+    ]
+    var texts: List[String] = [
+        "",
+        "α a9漢🙂",
+        "\n\r\t ١१\n",
+        "é߿ࠀ漢🙂",
+        "\x00Kſİı",
+        chr(0x10FFFF),
+        String("a") * 96 + "3α漢🙂",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            var expected = matcher.pike.search(
+                program, span, 0, len(span), False, slots
+            )
+            assert_equal(matcher.is_match(span), expected, pattern)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                var result = matcher.find(span, start)
+                assert_equal(result[0] >= 0, expected, pattern)
+                if expected:
+                    assert_equal(result[0], slots[0], pattern)
+                    assert_equal(result[1], slots[1], pattern)
+                assert_equal(matcher.captures(span, start), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+            _ = text
+        assert_equal(matcher.forward.state_count(), 0, pattern)
+        assert_equal(matcher.reverse.state_count(), 0, pattern)
+
+
 def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     from dataframe.regex.dfa import find_literal
 
@@ -592,12 +801,14 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
         "β",
         "éé",
         String("a") * 40,
+        String("ab") * 32 + "Z",
+        String("a") * 257,
     ]
     for needle in needles:
         var bytes = List[UInt8]()
         for k in range(needle.byte_length()):
             bytes.append(_span(needle)[k])
-        for offset in range(65):
+        for offset in range(130):
             var text = String("x") * offset + needle + String("x") * 40 + needle
             var span = _span(text)[: text.byte_length() - needle.byte_length()]
             assert_equal(
@@ -614,3 +825,87 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     var text = String("abca ") * 32 + "adca"
     assert_equal(find_literal(_span(text), needle, 0), 160)
     _ = text
+    needle = [97, 98, 97]
+    text = String("a") * 300 + "aba"
+    assert_equal(find_literal(_span(text), needle, 0), 300)
+    _ = text
+
+
+def test_two_byte_class_membership_matches_canonical_ranges() raises:
+    from dataframe.regex.charclass import class_contains
+
+    var patterns: List[String] = [
+        "(\\w+)",
+        "(\\d+)",
+        "(\\s+)",
+        "([^a-z])",
+        "([\\u{7f}-\\u{81}])",
+        "([\\u{7ff}-\\u{801}])",
+        "(\\p{Greek}+)",
+        "(\\p{Cyrillic}+)",
+        "(\\w+)(\\d+)([^a-z])",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        ref program = regex._compiled[].forward
+        for cls in range(len(program.class_ranges)):
+            ref ranges = program.class_ranges[cls]
+            for cp in range(0x840):
+                assert_equal(
+                    program.class_has(cls, UInt32(cp)),
+                    class_contains(ranges, UInt32(cp)),
+                    pattern,
+                )
+            var wider: List[UInt32] = [0xD7FF, 0xE000, 0x10000, 0x10FFFF]
+            for cp in wider:
+                assert_equal(
+                    program.class_has(cls, cp),
+                    class_contains(ranges, cp),
+                    pattern,
+                )
+
+
+def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
+    from dataframe.regex.charclass import class_contains
+
+    var patterns: List[String] = [
+        "(\\w+)(\\d+)([^a-z])",
+        "\\b([\\u{7f}-\\u{81}\\u{7ff}-\\u{801}])\\b",
+        "([\\p{Greek}\\p{Cyrillic}\\p{Han}])",
+        "([\\u{10FFFF}])",
+        "([a-z])",
+        "([\\u{0}-\\u{7f}])",
+        "",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        ref program = regex._compiled[].forward
+        var points = List[UInt32]()
+        for cp in range(0x840):
+            points.append(UInt32(cp))
+        for boundary in program.boundaries:
+            points.append(boundary)
+            if boundary > 0:
+                points.append(boundary - 1)
+        points.append(0x10FFFF)
+        for cp in points:
+            assert_equal(
+                program.is_word(cp), class_contains(program.word, cp), pattern
+            )
+            var interval = 0
+            for k in range(1, len(program.boundaries)):
+                if program.boundaries[k] > cp:
+                    break
+                interval = k
+            assert_equal(
+                program.class_of(cp), Int(program.interval_class[interval])
+            )
+            for cls in range(len(program.class_ranges)):
+                ref ranges = program.class_ranges[cls]
+                var expected = False
+                for k in range(0, len(ranges), 2):
+                    if ranges[k] <= cp and cp <= ranges[k + 1]:
+                        expected = True
+                        break
+                assert_equal(class_contains(ranges, cp), expected)
+    assert_false(class_contains(List[UInt32](), 0))

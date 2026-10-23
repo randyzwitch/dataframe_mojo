@@ -68,15 +68,16 @@ struct Program(Movable, Sized):
     var out: List[Int32]
     var arg: List[Int32]
     var class_ranges: List[List[UInt32]]
-    # 128 bits of ASCII membership per class.
+    # Packed ASCII membership (two words per class), followed by thirty
+    # words per class for U+0080..U+07FF: all two-byte UTF-8 code points.
     var class_ascii: List[UInt64]
     var start: Int
     var start_unanchored: Int
     var slot_count: Int
     var looks: UInt32
-    # The DFA alphabet: `ascii_class` for code points below 128, else the
-    # interval of `boundaries` holding the code point names its class in
-    # `interval_class`. `class_rep` is one member of each class.
+    # The DFA alphabet: `ascii_class` maps ASCII and Unicode cuts through
+    # U+07FF. `boundaries` and `interval_class` describe the remaining
+    # intervals. `class_rep` is one member of each class.
     var ascii_class: List[Int32]
     var boundaries: List[UInt32]
     var interval_class: List[Int32]
@@ -122,19 +123,32 @@ struct Program(Movable, Sized):
 
     @always_inline
     def class_has(self, id: Int, cp: UInt32) -> Bool:
+        var membership = self.class_ascii.unsafe_ptr()
         if cp < 128:
-            var word = self.class_ascii[2 * id + Int(cp >> 6)]
+            var word = membership[unsafe_offset=2 * id + Int(cp >> 6)]
             return (word >> UInt64(cp & 63)) & 1 == 1
-        return class_contains(self.class_ranges[id], cp)
+        if cp < 0x800:
+            var bit = Int(cp) - 128
+            var word = membership[
+                unsafe_offset=2 * len(self.class_ranges) + 30 * id + (bit >> 6)
+            ]
+            return (word >> UInt64(bit & 63)) & 1 == 1
+        return class_contains(
+            self.class_ranges.unsafe_ptr()[unsafe_offset=id], cp
+        )
 
     @always_inline
     def step(self, pc: Int, cp: UInt32) -> Bool:
         """Whether consuming instruction `pc` accepts `cp`."""
-        var op = self.op[pc]
+        # Consuming instruction and class ids come from the compiler's
+        # bounded program. Its immutable buffers stay fixed during search.
+        var op = self.op.unsafe_ptr()[unsafe_offset=pc]
         if op == OP_CHAR:
-            return UInt32(self.arg[pc]) == cp
+            return UInt32(self.arg.unsafe_ptr()[unsafe_offset=pc]) == cp
         if op == OP_CLASS:
-            return self.class_has(Int(self.arg[pc]), cp)
+            return self.class_has(
+                Int(self.arg.unsafe_ptr()[unsafe_offset=pc]), cp
+            )
         if op == OP_ANY:
             return True
         return cp != 10
@@ -142,23 +156,69 @@ struct Program(Movable, Sized):
     @always_inline
     def is_word(self, cp: UInt32) -> Bool:
         if cp < 128:
-            return self.word_ascii[Int(cp)]
+            return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
+        if cp < UInt32(len(self.word_ascii)):
+            return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
         return class_contains(self.word, cp)
 
     @always_inline
     def class_of(self, cp: UInt32) -> Int:
         """The DFA alphabet class of a code point."""
-        if cp < 128:
-            return Int(self.ascii_class[Int(cp)])
+        if cp < UInt32(len(self.ascii_class)):
+            return Int(self.ascii_class.unsafe_ptr()[unsafe_offset=Int(cp)])
+        var points = self.boundaries.unsafe_ptr()
+        var classes = self.interval_class.unsafe_ptr()
         var lo = 0
         var hi = len(self.boundaries)
+        if cp >= points[unsafe_offset=hi - 1]:
+            return Int(classes[unsafe_offset=hi - 1])
         while hi - lo > 1:
-            var mid = (lo + hi) // 2
-            if self.boundaries[mid] <= cp:
+            # Every compiled alphabet starts at zero. The search keeps
+            # lo < hi <= len(boundaries), with nonnegative midpoints.
+            var mid = (lo + hi) >> 1
+            if points[unsafe_offset=mid] <= cp:
                 lo = mid
             else:
                 hi = mid
-        return Int(self.interval_class[lo])
+        return Int(classes[unsafe_offset=lo])
+
+
+def _build_two_byte_membership(mut program: Program):
+    # Preserve the packed ASCII prefix and Program's existing field layout.
+    # At 240 extra bytes per class, the bounded two-byte UTF-8 domain gives
+    # repeated Unicode predicates one bitmap load instead of a range search.
+    var classes = len(program.class_ranges)
+    var base = 2 * classes
+    program.class_ascii.resize(32 * classes, 0)
+    for cls in range(classes):
+        ref ranges = program.class_ranges[cls]
+        for i in range(0, len(ranges), 2):
+            if ranges[i] >= 0x800:
+                break
+            var lo = max(Int(ranges[i]), 128) - 128
+            var hi = min(Int(ranges[i + 1]), 0x7FF) - 128
+            if lo > hi:
+                continue
+            for word in range(lo >> 6, (hi >> 6) + 1):
+                var low = max(lo - 64 * word, 0)
+                var high = min(hi - 64 * word, 63)
+                var mask = (UInt64.MAX << UInt64(low)) & (
+                    UInt64.MAX >> UInt64(63 - high)
+                )
+                program.class_ascii[base + 30 * cls + word] |= mask
+
+
+def _build_word_lookup(mut program: Program):
+    if program.looks & LOOK_UNICODE_WORD == 0:
+        return
+    program.word_ascii.resize(0x800, False)
+    for k in range(0, len(program.word), 2):
+        if program.word[k] >= 0x800:
+            break
+        var lo = max(Int(program.word[k]), 128)
+        var hi = min(Int(program.word[k + 1]), 0x7FF)
+        for cp in range(lo, hi + 1):
+            program.word_ascii[cp] = True
 
 
 def _nullable(ast: Ast, node: Int) -> Bool:
@@ -460,17 +520,17 @@ def _build_alphabet(mut program: Program):
             program.class_rep.append(program.boundaries[j])
         program.interval_class.append(Int32(id))
     program.alphabet = len(program.class_rep)
-    program.ascii_class = List[Int32](length=128, fill=0)
-    for cp in range(128):
-        var lo = 0
-        var hi = intervals
-        while hi - lo > 1:
-            var mid = (lo + hi) // 2
-            if program.boundaries[mid] <= UInt32(cp):
-                lo = mid
-            else:
-                hi = mid
-        program.ascii_class[cp] = program.interval_class[lo]
+    # The trailing interval needs no table. Extend the ASCII map through
+    # Unicode cuts in the two-byte UTF-8 domain.
+    var fast_size = min(0x800, max(128, Int(program.boundaries[intervals - 1])))
+    program.ascii_class = List[Int32](length=fast_size, fill=0)
+    var interval = 0
+    for cp in range(fast_size):
+        while interval + 1 < intervals and program.boundaries[
+            interval + 1
+        ] <= UInt32(cp):
+            interval += 1
+        program.ascii_class[cp] = program.interval_class[interval]
     program.class_word = List[Bool](capacity=program.alphabet)
     for c in range(program.alphabet):
         program.class_word.append(program.is_word(program.class_rep[c]))
@@ -509,5 +569,7 @@ def compile_program(ast: Ast, reverse: Bool) raises -> Program:
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    _build_two_byte_membership(program)
+    _build_word_lookup(program)
     _build_alphabet(program)
     return program^
