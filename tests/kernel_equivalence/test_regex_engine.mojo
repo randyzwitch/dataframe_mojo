@@ -77,14 +77,15 @@ def test_one_regex_shared_by_workers() raises:
 
 
 def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
-    # Unanchored, a(a|b){20}c tracks which of the last 25 code points were
+    # Unanchored, a(a|b){24}c tracks which of the last 25 code points were
     # `a`: up to 2^25 DFA states over random a/b text, past the cache.
     var regex = Regex("a(a|b){24}c")
     var matcher = Matcher(regex)
     assert_equal(len(matcher.pike.current.dense), 0)
     var bytes = List[UInt8]()
     var state: UInt64 = 12345
-    for _ in range(250_000):
+    # Two cache fills are needed before the progress check gives up.
+    for _ in range(500_000):
         state = state * 6364136223846793005 + 1442695040888963407
         bytes.append(UInt8(97) if (state >> 33) & 1 else UInt8(98))
     var text = String(unsafe_from_utf8=bytes)
