@@ -143,6 +143,14 @@ def main() raises:
     assert_true(not float_tolerance_match(left, drift, keys))
     var other_key = left.with_columns([(col("k") + lit(Int32(1))).alias("k")])
     assert_true(not float_tolerance_match(left, other_key, keys))
+    # Repeated non-floating keys pair by sorted position.
+    var repeated = left.with_columns([lit(Int32(0)).alias("k")])
+    var repeated_close = changed().with_columns([lit(Int32(0)).alias("k")])
+    assert_true(float_tolerance_match(repeated, repeated_close, keys))
+    var repeated_far = repeated_close.with_columns(
+        [(col("floating_mean") * lit(Float64(1.00001))).alias("floating_mean")]
+    )
+    assert_true(not float_tolerance_match(repeated, repeated_far, keys))
     assert_true(float_tolerance_match(a32, b32, row_keys))
     var wide = a32.with_columns(
         [(col("value") * lit(Float32(1.0001))).alias("value")]

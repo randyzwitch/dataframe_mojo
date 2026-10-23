@@ -164,8 +164,11 @@ def float_tolerance_match(
     """Same schema and rows; only floating cells may differ, within tolerance.
 
     Rows pair by the declared keys, or by every non-floating column when none
-    are declared; either must identify rows uniquely. Nulls, integers,
-    decimals, strings and all other cells stay bit-exact.
+    are declared, when those identify rows uniquely. Otherwise both answers
+    sort by the non-floating columns, then the floating ones, and rows pair
+    by position; a pairing that passes proves the row multisets agree within
+    tolerance. Nulls, integers, decimals, strings and all other cells stay
+    bit-exact.
     """
     if not schema_equal(left, right) or left.height() != right.height():
         return False
@@ -175,20 +178,28 @@ def float_tolerance_match(
             if not left.column(name).dtype().is_float():
                 pairing.append(name)
     var aligned = align(left, right, pairing)
+    var first = aligned.left.copy()
+    var second = aligned.right.copy()
     if not aligned.available:
-        return False
+        var order = List[String]()
+        for name in left.columns():
+            if not left.column(name).dtype().is_float():
+                order.append(name)
+        for name in left.columns():
+            if left.column(name).dtype().is_float():
+                order.append(name)
+        first = left.sort(order)
+        second = right.sort(order)
     for name in left.columns():
         var dtype = left.column(name).dtype()
         if not dtype.is_float():
-            if not aligned.left.select([name]).equals(
-                aligned.right.select([name])
-            ):
+            if not first.select([name]).equals(second.select([name])):
                 return False
             continue
         var single = dtype == DataType.FLOAT32
-        for row in range(aligned.left.height()):
-            var a = aligned.left.item(row, name)
-            var b = aligned.right.item(row, name)
+        for row in range(first.height()):
+            var a = first.item(row, name)
+            var b = second.item(row, name)
             if a == b:
                 continue
             if a.is_null() or b.is_null():
