@@ -544,6 +544,8 @@ def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
     var long = String("a") * 100000 + String("β") * 100000
+    assert_equal(len(matcher.pike.current.slots), 0)
+    assert_equal(len(matcher.pike.next.slots), 0)
     for _ in range(2):
         var short = String("aaa")
         assert_true(matcher.captures(_span(short)))
@@ -560,6 +562,29 @@ def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
         var bad = String("aaa!")
         assert_false(matcher.captures(_span(bad)))
         _ = bad
+    assert_equal(len(matcher.pike.current.slots), 0)
+    assert_equal(len(matcher.pike.next.slots), 0)
+    # Allocate the fallback's matrices after one-pass searches, then reuse
+    # the same scratch in both engines without leaking earlier captures.
+    var text = String("aaaββ")
+    assert_true(
+        matcher.pike.search(
+            regex._compiled[].forward,
+            _span(text),
+            0,
+            text.byte_length(),
+            True,
+            matcher.slots,
+        )
+    )
+    assert_true(len(matcher.pike.current.slots) > 0)
+    assert_true(len(matcher.pike.next.slots) > 0)
+    assert_equal(matcher.slots[4], 3)
+    assert_equal(matcher.slots[5], 7)
+    assert_true(matcher.captures(_span(long)))
+    assert_equal(matcher.slots[4], 100000)
+    assert_equal(matcher.slots[5], 300000)
+    _ = text
     _ = long
 
 
