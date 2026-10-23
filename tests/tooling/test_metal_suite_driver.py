@@ -107,12 +107,14 @@ class MetalSuiteDriver(unittest.TestCase):
                 driver.parse(output, "q1")
         result = driver.parse(
             "coverage\tq1\tok\t\nordered_equal\tFalse\ncollections\t2\n"
+            "match\twithin_float_tolerance\n"
             "runtime_audit\tno_marker\nruntime_audit\tcpu\n"
             "output_rows\t3\ncollection_ns\t17\n",
             "q1",
         )
         self.assertEqual(result["status"], "ok")
         self.assertFalse(result["ordered_equal"])
+        self.assertEqual(result["match"], "within_float_tolerance")
         self.assertEqual(result["collections"], 2)
         self.assertEqual(result["runtime_adjudication"]["observed_calls"], 2)
         self.assertEqual(result["runtime_adjudication"]["events"], ["no_marker", "cpu"])
@@ -128,6 +130,7 @@ class MetalSuiteDriver(unittest.TestCase):
     def test_runtime_audit_is_required_and_unknown_fails_closed(self):
         success = (
             "coverage\tq1\tok\t\nordered_equal\tTrue\ncollections\t2\n"
+            "match\texact\n"
             "runtime_audit\tno_marker\nruntime_audit\tcpu\n"
         )
         for output in (
@@ -289,12 +292,33 @@ class MetalSuiteDriver(unittest.TestCase):
         )
         self.assertEqual(unchanged["execution_boundary"], "hybrid")
 
-    def test_diagnostics_do_not_relax_the_exact_comparator(self):
+    def test_only_floating_cells_are_compared_with_tolerance(self):
         source = (ROOT / "benchmarks/metal_suite_common.mojo").read_text()
+        self.assertIn("float_tolerance_match", source)
+        self.assertIn("actual.sort(actual.columns()).equals(canonical)", source)
+        self.assertIn('print("match\\t"', source)
+        diagnostics = (
+            ROOT / "benchmarks/metal_suite_diagnostics.mojo"
+        ).read_text()
+        self.assertIn("FLOAT_TOLERANCE = 1e-6", diagnostics)
+        # The rule is bench_suites._close; keep the two in step.
         self.assertIn(
-            "or not actual.sort(actual.columns()).equals(canonical)", source
+            "abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))",
+            (ROOT / "benchmarks/tools/bench_suites.py").read_text(),
         )
-        self.assertNotIn("tolerance", source)
+
+    def test_a_match_kind_is_required_and_validated(self):
+        base = (
+            "coverage\tq1\tok\t\nordered_equal\tTrue\ncollections\t1\n"
+            "runtime_audit\tno_marker\n"
+        )
+        with self.assertRaises(ValueError):
+            driver.parse(base, "q1")
+        with self.assertRaises(ValueError):
+            driver.parse(base + "match\tclose\n", "q1")
+        self.assertEqual(
+            driver.parse(base + "match\texact\n", "q1")["match"], "exact"
+        )
 
 
 if __name__ == "__main__":

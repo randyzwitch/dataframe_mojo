@@ -10,7 +10,11 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from dataframe import DataFrame
 from suite_common import load_tables
-from metal_suite_diagnostics import emit_comparison, environment_keys
+from metal_suite_diagnostics import (
+    emit_comparison,
+    environment_keys,
+    float_tolerance_match,
+)
 from metal_suite_answer_exports import export_answer
 
 
@@ -46,6 +50,7 @@ def run[
         return
     export_answer(expected, "cpu", 0)
     var ordered_equal = True
+    var exact = True
     # Suite outputs can leave group/tie order unspecified. Canonical sorting
     # compares complete row multisets, preserving duplicates; also record the
     # stricter original-order comparison instead of silently discarding it.
@@ -74,11 +79,24 @@ def run[
             return
         export_answer(actual, "metal", repetition)
         ordered_equal &= actual.equals(expected)
-        if (
-            actual.columns() != expected.columns()
-            or actual.height() != expected.height()
-            or not actual.sort(actual.columns()).equals(canonical)
-        ):
+        var same = (
+            actual.columns() == expected.columns()
+            and actual.height() == expected.height()
+            and actual.sort(actual.columns()).equals(canonical)
+        )
+        var tolerated = False
+        if not same:
+            # Floating results may differ in the last bits when a parallel
+            # reduction adds in another order; nothing else may differ.
+            var close = False
+            try:
+                close = float_tolerance_match(expected, actual, alignment_keys)
+            except tolerance_error:
+                close = False
+            if close:
+                tolerated = True
+                exact = False
+        if not same and not tolerated:
             print("coverage\t" + name + "\twrong_answer\tfull result differs")
             print("expected_rows\t" + String(expected.height()))
             print("actual_rows\t" + String(actual.height()))
@@ -120,11 +138,14 @@ def run[
             return
     print("diagnostic\tcpu_metal.schema_equal\tTrue")
     print("diagnostic\tcpu_metal.row_count_equal\tTrue")
-    print("diagnostic\tcpu_metal.row_multiset_equal\tTrue")
+    print("diagnostic\tcpu_metal.row_multiset_equal\t" + String(exact))
     print(
         "diagnostic\tcpu_metal.classification\t"
-        + ("equal" if ordered_equal else "order_only")
+        + (
+            "within_float_tolerance" if not exact else "equal" if ordered_equal else "order_only"
+        )
     )
+    print("match\t" + ("exact" if exact else "within_float_tolerance"))
     print("coverage\t" + name + "\tok\t")
     print("ordered_equal\t" + String(ordered_equal))
     print("output_rows\t" + String(expected.height()))

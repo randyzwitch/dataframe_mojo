@@ -1,4 +1,7 @@
-"""CPU-only diagnostics over completed query answers, never a pass tolerance.
+"""CPU-only diagnostics over completed query answers.
+
+`float_tolerance_match` is the one admission rule: floating columns may differ
+by reassociation error, everything else must be bit-equal.
 
 Row alignment requires declared output keys whose uniqueness and exact key
 membership are checked on both answers. Otherwise column bags are reported
@@ -137,6 +140,75 @@ def column_metrics(
         )
         result.max_relative = max(result.max_relative, relative)
     return result^
+
+
+# Parallel float aggregates add in an order the scheduler chooses, on the CPU as
+# well as on Metal, so two correct runs differ in the last bits. The rule is the
+# project's answer-check policy, bench_suites._close (documented in
+# docs/design/benchmarks.md): |a - b| <= 1e-6 * max(1, |a|, |b|).
+comptime FLOAT_TOLERANCE = 1e-6
+
+
+def floats_close(x: Float64, y: Float64) -> Bool:
+    """Both NaN, the same infinity, or finite and within FLOAT_TOLERANCE."""
+    if x != x or y != y:
+        return x != x and y != y
+    if not _finite(x) or not _finite(y):
+        return x == y
+    return abs(x - y) <= FLOAT_TOLERANCE * max(Float64(1), abs(x), abs(y))
+
+
+def float_tolerance_match(
+    left: DataFrame, right: DataFrame, keys: List[String]
+) raises -> Bool:
+    """Same schema and rows; only floating cells may differ, within tolerance.
+
+    Rows pair by the declared keys, or by every non-floating column when none
+    are declared, when those identify rows uniquely. Otherwise both answers
+    sort by the non-floating columns, then the floating ones, and rows pair
+    by position; a pairing that passes proves the row multisets agree within
+    tolerance. Nulls, integers, decimals, strings and all other cells stay
+    bit-exact.
+    """
+    if not schema_equal(left, right) or left.height() != right.height():
+        return False
+    var pairing = keys.copy()
+    if not len(pairing):
+        for name in left.columns():
+            if not left.column(name).dtype().is_float():
+                pairing.append(name)
+    var aligned = align(left, right, pairing)
+    var first = aligned.left.copy()
+    var second = aligned.right.copy()
+    if not aligned.available:
+        var order = List[String]()
+        for name in left.columns():
+            if not left.column(name).dtype().is_float():
+                order.append(name)
+        for name in left.columns():
+            if left.column(name).dtype().is_float():
+                order.append(name)
+        first = left.sort(order)
+        second = right.sort(order)
+    for name in left.columns():
+        var dtype = left.column(name).dtype()
+        if not dtype.is_float():
+            if not first.select([name]).equals(second.select([name])):
+                return False
+            continue
+        var single = dtype == DataType.FLOAT32
+        for row in range(first.height()):
+            var a = first.item(row, name)
+            var b = second.item(row, name)
+            if a == b:
+                continue
+            if a.is_null() or b.is_null():
+                return False
+            var x = Float64(a.float32()) if single else a.float64()
+            var y = Float64(b.float32()) if single else b.float64()
+            if not floats_close(x, y):
+                return False
+    return True
 
 
 def _bool(prefix: String, name: String, value: Bool):
