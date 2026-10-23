@@ -77,8 +77,8 @@ def _short_hash(word: UInt64, length: Int) -> UInt64:
 def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
     """Hash short strings by one packed word, longer strings in eight-byte blocks.
 
-    Block mixing follows DuckDB 1.5.5 HashBytes (see THIRD_PARTY_NOTICES).
-    Keep our existing short-key encoding and final column-level `_mix`.
+    Block mixing uses a 128-bit intermediate to mix eight-byte blocks.
+    Keep the existing short-key encoding and final column-level `_mix`.
     Every wide load lies entirely inside the supplied byte span.
     """
     if len(bytes) <= 8:

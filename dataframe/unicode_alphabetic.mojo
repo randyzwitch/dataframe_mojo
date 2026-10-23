@@ -1,7 +1,7 @@
 """Code points with the Unicode `Alphabetic` property, for `to_titlecase`.
 
-Polars capitalizes a letter when the character before it is not alphabetic
-(Rust's `char::is_alphabetic`, the derived property `Alphabetic`). The
+Title casing capitalizes a letter when the character before it is not
+alphabetic. The
 ranges above ASCII come from Unicode 15.0 (generated with Perl's
 `\\p{Alphabetic}`), as hexadecimal `first-last` pairs.
 """

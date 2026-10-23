@@ -174,8 +174,8 @@ def _replaced(expression: Expr, target: Int, replacement: List[Node]) -> Expr:
 
 def _expand_inputs(expression: Expr, columns: List[Series]) raises -> Expr:
     """Expand each selector that is (part of) an input of a horizontal
-    reduction into one input per matched column, as Polars does: the
-    expression stays one expression. Other selectors are left alone."""
+    reduction into one input per matched column while keeping the
+    expression as one expression. Other selectors are left alone."""
     var current = expression.copy()
     while True:
         var parents = _parents(current._nodes)

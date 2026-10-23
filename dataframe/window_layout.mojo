@@ -1,7 +1,6 @@
-"""Window partitions laid out contiguously, as DuckDB's PhysicalWindow lays
-out its hash groups: the rows of each partition next to each other, in their
-input order, so each partition is evaluated on its own and many partitions
-are evaluated at once.
+"""Window partitions laid out contiguously: the rows of each partition are
+next to each other, in their input order, so each partition is evaluated on
+its own and many partitions are evaluated at once.
 
 The layout is a stable sort of row positions by partition id, done in two
 parallel passes: rows into bins of consecutive ids (each worker counting and
@@ -395,10 +394,9 @@ struct _PlaceJob(Job):
 
 
 def keyed_layout(keys: List[Series], lanes: Int) raises -> PartitionLayout:
-    """The layout of the rows of `keys`' partitions (nulls equal), built as
-    DuckDB's window sink builds its hash groups: keys hashed and rows
-    scattered into hash buckets in parallel, then each bucket's partitions
-    numbered and laid out on their own, buckets in parallel. No global
+    """The layout of the rows of `keys`' partitions (nulls equal): keys are
+    hashed and rows scattered into hash buckets in parallel, then each
+    bucket's partitions are numbered and laid out independently. No global
     numbering pass: on one thread that was most of a window step."""
     var n = len(keys[0])
     var flat = List[Series](capacity=len(keys))

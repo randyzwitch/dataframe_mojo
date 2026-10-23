@@ -1,7 +1,7 @@
 """Quadratic as-of selection by independent ordering and exact distances.
 
 Nearest reference requires nonnull finite right keys; null-position scan cases
-are independent literal fixtures verified against pinned Polars 1.44.2.
+are independent literal fixtures.
 """
 from std.math import abs, isnan
 from std.testing import assert_equal, assert_true

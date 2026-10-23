@@ -3,8 +3,8 @@
 
 This audit checks semantic selection evidence only. It does not change strict
 coverage status, support other queries, or create performance eligibility.
-DuckDB computes each full reference relation from the hash-verified source
-input; retained CPU/Metal exports are checked for exact row membership,
+The reference query computes each full relation from the hash-verified
+source input; retained CPU/Metal exports are checked for exact row membership,
 multiplicity, row count, and (where declared) descending rank sequence.
 """
 

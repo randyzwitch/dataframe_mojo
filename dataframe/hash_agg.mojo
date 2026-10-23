@@ -2,9 +2,8 @@
 
 The partitioned group-by (`group_by.partitioned`) scatters row numbers by key
 hash and gathers every aggregated column into bucket order before reducing
-it: on H2O's group-by queries that gather was a third of the time. DuckDB
-updates each group's state from the rows as they arrive instead
-(`radix_partitioned_hashtable.cpp`), and this does the same, in two phases:
+it: on H2O's group-by queries that gather was a third of the time. This
+implementation updates each group's state as rows arrive, in two phases:
 
 1. Each worker numbers its own row range with an open-addressing table and
    reduces the range's values in row order through `Reducer.update`.

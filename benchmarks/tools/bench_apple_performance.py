@@ -1,7 +1,7 @@
 """Collect CPU/forced-Apple complete-query samples; no HTML or coverage timings.
 
 Preparation/building and measurement are separate invocations. Run only after
-feature work on a quiet Mac. Strict CPU/GPU coverage and the external DuckDB
+feature work on a quiet Mac. Strict CPU/GPU coverage and external-reference
 summary policy are separate evidence; neither changes the other's outcome.
 """
 import argparse

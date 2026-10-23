@@ -1,7 +1,7 @@
 """Lazy rename, cast, group_by on expressions and the group_by reductions
 give the eager DataFrame methods' results under every executor setting.
-rename is a select of every column and cast a with_columns, as Polars
-builds them, so filters and column selections above them move below them:
+rename is a select of every column and cast a with_columns, so filters and
+column selections above them move below them:
 explain shows where they land."""
 # contract-group: lazy.rename_cast
 from std.testing import assert_equal, assert_true, assert_raises

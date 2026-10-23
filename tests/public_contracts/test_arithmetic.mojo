@@ -976,8 +976,8 @@ def _decimals(
 
 
 def test_decimal_arithmetic_takes_duckdb_types_and_null_zero_divisor() raises:
-    """DuckDB's decimal result types (`DecimalArithmeticBind`): a sum or
-    difference at the larger scale with one more integer digit, an exact
+    """Decimal result types: a sum or difference at the larger scale with
+    one more integer digit, an exact
     product at the scales added, a quotient as DOUBLE (null for a zero
     divisor), each stored at its precision's width."""
     var left: List[Int128] = [125, 75, -125, -75, 250, 100, 300, 625, 375, 999]
@@ -1119,7 +1119,7 @@ def test_decimal_arithmetic_takes_duckdb_types_and_null_zero_divisor() raises:
 
 def test_decimal_arithmetic_on_64_bit_inputs_stays_64_bit() raises:
     """Inputs of at most 18 digits give results of at most 18 digits,
-    checked for overflow, as DuckDB does: (18, 2) + (18, 2) is (18, 2),
+    checked for overflow: (18, 2) + (18, 2) is (18, 2),
     (15, 2) * (15, 2) is (18, 4); a product at scale 18 or more widens."""
     var frame = DataFrame(
         [
@@ -1187,7 +1187,7 @@ def test_decimal_arithmetic_on_64_bit_inputs_stays_64_bit() raises:
 
 def test_decimal_conditionals_take_the_common_decimal_type() raises:
     """A conditional or fill_null over decimals of different scales takes
-    DuckDB's common type: the larger scale and the larger integer part,
+    common decimal type: the larger scale and the larger integer part,
     holding either side exactly. A product (scale 4) next to a price
     (scale 2) is the usual case."""
     var frame = DataFrame(
@@ -1726,8 +1726,8 @@ def test_floating_power_independent_nan_infinity_zero_and_boundary_anchors() rai
 
 
 def powers_by_multiplication[D: DType]() raises:
-    """Polars' pow_on_floats: x ** 0.5 is sqrt and x ** n, n in 2..9, is the
-    left-to-right product, never libm's pow."""
+    """For x ** 0.5, use sqrt; for x ** n, n in 2..9, use the left-to-right
+    product rather than libm's pow."""
     var values = List[Scalar[D]]()
     var state = UInt64(0x9E3779B97F4A7C15)
     for _ in range(5000):

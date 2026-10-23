@@ -839,8 +839,8 @@ struct Expr(Copyable):
         return self._unary(LOG1P)
 
     def sign(self) -> Self:
-        """-1, 0 or 1 in the input's type. A float NaN stays NaN and a
-        signed zero keeps its sign, as in Polars."""
+        """-1, 0, or 1 in the input's type. A float NaN stays NaN and a
+        signed zero keeps its sign."""
         return self._unary(SIGN)
 
     def cbrt(self) -> Self:
@@ -1685,8 +1685,8 @@ struct Expr(Copyable):
         left_closed: Bool = False,
         include_breaks: Bool = False,
     ) -> Self:
-        """Bin numeric values at explicit sorted edges. Default labels match
-        Polars, including the open-ended outer bins."""
+        """Bin numeric values at explicit sorted edges, including
+        open-ended outer bins."""
         return self._bins(
             CUT, breaks, labels, left_closed, include_breaks, False
         )
@@ -1776,13 +1776,13 @@ struct Expr(Copyable):
         return DtNamespace(self.copy())
 
     def min(self) -> Self:
-        """Smallest non-null value. NaN is skipped, as in Polars, so it is
-        the minimum only when every valid value is NaN."""
+        """Smallest non-null value. NaN is skipped, so it is the minimum
+        only when every valid value is NaN."""
         return self._unary(MIN)
 
     def max(self) -> Self:
-        """Largest non-null value. NaN is skipped, as in Polars, so it is
-        the maximum only when every valid value is NaN."""
+        """Largest non-null value. NaN is skipped, so it is the maximum
+        only when every valid value is NaN."""
         return self._unary(MAX)
 
     def mean(self) -> Self:
@@ -1840,7 +1840,7 @@ struct Expr(Copyable):
 
     def sum(self, min_count: Int = 0) -> Self:
         """Skip nulls; zero when empty unless fewer than min_count are valid.
-        A Bool sums to its number of true values, as UInt32 (Polars)."""
+        A Bool sum counts true values as UInt32."""
         var nodes = self._nodes.copy()
         nodes.append(_node(SUM, len(nodes) - 1, min_count=min_count))
         return Self(nodes^, self._name)
@@ -1922,7 +1922,7 @@ comptime _GROUPING_MARK = "\x01grouping:"
 
 
 def grouping_id(names: List[String]) -> Expr:
-    """DuckDB's `GROUPING(a, b, ...)` inside the `agg` of `group_by_rollup`,
+    """Use inside the `agg` of `group_by_rollup`,
     `group_by_cube` or `group_by_grouping_sets`: an Int64 bit mask with one
     bit per name, the first name the highest bit, set to 1 when that key is
     aggregated away in the row (a subtotal) and 0 when the row groups by it.
@@ -1939,7 +1939,7 @@ def grouping_id(names: List[String]) -> Expr:
 
 
 def grouping(name: String) -> Expr:
-    """DuckDB's `GROUPING(a)`: 1 in rows where key `a` is aggregated away
+    """Return 1 in rows where key `a` is aggregated away
     (a subtotal row), else 0; Int64. See `grouping_id`."""
     var result = grouping_id([name])
     result._name = "grouping(" + name + ")"
@@ -2016,8 +2016,8 @@ def col(names: List[String]) -> Expr:
 def columns(pattern: String) -> Expr:
     """Columns matching a regular expression, in schema order.
 
-    Like DuckDB's COLUMNS('regex'), this searches anywhere in each name;
-    use ^ and $ to anchor the pattern. This is a Mojo selector, not SQL.
+    The pattern searches anywhere in each name; use ^ and $ to anchor it.
+    This is a Mojo selector, not SQL.
     """
     return _selector(SELECT_REGEX, pattern)
 
@@ -2241,8 +2241,8 @@ def _horizontal(
 def sum_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) raises -> Expr:
     """Sum of the inputs in each row, named after the first input.
 
-    Inputs are cast to their common type first (Polars' supertype; an
-    integer meeting a decimal becomes a decimal, as in DuckDB); Bool alone
+    Inputs are cast to their common type first; an integer meeting a
+    decimal becomes a decimal. Bool alone
     sums as UInt32. With ignore_nulls a null counts as zero, so a row of
     nulls sums to 0; without it any null makes the row null. Selectors
     among `exprs` expand into more inputs.
@@ -2389,7 +2389,7 @@ struct StrNamespace(Copyable):
 
     `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
     `replace_all` and `split(literal=False)` take regular expressions in
-    the syntax of Rust's `regex` crate, as Polars does; see
+    the syntax of Rust's `regex` crate; see
     docs/expressions.md for what is supported. A pattern that is plain text
     is searched as a substring."""
 
@@ -2488,10 +2488,10 @@ struct StrNamespace(Copyable):
     def replace(
         self, pattern: String, value: String, literal: Bool = False, n: Int = 1
     ) -> Expr:
-        """Replace the first `n` matches of the pattern. `value` may refer to
-        capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a
-        dollar sign) unless the pattern is literal; as in Polars, a pattern
-        without ASCII punctuation counts as literal. A regex `n` above 1 is
+        """Replace the first `n` matches of the pattern. `value` may refer
+        to capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a
+        dollar sign), unless the pattern is literal. A pattern without
+        ASCII punctuation is treated as literal. A regex `n` above 1 is
         not supported."""
         return self._op(
             STR_REPLACE, pattern, Int64(n), 1 if literal else 0, text2=value
@@ -2595,9 +2595,9 @@ struct StrNamespace(Copyable):
         return self._op(STR_SPLIT_FIELDS, by, 2, min_count=n)
 
     def to_titlecase(self) -> Expr:
-        """Lowercase, then uppercase each letter that follows a character
-        that is not alphabetic (a space, digit or punctuation), as Polars
-        does: "hello wORLD 1st" becomes "Hello World 1St"."""
+        """Lowercase, then uppercase each letter following a character
+        that is not alphabetic (a space, digit, or punctuation):
+        "hello wORLD 1st" becomes "Hello World 1St"."""
         return self._op(STR_TITLECASE)
 
     def strip_prefix(self, prefix: String) -> Expr:
@@ -2611,8 +2611,7 @@ struct StrNamespace(Copyable):
     def find(self, pattern: String, literal: Bool = False) -> Expr:
         """Byte offset (UInt32) of the first occurrence of the pattern, or
         null when it does not occur; an empty pattern is found at 0. Offsets
-        count bytes, as in Polars. The pattern is a regular expression
-        unless `literal`."""
+        count bytes. The pattern is a regular expression unless `literal`."""
         return self._op(STR_FIND, pattern, Int64(literal))
 
     def count_matches(self, pattern: String, literal: Bool = False) -> Expr:
@@ -2642,7 +2641,7 @@ struct StrNamespace(Copyable):
         """Replace every occurrence of each literal pattern in one pass;
         `replace_with` holds one replacement per pattern, or one for all of
         them. Scanning left to right, the match that ends first wins, the
-        longer one when two end together (Polars' default); with leftmost,
+        longer one when two end together; with leftmost,
         the match that starts first wins, the earlier pattern when two start
         together."""
         return self._op(
@@ -2778,8 +2777,8 @@ def concat_str(
     exprs: List[Expr], separator: String = "", ignore_nulls: Bool = False
 ) raises -> Expr:
     """Join String expressions row-wise; any null input makes the row null.
-    With ignore_nulls, null inputs are skipped along with their separator,
-    and a row whose inputs are all null is "" (DuckDB's concat_ws)."""
+    With ignore_nulls, null inputs are skipped along with their separator;
+    a row whose inputs are all null is an empty string."""
     if len(exprs) == 0:
         raise Error("concat_str requires at least one expression")
     var result = exprs[0].copy()
@@ -2851,8 +2850,7 @@ struct DtNamespace(Copyable):
     Fields use the proleptic Gregorian calendar. For a datetime with a time
     zone, fields, date, time, truncate, calendar offsets (d, w, mo, y) and
     strftime use local time in that zone; fixed offsets (h, m, s, ...) and
-    duration arithmetic act on the UTC instant, as in Polars. Nulls
-    propagate.
+    duration arithmetic act on the UTC instant. Nulls propagate.
     """
 
     var _expr: Expr
@@ -2915,8 +2913,8 @@ struct DtNamespace(Copyable):
         return self._op(DT_EPOCH, time_unit, "timestamp")
 
     def round(self, every: String) -> Expr:
-        """Round local time as in Polars: shift by half the interval, then
-        truncate. Calendar months use a 28-day estimate; fixed-unit ties
+        """Round local time by shifting by half the interval, then
+        truncating. Calendar months use a 28-day estimate; fixed-unit ties
         round forward.
         """
         return self._op(DT_ROUND, every)

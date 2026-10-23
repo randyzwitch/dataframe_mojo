@@ -1,34 +1,21 @@
-"""Join order by estimated cost, after DuckDB's join order optimizer
-(src/optimizer/join_order, v1.5.5).
+"""Choose an inner-join order using estimated cardinality and cost.
 
-Inner joins form a graph: relations (each with its row count after its own
-filters) and edges between two relations (the key pairs that join them).
-A set of relations has an estimated row count (`CardinalityEstimator`):
-the product of its relations' rows over the product of the total domains
-of the edges on a spanning tree of the set, taken in descending total
-domain (Kruskal). An edge's total domain is that of the equivalence set of
-columns its keys belong to (columns made equal by any join are one set),
-which with no distinct-count statistics (DuckDB's case for Parquet) is the
-smallest table row count among the set's relations: a column's distinct
-count is taken as its table's rows before any filter
-(`RelationStatisticsHelper::ExtractGetStats`), so joining to a filtered
-table divides by the whole table and keeps its share of the rows. Where a
-loaded table keeps distinct-count statistics (`distinct_statistics`,
-DuckDB's HyperLogLog per column), a set's domain is instead the largest
-count among its columns, and each edge with such a domain left over once
-the set is connected adds one to the denominator's multiplier. A filter
-between joins comparing a column of one relation with a column of another
-is an edge too (`FilterEdge`, DuckDB's `CreateHyperGraphEdges`): its
-columns form an equivalence set like key columns, and where it is the
-edge that connects two components it divides by its domain (an equality)
-or by the domain to the power 2/3 (any other comparison); met once they
-are connected, it counts as any unused edge does. A plan's cost is the
-sum of the estimated rows of every join it makes (`CostModel::ComputeCost`).
+Relations form vertices in a graph; join keys and column comparisons form
+edges. Each relation starts with its row count after local filters. To
+estimate a connected set, divide the product of its relation row counts by
+the product of edge domains on a spanning tree, choosing edges in descending
+domain order. Columns equated by joins or filters share an equivalence set.
+Without distinct-count statistics, an equivalence set's domain is the
+smallest row count among its relations. With statistics, use the largest
+distinct-count estimate among its columns. A cross-relation equality filter
+is an edge that divides by its domain; another comparison divides by the
+domain raised to 2/3. Additional edges after connecting the set each
+contribute another domain factor. A plan's cost is the sum of estimated
+output rows for its joins.
 
-Below `EXACT_RELATIONS` relations every connected split of every connected
-set is tried (dynamic programming over subsets, as DPhyp enumerates them);
-at or above it the cheapest connected pair is merged until one set
-remains (greedy operator ordering, `SolveJoinOrderApproximately`).
+Below `EXACT_RELATIONS`, dynamic programming tries every connected split
+of each connected set. At or above the threshold, a greedy strategy
+repeatedly merges the cheapest connected pair.
 """
 from std.collections import Dict
 from std.bit import pop_count
@@ -49,12 +36,10 @@ struct JoinEdge(Copyable, Movable):
 
 @fieldwise_init
 struct FilterEdge(Copyable, Movable):
-    """A filter between joins comparing column `a_column` of relation `a`
-    with `b_column` of relation `b`: DuckDB makes it an edge of the join
-    graph (`CreateHyperGraphEdges`) and estimates it as a join condition
-    (`CalculateUpdatedDenom`), an equality dividing by its total domain and
-    any other comparison by that domain to the power 2/3. It holds no join
-    keys: the filter runs once its relations are joined."""
+    """A cross-relation filter comparing `a_column` in relation `a` with
+    `b_column` in relation `b`. It contributes an edge to the join graph
+    for cardinality estimation but retains no join keys; the filter runs
+    once its relations are joined."""
 
     var a: Int
     var b: Int

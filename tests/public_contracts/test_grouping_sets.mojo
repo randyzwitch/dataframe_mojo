@@ -1,7 +1,7 @@
-"""ROLLUP, CUBE and GROUPING SETS, eager and lazy, give DuckDB's rows: the
-sets each form expands to, null keys on subtotal rows told apart from null
-key values by grouping(), duplicated sets kept, the empty set giving one row
-even over no rows, and every set equal to a plain group_by."""
+"""Test ROLLUP, CUBE and GROUPING SETS in eager and lazy execution. Each
+expands into its grouping sets; `grouping()` distinguishes subtotal nulls
+from null key values. Duplicate sets are preserved, the empty set yields
+one row even for empty input, and each set matches a plain `group_by`."""
 # contract-group: reduce.grouping_sets
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (

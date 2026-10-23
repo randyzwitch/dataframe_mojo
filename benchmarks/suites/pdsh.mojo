@@ -1,10 +1,10 @@
-"""PDS-H: the 22 TPC-H-derived queries of Polars' benchmark, written with
-this library's lazy API, as the Polars versions are: each query builds one
-plan over the tables and collects it, so projection and predicate pushdown
-decide which columns and rows reach each join (#329). q11 and q22 collect a
-scalar subquery first and use its value, as a user would. engines.py holds
-the Polars versions; DuckDB runs `tpch_queries()`. The same queries run on both
-data variants (bench_suites.py): money columns as Float64, or as
+"""PDS-H: 22 TPC-H-derived queries expressed as lazy plans. Each query builds
+one plan over the tables and collects it, so projection and predicate
+pushdown decide which columns and rows reach each join (#329). q11 and q22
+collect a scalar subquery first and use its value, as a user would.
+`engines.py` holds the expression-query translations and `tpch_queries()`
+provides the reference SQL. The same queries run on both data variants
+(bench_suites.py): money columns as Float64, or as
 Decimal(15, 2), where literals must be decimals too (`money`) and ratios
 and comparisons with averages convert to Float64 (`real`). Usage: see
 suite_common.mojo.
@@ -41,8 +41,8 @@ def money(decimal: Bool, text: String) raises -> Expr:
 
 
 def real(e: Expr) -> Expr:
-    """Float64, for ratios and comparisons with averages. DuckDB divides
-    decimals into DOUBLE; a decimal quotient would round to scale 2."""
+    """Float64, for ratios and comparisons with averages; a decimal
+    quotient would round to scale 2."""
     return e.cast(DataType.FLOAT64)
 
 

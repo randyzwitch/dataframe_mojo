@@ -1337,8 +1337,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     ) raises -> List[Int]:
         """Dense per-row ranks encoding direction, NaN, and null placement.
 
-        NaN is the largest value, as in Polars and DuckDB. Ascending,
-        numbers rank 0..d-1 and NaN ranks d; descending, NaN ranks 0 and
+        NaN is the largest value. Ascending, numbers rank 0..d-1 and NaN
+        ranks d; descending, NaN ranks 0 and
         numbers rank d..1. Null ranks -1 or d + 1 in either direction.
         """
         if self.is_chunked():

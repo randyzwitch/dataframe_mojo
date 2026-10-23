@@ -1,5 +1,5 @@
-"""Join graphs ordered by estimated cost (DuckDB's join order optimizer,
-`join_order.mojo`). The estimator divides the relations' rows by each
+"""Join graphs ordered by estimated cost (`join_order.mojo`). The estimator
+divides the relations' rows by each
 spanning edge's total domain, the fewest table rows among the relations
 its keys reach; the cheapest tree is found exactly below twelve relations
 and greedily from twelve; a disconnected graph is left alone; a filter
