@@ -3,8 +3,9 @@
 https://arrow.apache.org/docs/format/CDataInterface.html
 
 The interface is two C structs, `ArrowSchema` and `ArrowArray`, allocated by
-the consumer and filled by the producer. Producers and consumers exchange
-data directly through these structs; no library shim is needed.
+the consumer and filled by the producer. No Arrow library is involved:
+Polars, DuckDB, pyarrow, nanoarrow, or marrow exchange data with us through
+these structs directly.
 
 Export shares buffers wherever the layouts already agree, and the exported
 array keeps them alive (via reference counts) until the consumer calls
