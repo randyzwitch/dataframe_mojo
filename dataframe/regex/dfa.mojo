@@ -889,8 +889,12 @@ def find_literal(
     comptime lanes = 32
     var firsts = SIMD[DType.uint8, lanes](first)
     var lasts = SIMD[DType.uint8, lanes](last)
+    # Both loads must end inside the haystack. Hoist the last legal
+    # start so the miss loop only advances and compares one position.
+    var last_start = n - m
+    var vector_end = last_start - (lanes - 1)
     var i = at
-    while i + m - 1 + lanes <= n:
+    while i <= vector_end:
         var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
             width=lanes
         ](i + m - 1).eq(lasts)
@@ -906,7 +910,7 @@ def find_literal(
                 return i + k
             candidates &= candidates - 1
         i += lanes
-    while i + m <= n:
+    while i <= last_start:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:
             var same = True
             for j in range(1, m - 1):
