@@ -873,6 +873,9 @@ def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
         "\\b([\\u{7f}-\\u{81}\\u{7ff}-\\u{801}])\\b",
         "([\\p{Greek}\\p{Cyrillic}\\p{Han}])",
         "([\\u{10FFFF}])",
+        "([a-z])",
+        "([\\u{0}-\\u{7f}])",
+        "",
     ]
     for pattern in patterns:
         var regex = Regex(pattern)
@@ -886,6 +889,9 @@ def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
                 points.append(boundary - 1)
         points.append(0x10FFFF)
         for cp in points:
+            assert_equal(
+                program.is_word(cp), class_contains(program.word, cp), pattern
+            )
             var interval = 0
             for k in range(1, len(program.boundaries)):
                 if program.boundaries[k] > cp:
