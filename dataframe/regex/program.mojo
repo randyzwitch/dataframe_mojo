@@ -68,7 +68,8 @@ struct Program(Movable, Sized):
     var out: List[Int32]
     var arg: List[Int32]
     var class_ranges: List[List[UInt32]]
-    # 128 bits of ASCII membership per class.
+    # Packed ASCII membership (two words per class), followed by thirty
+    # words per class for U+0080..U+07FF: all two-byte UTF-8 code points.
     var class_ascii: List[UInt64]
     var start: Int
     var start_unanchored: Int
@@ -125,6 +126,12 @@ struct Program(Movable, Sized):
         if cp < 128:
             var word = self.class_ascii[2 * id + Int(cp >> 6)]
             return (word >> UInt64(cp & 63)) & 1 == 1
+        if cp < 0x800:
+            var bit = Int(cp) - 128
+            var word = self.class_ascii[
+                2 * len(self.class_ranges) + 30 * id + (bit >> 6)
+            ]
+            return (word >> UInt64(bit & 63)) & 1 == 1
         return class_contains(self.class_ranges[id], cp)
 
     @always_inline
@@ -159,6 +166,31 @@ struct Program(Movable, Sized):
             else:
                 hi = mid
         return Int(self.interval_class[lo])
+
+
+def _build_two_byte_membership(mut program: Program):
+    # Preserve the packed ASCII prefix and Program's existing field layout.
+    # At 240 extra bytes per class, the bounded two-byte UTF-8 domain gives
+    # repeated Unicode predicates one bitmap load instead of a range search.
+    var classes = len(program.class_ranges)
+    var base = 2 * classes
+    program.class_ascii.resize(32 * classes, 0)
+    for cls in range(classes):
+        ref ranges = program.class_ranges[cls]
+        for i in range(0, len(ranges), 2):
+            if ranges[i] >= 0x800:
+                break
+            var lo = max(Int(ranges[i]), 128) - 128
+            var hi = min(Int(ranges[i + 1]), 0x7FF) - 128
+            if lo > hi:
+                continue
+            for word in range(lo >> 6, (hi >> 6) + 1):
+                var low = max(lo - 64 * word, 0)
+                var high = min(hi - 64 * word, 63)
+                var mask = (UInt64.MAX << UInt64(low)) & (
+                    UInt64.MAX >> UInt64(63 - high)
+                )
+                program.class_ascii[base + 30 * cls + word] |= mask
 
 
 def _nullable(ast: Ast, node: Int) -> Bool:
@@ -509,5 +541,6 @@ def compile_program(ast: Ast, reverse: Bool) raises -> Program:
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    _build_two_byte_membership(program)
     _build_alphabet(program)
     return program^

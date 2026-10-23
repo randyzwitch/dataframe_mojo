@@ -614,3 +614,36 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
     var text = String("abca ") * 32 + "adca"
     assert_equal(find_literal(_span(text), needle, 0), 160)
     _ = text
+
+
+def test_two_byte_class_membership_matches_canonical_ranges() raises:
+    from dataframe.regex.charclass import class_contains
+
+    var patterns: List[String] = [
+        "(\\w+)",
+        "(\\d+)",
+        "(\\s+)",
+        "([^a-z])",
+        "([\\u{7f}-\\u{81}])",
+        "([\\u{7ff}-\\u{801}])",
+        "(\\p{Greek}+)",
+        "(\\p{Cyrillic}+)",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        ref program = regex._compiled[].forward
+        for cls in range(len(program.class_ranges)):
+            ref ranges = program.class_ranges[cls]
+            for cp in range(0x840):
+                assert_equal(
+                    program.class_has(cls, UInt32(cp)),
+                    class_contains(ranges, UInt32(cp)),
+                    pattern,
+                )
+            var wider: List[UInt32] = [0xD7FF, 0xE000, 0x10000, 0x10FFFF]
+            for cp in wider:
+                assert_equal(
+                    program.class_has(cls, cp),
+                    class_contains(ranges, cp),
+                    pattern,
+                )
