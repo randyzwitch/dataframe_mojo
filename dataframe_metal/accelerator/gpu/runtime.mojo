@@ -923,6 +923,11 @@ def _radix_sort_passes(plan: RowPlan, step: RowStep) raises -> Int:
     ):
         return -1
     var node = step.start
+    # A categorical key sorts by the rank of its original code (the Program
+    # sets that flag, the plan does not); radix passes would sort its words.
+    for descriptor in plan.category_sorts:
+        if descriptor[0] == node:
+            return -1
     var dtype = plan.node_dtypes[node]
     if (
         not dtype.is_integer()

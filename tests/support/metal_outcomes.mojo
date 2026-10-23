@@ -19,3 +19,20 @@ def same_outcome(query: LazyFrame) raises:
             _ = query.collect(accelerator=MetalRuntime())
         return
     assert_true(query.collect(accelerator=MetalRuntime()).equals(expected))
+
+
+def overflowed(query: LazyFrame, runtime: MetalRuntime) raises -> Bool:
+    """Whether the CPU raised an Int64 overflow, which Metal must then raise.
+
+    Returns False, with nothing asserted, when the CPU produced a result; the
+    caller compares the two results. Any other CPU error propagates.
+    """
+    try:
+        _ = query.collect(engine="cpu", streaming=False)
+    except cpu_error:
+        if "overflow" not in String(cpu_error):
+            raise cpu_error^
+        with assert_raises(contains=String(cpu_error)):
+            _ = query.collect(accelerator=runtime)
+        return True
+    return False

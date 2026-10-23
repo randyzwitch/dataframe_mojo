@@ -7,12 +7,11 @@ No row sort, generic word matrix, or native Metal helper participates.
 """
 from max.gpu import block_idx, thread_idx, barrier
 from std.atomic import Atomic
-from std.collections import Dict
 from std.memory import Pointer, unsafe_stack_allocation
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.binding import bind
-from dataframe.expr import COL, SUM
+from dataframe.expr import COL, SUM, SELECTOR
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG
 from dataframe.string_column import StringColumn
 from dataframe_metal.accelerator.metadata import schema_frame
@@ -40,6 +39,10 @@ def eligible(query: LazyFrame) raises -> Bool:
         return False
     ref node = query._nodes[1]
     ref frame = query._frames[query._nodes[0].offset]
+    # A schema selector is expanded later; binding it here would raise.
+    for part in node.exprs[0]._nodes:
+        if part.op == SELECTOR:
+            return False
     var bound = bind(node.exprs[0], frame._columns)
     if (
         len(bound.expr._nodes) != 2
@@ -214,16 +217,11 @@ def execute(
             ),
         )
         _ = scope.check(reserved)
-        # String equality is label equality, even when two retained codes
-        # name the same label. Canonicalize only dictionary entries; row
-        # codes remain immutable and are remapped on the device.
-        var lookup = Dict[String, UInt32]()
+        # A retained code is the group's identity, as on every other CPU and
+        # Metal grouping route: two codes naming one label stay two groups.
         var code_map = List[UInt32](capacity=max(1, groups - 1))
         for code in range(groups - 1):
-            var label = String(dictionary.dictionary()[].get(code))
-            if label not in lookup:
-                lookup[label] = UInt32(code)
-            code_map.append(lookup[label])
+            code_map.append(UInt32(code))
         if not len(code_map):
             code_map.append(0)
         var retained = key._dictionary_codes()

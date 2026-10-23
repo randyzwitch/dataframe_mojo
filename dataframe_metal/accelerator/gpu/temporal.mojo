@@ -205,18 +205,31 @@ def evaluate(
     var day = civil[2]
     if op == ROW_CALENDAR_OFFSET or op == ROW_CALENDAR_TRUNCATE:
         var index = year * 12 + month - 1
+        # The CPU raises when the shifted date leaves the Int64 range (#932),
+        # where the civil arithmetic here wraps. Flag the month count and the
+        # day number; the CPU then decides the fault.
+        var calendar_error = UInt32(0)
         if op == ROW_CALENDAR_OFFSET:
-            index = (
-                index.cast[DType.uint64]() + parameter.cast[DType.uint64]()
-            ).cast[DType.int64]()
+            var moved = checked_add(index, parameter)
+            index = moved[0]
+            calendar_error |= moved[1]
         else:
-            index = floor_div(index, parameter) * parameter
+            var floored = checked_mul(floor_div(index, parameter), parameter)
+            index = floored[0]
+            calendar_error |= floored[1]
         year = floor_div(index, 12)
         month = floor_mod(index, 12) + 1
         day = min(
             day, days_in_month(year, month)
         ) if op == ROW_CALENDAR_OFFSET else Int64(1)
         var target_days = days_from_civil(year, month, day)
+        var round_trip = civil_from_days(target_days)
+        if (
+            round_trip[0] != year
+            or round_trip[1] != month
+            or round_trip[2] != day
+        ):
+            calendar_error |= 1
         var within = floor_mod(
             input, per_day
         ) if storage_unit != 0 and op == ROW_CALENDAR_OFFSET else Int64(0)
@@ -229,13 +242,22 @@ def evaluate(
                     storage_unit,
                     calendar_days,
                 )
-                return (shifted[0].cast[DType.uint64](), joined[1] | shifted[1])
+                return (
+                    shifted[0].cast[DType.uint64](),
+                    calendar_error | joined[1] | shifted[1],
+                )
             var shifted = checked_add(joined[0], literal.cast[DType.int64]())
-            return (shifted[0].cast[DType.uint64](), joined[1] | shifted[1])
+            return (
+                shifted[0].cast[DType.uint64](),
+                calendar_error | joined[1] | shifted[1],
+            )
         if utc:
             var instant = _utc_localize(joined[0], storage_unit)
-            return (instant[0].cast[DType.uint64](), joined[1] | instant[1])
-        return (joined[0].cast[DType.uint64](), joined[1])
+            return (
+                instant[0].cast[DType.uint64](),
+                calendar_error | joined[1] | instant[1],
+            )
+        return (joined[0].cast[DType.uint64](), calendar_error | joined[1])
     if op == DT_YEAR:
         return (year.cast[DType.uint64](), 0)
     if op == DT_MONTH:

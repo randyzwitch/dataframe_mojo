@@ -11,6 +11,7 @@ from dataframe_metal.accelerator.capabilities import RowCapabilities
 from dataframe_metal.accelerator.rows import lower_rows, ROW_CALENDAR_TRUNCATE
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_empty_inputs import check
+from tests.support.metal_outcomes import overflowed
 from tests.support.temporal_reference import civil_days
 
 
@@ -160,8 +161,36 @@ def test_native_metal_calendar_truncation_full_date_domain_datetime_overflow_and
             ).with_dtype(DataType.DATE)
         ]
     )
+    var days: List[Int64] = [Int64.MIN, Int64.MIN + 1, Int64.MAX - 1, Int64.MAX]
+    days.extend([-719528, 0])
     for interval in List[String](["1mo", "1y", "5mo", "999999999999999999mo"]):
-        check(dates.lazy().select(col("t").dt().truncate(interval)), runtime)
+        # A period start below the Int64 day range raises on both engines
+        # (#932 rejects it instead of wrapping). The other rows run together.
+        var fits = List[Int64]()
+        for day in days:
+            var one = DataFrame(
+                [Series("t", Column[Int64]([day])).with_dtype(DataType.DATE)]
+            )
+            if not overflowed(
+                one.lazy().select(col("t").dt().truncate(interval)), runtime
+            ):
+                fits.append(day)
+        var every = dates.lazy().select(col("t").dt().truncate(interval))
+        if len(fits) < len(days):
+            assert_true(overflowed(every, runtime))
+        if len(fits):
+            check(
+                DataFrame(
+                    [
+                        Series("t", Column[Int64](fits.copy())).with_dtype(
+                            DataType.DATE
+                        )
+                    ]
+                )
+                .lazy()
+                .select(col("t").dt().truncate(interval)),
+                runtime,
+            )
     for dtype in List[DataType](
         [
             DataType.datetime("ms"),

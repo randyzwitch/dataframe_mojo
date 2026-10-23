@@ -6,12 +6,11 @@ without requiring their entire state to fit in threadgroup memory.
 """
 from max.gpu import block_idx, thread_idx
 from std.atomic import Atomic
-from std.collections import Dict
 from std.memory import Pointer
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.binding import bind
-from dataframe.expr import COL, SUM
+from dataframe.expr import COL, SUM, SELECTOR
 from dataframe.lazy import LazyFrame, SCAN_FRAME, AGG
 from dataframe.string_column import StringColumn
 from dataframe_metal.accelerator.metadata import schema_frame
@@ -55,6 +54,10 @@ def eligible(query: LazyFrame) raises -> Bool:
         return False
     ref node = query._nodes[1]
     ref frame = query._frames[query._nodes[0].offset]
+    # A schema selector is expanded later; binding it here would raise.
+    for part in node.exprs[0]._nodes:
+        if part.op == SELECTOR:
+            return False
     var bound = bind(node.exprs[0], frame._columns)
     if (
         len(bound.expr._nodes) != 2
@@ -76,13 +79,11 @@ def eligible(query: LazyFrame) raises -> Bool:
 
 
 def _code_map(dtype: DataType) raises -> List[UInt32]:
-    var lookup = Dict[String, UInt32]()
+    # A retained code is the group's identity, as on every other CPU and
+    # Metal grouping route: two codes naming one label stay two groups.
     var result = List[UInt32](capacity=max(1, len(dtype.dictionary()[])))
     for code in range(len(dtype.dictionary()[])):
-        var label = String(dtype.dictionary()[].get(code))
-        if label not in lookup:
-            lookup[label] = UInt32(code)
-        result.append(lookup[label])
+        result.append(UInt32(code))
     if not len(result):
         result.append(0)
     return result^
@@ -218,7 +219,7 @@ def execute(
             ),
         )
         _ = scope.check(reserved)
-        # Canonicalize dictionary labels only; row codes stay immutable.
+        # Row codes stay immutable and are the groups' identity.
         var code_map = _code_map(dictionary)
         var code_map2 = _code_map(dictionary2)
         var retained = key._dictionary_codes()

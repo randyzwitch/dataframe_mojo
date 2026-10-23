@@ -157,7 +157,7 @@ def test_mojo_gpu_paired_coded_sum_wide_cancellation_and_overflow() raises:
 
 
 # requires: metal
-def test_mojo_gpu_paired_coded_sum_duplicate_labels_coalesce() raises:
+def test_mojo_gpu_paired_coded_sum_duplicate_labels_keep_code_identity() raises:
     var frame = DataFrame(
         [
             coded("region", ["same", "same"], [0, 1, 0], [True, True, True]),
@@ -167,9 +167,9 @@ def test_mojo_gpu_paired_coded_sum_duplicate_labels_coalesce() raises:
     )
     var expected = DataFrame(
         [
-            Series("region", StringColumn(["same"])),
-            Series("status", StringColumn(["s"])),
-            Series("total", Column[Int64]([13])),
+            Series("region", StringColumn(["same", "same"])),
+            Series("status", StringColumn(["s", "s"])),
+            Series("total", Column[Int64]([5, 8])),
         ]
     )
     assert_frame(direct(plan(frame))[0], expected)
