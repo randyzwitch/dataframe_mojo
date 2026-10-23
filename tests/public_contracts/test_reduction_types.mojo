@@ -63,7 +63,8 @@ def test_global_float_extrema_and_statistics_follow_nonfinite_policy() raises:
             [-inf, -1, -inf, -2],
         ]
         var minima: List[Float64] = [-0.0, 0.0, nan, -inf, 1, -inf]
-        var maxima: List[Float64] = [nan, nan, nan, nan, inf, -1]
+        # NaN is skipped by min and max unless it is all there is (#816).
+        var maxima: List[Float64] = [3, 3, nan, inf, inf, -1]
         var argmin: List[UInt32] = [0, 0, 0, 0, 1, 0]
         var argmax: List[UInt32] = [3, 3, 0, 1, 0, 1]
         var unique: List[Int64] = [3, 3, 1, 4, 3, 3]

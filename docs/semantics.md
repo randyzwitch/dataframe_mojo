@@ -67,7 +67,8 @@ Polars' layout: a `statistic` column with rows `count`, `null_count`, `mean`,
 on; an empty list gives none), and `max`, then one column per input column.
 Numeric and Bool columns give Float64; Bool `mean` is the share of true
 values and has no `std` or percentiles. `min` and `max` skip NaN unless every
-valid value is NaN, while `mean` and `std` propagate it. String columns give
+valid value is NaN, as the `min` and `max` expressions do, while `mean` and
+`std` propagate it. String columns give
 String counts, `min` and `max`. Temporal columns give String counts, `mean`
 (a datetime for a Date column), `min`, percentiles and `max`, formatted as a
 cast to String formats them. Polars formats temporal values through Python,

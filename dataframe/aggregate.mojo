@@ -2558,10 +2558,9 @@ struct Reducer(Movable):
                 var output = self.floats.copy()
                 if not picked:
                     for g in range(n):
-                        var nan_wins = self.nan_seen[g] and (
-                            op == MAX or not self.seen[g]
-                        )
-                        if nan_wins:
+                        # NaN is the result only when it is all a group
+                        # has, as in Polars (#816).
+                        if self.nan_seen[g] and not self.seen[g]:
                             output[g] = Float64(0) / Float64(0)
                             valid[g] = True
                 return Series("", Column[Float64](output^, valid))

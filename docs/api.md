@@ -968,9 +968,9 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def dt(self) -> DtNamespace`
   Temporal operations: col("when").dt().year().
 - `def min(self) -> Self`
-  Smallest non-null value. NaN sorts above every number, so it is the minimum only when every valid value is NaN.
+  Smallest non-null value. NaN is skipped, as in Polars, so it is the minimum only when every valid value is NaN.
 - `def max(self) -> Self`
-  Largest non-null value; any valid NaN makes the maximum NaN.
+  Largest non-null value. NaN is skipped, as in Polars, so it is the maximum only when every valid value is NaN.
 - `def mean(self) -> Self`
   Arithmetic mean of non-null values as Float64; null when empty. A Bool's mean is the share of true values.
 - `def first(self) -> Self`

@@ -305,7 +305,8 @@ def finish(
         total = f.div(total, f.from_unsigned(count))
     elif op == MIN or op == MAX:
         present = flags != 0
-        if (flags & NAN_SEEN) and (op == MAX or not (flags & SEEN)):
+        # NaN is the result only when it is all a group has (#816).
+        if (flags & NAN_SEEN) and not (flags & SEEN):
             total = canonical_nan
     if dtype == 1 and op != MEAN:
         total = UInt64(f.to_float32(total))

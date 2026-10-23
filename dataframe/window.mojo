@@ -1,8 +1,10 @@
 """Order-dependent kernels over whole columns, restarted per partition.
 
 Most operations choose, for every output row, a source row to gather (or
-none). Ordering uses the same dense sort ranks as `sort`, so NaN sorts above
-every number and ties keep the earlier row.
+none). Ordering uses the same dense sort ranks as `sort`, so ties keep the
+earlier row. cum_min and cum_max skip NaN, as in Polars: a NaN row gets the
+running value so far, and is NaN only before the first number (#816). A
+rolling_min or rolling_max window holding a NaN is NaN.
 """
 from .column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
@@ -255,6 +257,10 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if op == CUM_MIN or op == CUM_MAX or op == ROLLING_MIN or op == ROLLING_MAX:
         ranks = input._sort_ranks(False, True)
     var take_max = op == CUM_MAX or op == ROLLING_MAX
+    var nan = List[Bool]()
+    if len(ranks) > 0 and input.dtype().is_float():
+        nan = _nan_rows(input, valid)
+    var has_nan = len(nan) > 0
     for rows in groups:
         var m = len(rows)
         if op == SHIFT:
@@ -267,6 +273,10 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
             var best = -1
             for row in _ordered(rows, reverse):
                 if valid[row]:
+                    if has_nan and nan[row]:
+                        # Skipped, unless nothing but NaN has come.
+                        source[row] = best if best >= 0 else row
+                        continue
                     if best < 0 or (
                         ranks[row]
                         > ranks[best] if take_max else ranks[row]
@@ -279,12 +289,15 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
             var needed = window if node.floating < 0 else Int(node.floating)
             for j in range(m):
                 var best = -1
+                var nan_row = -1
                 var count = 0
                 for k in range(max(0, j - window + 1), j + 1):
                     var row = rows[k]
                     if not valid[row]:
                         continue
                     count += 1
+                    if has_nan and nan[row]:
+                        nan_row = row
                     if best < 0 or (
                         ranks[row]
                         > ranks[best] if take_max else ranks[row]
@@ -292,7 +305,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     ):
                         best = row
                 if count >= needed and count > 0:
-                    source[rows[j]] = best
+                    # A NaN in the window is the result, as in Polars.
+                    source[rows[j]] = nan_row if nan_row >= 0 else best
         else:
             var limit = Int(node.integer)
             var last = -1
@@ -307,6 +321,16 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     if last >= 0 and (limit < 0 or distance <= limit):
                         source[row] = last
     return input.take_or_null(source)
+
+
+def _nan_rows(input: Series, valid: List[Bool]) raises -> List[Bool]:
+    """Whether each valid row of a float column holds NaN."""
+    var floats = _as_float(input)
+    ref column = floats._data[Column[Float64]]
+    var out = List[Bool](length=len(input), fill=False)
+    for i in range(len(input)):
+        out[i] = valid[i] and isnan(column._get(i))
+    return out^
 
 
 def _cum_prod(input: Series, ids: List[Int], reverse: Bool) raises -> Series:
@@ -379,8 +403,7 @@ def _running(
     per partition and, for min and max, sorts the whole column to compare
     ranks: TPC-DS q51's running max over 611K rows in 18K items took 66
     ms. Int64 and Float64 input (others are widened first or keep the
-    general path); a Float64 column holding NaN keeps it too, since NaN's
-    place comes from the sort. None when not handled."""
+    general path). None when not handled."""
     var n = len(input)
     var groups = 1
     var partitioned = len(ids) > 0
@@ -426,14 +449,6 @@ def _running(
             ).with_dtype(input.dtype())
     if input._data.isa[Column[Float64]]():
         ref column = input._data[Column[Float64]]
-        if op != CUM_SUM:
-            var values = column.unsafe_values()
-            var nulls = column.null_count() > 0
-            for i in range(n):
-                if isnan(values.unsafe_load(i)) and (
-                    not nulls or column._valid(i)
-                ):
-                    return None
         return _running_values[DType.float64](
             op, input, column, ids, groups, reverse
         )
@@ -471,6 +486,14 @@ def _running_values[
         var g = partition[unsafe_offset=i] if partitioned else 0
         var value = values.unsafe_load(i)
         var current = running[unsafe_offset=g]
+        comptime if D == DType.float64:
+            if op != CUM_SUM and isnan(value):
+                # A running min or max skips NaN: the row gets the value
+                # so far, or NaN when no number has come yet (#816).
+                written[unsafe_offset=i] = current if started[
+                    unsafe_offset=g
+                ] else value
+                continue
         if op == CUM_SUM:
             comptime if D == DType.int64:
                 current = rebind[Scalar[D]](

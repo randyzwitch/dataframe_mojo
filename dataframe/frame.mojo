@@ -758,12 +758,11 @@ struct DataFrame(Copyable, Sized, Writable):
             exprs.append(c.null_count().alias(p + "null_count"))
             if dtype.is_numeric() or dtype == DataType.BOOL:
                 var x = c.cast(DataType.FLOAT64)
-                # min and max skip NaN, as Polars' describe does; a column
-                # of only NaN gives NaN (restored below).
-                var numbers = x.fill_nan(null(DataType.FLOAT64))
+                # min and max skip NaN unless every valid value is NaN, as
+                # the min and max expressions do (#816).
                 exprs.append(x.mean().alias(p + "mean"))
-                exprs.append(numbers.min().alias(p + "min"))
-                exprs.append(numbers.max().alias(p + "max"))
+                exprs.append(x.min().alias(p + "min"))
+                exprs.append(x.max().alias(p + "max"))
                 if dtype.is_numeric():
                     exprs.append(x.std().alias(p + "std"))
                     for k in range(len(qs)):
@@ -830,15 +829,6 @@ struct DataFrame(Copyable, Sized, Writable):
                         valid.append(True)
                     elif (p + key) in present:
                         var value = stats.column(p + key).get(0)
-                        if (
-                            value.is_null()
-                            and count > 0
-                            and (key == "min" or key == "max")
-                        ):
-                            # Every valid value was NaN.
-                            values.append(Float64(0) / Float64(0))
-                            valid.append(True)
-                            continue
                         valid.append(not value.is_null())
                         values.append(0 if value.is_null() else value.float64())
                     else:

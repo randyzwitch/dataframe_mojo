@@ -611,6 +611,8 @@ def test_float_extrema_state_merge_preserves_first_zero_ties_and_nan_order() rai
         [nan, -0.0, 0.0, nan],
     ]
     var minima: List[Float64] = [-0.0, 0.0, nan, -0.0]
+    # NaN is skipped by min and max unless it is all there is (#816).
+    var maxima: List[Float64] = [3, 3, nan, -0.0]
     for example in range(len(values)):
         var source = Series("x", Column[Float64](values[example].copy()))
         for op in [MIN, MAX]:
@@ -630,6 +632,8 @@ def test_float_extrema_state_merge_preserves_first_zero_ties_and_nan_order() rai
                     var right = _new_reducer(source, op, 1)
                     right.merge(first)
                     right.merge(middle)
-                    var expected = minima[example] if op == MIN else nan
+                    var expected = (
+                        minima[example] if op == MIN else maxima[example]
+                    )
                     assert_float(left.finish().get(0).float64(), expected)
                     assert_float(right.finish().get(0).float64(), expected)

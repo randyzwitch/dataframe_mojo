@@ -37,9 +37,15 @@ def cumulative(cells: WindowCells, kind: String, reverse: Bool) -> WindowCells:
         if cells.valid[row]:
             var value = cells.values[row]
             total += value
-            if count == 0 or (
-                order_less(value, best) if kind
-                == "min" else order_less(best, value)
+            # A running min or max skips NaN: it is NaN only before the first
+            # number (#816).
+            if isnan(value):
+                if count == 0:
+                    best = value
+            elif (
+                count == 0
+                or isnan(best)
+                or (value < best if kind == "min" else value > best)
             ):
                 best = value
             count += 1
@@ -117,8 +123,10 @@ def rolling(
         valid[row] = True
         var total = Float64(0)
         var best = members[0]
+        var holds_nan = False
         for value in members:
             total += value
+            holds_nan = holds_nan or isnan(value)
             if order_less(value, best) if kind == "min" else order_less(
                 best, value
             ):
@@ -128,7 +136,8 @@ def rolling(
         elif kind == "mean":
             values[row] = total / Float64(count)
         elif kind == "min" or kind == "max":
-            values[row] = best
+            # A rolling window holding NaN is NaN, as in Polars (#816).
+            values[row] = Float64(0) / Float64(0) if holds_nan else best
         else:
             var mean = total / Float64(count)
             var squares = Float64(0)
