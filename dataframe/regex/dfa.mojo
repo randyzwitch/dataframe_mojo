@@ -870,7 +870,7 @@ def find_sets(
     return -1
 
 
-@no_inline
+@always_inline
 def _verify_literal(
     hay: Pointer[UInt8, ImmutAnyOrigin],
     needle: Pointer[UInt8, ImmutAnyOrigin],
@@ -944,8 +944,8 @@ def find_literal(
         if found >= 0:
             return found
         i += lanes
-    # Keep verification out of the bulk miss loop. Two vectors per load
-    # amortize its cursor, mask and branch work over twice as many bytes.
+    # Two vectors per load amortize the cursor, mask and branch work over
+    # twice as many bytes. Verification runs only for candidate positions.
     var wide_firsts = SIMD[DType.uint8, 64](first)
     var wide_lasts = SIMD[DType.uint8, 64](last)
     var bulk_end = last_start - 63

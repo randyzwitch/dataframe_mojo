@@ -755,6 +755,7 @@ def test_single_class_searches_match_vm_without_dfa_passes() raises:
         "α a9漢🙂",
         "\n\r\t ١१\n",
         "é߿ࠀ漢🙂",
+        "\x00Kſİı",
         chr(0x10FFFF),
         String("a") * 96 + "3α漢🙂",
     ]
