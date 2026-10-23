@@ -1,7 +1,7 @@
 """Optional installed GIS consumers for actual Mojo GeoParquet writer outputs.
 
 No extension installation or network access is attempted. Missing imports or a
-missing cached spatial extension are reported as unavailable capabilities;
+missing cached DuckDB Spatial extension are reported as unavailable capabilities;
 once a capability is loaded, every semantic assertion is mandatory.
 """
 import argparse
