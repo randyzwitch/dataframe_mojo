@@ -50,3 +50,12 @@ def huge_uninit[T: Copyable](length: Int) -> List[T]:
     var out = List[T](unsafe_uninit_length=length)
     advise_huge_pages(Int(out.unsafe_ptr()), length * size_of[T]())
     return out^
+
+
+def huge_capacity[T: Copyable](length: Int) -> List[T]:
+    """An empty list with room for `length` elements that are appended or
+    written through its pointer, on huge pages when the room can hold one
+    and the kernel grants them."""
+    var out = List[T](capacity=length)
+    advise_huge_pages(Int(out.unsafe_ptr()), length * size_of[T]())
+    return out^
