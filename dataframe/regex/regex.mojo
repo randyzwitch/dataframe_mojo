@@ -504,10 +504,9 @@ def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
 
 
 struct Regex(Copyable, Movable):
-    """A compiled regular expression in the syntax of Rust's `regex` crate,
-    which Polars uses. Cheap to copy: the compiled programs are shared and
-    never change, so any number of workers can match with one `Regex`, each
-    through its own `Matcher`.
+    """A compiled regular expression. Cheap to copy: the compiled programs
+    are shared and never change, so any number of workers can match with one
+    `Regex`, each through its own `Matcher`.
 
     Supported: literals and escapes (`\\n`, `\\x7F`, `\\u{1F600}`, escaped
     punctuation), `.`, classes with ranges, negation, nesting, `&&`, `--`,
@@ -931,8 +930,7 @@ struct Matcher(Movable):
 
 def escape(text: String) -> String:
     """Escape every regex metacharacter (`\\.+*?()|[]{}^$#&-~`), so the
-    result matches `text` literally, like `regex::escape` and Polars'
-    `escape_regex`."""
+    result matches `text` literally."""
     var out = String()
     for cp in text.codepoints():
         var c = Int(cp)

@@ -1,5 +1,5 @@
-"""Window partitions laid out contiguously (DuckDB's hash groups) and
-evaluated many at once: the layout is a stable sort of rows by partition id
+"""Window partitions laid out contiguously and evaluated many at once: the
+layout is a stable sort of rows by partition id
 for any number of partitions, and `over()` on it gives each partition what
 the scalar window models give it: running sums both ways, shift, average
 rank, rolling mean, forward fill and broadcast sums and means, with string

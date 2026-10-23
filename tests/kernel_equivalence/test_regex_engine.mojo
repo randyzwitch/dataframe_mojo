@@ -1,5 +1,5 @@
-"""Regex engine properties the Polars corpus does not reach: one compiled
-regex shared by several workers, the DFA cache overflowing on a pattern
+"""Regex engine properties beyond the corpus: one compiled regex shared by
+several workers, the DFA cache overflowing on a pattern
 with many states (and the Pike VM taking over), prefilters on long
 haystacks, capture slots, replacement templates, escaping and the errors
 for unsupported syntax."""

@@ -1,12 +1,11 @@
 """NaN in min, max, cum_min, cum_max, rolling_min, rolling_max and describe (#816).
 
-The expected values are what Polars 2.0 gives for the same input (`min`, `max`,
-`cum_min`, `cum_max`, `rolling_min`, `rolling_max`, `describe`), each also
-taken `over` a partition and grouped. min and max skip NaN and are NaN only
-when every valid value is NaN; a running min or max repeats the value so far on
-a NaN row, which is NaN only before the first number; a rolling window holding
-NaN is NaN. DuckDB treats NaN as the largest value instead, so its max is NaN
-if any value is; this library follows Polars.
+The expected values cover `min`, `max`, `cum_min`, `cum_max`, `rolling_min`,
+`rolling_max` and `describe`, each also taken `over` a partition and grouped.
+Min and max ignore NaNs: they return null when no valid values remain, the
+extreme number when one exists, and NaN when all valid values are NaN.
+Running min and max repeat the value so far on a NaN row (NaN only before
+the first number); rolling windows containing NaN return NaN.
 """
 # contract-group: reduce.global
 # contract-group: reduce.grouped

@@ -1,6 +1,5 @@
 """A subplan read whole in several places runs once and every reader reads
-its result, as DuckDB materializes a CTE read twice and Polars caches a
-repeated subplan: a join several aggregations read (a rollup written as
+its result: a join several aggregations read (a rollup written as
 UNION ALL), and a subquery several joins build on. Copies with a filter of
 their own above them stay apart, since each filter would have narrowed its
 copy. Either way the result is the scalar model's, with the optimizer on
@@ -284,8 +283,8 @@ def test_a_subquery_two_joins_build_on_runs_once() raises:
 
 def test_copies_read_differently_keep_the_union_and_run_once() raises:
     """A CTE read in two places, each reader using other columns of it, is
-    pruned in both copies to the columns some reader uses, as Polars merges
-    a cache's readers' projections: the copies stay alike and run once,
+    pruned in both copies to the columns some reader uses: the copies stay
+    alike and run once,
     and a column neither reads is not computed."""
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var frame = sales()

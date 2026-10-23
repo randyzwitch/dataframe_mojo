@@ -452,7 +452,7 @@ struct StringViewBuilder(Movable):
         self._in_progress = List[UInt8]()
 
     def _new_buffer(mut self, bytes: Int):
-        """Exact Polars block replacement and exponential-capacity policy."""
+        """Block replacement and exponential-capacity policy for string views."""
         var doubled = self._in_progress.capacity() * 2
         var grown = min(
             STRING_VIEW_MAX_EXP_BLOCK_SIZE,

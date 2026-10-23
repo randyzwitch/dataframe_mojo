@@ -88,9 +88,9 @@ struct _Candidates(Movable):
     probe rows in row order: the probe row, the build row, and the bucket
     and duplicate chain that list the build row's equal keys.
 
-    The keys are then compared a column at a time over the candidates that
-    are still equal (`sel`), as DuckDB's RowMatcher does: each column's type
-    is resolved once per batch instead of once per key per candidate, which
+    The keys are compared a column at a time over candidates that remain
+    equal (`sel`). Resolve each column's type once per batch instead of once
+    per key per candidate, which
     `_row_equal` did (two thirds of a 65K-row join on four string keys and
     an integer)."""
 
@@ -1292,9 +1292,8 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
     shape. The scan stops at the first null or irregular step.
 
     Whether a whole buffer is one is found once and kept with it
-    (`_BufferFacts.progression`), as DuckDB plans with the statistics it
-    keeps for a table: a window onto a known progression is checked only
-    where it meets the chunk before.
+    (`_BufferFacts.progression`): a window onto a known progression is
+    checked only where it meets the chunk before.
     """
     if len(key) == 0:
         return (False, Int64(0), UInt64(1))
@@ -1549,10 +1548,9 @@ def prepare_hash_index(
     probe_rows: Int = -1,
 ) raises -> PreparedHashIndex:
     """The build side's index. `probe_rows`, when known, bounds the rows
-    that will probe it: an integer key's bits (`filter`) are made only when
-    the build has no more rows, as DuckDB builds a probe-side filter only
-    from a build no larger than the probe (`CanUseBloomFilter`); a larger
-    build pays more to set its bits than few probes save (PDS-H q16's 800K
+    that will probe it: build an integer-key bit filter only when the build
+    has no more rows than the probe. A larger build pays more to set its
+    bits than a small number of probes can save (PDS-H q16's 800K
     partsupp keys for 29.5K parts)."""
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")

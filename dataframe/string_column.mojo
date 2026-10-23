@@ -556,10 +556,9 @@ struct StringColumn(Copyable, Sized):
         Each output row is a 16-byte view: a value of up to 12 bytes inline,
         a longer one as its length, first four bytes and position in this
         column's byte buffer, which the result shares instead of copying.
-        This is how Polars gathers strings (`take_binview_unchecked`, which
-        clones the data buffers). A buffer too large for a view's 32-bit
-        offsets is copied as before (`_gather_offsets`). Arguments are as in
-        `_gather_offsets`.
+        If the byte buffer exceeds the view's 32-bit offsets, copy as
+        before with `_gather_offsets`. Arguments are the same as for that
+        method.
         """
         if len(self._bytes[]) > 4_294_967_295:
             return self._gather_offsets(
@@ -712,9 +711,9 @@ struct StringColumn(Copyable, Sized):
 
     def _as_views(self) raises -> Self:
         """This column as Arrow views onto its own bytes (descriptors only;
-        the bytes are shared, not copied), the one in-memory string layout
-        every kernel reads fast, as Polars keeps BinaryView. A column whose
-        bytes pass a view's 32-bit offsets stays as it is."""
+        the bytes are shared, not copied), the in-memory string layout used
+        for fast kernel reads. A column whose bytes exceed a view's 32-bit
+        offsets stays as it is."""
         if self._is_view_storage() or len(self._bytes[]) > Int(Int32.MAX):
             return self.copy()
         var rows = List[Int](capacity=self._length)
@@ -876,7 +875,7 @@ struct StringBuilder(Copyable):
 
 def escape_bytes(bytes: Span[UInt8, _]) -> String:
     """Bytes as b"..." with printable ASCII kept and everything else
-    escaped (\\n, \\t, \\r, \\", \\\\, \\xNN), as Polars prints binary."""
+    escaped (\\n, \\t, \\r, \\", \\\\, \\xNN)."""
     comptime HEX = "0123456789abcdef"
     var out = String('b"')
     for byte in bytes:

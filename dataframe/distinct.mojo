@@ -14,9 +14,9 @@ from all others. Rows are scattered by the top bits of their hash into
 partitions small enough for a cache-resident table, in two parallel passes
 (count, then write), and each partition counts its distinct keys in an
 open-addressing table on its own worker. Equal keys share a partition, so
-partitions never need merging: a distinct count is the sum of theirs, and a
-group's is the number of new keys each partition saw for it. This is how
-DuckDB and Polars count distinct, as grouping on (group, value).
+partitions never need merging: an overall distinct count is the sum of
+partition counts, and a group's count is the number of new keys each
+partition saw for it.
 """
 from std.bit import count_leading_zeros
 from std.memory import bitcast

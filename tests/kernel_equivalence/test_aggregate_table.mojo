@@ -1,5 +1,5 @@
-"""The aggregate table (DuckDB's radix-partitioned hash aggregate) against a
-scalar model of each group, through both routes that dispatch to it: the
+"""The radix-partitioned aggregate table against a scalar model of each group,
+through both routes that dispatch to it: the
 eager group-by over many groups, and a pipeline's grouped sink. Keys cover
 short, long, empty, Unicode and null strings, null integers, -0.0/0.0 and NaN
 floats and null Booleans; layouts cover contiguous, offset and unequally

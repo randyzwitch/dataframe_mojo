@@ -180,11 +180,11 @@ struct TimeZone(Copyable, Movable):
     def relocalize(self, local: Int64, original: Int64) raises -> Int64:
         """The UTC instant (seconds) for local time `local`, reached by
         shifting the value at UTC `original` in local time (truncate and
-        calendar offset_by). Ports Polars' `localize_result_rfc_5545`: an
-        ambiguous result keeps the original's daylight-saving state, and a
-        result in a gap moves forward by the daylight-saving amount (the
-        original's, or the one an hour later when the original is in
-        standard time). Raises when neither rule gives one instant."""
+        calendar offset_by). An ambiguous result keeps the original's
+        daylight-saving state; a result in a gap moves forward by the
+        daylight-saving amount, using the original's offset or the offset
+        an hour later when the original is in standard time. Raises when
+        neither rule gives one instant."""
         var found = self.resolve(local)
         if found[0] == 1:
             return found[1]
