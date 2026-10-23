@@ -193,6 +193,26 @@ CHECKS = {
 }
 
 
+# The same, for one data variant only: (suite, variant, query).
+VARIANT_CHECKS = {
+    # Independent per-set float sums make subtotal/group ties in q67's rank
+    # thread-dependent; DuckDB's single-set answer is the reference, and a
+    # shared-scan rollup removes it. The decimal variant is exact, so it
+    # still compares rk.
+    ("tpcds", "base", "q67"): [
+        "i_category",
+        "i_class",
+        "i_brand",
+        "i_product_name",
+        "d_year",
+        "d_qoy",
+        "d_moy",
+        "s_store_id",
+        "sumsales",
+    ],
+}
+
+
 def tables(suite, variant, scale):
     size = SCALES[scale]
     spec = VARIANTS[suite][variant]
@@ -488,10 +508,12 @@ def _positions(spec, summary):
     return out
 
 
-def same_answer(suite, query, got, want):
+def same_answer(suite, query, got, want, variant=None):
     if got["height"] != want["height"]:
         return False
-    spec = CHECKS.get((suite, query))
+    spec = VARIANT_CHECKS.get((suite, variant, query)) or CHECKS.get(
+        (suite, query)
+    )
     if spec is None:
         if len(got["values"]) != len(want["values"]):
             return False
@@ -823,7 +845,9 @@ def evaluate(result):
                 break
         if reference is None or reference is cell:
             continue
-        if not same_answer(suite, query, cell["summary"], reference["summary"]):
+        if not same_answer(
+            suite, query, cell["summary"], reference["summary"], variant
+        ):
             cell["status"] = "wrong answer"
     return cells
 

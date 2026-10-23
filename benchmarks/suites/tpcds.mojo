@@ -17,9 +17,9 @@ distinct rows and sum the tags per row, since SQL compares null values as
 equal there and joins never match null keys. SQL RANK is
 `rank(method="min")`, a window over a partition `.over`, and a running
 window (q51) a sort followed by a cumulative op `.over` the partition.
-The 10 left use ROLLUP or GROUPING (#564 phase 3).
-Any other query reports `unsupported: not translated`, so it is counted in
-every report instead of dropped. The same queries run on both data variants
+Last (#564 phase 3), the 10 with ROLLUP or GROUPING, using `group_by_rollup`
+and `grouping`. A query without a translation reports `unsupported: not
+translated`, so it is counted in every report instead of dropped. The same queries run on both data variants
 (bench_suites.py): money columns as Float64, or as declared decimals, where
 literals compared with them must be decimals too (`like`). Usage: see
 suite_common.mojo.
@@ -37,6 +37,7 @@ from dataframe import (
     coalesce,
     col,
     concat_str,
+    grouping,
     lit,
     when,
 )
@@ -1300,6 +1301,250 @@ def q51_running_max(value: String, name: String) -> Expr:
         )
         .end()
         .alias(name)
+    )
+
+
+def q5_channel(
+    t: Dict[String, DataFrame],
+    channel: String,
+    label: String,
+    sold: LazyFrame,
+    back: LazyFrame,
+    sales_zero: Expr,
+    returns_zero: Expr,
+    dim: String,
+    dim_key: String,
+    dim_id: String,
+) raises -> LazyFrame:
+    """One channel of q5: its sales rows (zero returns) and return rows (zero
+    sales) as one UNION ALL, in the two weeks, per outlet, as the SQL's
+    ssr, csr and wsr, then the channel's label and its id as text."""
+    var sold_rows = sold.with_columns(
+        [returns_zero.alias("return_amt"), returns_zero.alias("net_loss")]
+    )
+    var back_rows = back.with_columns(
+        [sales_zero.alias("sales_price"), sales_zero.alias("profit")]
+    ).select(
+        [
+            "unit_sk",
+            "date_sk",
+            "sales_price",
+            "profit",
+            "return_amt",
+            "net_loss",
+        ]
+    )
+    return (
+        sold_rows.concat(back_rows)
+        .join(
+            dates(
+                t,
+                col("d_date").is_between(
+                    date_lit("2000-08-23"), date_lit("2000-09-06")
+                ),
+                "d_sk",
+            ),
+            left_on=["date_sk"],
+            right_on=["d_sk"],
+        )
+        .join(
+            t[dim].lazy().select([dim_key, dim_id]),
+            left_on=["unit_sk"],
+            right_on=[dim_key],
+        )
+        .group_by([dim_id])
+        .agg(
+            [
+                col("sales_price").sum(min_count=1).alias("sales"),
+                col("profit").sum(min_count=1).alias("profit"),
+                col("return_amt").sum(min_count=1).alias("returns_"),
+                col("net_loss").sum(min_count=1).alias("profit_loss"),
+            ]
+        )
+        .select_exprs(
+            [
+                lit(channel + " channel").alias("channel"),
+                concat_str([lit(label), col(dim_id).fill_null("")]).alias("id"),
+                col("sales"),
+                col("returns_"),
+                (col("profit") - col("profit_loss")).alias("profit"),
+            ]
+        )
+    )
+
+
+def q5_legs(
+    sales: LazyFrame,
+    returns: LazyFrame,
+    sales_columns: List[String],
+    returns_columns: List[String],
+) raises -> List[LazyFrame]:
+    """The sales and return rows of a channel under the shared names
+    unit_sk, date_sk, sales_price, profit, return_amt and net_loss."""
+    var sold = sales.select_exprs(
+        [
+            col(sales_columns[0]).alias("unit_sk"),
+            col(sales_columns[1]).alias("date_sk"),
+            col(sales_columns[2]).alias("sales_price"),
+            col(sales_columns[3]).alias("profit"),
+        ]
+    )
+    var back = returns.select_exprs(
+        [
+            col(returns_columns[0]).alias("unit_sk"),
+            col(returns_columns[1]).alias("date_sk"),
+            col(returns_columns[2]).alias("return_amt"),
+            col(returns_columns[3]).alias("net_loss"),
+        ]
+    )
+    return [sold^, back^]
+
+
+def q14_value(
+    frame: DataFrame, prefix: String, quantity: String, price: String
+) raises -> Expr:
+    """The quantity times the list price: a BIGINT beside a decimal is decimal(18,0)."""
+    var counted = DataType.FLOAT64
+    if frame.column(prefix + price).dtype().is_decimal():
+        counted = DataType.decimal(18, 0, 64)
+    return col(prefix + quantity).cast(counted) * col(prefix + price)
+
+
+def q14_channel(
+    t: Dict[String, DataFrame],
+    label: String,
+    table: String,
+    prefix: String,
+    cross_items: LazyFrame,
+    average: LazyFrame,
+) raises -> LazyFrame:
+    """One channel of q14: November 2001 sales of the cross items by brand,
+    class and category, kept where they pass the all-channel average."""
+    var value = q14_value(t[table], prefix, "_quantity", "_list_price")
+    return (
+        t[table]
+        .lazy()
+        .join(
+            cross_items,
+            left_on=[prefix + "_item_sk"],
+            right_on=["x_item_sk"],
+            how="semi",
+        )
+        .join(
+            t["item"]
+            .lazy()
+            .select(["i_item_sk", "i_brand_id", "i_class_id", "i_category_id"]),
+            left_on=[prefix + "_item_sk"],
+            right_on=["i_item_sk"],
+        )
+        .join(
+            dates(t, (col("d_year") == 2001) & (col("d_moy") == 11), "d_sk"),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_sk"],
+        )
+        .with_columns([value.alias("value")])
+        .group_by(["i_brand_id", "i_class_id", "i_category_id"])
+        .agg(
+            [
+                col("value").sum(min_count=1).alias("sales"),
+                col(prefix + "_item_sk").len().alias("number_sales"),
+            ]
+        )
+        .join(average, how="cross")
+        .filter(col("sales").cast(DataType.FLOAT64) > col("average_sales"))
+        .select_exprs(
+            [
+                lit(label).alias("channel"),
+                col("i_brand_id"),
+                col("i_class_id"),
+                col("i_category_id"),
+                col("sales"),
+                col("number_sales"),
+            ]
+        )
+    )
+
+
+def q77_totals(
+    t: Dict[String, DataFrame],
+    table: String,
+    date_key: String,
+    unit_key: String,
+    dim: String,
+    dim_key: String,
+    first: String,
+    second: String,
+    names: List[String],
+) raises -> LazyFrame:
+    """Two sums per outlet over the month from 2000-08-23 (q77's ss, sr,
+    cs, cr, ws and wr); the dimension join is skipped when `dim` is empty."""
+    var frame = (
+        t[table]
+        .lazy()
+        .join(
+            dates(
+                t,
+                col("d_date").is_between(
+                    date_lit("2000-08-23"), date_lit("2000-09-22")
+                ),
+                "d_sk",
+            ),
+            left_on=[date_key],
+            right_on=["d_sk"],
+        )
+    )
+    if dim.byte_length() > 0:
+        frame = frame.join(
+            t[dim].lazy().select([dim_key]),
+            left_on=[unit_key],
+            right_on=[dim_key],
+        )
+    return (
+        frame.group_by([unit_key])
+        .agg(
+            [
+                col(first).sum(min_count=1).alias(names[0]),
+                col(second).sum(min_count=1).alias(names[1]),
+            ]
+        )
+        .select_exprs(
+            [
+                col(unit_key).alias(names[2]),
+                col(names[0]),
+                col(names[1]),
+            ]
+        )
+    )
+
+
+def q70_hierarchy(
+    grouped: LazyFrame, high: String, low: String, nulls_first: Bool
+) raises -> LazyFrame:
+    """The shared tail of q70 and q86 over a rollup of (high, low) holding total_sum and the
+    two grouping columns: the level (0 to 2), and the rank of each total
+    among its siblings, the rows with one parent while low is a key."""
+    return (
+        grouped.with_columns(
+            [
+                (col("g_high") + col("g_low")).alias("lochierarchy"),
+                when(col("g_low") == 0).then(col(high)).alias("parent"),
+            ]
+        )
+        .with_columns(
+            [
+                col("total_sum")
+                .rank(method="min", descending=True)
+                .over(["lochierarchy", "parent"])
+                .alias("rank_within_parent")
+            ]
+        )
+        .sort(
+            ["lochierarchy", "parent", "rank_within_parent"],
+            descending=[True, False, False],
+            nulls_last=List[Bool](length=3, fill=not nulls_first),
+        )
+        .head(100)
+        .select(["total_sum", high, low, "lochierarchy", "rank_within_parent"])
     )
 
 
@@ -5834,6 +6079,979 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             ["channel", "return_rank", "currency_rank", "item"],
             nulls_first=True,
         ).head(100)
+    if q == "q22":
+        # ROLLUP of four keys over the year's inventory, as one grouping.
+        var grouped = (
+            t["inventory"]
+            .lazy()
+            .join(
+                dates(
+                    t,
+                    col("d_month_seq").is_between(
+                        lit(Int64(1200)), lit(Int64(1211))
+                    ),
+                    "d_sk",
+                ),
+                left_on=["inv_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["item"]
+                .lazy()
+                .select(
+                    [
+                        "i_item_sk",
+                        "i_product_name",
+                        "i_brand",
+                        "i_class",
+                        "i_category",
+                    ]
+                ),
+                left_on=["inv_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .group_by_rollup(
+                ["i_product_name", "i_brand", "i_class", "i_category"]
+            )
+            .agg([col("inv_quantity_on_hand").mean().alias("qoh")])
+        )
+        return ascending(
+            grouped,
+            ["qoh", "i_product_name", "i_brand", "i_class", "i_category"],
+            nulls_first=True,
+        ).head(100)
+    if q == "q18":
+        # ROLLUP of item and place; ORDER BY includes grouping() of each
+        # place key, so the grouping columns are kept to sort and then
+        # dropped. Each average is of a value cast to decimal(12,2).
+        var states: List[String] = ["MS", "IN", "ND", "OK", "NM", "VA", "MS"]
+        var months = ints([1, 6, 8, 9, 12, 2])
+        var measured = DataType.decimal(12, 2, 64)
+        var grouped = (
+            t["catalog_sales"]
+            .lazy()
+            .join(
+                dates(t, col("d_year") == 1998, "d_sk"),
+                left_on=["cs_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["item"].lazy().select(["i_item_sk", "i_item_id"]),
+                left_on=["cs_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["customer_demographics"]
+                .lazy()
+                .filter(
+                    (col("cd_gender") == "F")
+                    & (col("cd_education_status") == "Unknown")
+                )
+                .select(["cd_demo_sk", "cd_dep_count"]),
+                left_on=["cs_bill_cdemo_sk"],
+                right_on=["cd_demo_sk"],
+            )
+            .join(
+                t["customer"]
+                .lazy()
+                .filter(col("c_birth_month").is_in(months))
+                .select(
+                    [
+                        "c_customer_sk",
+                        "c_current_cdemo_sk",
+                        "c_current_addr_sk",
+                        "c_birth_year",
+                    ]
+                ),
+                left_on=["cs_bill_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                t["customer_demographics"]
+                .lazy()
+                .select_exprs([col("cd_demo_sk").alias("cd2_sk")]),
+                left_on=["c_current_cdemo_sk"],
+                right_on=["cd2_sk"],
+                how="semi",
+            )
+            .join(
+                t["customer_address"]
+                .lazy()
+                .filter(col("ca_state").is_in(states))
+                .select(
+                    ["ca_address_sk", "ca_country", "ca_state", "ca_county"]
+                ),
+                left_on=["c_current_addr_sk"],
+                right_on=["ca_address_sk"],
+            )
+            .group_by_rollup(
+                ["i_item_id", "ca_country", "ca_state", "ca_county"]
+            )
+            .agg(
+                [
+                    col("cs_quantity").cast(measured).mean().alias("agg1"),
+                    col("cs_list_price").cast(measured).mean().alias("agg2"),
+                    col("cs_coupon_amt").cast(measured).mean().alias("agg3"),
+                    col("cs_sales_price").cast(measured).mean().alias("agg4"),
+                    col("cs_net_profit").cast(measured).mean().alias("agg5"),
+                    col("c_birth_year").cast(measured).mean().alias("agg6"),
+                    col("cd_dep_count").cast(measured).mean().alias("agg7"),
+                    grouping("ca_country").alias("g_country"),
+                    grouping("ca_state").alias("g_state"),
+                    grouping("ca_county").alias("g_county"),
+                ]
+            )
+        )
+        return (
+            ascending(
+                grouped,
+                [
+                    "ca_country",
+                    "ca_state",
+                    "ca_county",
+                    "i_item_id",
+                    "g_country",
+                    "g_state",
+                    "g_county",
+                ],
+                nulls_first=True,
+            )
+            .head(100)
+            .select(
+                [
+                    "i_item_id",
+                    "ca_country",
+                    "ca_state",
+                    "ca_county",
+                    "agg1",
+                    "agg2",
+                    "agg3",
+                    "agg4",
+                    "agg5",
+                    "agg6",
+                    "agg7",
+                ]
+            )
+        )
+    if q == "q5":
+        # Three channels of sales UNION ALL returns per outlet, then a
+        # ROLLUP over channel and outlet id.
+        ref store_sales = t["store_sales"]
+        ref store_returns = t["store_returns"]
+        ref catalog_sales = t["catalog_sales"]
+        ref catalog_returns = t["catalog_returns"]
+        ref web_sales = t["web_sales"]
+        ref web_returns = t["web_returns"]
+        var store_legs = q5_legs(
+            store_sales.lazy(),
+            store_returns.lazy(),
+            [
+                "ss_store_sk",
+                "ss_sold_date_sk",
+                "ss_ext_sales_price",
+                "ss_net_profit",
+            ],
+            [
+                "sr_store_sk",
+                "sr_returned_date_sk",
+                "sr_return_amt",
+                "sr_net_loss",
+            ],
+        )
+        var catalog_legs = q5_legs(
+            catalog_sales.lazy(),
+            catalog_returns.lazy(),
+            [
+                "cs_catalog_page_sk",
+                "cs_sold_date_sk",
+                "cs_ext_sales_price",
+                "cs_net_profit",
+            ],
+            [
+                "cr_catalog_page_sk",
+                "cr_returned_date_sk",
+                "cr_return_amount",
+                "cr_net_loss",
+            ],
+        )
+        # Web returns carry the site of the sale they return (LEFT JOIN).
+        var web_legs = q5_legs(
+            web_sales.lazy(),
+            web_returns.lazy().join(
+                web_sales.lazy().select(
+                    ["ws_item_sk", "ws_order_number", "ws_web_site_sk"]
+                ),
+                left_on=["wr_item_sk", "wr_order_number"],
+                right_on=["ws_item_sk", "ws_order_number"],
+                how="left",
+            ),
+            [
+                "ws_web_site_sk",
+                "ws_sold_date_sk",
+                "ws_ext_sales_price",
+                "ws_net_profit",
+            ],
+            [
+                "ws_web_site_sk",
+                "wr_returned_date_sk",
+                "wr_return_amt",
+                "wr_net_loss",
+            ],
+        )
+        var channels = (
+            q5_channel(
+                t,
+                "store",
+                "store",
+                store_legs[0],
+                store_legs[1],
+                like(store_sales, "ss_ext_sales_price", "0"),
+                like(store_returns, "sr_return_amt", "0"),
+                "store",
+                "s_store_sk",
+                "s_store_id",
+            )
+            .concat(
+                q5_channel(
+                    t,
+                    "catalog",
+                    "catalog_page",
+                    catalog_legs[0],
+                    catalog_legs[1],
+                    like(catalog_sales, "cs_ext_sales_price", "0"),
+                    like(catalog_returns, "cr_return_amount", "0"),
+                    "catalog_page",
+                    "cp_catalog_page_sk",
+                    "cp_catalog_page_id",
+                )
+            )
+            .concat(
+                q5_channel(
+                    t,
+                    "web",
+                    "web_site",
+                    web_legs[0],
+                    web_legs[1],
+                    like(web_sales, "ws_ext_sales_price", "0"),
+                    like(web_returns, "wr_return_amt", "0"),
+                    "web_site",
+                    "web_site_sk",
+                    "web_site_id",
+                )
+            )
+        )
+        var grouped = channels.group_by_rollup(["channel", "id"]).agg(
+            [
+                col("sales").sum(min_count=1).alias("sales"),
+                col("returns_").sum(min_count=1).alias("returns_"),
+                col("profit").sum(min_count=1).alias("profit"),
+            ]
+        )
+        return ascending(grouped, ["channel", "id"], nulls_first=True).head(100)
+    if q == "q77":
+        var pair: List[String] = ["sales", "profit", "unit"]
+        var back: List[String] = ["returns_", "profit_loss", "back_unit"]
+        var zero_returns = like(t["store_returns"], "sr_return_amt", "0")
+        var zero_loss = like(t["store_returns"], "sr_net_loss", "0")
+        var store = (
+            q77_totals(
+                t,
+                "store_sales",
+                "ss_sold_date_sk",
+                "ss_store_sk",
+                "store",
+                "s_store_sk",
+                "ss_ext_sales_price",
+                "ss_net_profit",
+                pair,
+            )
+            .join(
+                q77_totals(
+                    t,
+                    "store_returns",
+                    "sr_returned_date_sk",
+                    "sr_store_sk",
+                    "store",
+                    "s_store_sk",
+                    "sr_return_amt",
+                    "sr_net_loss",
+                    back,
+                ),
+                left_on=["unit"],
+                right_on=["back_unit"],
+                how="left",
+            )
+            .select_exprs(
+                [
+                    lit("store channel").alias("channel"),
+                    col("unit").alias("id"),
+                    col("sales"),
+                    coalesce([col("returns_"), zero_returns.copy()]).alias(
+                        "returns_"
+                    ),
+                    (
+                        col("profit")
+                        - coalesce([col("profit_loss"), zero_loss.copy()])
+                    ).alias("profit"),
+                ]
+            )
+        )
+        # FROM cs, cr is a cross join: every call center's sales beside the
+        # totals of every call center's returns.
+        var catalog = (
+            q77_totals(
+                t,
+                "catalog_sales",
+                "cs_sold_date_sk",
+                "cs_call_center_sk",
+                "",
+                "",
+                "cs_ext_sales_price",
+                "cs_net_profit",
+                pair,
+            )
+            .join(
+                q77_totals(
+                    t,
+                    "catalog_returns",
+                    "cr_returned_date_sk",
+                    "cr_call_center_sk",
+                    "",
+                    "",
+                    "cr_return_amount",
+                    "cr_net_loss",
+                    back,
+                ),
+                how="cross",
+            )
+            .select_exprs(
+                [
+                    lit("catalog channel").alias("channel"),
+                    col("unit").alias("id"),
+                    col("sales"),
+                    col("returns_"),
+                    (col("profit") - col("profit_loss")).alias("profit"),
+                ]
+            )
+        )
+        var web = (
+            q77_totals(
+                t,
+                "web_sales",
+                "ws_sold_date_sk",
+                "ws_web_page_sk",
+                "web_page",
+                "wp_web_page_sk",
+                "ws_ext_sales_price",
+                "ws_net_profit",
+                pair,
+            )
+            .join(
+                q77_totals(
+                    t,
+                    "web_returns",
+                    "wr_returned_date_sk",
+                    "wr_web_page_sk",
+                    "web_page",
+                    "wp_web_page_sk",
+                    "wr_return_amt",
+                    "wr_net_loss",
+                    back,
+                ),
+                left_on=["unit"],
+                right_on=["back_unit"],
+                how="left",
+            )
+            .select_exprs(
+                [
+                    lit("web channel").alias("channel"),
+                    col("unit").alias("id"),
+                    col("sales"),
+                    coalesce(
+                        [
+                            col("returns_"),
+                            like(t["web_returns"], "wr_return_amt", "0"),
+                        ]
+                    ).alias("returns_"),
+                    (
+                        col("profit")
+                        - coalesce(
+                            [
+                                col("profit_loss"),
+                                like(t["web_returns"], "wr_net_loss", "0"),
+                            ]
+                        )
+                    ).alias("profit"),
+                ]
+            )
+        )
+        var grouped = (
+            store.concat(catalog)
+            .concat(web)
+            .group_by_rollup(["channel", "id"])
+            .agg(
+                [
+                    col("sales").sum(min_count=1).alias("sales"),
+                    col("returns_").sum(min_count=1).alias("returns_"),
+                    col("profit").sum(min_count=1).alias("profit"),
+                ]
+            )
+        )
+        # returns_ DESC takes DuckDB's default, nulls last.
+        return grouped.sort(
+            ["channel", "id", "returns_"],
+            descending=[False, False, True],
+            nulls_last=[False, False, True],
+        ).head(100)
+    if q == "q80":
+        # Each channel's August 2000 sales on non-TV promotions of items over
+        # $50, with the returns they matched (LEFT JOIN), then ROLLUP.
+        var zero = like(t["store_returns"], "sr_return_amt", "0")
+        var window = dates(
+            t,
+            col("d_date").is_between(
+                date_lit("2000-08-23"), date_lit("2000-09-22")
+            ),
+            "d_sk",
+        )
+        var items = (
+            t["item"]
+            .lazy()
+            .filter(
+                col("i_current_price")
+                > like(t["item"], "i_current_price", "50")
+            )
+            .select(["i_item_sk"])
+        )
+        var promotions = (
+            t["promotion"]
+            .lazy()
+            .filter(col("p_channel_tv") == "N")
+            .select(["p_promo_sk"])
+        )
+        var names: List[String] = ["store", "catalog", "web"]
+        var labels: List[String] = ["store", "catalog_page", "web_site"]
+        var sales: List[String] = ["store_sales", "catalog_sales", "web_sales"]
+        var back: List[String] = [
+            "store_returns",
+            "catalog_returns",
+            "web_returns",
+        ]
+        var s: List[String] = ["ss", "cs", "ws"]
+        var r: List[String] = ["sr", "cr", "wr"]
+        var amount: List[String] = [
+            "sr_return_amt",
+            "cr_return_amount",
+            "wr_return_amt",
+        ]
+        var dims: List[String] = ["store", "catalog_page", "web_site"]
+        var dim_keys: List[String] = [
+            "s_store_sk",
+            "cp_catalog_page_sk",
+            "web_site_sk",
+        ]
+        var dim_ids: List[String] = [
+            "s_store_id",
+            "cp_catalog_page_id",
+            "web_site_id",
+        ]
+        var unit_keys: List[String] = [
+            "ss_store_sk",
+            "cs_catalog_page_sk",
+            "ws_web_site_sk",
+        ]
+        var sale_keys: List[List[String]] = [
+            ["ss_item_sk", "ss_ticket_number"],
+            ["cs_item_sk", "cs_order_number"],
+            ["ws_item_sk", "ws_order_number"],
+        ]
+        var return_keys: List[List[String]] = [
+            ["sr_item_sk", "sr_ticket_number"],
+            ["cr_item_sk", "cr_order_number"],
+            ["wr_item_sk", "wr_order_number"],
+        ]
+        var channels = List[LazyFrame]()
+        for i in range(3):
+            var loss = r[i] + "_net_loss"
+            var returned = coalesce([col(amount[i]), zero.copy()])
+            var net = col(s[i] + "_net_profit") - coalesce(
+                [col(loss), like(t[back[i]], loss, "0")]
+            )
+            channels.append(
+                t[sales[i]]
+                .lazy()
+                .join(
+                    t[back[i]]
+                    .lazy()
+                    .select(
+                        [amount[i], loss, return_keys[i][0], return_keys[i][1]]
+                    ),
+                    left_on=sale_keys[i],
+                    right_on=return_keys[i],
+                    how="left",
+                )
+                .join(
+                    window,
+                    left_on=[s[i] + "_sold_date_sk"],
+                    right_on=["d_sk"],
+                )
+                .join(
+                    t[dims[i]].lazy().select([dim_keys[i], dim_ids[i]]),
+                    left_on=[unit_keys[i]],
+                    right_on=[dim_keys[i]],
+                )
+                .join(
+                    items,
+                    left_on=[s[i] + "_item_sk"],
+                    right_on=["i_item_sk"],
+                    how="semi",
+                )
+                .join(
+                    promotions,
+                    left_on=[s[i] + "_promo_sk"],
+                    right_on=["p_promo_sk"],
+                    how="semi",
+                )
+                .group_by([dim_ids[i]])
+                .agg(
+                    [
+                        col(s[i] + "_ext_sales_price")
+                        .sum(min_count=1)
+                        .alias("sales"),
+                        returned.sum(min_count=1).alias("returns_"),
+                        net.sum(min_count=1).alias("profit"),
+                    ]
+                )
+                .select_exprs(
+                    [
+                        lit(names[i] + " channel").alias("channel"),
+                        concat_str(
+                            [lit(labels[i]), col(dim_ids[i]).fill_null("")]
+                        ).alias("id"),
+                        col("sales"),
+                        col("returns_"),
+                        col("profit"),
+                    ]
+                )
+            )
+        var grouped = (
+            channels[0]
+            .concat(channels[1])
+            .concat(channels[2])
+            .group_by_rollup(["channel", "id"])
+            .agg(
+                [
+                    col("sales").sum(min_count=1).alias("sales"),
+                    col("returns_").sum(min_count=1).alias("returns_"),
+                    col("profit").sum(min_count=1).alias("profit"),
+                ]
+            )
+        )
+        return ascending(grouped, ["channel", "id"], nulls_first=True).head(100)
+    if q == "q14":
+        # Items sold in every channel over 1999 to 2001 (INTERSECT, as the
+        # tags of q38 sum to 7), then each channel's November 2001 sales of
+        # those items above the all-channel average, under a 4-key ROLLUP.
+        var kept = col("d_year").is_between(lit(Int64(1999)), lit(Int64(2001)))
+        var tables: List[String] = ["store_sales", "catalog_sales", "web_sales"]
+        var prefixes: List[String] = ["ss", "cs", "ws"]
+        var tagged = List[LazyFrame]()
+        var values = List[LazyFrame]()
+        for i in range(3):
+            tagged.append(
+                t[tables[i]]
+                .lazy()
+                .join(
+                    t["item"]
+                    .lazy()
+                    .select(
+                        [
+                            "i_item_sk",
+                            "i_brand_id",
+                            "i_class_id",
+                            "i_category_id",
+                        ]
+                    ),
+                    left_on=[prefixes[i] + "_item_sk"],
+                    right_on=["i_item_sk"],
+                )
+                .join(
+                    dates(t, kept, "d_sk"),
+                    left_on=[prefixes[i] + "_sold_date_sk"],
+                    right_on=["d_sk"],
+                )
+                .select(["i_brand_id", "i_class_id", "i_category_id"])
+                .unique()
+                .with_columns([lit(Int64(1 << i)).alias("tag")])
+            )
+            values.append(
+                t[tables[i]]
+                .lazy()
+                .join(
+                    dates(t, kept, "d_sk"),
+                    left_on=[prefixes[i] + "_sold_date_sk"],
+                    right_on=["d_sk"],
+                )
+                .select_exprs(
+                    [
+                        q14_value(
+                            t[tables[i]],
+                            prefixes[i],
+                            "_quantity",
+                            "_list_price",
+                        )
+                        .cast(DataType.FLOAT64)
+                        .alias("value")
+                    ]
+                )
+            )
+        var triples = (
+            tagged[0]
+            .concat(tagged[1])
+            .concat(tagged[2])
+            .group_by(["i_brand_id", "i_class_id", "i_category_id"])
+            .agg([col("tag").sum().alias("tags")])
+            .filter(col("tags") == 7)
+            .select_exprs(
+                [
+                    col("i_brand_id").alias("brand_id"),
+                    col("i_class_id").alias("class_id"),
+                    col("i_category_id").alias("category_id"),
+                ]
+            )
+        )
+        var cross_items = (
+            t["item"]
+            .lazy()
+            .select(["i_item_sk", "i_brand_id", "i_class_id", "i_category_id"])
+            .join(
+                triples,
+                left_on=["i_brand_id", "i_class_id", "i_category_id"],
+                right_on=["brand_id", "class_id", "category_id"],
+            )
+            .select_exprs([col("i_item_sk").alias("x_item_sk")])
+        )
+        var average = (
+            values[0]
+            .concat(values[1])
+            .concat(values[2])
+            .select_exprs([col("value").mean().alias("average_sales")])
+        )
+        var grouped = (
+            q14_channel(t, "store", "store_sales", "ss", cross_items, average)
+            .concat(
+                q14_channel(
+                    t, "catalog", "catalog_sales", "cs", cross_items, average
+                )
+            )
+            .concat(
+                q14_channel(t, "web", "web_sales", "ws", cross_items, average)
+            )
+            .group_by_rollup(
+                ["channel", "i_brand_id", "i_class_id", "i_category_id"]
+            )
+            .agg(
+                [
+                    col("sales").sum(min_count=1).alias("sum_sales"),
+                    col("number_sales")
+                    .sum(min_count=1)
+                    .alias("sum_number_sales"),
+                ]
+            )
+        )
+        return ascending(
+            grouped,
+            ["channel", "i_brand_id", "i_class_id", "i_category_id"],
+            nulls_first=True,
+        ).head(100)
+    if q == "q36":
+        # The SQL writes its rollup as a UNION of three groupings of the
+        # store sales' (category, class) sums: by both, by category, and
+        # in total. lochierarchy is 0, 1 or 2; the rank is among siblings.
+        var results = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(t, col("d_year") == 2001, "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["item"].lazy().select(["i_item_sk", "i_category", "i_class"]),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["store"]
+                .lazy()
+                .filter(col("s_state") == "TN")
+                .select(["s_store_sk"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .group_by(["i_category", "i_class"])
+            .agg(
+                [
+                    col("ss_net_profit")
+                    .sum(min_count=1)
+                    .alias("ss_net_profit"),
+                    col("ss_ext_sales_price")
+                    .sum(min_count=1)
+                    .alias("ss_ext_sales_price"),
+                ]
+            )
+        )
+        # (sum(profit) * 1.0000) / sum(price): decimal division is DOUBLE.
+        var margin = col("ss_net_profit").cast(DataType.FLOAT64) / col(
+            "ss_ext_sales_price"
+        ).cast(DataType.FLOAT64)
+        var sums: List[Expr] = [
+            col("ss_net_profit").sum(min_count=1).alias("ss_net_profit"),
+            col("ss_ext_sales_price")
+            .sum(min_count=1)
+            .alias("ss_ext_sales_price"),
+        ]
+        var shown: List[Expr] = [
+            margin.alias("gross_margin"),
+            col("i_category"),
+            col("i_class"),
+            col("t_class"),
+            col("lochierarchy"),
+        ]
+        var by_class = results.with_columns(
+            [
+                lit(Int64(0)).alias("t_class"),
+                lit(Int64(0)).alias("lochierarchy"),
+            ]
+        ).select_exprs(shown)
+        var by_category = (
+            results.group_by(["i_category"])
+            .agg(sums)
+            .with_columns(
+                [
+                    q27_no_text().alias("i_class"),
+                    lit(Int64(1)).alias("t_class"),
+                    lit(Int64(1)).alias("lochierarchy"),
+                ]
+            )
+            .select_exprs(shown)
+        )
+        var overall = (
+            results.select_exprs(sums)
+            .with_columns(
+                [
+                    q27_no_text().alias("i_category"),
+                    q27_no_text().alias("i_class"),
+                    lit(Int64(1)).alias("t_class"),
+                    lit(Int64(2)).alias("lochierarchy"),
+                ]
+            )
+            .select_exprs(shown)
+        )
+        # UNION removes duplicate rows. The rank partitions by level and by
+        # the category where class is a key (t_class = 0), else a null
+        # group, and the sort key is that same CASE expression (level 0).
+        var ranked = (
+            by_class.concat(by_category)
+            .concat(overall)
+            .unique()
+            .with_columns(
+                [
+                    when(col("t_class") == 0)
+                    .then(col("i_category"))
+                    .alias("parent")
+                ]
+            )
+            .with_columns(
+                [
+                    col("gross_margin")
+                    .rank(method="min")
+                    .over(["lochierarchy", "parent"])
+                    .alias("rank_within_parent")
+                ]
+            )
+        )
+        return (
+            ordered(
+                ranked,
+                ["lochierarchy", "parent", "rank_within_parent"],
+                [True, False, False],
+                nulls_first=True,
+            )
+            .head(100)
+            .select(
+                [
+                    "gross_margin",
+                    "i_category",
+                    "i_class",
+                    "lochierarchy",
+                    "rank_within_parent",
+                ]
+            )
+        )
+    if q == "q67":
+        # ROLLUP of eight keys, then the 100 best sums per category by rank.
+        ref frame = t["store_sales"]
+        var counted = DataType.FLOAT64
+        if frame.column("ss_sales_price").dtype().is_decimal():
+            counted = DataType.decimal(18, 0, 64)
+        var amount = col("ss_sales_price") * col("ss_quantity").cast(counted)
+        var zero = like(frame, "ss_sales_price", "0") * lit(Int64(0)).cast(
+            counted
+        )
+        var keys: List[String] = [
+            "i_category",
+            "i_class",
+            "i_brand",
+            "i_product_name",
+            "d_year",
+            "d_qoy",
+            "d_moy",
+            "s_store_id",
+        ]
+        var grouped = (
+            frame.lazy()
+            .join(
+                t["date_dim"]
+                .lazy()
+                .filter(
+                    col("d_month_seq").is_between(
+                        lit(Int64(1200)), lit(Int64(1211))
+                    )
+                )
+                .select(["d_date_sk", "d_year", "d_qoy", "d_moy"]),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_date_sk"],
+            )
+            .join(
+                t["store"].lazy().select(["s_store_sk", "s_store_id"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["item"]
+                .lazy()
+                .select(
+                    [
+                        "i_item_sk",
+                        "i_category",
+                        "i_class",
+                        "i_brand",
+                        "i_product_name",
+                    ]
+                ),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .group_by_rollup(keys)
+            .agg(
+                [coalesce([amount^, zero^]).sum(min_count=1).alias("sumsales")]
+            )
+            .with_columns(
+                [
+                    col("sumsales")
+                    .rank(method="min", descending=True)
+                    .over("i_category")
+                    .alias("rk")
+                ]
+            )
+            .filter(col("rk") <= 100)
+        )
+        return ascending(
+            grouped, keys + ["sumsales", "rk"], nulls_first=True
+        ).head(100)
+    if q == "q70":
+        # ROLLUP of state and county; the states are those ranked in the top
+        # five by profit within their own state (the SQL's partition is the
+        # state, so each state ranks first). grouping() sums give the level.
+        var months = col("d_month_seq").is_between(
+            lit(Int64(1200)), lit(Int64(1211))
+        )
+        var top_states = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["store"].lazy().select(["s_store_sk", "s_state"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                dates(t, months, "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .group_by(["s_state"])
+            .agg([col("ss_net_profit").sum(min_count=1).alias("profit")])
+            .with_columns(
+                [
+                    col("profit")
+                    .rank(method="min", descending=True)
+                    .over("s_state")
+                    .alias("ranking")
+                ]
+            )
+            .filter(col("ranking") <= 5)
+            .select_exprs([col("s_state").alias("top_state")])
+        )
+        var grouped = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(t, months, "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["store"].lazy().select(["s_store_sk", "s_state", "s_county"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                top_states,
+                left_on=["s_state"],
+                right_on=["top_state"],
+                how="semi",
+            )
+            .group_by_rollup(["s_state", "s_county"])
+            .agg(
+                [
+                    col("ss_net_profit").sum(min_count=1).alias("total_sum"),
+                    grouping("s_state").alias("g_high"),
+                    grouping("s_county").alias("g_low"),
+                ]
+            )
+        )
+        return q70_hierarchy(grouped, "s_state", "s_county", False)
+    if q == "q86":
+        var grouped = (
+            t["web_sales"]
+            .lazy()
+            .join(
+                dates(
+                    t,
+                    col("d_month_seq").is_between(
+                        lit(Int64(1200)), lit(Int64(1211))
+                    ),
+                    "d_sk",
+                ),
+                left_on=["ws_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["item"].lazy().select(["i_item_sk", "i_category", "i_class"]),
+                left_on=["ws_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .group_by_rollup(["i_category", "i_class"])
+            .agg(
+                [
+                    col("ws_net_paid").sum(min_count=1).alias("total_sum"),
+                    grouping("i_category").alias("g_high"),
+                    grouping("i_class").alias("g_low"),
+                ]
+            )
+        )
+        return q70_hierarchy(grouped, "i_category", "i_class", True)
     raise unsupported("not translated")
 
 

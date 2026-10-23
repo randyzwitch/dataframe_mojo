@@ -65,7 +65,7 @@ class MetalQueryReport(unittest.TestCase):
         catalog = report.catalog()
         self.assertEqual(sum(len(d["queries"]) for d in catalog.values()), 179)
         self.assertEqual(
-            sum(len(d["translated_queries"]) for d in catalog.values()), 169
+            sum(len(d["translated_queries"]) for d in catalog.values()), 179
         )
         self.assertEqual(
             sum(
@@ -74,21 +74,11 @@ class MetalQueryReport(unittest.TestCase):
             345,
         )
         self.assertIn("q28", catalog["clickbench"]["translated_queries"])
+        # Every TPC-DS query has a translation since #951 (ROLLUP via #802).
         self.assertEqual(
             set(catalog["tpcds"]["queries"])
             - set(catalog["tpcds"]["translated_queries"]),
-            {
-                "q5",
-                "q14",
-                "q18",
-                "q22",
-                "q36",
-                "q67",
-                "q70",
-                "q77",
-                "q80",
-                "q86",
-            },
+            set(),
         )
 
     def test_partial_grid_cannot_claim_all_variants_or_complete_percent(self):

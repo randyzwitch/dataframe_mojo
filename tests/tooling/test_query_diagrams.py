@@ -47,7 +47,7 @@ class QueryDiagrams(unittest.TestCase):
             for number in numbers:
                 source = diagrams.source_for(suite, f'q{number}')
                 found += not source.startswith('No Mojo')
-            expected = 89 if suite == 'tpcds' else len(numbers)
+            expected = len(numbers)
             self.assertEqual(found, expected, suite)
         self.assertIn('q48', diagrams.source_for('tpcds', 'q13'))
         self.assertIn('how="left"', diagrams.source_for('h2o_join', 'q3'))
