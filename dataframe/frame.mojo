@@ -294,7 +294,9 @@ def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
             else:
                 fields.append(column.renamed(decode_name(suffix)))
             k += 1
-        columns.append(Series(prefix, StructColumn(fields^, bits^)))
+        columns.append(
+            Series(prefix, StructColumn(fields^, bits^, length=frame.height()))
+        )
     return DataFrame(columns^, height=frame.height())
 
 

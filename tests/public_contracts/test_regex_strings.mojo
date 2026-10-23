@@ -20,6 +20,10 @@ from dataframe import (
     columns,
     DataType,
     StructColumn,
+    ArrowArray,
+    ArrowSchema,
+    export_arrow_series,
+    import_arrow_series,
     all_horizontal,
 )
 from dataframe.string_view import StringViewBuilder
@@ -351,6 +355,23 @@ def test_regex_without_captures_returns_empty_structs_with_row_count() raises:
         assert_equal(empty.height(), 0)
         assert_equal(empty.column("s").dtype().field_count(), 0)
 
+        # Empty capture structs retain their explicit length at the Arrow
+        # boundary and when flattened/restored as grouping keys.
+        var values = source.select(expr).column("s")
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        export_arrow_series(values, array, schema)
+        var imported = import_arrow_series(array, schema)
+        assert_equal(len(imported), source.height())
+        assert_equal(imported.dtype().field_count(), 0)
+        var grouped = (
+            source.with_columns(expr.alias("empty"))
+            .group_by("empty")
+            .agg(col("g").sum())
+        )
+        assert_equal(grouped.height(), 1)
+        assert_equal(grouped.item(0, "g").int64(), 11)
+
 
 def test_regex_selectors_expand_in_schema_order_and_compose_with_expressions() raises:
     var source = DataFrame(
@@ -384,7 +405,7 @@ def test_regex_selectors_expand_in_schema_order_and_compose_with_expressions() r
     assert_equal(source.select(columns("\\p{Greek}")).columns(), [String("α")])
     assert_equal(
         source.select(col(["id", "^cost_.*$"])).columns(),
-        [String("id"), "cost_b", "cost_a"],
+        [String("cost_b"), "id", "cost_a"],
     )
     assert_equal(source.select(columns("\\.")).columns(), [String("x\x1f.y")])
     assert_equal(source.select(col("^nothing$")).width(), 0)

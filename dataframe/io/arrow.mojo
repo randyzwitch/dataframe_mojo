@@ -1060,7 +1060,7 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
             )
             var child = _import_child(child_array[], child_schema[])
             fields.append(child.slice(offset, length))
-        return Series(name, StructColumn(fields^, bits^))
+        return Series(name, StructColumn(fields^, bits^, length=length))
     raise Error("Unsupported Arrow format '" + format + "' for column " + name)
 
 

@@ -65,8 +65,10 @@ def _matches(
         return _regex_names(items, names)
     if kind == SELECT_COLS or kind == SELECT_EXCLUDE:
         var listed = List[String]()
+        var regex = False
         for item in _split(items):
             if item.startswith("^") and item.endswith("$"):
+                regex = True
                 listed.extend(_regex_names(item, names))
             else:
                 listed.append(item)
@@ -77,7 +79,14 @@ def _matches(
             if not found:
                 raise Error("Unknown selector column: " + name)
         if kind == SELECT_COLS:
-            return listed^
+            if not regex:
+                return listed^
+            # Polars treats a mixed regex/name list as a schema-ordered
+            # union, while a list of exact names retains its explicit order.
+            for name in names:
+                if name in listed:
+                    result.append(name)
+            return result^
         for name in names:
             var excluded = False
             for skip in listed:

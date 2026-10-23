@@ -526,7 +526,8 @@ string is searched as a substring.
 
 Regex selection uses the same engine: `col("^cost_.*$")` expands to matching
 column names in schema order, as Polars does. Anchored patterns also work in
-`col(["id", "^cost_.*$"])`. Operations, name prefixes/suffixes, reductions,
+`col(["id", "^cost_.*$"])`; a list containing a regex selects the union in
+schema order, while a list of exact names keeps its requested order. Operations, name prefixes/suffixes, reductions,
 `with_columns` and horizontal inputs use the existing selector expansion.
 An ordinary `col("name")` still requires that exact column name.
 `columns("cost")` searches anywhere in each name, like DuckDB's
