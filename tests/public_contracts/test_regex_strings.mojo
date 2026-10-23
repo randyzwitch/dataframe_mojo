@@ -324,7 +324,7 @@ def test_regex_capture_struct_and_escaping_preserve_layouts_nulls_and_schema() r
             .str()
             .len_chars()
         )
-        assert_equal(length.item(2, "s").int64(), 6)
+        assert_equal(length.item(2, "head").int64(), 6)
 
 
 def test_regex_without_captures_returns_empty_structs_with_row_count() raises:
