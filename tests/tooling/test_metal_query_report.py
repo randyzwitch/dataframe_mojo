@@ -65,7 +65,7 @@ class MetalQueryReport(unittest.TestCase):
         catalog = report.catalog()
         self.assertEqual(sum(len(d["queries"]) for d in catalog.values()), 179)
         self.assertEqual(
-            sum(len(d["translated_queries"]) for d in catalog.values()), 169
+            sum(len(d["translated_queries"]) for d in catalog.values()), 179
         )
         self.assertEqual(
             sum(
