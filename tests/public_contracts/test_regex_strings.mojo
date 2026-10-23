@@ -46,8 +46,10 @@ def _valid() -> List[Bool]:
     return [True, False, True, True, True, True]
 
 
-def _source(layout: Int) raises -> DataFrame:
+def _source(layout: Int, padding: String = "") raises -> DataFrame:
     var values = _values()
+    for i in range(len(values)):
+        values[i] = padding + values[i]
     var valid = _valid()
     var groups: List[Int64] = [1, 1, 2, 2, 2, 3]
     if layout == 3:
@@ -446,3 +448,43 @@ def test_new_regex_apis_validate_even_for_empty_or_unobserved_inputs() raises:
     assert_equal(
         frame.filter(col("s").str().contains("^" + escaped + "$")).height(), 1
     )
+
+
+def test_literal_alternatives_on_nullable_string_layouts() raises:
+    # Polars results, including a multibyte alternative and captures. The
+    # same expression must work with offsets, chunks and string views.
+    var pattern = "(id|Straße|a\\.b|never|zebra)"
+    var padding = String("!") * 96
+    var valid = _valid()
+    var found: List[Bool] = [True, False, True, False, False, True]
+    var expected = DataFrame(
+        [
+            Series("c", Column[Bool](found.copy(), valid.copy())),
+            Series("n", Column[UInt32]([2, 0, 1, 0, 0, 2], valid.copy())),
+            _strings("x", ["id", "", "Straße", "", "", "a.b"], found),
+            _strings(
+                "r",
+                [
+                    padding + "id!-12 and id!-7",
+                    "",
+                    padding + "Straße! 9",
+                    padding + "no digits",
+                    padding,
+                    padding + "a.b! a.b!",
+                ],
+                valid,
+            ),
+        ]
+    )
+    for layout in range(4):
+        var source = _source(layout, padding)
+        var expressions: List[Expr] = [
+            col("s").str().contains(pattern).alias("c"),
+            col("s").str().count_matches(pattern).alias("n"),
+            col("s").str().extract(pattern, 1).alias("x"),
+            col("s").str().replace_all(pattern, "$1!").alias("r"),
+        ]
+        assert_frame(source.select_exprs(expressions), expected)
+        assert_frame(
+            source.lazy().select_exprs(expressions).collect(), expected
+        )

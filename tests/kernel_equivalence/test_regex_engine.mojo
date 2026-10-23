@@ -214,3 +214,118 @@ def test_unicode_properties_and_ascii_word_anchors_with_long_capture_spans() rai
         assert_equal(matcher.slots[k], expected[k])
     assert_equal(matcher.count(_span(text)), 1)
     _ = text
+
+
+def test_literal_alternative_prefilter_priority_and_tails() raises:
+    # Keep alternatives correlated: `fog` and `dox` pass independent byte
+    # sets for fox|dog, but are not candidates for the literal-set scanner.
+    var regex = Regex("(fox|dog|elephant|tiger|zebra)[0-9]")
+    ref prefilter = regex._compiled[].prefilter
+    assert_equal(len(prefilter.literals), 5)
+    var miss = String("fog dox ") * 80
+    assert_equal(prefilter._find_literals(_span(miss), 0), -1)
+    # Every vector lane, the scalar tail, short spans and nonzero starts.
+    for padding in range(70):
+        var text = String("x") * padding + "elephant7 dog2 fox1"
+        var matcher = Matcher(regex)
+        var found = matcher.find(_span(text))
+        assert_equal(found[0], padding)
+        assert_equal(found[1], padding + 9)
+        assert_equal(matcher.count(_span(text)), 3)
+        assert_equal(matcher.find(_span(text), padding + 1)[0], padding + 10)
+        assert_true(matcher.captures(_span(text)))
+        assert_equal(matcher.slots[2], padding)
+        assert_equal(matcher.slots[3], padding + 8)
+        # A view must not read the backing string's excluded tail.
+        for n in range(9):
+            var view = _span(text)[padding : padding + n]
+            assert_false(matcher.is_match(view))
+            assert_equal(prefilter._find_literals(view, 0), 0 if n == 8 else -1)
+        _ = text
+    assert_equal(_replace("(sam|samwise)", "samwise", "<$1>"), "<sam>wise")
+    assert_equal(_replace("(samwise|sam)", "samwise", "<$1>"), "<samwise>")
+    assert_equal(_replace("(猫|犬犬)", "!犬犬 猫!", "<$1>"), "!<犬犬> <猫>!")
+    _ = miss
+
+
+def test_literal_alternative_analysis_matches_unfiltered_vm() raises:
+    # The Pike VM consumes the original program without any prefilter.
+    # Cover nullable branches, assertions, bounded expansion and truncation
+    # rather than reproducing the prefix extraction's decisions in a test.
+    var patterns: List[String] = [
+        "(fox|dog) jumps",
+        "(cat|elephant)[0-9]+",
+        "(fox|dog|elephant|tiger|zebra)[0-9]+",
+        "\\b(fox|dog|elephant|tiger|zebra)[0-9]",
+        "\\b(fox|dog|elephant|tiger|zebra)\\b",
+        "(?m)^(cat|dog|elephant|tiger|zebra)$",
+        "(fox|dog|elephant|tiger|zebra)+",
+        "(猫|犬犬|fox|dog|elephant|tiger|zebra)+",
+        "(a{300}|bb|cc|dd|ee)dog",
+        "(aa|bb|cc|dd|ee|)dog",
+        "(sam|samwise)",
+        "(samwise|sam)",
+        "(猫|犬犬)+",
+        "(?m)^(cat|dog)$",
+        "\\b(cat|elephant)\\b",
+        "(cat|elephant)?dog",
+        "(cat|elephant)*?dog",
+        "(cat|elephant){2,3}dog",
+        "(cat|elephant){0}dog",
+        "(cat|elephant|)dog",
+        "(cat|elephant|[0-9])dog",
+        "((ab|cd)(ef|gh)){2}x",
+        "(aa|bb|cc|dd|ee|ff|gg|hh|ii)dog",
+        "((aa|bb|cc)(dd|ee|ff))dog",
+        "(a{300}|bb)dog",
+        "(?i)(cat|elephant)dog",
+    ]
+    var texts: List[String] = [
+        "",
+        "dog",
+        "fog dox",
+        "fox jumps dog jumps",
+        "cat7 elephant42",
+        "samwise sam",
+        "xfox dog tigerz",
+        "!犬犬 猫!",
+        "cat\ndog\n",
+        "!elephant!",
+        "catdog elephantdog",
+        "catcatdog elephantelephantdog",
+        "1dog",
+        "abcdefghx cdghefghx",
+        "iidog aaeedog",
+        "CATDOG",
+        String("a") * 300 + "dog",
+    ]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        for text in texts:
+            for padding in range(0, 65, 16):
+                var input = String("!") * padding + text
+                var span = _span(input)
+                for start in range(len(span) + 1):
+                    # A search start is always a UTF-8 scalar boundary.
+                    if start < len(span) and (span[start] & 0xC0) == 0x80:
+                        continue
+                    var slots = List[Int](length=program.slot_count, fill=-1)
+                    var expected = matcher.pike.search(
+                        program, span, start, len(span), False, slots
+                    )
+                    if start == 0:
+                        assert_equal(matcher.is_match(span), expected, pattern)
+                    var found = matcher.find(span, start)
+                    assert_equal(
+                        found[0], slots[0] if expected else -1, pattern
+                    )
+                    assert_equal(
+                        found[1], slots[1] if expected else -1, pattern
+                    )
+                    if expected:
+                        assert_true(matcher.captures(span, start), pattern)
+                        for k in range(len(slots)):
+                            assert_equal(matcher.slots[k], slots[k], pattern)
+                _ = input

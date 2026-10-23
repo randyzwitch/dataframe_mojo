@@ -486,11 +486,18 @@ struct LazyDFA(Movable):
         var p = text.unsafe_ptr()
         var ascii = program.ascii_class.unsafe_ptr()
         var stride = self.stride
-        var s0 = Int(self.start_state(program, text, start, anchored))
+        var at = start
+        # Literal sets extend coverage when no cheap start-state scanner is
+        # available. Skip once before entering the DFA, leaving its cached
+        # transitions unchanged. Small inputs use the ordinary DFA directly.
+        if not anchored and len(prefilter.literals) > 0 and n - at >= 64:
+            at = prefilter._find_literals(text, at)
+            if at < 0:
+                return -1
+        var s0 = Int(self.start_state(program, text, at, anchored))
         if s0 == Int(DEAD):
             return -1
         var accel = not anchored and prefilter.active()
-        var at = start
         var off = s0 * stride
         if accel and self.accel[s0] and at < n:
             var candidate = prefilter.find(text, at)
@@ -647,24 +654,44 @@ struct Prefilter(Copyable, Movable):
     in its start state (RE2's prefix accel, regex-automata's prefilters):
     a literal every match starts with, or a sequence of small byte sets
     every match starts with (`(?i)ab` is {A, a} then {B, b}; `(fox|dog)`
-    is {f, d}, {o}, {x, g}), which plays the part of Rust's Teddy."""
+    is {f, d}, {o}, {x, g}). Literal alternatives preserve correlations
+    between positions and allow unequal lengths."""
 
     var prefix: List[UInt8]
     # Four bytes per position (a set of fewer repeats its first byte).
     var sets: List[UInt8]
+    var literals: List[List[UInt8]]
+    var literal_width: Int
 
     def __init__(out self):
         self.prefix = List[UInt8]()
         self.sets = List[UInt8]()
+        self.literals = List[List[UInt8]]()
+        self.literal_width = 0
 
-    def __init__(out self, var prefix: List[UInt8], var sets: List[UInt8]):
+    def __init__(
+        out self,
+        var prefix: List[UInt8],
+        var sets: List[UInt8],
+        var literals: List[List[UInt8]],
+    ):
         self.prefix = prefix^
         self.sets = sets^
+        self.literals = List[List[UInt8]]()
+        self.literal_width = 0
         if len(self.sets) <= 4 * len(self.prefix):
-            # The literal is at least as selective.
             self.sets.clear()
         else:
             self.prefix.clear()
+        # Preserve the cheaper single-literal and byte-set scanners.
+        # The new path covers alternatives those analyses cannot represent.
+        if len(self.prefix) == 0 and len(self.sets) == 0 and len(literals) > 1:
+            var width = len(literals[0])
+            for literal in literals:
+                width = min(width, len(literal))
+            if width > 1:
+                self.literals = literals^
+                self.literal_width = width
 
     @always_inline
     def active(self) -> Bool:
@@ -674,6 +701,52 @@ struct Prefilter(Copyable, Movable):
         if len(self.prefix) > 0:
             return find_literal(text, self.prefix, at)
         return find_sets(text, self.sets, at)
+
+    def _find_literals(self, text: Span[UInt8, ImmutAnyOrigin], at: Int) -> Int:
+        """Scan 32 candidate starts at once. Pair masks retain each
+        literal's first and common-width last byte together; verify the
+        entire literal before handing the candidate to the regex engine.
+        Loads and tail checks stay within the supplied span."""
+        var n = len(text)
+        var width = self.literal_width
+        var p = text.unsafe_ptr()
+        var i = at
+        comptime lanes = 32
+        while i + width - 1 + lanes <= n:
+            var first = p.unsafe_load[width=lanes](i)
+            var last = p.unsafe_load[width=lanes](i + width - 1)
+            var hits = SIMD[DType.bool, lanes](fill=False)
+            for literal in self.literals:
+                hits |= first.eq(SIMD[DType.uint8, lanes](literal[0])) & (
+                    last.eq(SIMD[DType.uint8, lanes](literal[width - 1]))
+                )
+            if hits.reduce_or():
+                for k in range(lanes):
+                    if hits[k] and _literal_at(text, self.literals, i + k):
+                        return i + k
+            i += lanes
+        while i + width <= n:
+            if _literal_at(text, self.literals, i):
+                return i
+            i += 1
+        return -1
+
+
+def _literal_at(
+    text: Span[UInt8, ImmutAnyOrigin], literals: List[List[UInt8]], at: Int
+) -> Bool:
+    var p = text.unsafe_ptr()
+    for literal in literals:
+        if len(literal) > len(text) - at:
+            continue
+        var same = True
+        for j in range(len(literal)):
+            if p[unsafe_offset=at + j] != literal[j]:
+                same = False
+                break
+        if same:
+            return True
+    return False
 
 
 @always_inline

@@ -10,7 +10,7 @@ engine goes:
    non-matching rows with one substring search (RE2's prefilter idea, for
    a single pattern).
 3. The forward DFA finds where the leftmost-first match ends, skipping
-   input with a literal prefix or first-byte prefilter while it sits in its
+   input with literal prefixes or a byte-set prefilter while it sits in its
    start state.
 4. The reverse DFA, run back from that end, finds where it starts; a
    pattern anchored at the start of the text needs no reverse pass.
@@ -223,6 +223,99 @@ def _analyze(ast: Ast, node: Int) -> _Literals:
     )
 
 
+# Bounded literal alternatives. An empty prefix represents an unknown (or
+# empty) beginning, so callers must keep the ordinary DFA in that case.
+comptime _PREFIX_COUNT = 8
+
+
+@fieldwise_init
+struct _Prefixes(Movable):
+    var values: List[List[UInt8]]
+    var full: Bool
+
+
+def _unknown_prefix(full: Bool = False) -> _Prefixes:
+    var values = List[List[UInt8]]()
+    values.append(List[UInt8]())
+    return _Prefixes(values^, full)
+
+
+def _join_prefixes(left: _Prefixes, right: _Prefixes) -> _Prefixes:
+    if not left.full:
+        return _Prefixes(left.values.copy(), False)
+    if len(left.values) * len(right.values) > _PREFIX_COUNT:
+        # Retain all left alternatives; dropping right only broadens them.
+        return _Prefixes(left.values.copy(), False)
+    var out = List[List[UInt8]]()
+    var full = right.full
+    for a in left.values:
+        for b in right.values:
+            var value = a.copy()
+            for byte in b:
+                if len(value) == _LITERAL_CAP:
+                    full = False
+                    break
+                value.append(byte)
+            out.append(value^)
+    return _Prefixes(out^, full)
+
+
+def _literal_prefixes(ast: Ast, node: Int) -> _Prefixes:
+    """A covering set of UTF-8 prefixes, never an incomplete set of
+    alternatives. At most eight 256-byte strings survive any node."""
+    var kind = ast.kind[node]
+    if kind == NODE_LITERAL:
+        var values = List[List[UInt8]]()
+        values.append(_utf8(ast.a[node]))
+        return _Prefixes(values^, True)
+    if kind == NODE_CLASS:
+        ref ranges = ast.classes[ast.a[node]]
+        if class_size(ranges) == 1:
+            var values = List[List[UInt8]]()
+            values.append(_utf8(Int(ranges[0])))
+            return _Prefixes(values^, True)
+        return _unknown_prefix()
+    if kind == NODE_EMPTY or kind == NODE_LOOK:
+        return _unknown_prefix(True)
+    if kind == NODE_GROUP:
+        return _literal_prefixes(ast, ast.kid(node, 0))
+    if kind == NODE_CONCAT:
+        var out = _unknown_prefix(True)
+        for k in range(ast.count[node]):
+            var part = _literal_prefixes(ast, ast.kid(node, k))
+            out = _join_prefixes(out, part)
+            if not out.full:
+                break
+        return out^
+    if kind == NODE_ALTERNATE:
+        var values = List[List[UInt8]]()
+        var full = True
+        for k in range(ast.count[node]):
+            var part = _literal_prefixes(ast, ast.kid(node, k))
+            if len(values) + len(part.values) > _PREFIX_COUNT:
+                return _unknown_prefix()
+            full = full and part.full
+            for value in part.values:
+                values.append(value.copy())
+        return _Prefixes(values^, full)
+    # Repetitions contribute only their mandatory copies. Optional copies
+    # prevent concatenation with following nodes, including lazy repeats.
+    var low = ast.a[node]
+    var high = ast.b[node]
+    if high == 0:
+        return _unknown_prefix(True)
+    if low == 0:
+        return _unknown_prefix()
+    var child = _literal_prefixes(ast, ast.kid(node, 0))
+    var out = _unknown_prefix(True)
+    for _ in range(min(low, _LITERAL_CAP)):
+        out = _join_prefixes(out, child)
+        if not out.full:
+            break
+    out.full = out.full and low == high and low <= _LITERAL_CAP
+    return out^
+
+
 # Longest byte-set prefix, and the most bytes one position may hold.
 comptime _SET_POSITIONS = 16
 comptime _SET_BYTES = 4
@@ -375,9 +468,12 @@ struct _Compiled(Movable):
         self.literal = info.exact and self.forward.looks == 0
         self.text = info.text.copy()
         self.required = info.required.copy()
-        self.prefilter = Prefilter(
-            info.prefix.copy(), _flat_sets(_byte_sets(ast, ast.root))
-        )
+        var sets = _flat_sets(_byte_sets(ast, ast.root))
+        var prefixes = List[List[UInt8]]()
+        if not self.anchored and len(info.prefix) == 0 and len(sets) == 0:
+            var extracted = _literal_prefixes(ast, ast.root)
+            prefixes = extracted.values.copy()
+        self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
