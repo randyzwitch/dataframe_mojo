@@ -397,8 +397,9 @@ SQL text before any query in it is timed:
    translated as written.
 
 That is 99 of 99. q67 ranks Float64 sums, whose ties depend on rounding, so
-its rank column is not compared (`CHECKS` in bench_suites.py); every other
-column is.
+on the Float64 variant its rank column is not compared
+(`VARIANT_CHECKS` in bench_suites.py; the decimal variant is exact and
+compares it); every other column is.
 
 Add further batches by a rule of the same kind, never by which queries run
 well. A translation uses the API as a user would; where the
