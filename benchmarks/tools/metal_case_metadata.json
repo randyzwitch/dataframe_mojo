@@ -6,8 +6,8 @@
       "execution_boundary": "hybrid",
       "audit_reason": "After the explicit ssales collect, DataFrame.select(mean).item executes an eager CPU aggregate before the final LazyFrame collect. Applies to both data variants, including empty outputs.",
       "source_path": "benchmarks/suites/tpcds.mojo",
-      "source_sha256": "14d4f9e0288dcadbb01f4c5aae341951ebb60dd011af478a35010688a8c74e68",
-      "metal_derived_source_sha256": "be5a3dedce582790ffdf7160875d060b014ad6ec96a3ea4e0df44defdbb3d5cc"
+      "source_sha256": "b2268e5964311862ec3784ded60bffab5f9fa26ef168c80effe5f1f3028222ef",
+      "metal_derived_source_sha256": "9c8a70d7f9acfc181ba79da9452a0269428fa4757dbb0e4eb105104f2f5b0509"
     },
     "h2o_groupby/q1": {
       "workload_kind": "canonical",
