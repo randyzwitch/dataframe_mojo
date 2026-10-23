@@ -3574,9 +3574,7 @@ struct DataFrame(Copyable, Sized, Writable):
         as a grouping set. Finish it with `agg`."""
         return GroupingSets(self.lazy().group_by_cube(keys))
 
-    def group_by_grouping_sets(
-        self, sets: List[List[String]]
-    ) -> GroupingSets:
+    def group_by_grouping_sets(self, sets: List[List[String]]) -> GroupingSets:
         """DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping
         per listed set, an empty set being the grand total. Finish it with
         `agg`."""

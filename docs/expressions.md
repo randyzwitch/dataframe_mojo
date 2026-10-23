@@ -760,6 +760,10 @@ var report = sales.lazy().group_by_rollup(["region", "product"]).agg([
   of no rows is everywhere in this library; DuckDB's is null); every other
   set yields no rows over no rows.
 - Row order is unspecified unless the result is sorted.
+- Known limits: `grouping` and `grouping_id` must be a whole aggregation
+  expression (`grouping(a) + 1` raises), and when one is present every other
+  aggregation must produce a single column named by its output name (a
+  selector such as `all().sum()` next to `grouping` is not supported).
 
 The plan is `group_by(set).agg(...)` per set, each with its missing keys
 added as null columns, joined by `concat`. Every set reads the input, so the

@@ -453,6 +453,12 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Group by one or more columns of any dtype.
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
+- `def group_by_rollup(self, keys: List[String]) -> GroupingSets`
+  DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (). Finish it with `agg`; see GroupingSets for the output. Runs the lazy plan.
+- `def group_by_cube(self, keys: List[String]) -> GroupingSets`
+  DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys as a grouping set. Finish it with `agg`.
+- `def group_by_grouping_sets(self, sets: List[List[String]]) -> GroupingSets`
+  DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping per listed set, an empty set being the grand total. Finish it with `agg`.
 - `def group_indices(self, key: String) -> GroupIndices`
 - `def group_indices(self, keys: List[String]) -> GroupIndices`
   Which rows belong to which group, without aggregating them.
@@ -1115,6 +1121,30 @@ group g, which is where to read that group's key values from.
 - `def sizes(self) -> List[Int]`
   Each group's row count, in group order.
 
+## `grouping`
+
+DuckDB's `GROUPING(a)`: 1 in rows where key `a` is aggregated away (a subtotal row), else 0; Int64. See `grouping_id`.
+
+```mojo
+def grouping(name: String) -> Expr
+```
+
+## `grouping_id`
+
+DuckDB's `GROUPING(a, b, ...)` inside the `agg` of `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`: an Int64 bit mask with one bit per name, the first name the highest bit, set to 1 when that key is aggregated away in the row (a subtotal) and 0 when the row groups by it. It tells a subtotal null from a null key value. Elsewhere it is an error: the expansion of the grouping sets replaces it with a literal for each set.
+
+```mojo
+def grouping_id(names: List[String]) -> Expr
+```
+
+## `GroupingSets`
+
+A pending `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`; finish it with agg.
+
+- `def agg(self, exprs: List[Expr]) -> DataFrame`
+  The rows of every grouping set, in set order: the keys (null in the sets that do not group by them), then the aggregations. Use `grouping` / `grouping_id` in `exprs` to tell subtotal rows from null key values. See LazyGroupingSets.agg.
+- `def agg(self, expr: Expr) -> DataFrame`
+
 ## `import_arrow`
 
 Copy an exported Arrow record batch, then release both exports.
@@ -1165,6 +1195,12 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False) -> LazyGroupBy`
   Group by computed keys, as DataFrame.group_by(List[Expr]): each key is evaluated once and named by its output name, and the aggregations still read the input's columns. Keys that are columns under their own names group as names do.
+- `def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets`
+  DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (), as one plan. Finish it with `agg`; see LazyGroupingSets for the output.
+- `def group_by_cube(self, keys: List[String]) -> LazyGroupingSets`
+  DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys as a grouping set, 2^n of them (a key listed twice doubles them, as in DuckDB). Finish it with `agg`.
+- `def group_by_grouping_sets(self, sets: List[List[String]]) -> LazyGroupingSets`
+  DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping per listed set, an empty set being the grand total. A set listed twice yields its rows twice, as in DuckDB. Finish it with `agg`.
 - `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Sort by `by`. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order (Polars' `maintain_order`; DuckDB's ORDER BY makes no promise either).
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
@@ -1299,6 +1335,14 @@ A pending lazy grouping; finish it with agg, len or a reduction of every other c
   Each other column's distinct values per group; see GroupBy.n_unique.
 - `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> LazyFrame`
   Each other column's quantile per group; see GroupBy.quantile.
+
+## `LazyGroupingSets`
+
+A pending `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`; finish it with agg.
+
+- `def agg(self, exprs: List[Expr]) -> LazyFrame`
+  The rows of every grouping set, in set order: the keys (every key any set names, in order of first appearance), then the aggregations. A key a set does not group by is null in that set's rows, and `grouping` / `grouping_id` in `exprs` tell those subtotal nulls from null key values. Within a set the aggregations act as in `group_by(set).agg(exprs)`; the empty set gives one row, over the whole input, even when it has no rows. Row order is unspecified unless the result is sorted.
+- `def agg(self, expr: Expr) -> LazyFrame`
 
 ## `LazyTimeGroupBy`
 
