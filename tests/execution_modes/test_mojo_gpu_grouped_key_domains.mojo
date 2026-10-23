@@ -12,6 +12,7 @@ from dataframe import (
     StringColumn,
     col,
 )
+from dataframe.canonical_labels import canonical_labels
 from dataframe.dtype import CategoricalDictionary
 from dataframe_metal.metal import MetalRuntime
 from dataframe.key_domains import (
@@ -176,6 +177,14 @@ def _check_multiple_lookup_bases() raises:
         var field = original._columns[index].rechunk()
         _hash_column(field, 0, 4, Int(cpu.unsafe_ptr()), index == 0)
     assert_equal(cpu, literal)
+    # The device hashes the key domain, whose categorical codes name the first
+    # code of each label (#943): rows 1 and 2 of "c" hash as code 0.
+    var canonical = List[UInt64](length=4, fill=0)
+    for index in range(original.width()):
+        var field = canonical_labels(original._columns[index]).rechunk()
+        _hash_column(field, 0, 4, Int(canonical.unsafe_ptr()), index == 0)
+    assert_equal(canonical[0], literal[0])
+    assert_equal(canonical[3], literal[3])
     var domains = List[KeyDomain]()
     var columns = List[Series]()
     var provenance = List[WindowKey]()
@@ -204,7 +213,7 @@ def _check_multiple_lookup_bases() raises:
         _ = provenance^
         _ = domains^
         raise error^
-    assert_equal(actual, literal)
+    assert_equal(actual, canonical)
     _ = actual^
     _ = schedule^
     _ = source^
