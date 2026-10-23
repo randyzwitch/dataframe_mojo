@@ -161,6 +161,21 @@ VARIANTS = {
 # between runs of one engine), but the ORDER BY columns may not. An empty
 # list compares only the row count (an unordered LIMIT).
 CHECKS = {
+    # q67 ranks float sums: a subtotal over one group equals that group's sum
+    # except for rounding, so whether two rows tie, and so their rank, changes
+    # with the thread count (DuckDB's own is stable only by its fixed order).
+    # Every other column, the sums included, is compared.
+    ("tpcds", "q67"): [
+        "i_category",
+        "i_class",
+        "i_brand",
+        "i_product_name",
+        "d_year",
+        "d_qoy",
+        "d_moy",
+        "s_store_id",
+        "sumsales",
+    ],
     ("clickbench", "q8"): [1],
     ("clickbench", "q9"): [2],
     ("clickbench", "q10"): [1],

@@ -389,10 +389,16 @@ SQL text before any query in it is timed:
 7. The 11 with window functions and no ROLLUP (q12, q20, q44, q47, q49,
    q51, q53, q57, q63, q89, q98; #575).
 
-That is 89 of 99. The remaining 10 (q5, q14, q18, q22, q36, q67, q70, q77,
-q80, q86) use ROLLUP or GROUPING and stay `unsupported: not translated`
-until the library has ROLLUP, CUBE and GROUPING SETS (#802; #564 tracks
-their translation).
+8. The 10 with ROLLUP or GROUPING (q5, q14, q18, q22, q36, q67, q70, q77,
+   q80, q86; #564 phase 3), now that the library has ROLLUP, CUBE and
+   GROUPING SETS (#802). q5, q14, q18, q22, q67, q77 and q80 use
+   `group_by_rollup`; q70 and q86 add `grouping` columns for their level and
+   rank; q36's SQL writes its rollup as a UNION of three groupings, so it is
+   translated as written.
+
+That is 99 of 99. q67 ranks Float64 sums, whose ties depend on rounding, so
+its rank column is not compared (`CHECKS` in bench_suites.py); every other
+column is.
 
 Add further batches by a rule of the same kind, never by which queries run
 well. A translation uses the API as a user would; where the
