@@ -454,7 +454,7 @@ def test_onepass_shared_workers_and_resource_fallbacks() raises:
     _ = text
 
 
-def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
+def test_unicode_captures_over_the_backtracker_budget() raises:
     var regex = Regex("^(a+)(β+)$")
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
@@ -464,6 +464,18 @@ def test_onepass_unicode_fallback_over_the_backtracker_budget() raises:
     assert_equal(matcher.slots[3], 100000)
     assert_equal(matcher.slots[4], 100000)
     assert_equal(matcher.slots[5], 300000)
+    # Ambiguous Unicode captures still use the bounded engines, including
+    # the Pike VM when the visited-bit budget cannot cover the span.
+    var ambiguous = Regex("^(a+)(β*)(β*)$")
+    assert_false(Bool(ambiguous._compiled[].onepass))
+    matcher = Matcher(ambiguous)
+    assert_true(matcher.captures(_span(text)))
+    assert_equal(matcher.slots[2], 0)
+    assert_equal(matcher.slots[3], 100000)
+    assert_equal(matcher.slots[4], 100000)
+    assert_equal(matcher.slots[5], 300000)
+    assert_equal(matcher.slots[6], 300000)
+    assert_equal(matcher.slots[7], 300000)
     _ = text
 
 
@@ -518,7 +530,7 @@ def test_onepass_reused_scratch_matches_vm_on_short_inputs() raises:
     _ = text
 
 
-def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
+def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
     var regex = Regex("^(a+)(β*)$")
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
@@ -540,6 +552,82 @@ def test_onepass_and_unicode_fallback_can_reuse_vm_scratch() raises:
         assert_false(matcher.captures(_span(bad)))
         _ = bad
     _ = long
+
+
+def test_onepass_unicode_predicates_match_independent_vm() raises:
+    var patterns: List[String] = [
+        "^(α+)(β*)$",
+        "(α+)(β*)",
+        "(α*?)(β*)",
+        "(α+)|(β+)",
+        "(α(β)?)+",
+        "(?m)^(α+)(β*)$",
+        "()",
+        "(α??)",
+        "^(\\w+) (\\w+) (\\w+)",
+        "^(\\S{2})(\\S)\\b",
+        "^(\\p{Greek}+)(\\p{Cyrillic}*)$",
+        "^([\\u{7f}-\\u{7ff}]+)([\\u{800}-\\u{10ffff}]+)$",
+    ]
+    var alphabet: List[String] = ["α", "β", " ", "\n"]
+    var texts: List[String] = [
+        "один два три",
+        "αβγδ",
+        "éαβγ",
+        "αβγé",
+        "αβ!",
+        "αβ漢",
+        "é߿ࠀ漢🙂",
+        "αβЖ",
+    ]
+    for length in range(5):
+        for encoded in range(1 << (2 * length)):
+            var text = String()
+            var digits = encoded
+            for _ in range(length):
+                text += alphabet[digits & 3]
+                digits >>= 2
+            texts.append(text^)
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        for text in texts:
+            var span = _span(text)
+            for start in range(len(span) + 1):
+                if start < len(span) and span[start] & 0xC0 == 0x80:
+                    continue
+                var expected = matcher.pike.search(
+                    program, span, start, len(span), False, slots
+                )
+                assert_equal(matcher.captures(span, start), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+                # Exercise the deterministic executor directly too: it is
+                # anchored at start even when the pattern itself is not.
+                expected = matcher.pike.search(
+                    program, span, start, len(span), True, slots
+                )
+                var found = (
+                    regex._compiled[]
+                    .onepass.value()[]
+                    .search[True](
+                        program,
+                        span,
+                        start,
+                        len(span),
+                        matcher.pike.scratch,
+                        matcher.slots,
+                    )
+                )
+                assert_equal(found, expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+            _ = text
 
 
 def test_cached_start_states_preserve_context_sensitive_matches() raises:

@@ -477,7 +477,7 @@ struct _Compiled(Movable):
             var extracted = _literal_prefixes(ast, ast.root)
             prefixes = extracted.values.copy()
         self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
-        # Capture tables are cold for ordinary searches. Keep their seven
+        # Capture tables are cold for ordinary searches. Keep their
         # vectors behind a pointer instead of widening the hot program object.
         var onepass = compile_onepass(self.forward)
         self.onepass = None
@@ -753,15 +753,14 @@ struct Matcher(Movable):
         `slots`: group g spans `slots[2g] : slots[2g + 1]`, -1 when it took
         no part."""
         ref c = self.regex._compiled[]
-        if (
-            c.anchored
-            and start == 0
-            and Bool(c.onepass)
-            and (len(text) == 0 or text[0] < 128)
-        ):
+        if c.anchored and start == 0 and Bool(c.onepass):
             # The start state's ASCII table can reject impossible first
             # bytes before scanning a whole row for ASCII eligibility.
-            if len(text) > 0 and not c.onepass.value()[].matched[0]:
+            if (
+                len(text) > 0
+                and text[0] < 128
+                and not c.onepass.value()[].matched[0]
+            ):
                 var cls = Int(c.forward.ascii_class[Int(text[0])])
                 if c.onepass.value()[].next[cls] < 0:
                     return False
@@ -770,7 +769,7 @@ struct Matcher(Movable):
             if ascii_span(text, 0, len(text)):
                 # The capture engines run sequentially and initialize their
                 # scratch before use, so they can share this worker's slots.
-                return c.onepass.value()[].search(
+                return c.onepass.value()[].search[False](
                     c.forward,
                     text,
                     0,
@@ -778,6 +777,14 @@ struct Matcher(Movable):
                     self.pike.scratch,
                     self.slots,
                 )
+            return c.onepass.value()[].search[True](
+                c.forward,
+                text,
+                0,
+                len(text),
+                self.pike.scratch,
+                self.slots,
+            )
         if self._direct_captures(text):
             return start == 0 and self._anchored_captures(text)
         var m = self.find(text, start)
@@ -816,8 +823,12 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
-        if Bool(c.onepass) and ascii_span(text, begin, end):
-            return c.onepass.value()[].search(
+        if Bool(c.onepass):
+            if ascii_span(text, begin, end):
+                return c.onepass.value()[].search[False](
+                    c.forward, text, begin, end, self.pike.scratch, self.slots
+                )
+            return c.onepass.value()[].search[True](
                 c.forward, text, begin, end, self.pike.scratch, self.slots
             )
         if Backtracker.fits(c.forward, begin, end):

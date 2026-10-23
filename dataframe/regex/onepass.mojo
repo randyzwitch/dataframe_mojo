@@ -4,9 +4,9 @@ Each alphabet class may reach at most one consuming instruction from a state.
 SAVE operations become a bit mask; assertions remain conditions on that edge.
 Ambiguity, epsilon cycles and resource limits leave the existing engines in
 charge. The construction follows the one-pass property described by RE2;
-this implementation compiles this engine's code-point alphabet and uses
-its ASCII classes for execution. Unicode spans retain the original capture
-engines; assertions may inspect Unicode outside the captured ASCII span.
+this implementation compiles this engine's code-point alphabet. ASCII uses
+dense class tables; Unicode tests the state's disjoint consuming predicates
+without searching the complete alphabet. Assertions see the full input.
 """
 from std.bit import count_trailing_zeros
 from .program import (
@@ -18,7 +18,7 @@ from .program import (
     OP_LOOK,
     OP_NOP,
 )
-from .pikevm import look_holds
+from .pikevm import decode, look_holds
 
 comptime _MAX_STATES = 256
 comptime _MAX_CELLS = 32768
@@ -34,6 +34,11 @@ struct OnePass(Movable):
     var matched: List[Bool]
     var match_save: List[UInt64]
     var match_looks: List[UInt32]
+    # Unicode edges refer to the same actions as the dense ASCII table.
+    # Their predicates are disjoint, as checked during construction.
+    var terminal_starts: List[Int32]
+    var terminal_pc: List[Int32]
+    var terminal_edge: List[Int32]
 
     def __init__(out self):
         self.next = List[Int32]()
@@ -43,12 +48,17 @@ struct OnePass(Movable):
         self.matched = List[Bool]()
         self.match_save = List[UInt64]()
         self.match_looks = List[UInt32]()
+        self.terminal_starts = List[Int32]()
+        self.terminal_pc = List[Int32]()
+        self.terminal_edge = List[Int32]()
 
     @always_inline
     def active(self) -> Bool:
         return len(self.matched) > 0
 
-    def search(
+    def search[
+        unicode_input: Bool
+    ](
         self,
         program: Program,
         text: Span[UInt8, ImmutAnyOrigin],
@@ -57,8 +67,8 @@ struct OnePass(Movable):
         mut current: List[Int],
         mut slots: List[Int],
     ) -> Bool:
-        # Caller verified [start, end) is ASCII. Assertions still inspect
-        # the full text and can see Unicode outside this captured span.
+        # The ASCII instantiation's caller verified [start, end). Both
+        # instantiations inspect the full text when checking assertions.
         # All tables are immutable and all scratch storage is fixed for
         # this search. Hoist their addresses out of the per-byte loop.
         var nexts = self.next.unsafe_ptr()
@@ -69,6 +79,9 @@ struct OnePass(Movable):
         var match_saves = self.match_save.unsafe_ptr()
         var match_looks = self.match_looks.unsafe_ptr()
         var classes = program.ascii_class.unsafe_ptr()
+        var terminal_starts = self.terminal_starts.unsafe_ptr()
+        var terminal_pc = self.terminal_pc.unsafe_ptr()
+        var terminal_edge = self.terminal_edge.unsafe_ptr()
         var bytes = text.unsafe_ptr()
         var count = len(slots)
         var captures = current.unsafe_ptr()
@@ -81,11 +94,34 @@ struct OnePass(Movable):
         var alphabet = program.alphabet
         while True:
             var edge = -1
+            var width = 1
             if at < end:
-                var cls = Int(
-                    classes[unsafe_offset=Int(bytes[unsafe_offset=at])]
-                )
-                edge = state * alphabet + cls
+                comptime if unicode_input:
+                    var packed = decode(text, at)
+                    var cp = UInt32(packed >> 3)
+                    width = packed & 7
+                    if cp < 128:
+                        edge = state * alphabet + Int(
+                            classes[unsafe_offset=Int(cp)]
+                        )
+                    else:
+                        var first_terminal = Int(
+                            terminal_starts[unsafe_offset=state]
+                        )
+                        var last_terminal = Int(
+                            terminal_starts[unsafe_offset=state + 1]
+                        )
+                        for k in range(first_terminal, last_terminal):
+                            if program.step(
+                                Int(terminal_pc[unsafe_offset=k]), cp
+                            ):
+                                edge = Int(terminal_edge[unsafe_offset=k])
+                                break
+                else:
+                    var cls = Int(
+                        classes[unsafe_offset=Int(bytes[unsafe_offset=at])]
+                    )
+                    edge = state * alphabet + cls
             var accepts = matched[unsafe_offset=state] and _holds(
                 program, match_looks[unsafe_offset=state], text, at
             )
@@ -123,7 +159,7 @@ struct OnePass(Movable):
                 captures[unsafe_offset=k] = at
                 mask &= mask - 1
             state = next
-            at += 1
+            at += width
 
 
 @always_inline
@@ -211,6 +247,8 @@ def compile_onepass(program: Program) -> OnePass:
         result.matched.append(match_rank >= 0)
         result.match_save.append(match_save)
         result.match_looks.append(match_looks)
+        result.terminal_starts.append(Int32(len(result.terminal_pc)))
+        var edges = List[Int](length=len(terminals), fill=-1)
         for cls in range(alphabet):
             var terminal = -1
             for k in range(len(terminals)):
@@ -223,6 +261,8 @@ def compile_onepass(program: Program) -> OnePass:
             var flags: UInt32 = 0
             var first = False
             if terminal >= 0:
+                if edges[terminal] < 0:
+                    edges[terminal] = len(result.next)
                 var pc = Int(program.out[terminals[terminal]])
                 next = state_of[pc]
                 if next < 0:
@@ -236,14 +276,17 @@ def compile_onepass(program: Program) -> OnePass:
             result.save.append(save)
             result.looks.append(flags)
             result.match_first.append(first)
+        for k in range(len(terminals)):
+            if edges[k] >= 0:
+                result.terminal_pc.append(Int32(terminals[k]))
+                result.terminal_edge.append(Int32(edges[k]))
         state += 1
+    result.terminal_starts.append(Int32(len(result.terminal_pc)))
     return result^
 
 
 def ascii_span(text: Span[UInt8, ImmutAnyOrigin], start: Int, end: Int) -> Bool:
-    """Whether a span can use byte-indexed one-pass capture transitions.
-    Check before executing, so Unicode never requires replaying partial
-    deterministic work in a fallback engine."""
+    """Whether a span can use byte-indexed one-pass capture transitions."""
     var p = text.unsafe_ptr()
     var at = start
     while at + 16 <= end:
