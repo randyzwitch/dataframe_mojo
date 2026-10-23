@@ -450,20 +450,19 @@ struct _Compiled(Movable):
     var pattern: String
     var forward: Program
     var reverse: Program
-    var onepass: OnePass
     var names: List[String]
     var anchored: Bool
     var literal: Bool
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
+    var onepass: OnePass
 
     def __init__(out self, pattern: String) raises:
         var ast = parse(pattern)
         self.pattern = pattern
         self.forward = compile_program(ast, False)
         self.reverse = compile_program(ast, True)
-        self.onepass = compile_onepass(self.forward)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
         var info = _analyze(ast, ast.root)
@@ -478,6 +477,7 @@ struct _Compiled(Movable):
             var extracted = _literal_prefixes(ast, ast.root)
             prefixes = extracted.values.copy()
         self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
+        self.onepass = compile_onepass(self.forward)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
@@ -673,10 +673,10 @@ struct Matcher(Movable):
     var reverse: LazyDFA
     var pike: PikeVM
     var backtracker: Backtracker
-    var capture_scratch: List[Int]
     var slots: List[Int]
     var _position: Int
     var _last_end: Int
+    var capture_scratch: List[Int]
 
     def __init__(out self, regex: Regex):
         self.regex = regex.copy()
@@ -686,12 +686,12 @@ struct Matcher(Movable):
         self.reverse = LazyDFA(c.reverse, True)
         self.pike = PikeVM(c.forward, c.forward.slot_count)
         self.backtracker = Backtracker()
-        self.capture_scratch = List[Int](
-            length=c.forward.slot_count if c.onepass.active() else 0, fill=-1
-        )
         self.slots = List[Int](length=c.forward.slot_count, fill=-1)
         self._position = 0
         self._last_end = -1
+        self.capture_scratch = List[Int](
+            length=c.forward.slot_count if c.onepass.active() else 0, fill=-1
+        )
 
     def is_match(mut self, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
         """Whether the pattern matches anywhere in `text`."""
