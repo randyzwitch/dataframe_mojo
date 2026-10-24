@@ -98,6 +98,12 @@ def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
     assert_equal(m[0], text.byte_length())
     assert_equal(m[1], tail.byte_length())
     assert_equal(matcher.count(_span(tail + tail)), 2)
+    assert_true(regex._compiled[].reverse_captures)
+    assert_true(matcher.captures(_span(tail)))
+    assert_equal(matcher.slots[0], text.byte_length())
+    assert_equal(matcher.slots[1], tail.byte_length())
+    assert_equal(matcher.slots[2], text.byte_length() + 24)
+    assert_equal(matcher.slots[3], text.byte_length() + 25)
     _ = text
     _ = tail
 

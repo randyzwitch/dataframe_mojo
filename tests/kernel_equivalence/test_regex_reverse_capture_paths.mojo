@@ -1,8 +1,9 @@
 """Capture engine selection and replacement preserve the public behavior."""
 # contract-group: kernel.regex
 from std.testing import assert_equal, assert_false, assert_true
+from dataframe.parallel import run_jobs
 from dataframe.regex import Matcher, Regex
-from .test_regex_engine import _replace, _span
+from .test_regex_engine import _CaptureJob, _replace, _span
 
 
 def test_reverse_capture_path_leaves_reverse_dfa_and_vm_buffers_unused() raises:
@@ -73,3 +74,16 @@ def test_reverse_capture_replacement_groups_and_empty_iteration() raises:
             expected[i],
             patterns[i],
         )
+
+
+def test_reverse_capture_tables_shared_by_workers() raises:
+    var regex = Regex("([a-z]+) ([0-9]+)")
+    assert_true(regex._compiled[].reverse_captures)
+    var jobs = List[_CaptureJob]()
+    for k in range(8):
+        jobs.append(_CaptureJob(regex, k * 500, (k + 1) * 500))
+    run_jobs(jobs)
+    var count = 0
+    for k in range(len(jobs)):
+        count += jobs[k].count
+    assert_equal(count, 4000)
