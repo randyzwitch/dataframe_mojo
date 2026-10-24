@@ -942,6 +942,45 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
                 )
 
 
+def test_repeated_classes_preserve_alphabet_and_word_context() raises:
+    from dataframe.regex.program import compile_program
+    from dataframe.regex.syntax import parse
+
+    var classes: List[String] = [
+        "\\w",
+        "\\d",
+        "[a-z]",
+        "[\\p{Han}\\p{Deseret}]",
+    ]
+    for cls in classes:
+        var single = "\\b" + cls + "\\b"
+        var base = Regex(single)
+        for count in [3, 31]:
+            var pattern = "\\b(?:" + cls + "){" + String(count) + "}\\b"
+            var repeated = Regex(pattern)
+            var ast = parse(pattern)
+            for reverse in [False, True]:
+                var independent = compile_program(ast, reverse)
+                ref actual = (
+                    repeated._compiled[]
+                    .reverse if reverse else repeated._compiled[]
+                    .forward
+                )
+                ref expected = (
+                    base._compiled[]
+                    .reverse if reverse else base._compiled[]
+                    .forward
+                )
+                assert_equal(actual.class_ranges, expected.class_ranges)
+                assert_equal(actual.boundaries, expected.boundaries)
+                assert_equal(actual.interval_class, expected.interval_class)
+                assert_equal(actual.ascii_class, expected.ascii_class)
+                assert_equal(actual.class_rep, expected.class_rep)
+                assert_equal(actual.class_word, expected.class_word)
+                assert_equal(actual.word, independent.word)
+                assert_equal(actual.word_ascii, independent.word_ascii)
+
+
 def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
     from dataframe.regex.charclass import class_contains
 
