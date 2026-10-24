@@ -101,3 +101,76 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
             right_on=["p_key"],
         ),
     )
+
+
+def test_a_small_left_of_a_left_join_builds_in_the_pipeline_and_emits_unmatched_rows_last() raises:
+    # 3,000 customers (one with a null key) and 60K orders that reach only
+    # the first 1,500 customer keys, some of them several times: under an
+    # aggregation the left join builds on the customers, the orders stream
+    # through them, and the customers no order matched come out as a final
+    # morsel with null order columns.
+    var c_key = List[Int64]()
+    var c_valid = List[Bool]()
+    var c_val = List[Int64]()
+    for c in range(3000):
+        c_key.append(Int64(c))
+        c_valid.append(c != 17)
+        c_val.append(Int64(c % 11))
+    var o_cust = List[Int64]()
+    var o_id = List[Int64]()
+    for row in range(60_000):
+        o_cust.append(Int64((row * 37) % 1500))
+        o_id.append(Int64(row))
+    var customers = DataFrame(
+        [
+            Series("c_key", Column[Int64](c_key^, c_valid^)),
+            ints("c_val", c_val),
+        ]
+    )
+    var orders = DataFrame([ints("o_cust", o_cust), ints("o_id", o_id)])
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var counts = (
+        customers.lazy()
+        .join(
+            orders.lazy(),
+            left_on=["c_key"],
+            right_on=["o_cust"],
+            how="left",
+        )
+        .group_by(["c_key"])
+        .agg(
+            [
+                col("o_id").count().alias("n"),
+                col("c_val").sum().alias("v"),
+            ]
+        )
+        .collect()
+        .sort(["c_key"])
+    )
+    var text = observed.text()
+    assert_true(
+        "dataframe-path: lazy.swap_left_join_sides\n" in text,
+        "the left join did not build on the left",
+    )
+    assert_true(
+        "dataframe-path: pipeline.join_unmatched\n" in text,
+        "the unmatched left rows were not emitted by the pipeline",
+    )
+    _ = observed^
+    _ = trace^
+    var expected = (
+        customers.join(
+            orders, left_on=["c_key"], right_on=["o_cust"], how="left"
+        )
+        .group_by(["c_key"])
+        .agg(
+            [
+                col("o_id").count().alias("n"),
+                col("c_val").sum().alias("v"),
+            ]
+        )
+        .sort(["c_key"])
+    )
+    assert_true(counts.height() == 3000)
+    assert_frame(counts, expected)

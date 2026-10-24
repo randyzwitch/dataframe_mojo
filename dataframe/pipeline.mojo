@@ -70,7 +70,7 @@ from .join_hash import (
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
-from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_SEMI
+from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from .row_encode import encodable
 from .gather import can_filter_aligned_chunks, take_parallel, true_rows
 from .huge_pages import huge_list
@@ -651,8 +651,12 @@ struct Morsel(Movable):
     # The height of the source this morsel was cut from: steps choose
     # their route by it, not by the morsel's own height.
     var source_rows: Int
+    # A right join step's per-worker flags of the build rows matched so
+    # far (the address of the bytes), set before the step runs; 0 for none.
+    var marks: Int
 
     def __init__(out self, var frame: DataFrame, sequence: Int):
+        self.marks = 0
         self.source_rows = frame.height()
         self.count = frame.height()
         self.compact = List[Bool](length=frame.width(), fill=True)
@@ -1133,6 +1137,7 @@ struct Morsel(Movable):
             coalesce=step.coalesce,
             prepared=indexes[][step.join],
             workers=0,
+            marks=self.marks,
         )
         self.count = joined.height()
         self.compact = List[Bool](length=joined.width(), fill=True)
@@ -2380,6 +2385,9 @@ struct _PipelineJob(Job):
     var counts: List[Int]
     # The join builds' key ranges on source columns (`_key_ranges`).
     var key_ranges: List[_KeyRange]
+    # A right join step's flags of the build rows this worker's morsels
+    # matched (one byte a build row), by step; empty for other steps.
+    var marks: List[List[UInt8]]
 
     def __init__(
         out self,
@@ -2406,6 +2414,14 @@ struct _PipelineJob(Job):
         key_ranges: List[_KeyRange],
     ):
         self.key_ranges = key_ranges.copy()
+        self.marks = List[List[UInt8]](capacity=len(steps))
+        for step in steps:
+            if step.kind == STEP_JOIN and step.how == JOIN_RIGHT:
+                self.marks.append(
+                    List[UInt8](length=joins[][step.join].height(), fill=0)
+                )
+            else:
+                self.marks.append(List[UInt8]())
         self.layout = layout.copy()
         self.sets = sets.copy()
         self.sinks = List[AggregateSink]()
@@ -2595,6 +2611,8 @@ struct _PipelineJob(Job):
             for i in range(len(self.steps)):
                 self.counts[2 * i + 1] += morsel.height()
                 var began = Int(perf_counter_ns())
+                if len(self.marks[i]) > 0:
+                    morsel.marks = Int(self.marks[i].unsafe_ptr())
                 morsel.apply(
                     self.steps[i], self.batch_size, self.joins, self.indexes
                 )
@@ -2606,157 +2624,155 @@ struct _PipelineJob(Job):
                     break
             if morsel.height() == 0:
                 continue
-            if len(self.layout) > 0 and len(self.sets) > 0:
-                self._sink_sets(morsel, k)
-                continue
-            if len(self.layout) > 0:
-                if len(self.sinks) == 0:
-                    self.sinks.append(
-                        AggregateSink(self.layout[0], self.workers)
+            self._consume(morsel, k, offset, length)
+
+    def _consume(
+        mut self, mut morsel: Morsel, k: Int, offset: Int, length: Int
+    ) raises:
+        """Sink one morsel that has run every step into this worker's
+        state: `k` numbers it, `offset` and `length` place its rows in the
+        source."""
+        if len(self.layout) > 0 and len(self.sets) > 0:
+            self._sink_sets(morsel, k)
+            return
+        if len(self.layout) > 0:
+            if len(self.sinks) == 0:
+                self.sinks.append(AggregateSink(self.layout[0], self.workers))
+            var in_place = _in_place_table_rows(
+                morsel, self.keys, self.expressions
+            )
+            if in_place:
+                trace_path("pipeline.table_in_place")
+                ref rows = in_place.value()
+                self.sinks[0].sink(rows[0], rows[1], k << 32, rows[2])
+                self.rows += rows[3]
+                return
+            # The aggregate table: the morsel's keys and reduction
+            # inputs into this worker's sink, no matter how many groups
+            # (its tables adapt), with strings compared in place.
+            var source = morsel._compact_frame(self._table_reads()) if _reads(
+                self.expressions
+            ) else morsel.materialized()
+            var keys = List[Series](capacity=len(self.keys))
+            for name in self.keys:
+                keys.append(canonical_labels(_unchunked(source.column(name))))
+            var inputs = table_inputs(source, keys, self.expressions)
+            for i in range(len(inputs)):
+                inputs[i] = _unchunked(inputs[i])
+            if len(self.sinks) == 0:
+                self.sinks.append(AggregateSink(self.layout[0], self.workers))
+            # First rows numbered by morsel, then by row of its output
+            # (a join's may outgrow the morsel), so the table orders
+            # groups the same whichever worker took which morsel.
+            self.sinks[0].sink(keys, inputs, k << 32)
+            self.rows += len(keys[0])
+            return
+        if (
+            len(self.keys) > 0
+            and len(self.expressions) > 0
+            and not self.insert
+            and self.filter_only
+        ):
+            if len(self.grouped) == 0:
+                self.grouped.append(
+                    _GroupedSink(
+                        morsel.frame,
+                        self.expressions,
+                        self.keys,
+                        True,
+                        self.batch_size,
                     )
-                var in_place = _in_place_table_rows(
-                    morsel, self.keys, self.expressions
                 )
-                if in_place:
-                    trace_path("pipeline.table_in_place")
-                    ref rows = in_place.value()
-                    self.sinks[0].sink(rows[0], rows[1], k << 32, rows[2])
-                    self.rows += rows[3]
-                    continue
-                # The aggregate table: the morsel's keys and reduction
-                # inputs into this worker's sink, no matter how many groups
-                # (its tables adapt), with strings compared in place.
-                var source = morsel._compact_frame(
-                    self._table_reads()
-                ) if _reads(self.expressions) else morsel.materialized()
-                var keys = List[Series](capacity=len(self.keys))
-                for name in self.keys:
-                    keys.append(
-                        canonical_labels(_unchunked(source.column(name)))
-                    )
-                var inputs = table_inputs(source, keys, self.expressions)
-                for k in range(len(inputs)):
-                    inputs[k] = _unchunked(inputs[k])
-                if len(self.sinks) == 0:
-                    self.sinks.append(
-                        AggregateSink(self.layout[0], self.workers)
-                    )
-                # First rows numbered by morsel, then by row of its output
-                # (a join's may outgrow the morsel), so the table orders
-                # groups the same whichever worker took which morsel.
-                self.sinks[0].sink(keys, inputs, k << 32)
-                self.rows += len(keys[0])
-                continue
-            if (
-                len(self.keys) > 0
-                and len(self.expressions) > 0
-                and not self.insert
-                and self.filter_only
-            ):
+            if morsel.selected:
+                self.grouped[0].select(offset, length, morsel.mask)
+            else:
+                self.grouped[0].select(offset, length, BoolColumn(List[Bool]()))
+            self.rows += morsel.height()
+            return
+        if len(self.expressions) > 0:
+            var reads = _reads(self.expressions)
+            var input: DataFrame
+            if reads:
+                var names = reads.take()
+                for key in self.keys:
+                    if key not in names:
+                        names.append(key)
+                input = morsel._compact_frame(names)
+            else:
+                input = morsel.materialized()
+            if len(self.keys) > 0 and len(self.reduction) == 0:
+                # Rows go straight into this worker's per-part key
+                # indexes and reducer states (DuckDB's thread-local
+                # partitioned aggregate table), when the keys encode
+                # as words; otherwise each morsel's state is split
+                # into parts and merged below.
                 if len(self.grouped) == 0:
                     self.grouped.append(
                         _GroupedSink(
-                            morsel.frame,
+                            input,
                             self.expressions,
                             self.keys,
-                            True,
+                            not self.insert,
                             self.batch_size,
                         )
                     )
-                if morsel.selected:
-                    self.grouped[0].select(offset, length, morsel.mask)
+                if self.grouped[0].absorb(input, offset):
+                    self.rows += input.height()
+                    return
+                if self.grouped[0].count > 0:
+                    raise Error("grouped pipeline: keys stopped partitioning")
+                self.grouped = List[_GroupedSink]()
+            # Group first rows are the frame's rows, so first-occurrence
+            # order survives morsels taken out of order.
+            var state = _StreamReduction(input, self.expressions, self.keys)
+            state.shift_firsts(offset)
+            self.rows += state.rows
+            if len(self.keys) == 0:
+                if len(self.reduction) == 0:
+                    self.reduction.append(state^)
                 else:
-                    self.grouped[0].select(
-                        offset, length, BoolColumn(List[Bool]())
-                    )
-                self.rows += morsel.height()
-                continue
-            if len(self.expressions) > 0:
-                var reads = _reads(self.expressions)
-                var input: DataFrame
-                if reads:
-                    var names = reads.take()
-                    for key in self.keys:
-                        if key not in names:
-                            names.append(key)
-                    input = morsel._compact_frame(names)
-                else:
-                    input = morsel.materialized()
-                if len(self.keys) > 0 and len(self.reduction) == 0:
-                    # Rows go straight into this worker's per-part key
-                    # indexes and reducer states (DuckDB's thread-local
-                    # partitioned aggregate table), when the keys encode
-                    # as words; otherwise each morsel's state is split
-                    # into parts and merged below.
-                    if len(self.grouped) == 0:
-                        self.grouped.append(
-                            _GroupedSink(
-                                input,
-                                self.expressions,
-                                self.keys,
-                                not self.insert,
-                                self.batch_size,
-                            )
-                        )
-                    if self.grouped[0].absorb(input, offset):
-                        self.rows += input.height()
-                        continue
-                    if self.grouped[0].count > 0:
-                        raise Error(
-                            "grouped pipeline: keys stopped partitioning"
-                        )
-                    self.grouped = List[_GroupedSink]()
-                # Group first rows are the frame's rows, so first-occurrence
-                # order survives morsels taken out of order.
-                var state = _StreamReduction(input, self.expressions, self.keys)
-                state.shift_firsts(offset)
-                self.rows += state.rows
-                if len(self.keys) == 0:
-                    if len(self.reduction) == 0:
-                        self.reduction.append(state^)
-                    else:
-                        self.reduction[0].merge(state)
-                elif len(self.reduction) == 0:
-                    # The worker's state is kept in hash parts, so every
-                    # morsel's groups go into tables small enough to stay
-                    # in cache; one table over all the worker's groups
-                    # cost ClickBench q32 (10M groups) 280 ns a probe.
-                    self.reduction = state.split(_PART_BITS)
-                else:
-                    var pieces = state.split(_PART_BITS)
-                    var p = 0
-                    while len(pieces) > 0:
-                        var piece = pieces.pop(0)
-                        if piece.group_count() > 0:
-                            var batch = List[_StreamReduction]()
-                            batch.append(piece^)
-                            self.reduction[p].merge_all(batch, parallel=False)
-                        p += 1
-            elif self.top > 0:
-                var output = morsel.materialized()
-                var h = output.height()
-                var places = List[Int64](capacity=h)
-                var base = Int64(morsel.sequence) << 40
-                for r in range(h):
-                    places.append(base + Int64(r))
-                output = output.with_column(
-                    Series(_ORDER_COLUMN, Column[Int64](places^))
-                )
-                self.candidate_rows += h
-                self.parts.append(output^)
-                # Folds come at doubling candidate counts, from a few rows
-                # past k up to a few thousand: the first folds are cheap
-                # and tighten the shared bound fast (a bound from 40 rows
-                # kept 10% of ClickBench q26's rows; from 8K rows, 0.1%),
-                # and the fold's setup per call (dense ranks of a string
-                # key) is then paid once per thousands of rows, not per
-                # morsel (650 folds cost q26 44 ms).
-                if self.candidate_rows > self.fold_at and len(self.parts) > 1:
-                    self._fold_candidates()
-                    self.fold_at = min(_FOLD_ROWS, 2 * self.fold_at)
+                    self.reduction[0].merge(state)
+            elif len(self.reduction) == 0:
+                # The worker's state is kept in hash parts, so every
+                # morsel's groups go into tables small enough to stay
+                # in cache; one table over all the worker's groups
+                # cost ClickBench q32 (10M groups) 280 ns a probe.
+                self.reduction = state.split(_PART_BITS)
             else:
-                self.parts.append(morsel.materialized())
-                self.sequences.append(morsel.sequence)
+                var pieces = state.split(_PART_BITS)
+                var p = 0
+                while len(pieces) > 0:
+                    var piece = pieces.pop(0)
+                    if piece.group_count() > 0:
+                        var batch = List[_StreamReduction]()
+                        batch.append(piece^)
+                        self.reduction[p].merge_all(batch, parallel=False)
+                    p += 1
+        elif self.top > 0:
+            var output = morsel.materialized()
+            var h = output.height()
+            var places = List[Int64](capacity=h)
+            var base = Int64(morsel.sequence) << 40
+            for r in range(h):
+                places.append(base + Int64(r))
+            output = output.with_column(
+                Series(_ORDER_COLUMN, Column[Int64](places^))
+            )
+            self.candidate_rows += h
+            self.parts.append(output^)
+            # Folds come at doubling candidate counts, from a few rows
+            # past k up to a few thousand: the first folds are cheap
+            # and tighten the shared bound fast (a bound from 40 rows
+            # kept 10% of ClickBench q26's rows; from 8K rows, 0.1%),
+            # and the fold's setup per call (dense ranks of a string
+            # key) is then paid once per thousands of rows, not per
+            # morsel (650 folds cost q26 44 ms).
+            if self.candidate_rows > self.fold_at and len(self.parts) > 1:
+                self._fold_candidates()
+                self.fold_at = min(_FOLD_ROWS, 2 * self.fold_at)
+        else:
+            self.parts.append(morsel.materialized())
+            self.sequences.append(morsel.sequence)
 
 
 def _scatter(
@@ -3149,6 +3165,69 @@ def _morsel_ranges(
     return ranges^
 
 
+def _emit_unmatched(
+    mut jobs: List[_PipelineJob],
+    steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    batch_size: Int,
+) raises:
+    """The build rows no morsel matched, for each right join step in step
+    order, as a final morsel of that step's output (the probe columns null)
+    through the steps after it and into the first worker's sink: Polars'
+    `emit_unmatched_build` (`EmitUnmatchedState`, polars-stream equi_join)
+    and the right-outer scan of DuckDB's `PhysicalHashJoin::GetData`. Every
+    worker flagged the build rows its own morsels matched; the flags are
+    merged here, once all have finished."""
+    var next_morsel = len(jobs[0].ranges[]) // 2
+    for j in range(len(steps)):
+        if steps[j].kind != STEP_JOIN or steps[j].how != JOIN_RIGHT:
+            continue
+        ref build = joins[][steps[j].join]
+        var n = build.height()
+        var unmatched = List[Int]()
+        var seen = List[UInt8](length=n, fill=0)
+        var flags = seen.unsafe_ptr()
+        for w in range(len(jobs)):
+            var mine = jobs[w].marks[j].unsafe_ptr()
+            for r in range(n):
+                flags[unsafe_offset=r] |= mine[unsafe_offset=r]
+        for r in range(n):
+            if flags[unsafe_offset=r] == 0:
+                unmatched.append(r)
+        if len(unmatched) == 0:
+            continue
+        trace_path("pipeline.join_unmatched")
+        # The probe side's columns at this step: an empty source through
+        # the steps before it.
+        var empty = jobs[0].frame[].clear()
+        for i in range(j):
+            var probe = Morsel(empty.copy(), 0)
+            probe.apply(steps[i], batch_size, joins, indexes)
+            empty = probe.materialized()
+        var tail = empty._join_impl(
+            build._filter_rows(unmatched^),
+            left_on=steps[j].names,
+            right_on=steps[j].right_keys,
+            how=JOIN_RIGHT,
+            suffix=steps[j].suffix,
+            coalesce=False,
+        )
+        var morsel = Morsel(tail^, next_morsel)
+        next_morsel += 1
+        for i in range(j + 1, len(steps)):
+            jobs[0].counts[2 * i + 1] += morsel.height()
+            morsel.apply(steps[i], batch_size, joins, indexes)
+            jobs[0].counts[2 * i + 2] += morsel.height()
+            if morsel.height() == 0:
+                break
+        if morsel.height() == 0:
+            continue
+        jobs[0]._consume(
+            morsel, next_morsel - 1, jobs[0].frame[].height(), morsel.height()
+        )
+
+
 def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
@@ -3305,6 +3384,7 @@ def run_pipeline(
         raise e
     cursor.free()
     shared_bound.free()
+    _emit_unmatched(jobs, steps, joins, indexes, batch_size)
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
