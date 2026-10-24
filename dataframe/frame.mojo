@@ -6302,16 +6302,13 @@ struct GroupBy(Copyable):
         # Keys are unchanged throughout this aggregation. Reuse the sampled
         # preference across hash, range and partitioned strategy selection.
         var whole = low_cardinality(self._keys) if workers > 1 else False
-        # Few groups (the sample above) keep the routes that reduce each
-        # range into a small private state, in first-occurrence order; more
-        # go through the aggregate table, whose per-thread tables adapt to
-        # however many there are. Keys with few values each may still form
-        # many groups, so they take the table too, as in a pipeline: PDS-H
-        # q16's brand, type and size (under 30K combinations) form 18K
-        # groups among 118K rows, 14 ms in per-range states that number
-        # each range's strings again and 4.4 ms in the table; H2O q2's two
-        # 100-value keys are 17% faster there.
-        if workers > 1 and not whole and self._table_supported(expressions):
+        # Keys of a small dense domain went to the perfect hash above, as
+        # DuckDB's do; any other grouping goes through the aggregate table
+        # whatever its number of groups, whose per-thread tables adapt to
+        # however many there are. Neither DuckDB nor Polars picks a route
+        # by an estimate of the groups. The per-range routes below keep the
+        # reductions the table has no state for.
+        if workers > 1 and self._table_supported(expressions):
             var table = self._agg_table(expressions, workers)
             if table:
                 return _pack_struct_keys(table.value())
