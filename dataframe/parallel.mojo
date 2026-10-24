@@ -988,11 +988,56 @@ def _current_crew() -> ref[MutAnyOrigin] Atomic[Int64]:
     )[]
 
 
+def _parked_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+
+
+def _parked_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
+def _parked_crew() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """The address of the crew kept between operations, or 0: its threads
+    are parked, waiting for the next operation's work."""
+    var address = _get_global[
+        "DATAFRAME_PARKED_CREW", _parked_init, _parked_keep
+    ]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+def _stop_crew(address: Int):
+    """Stop and join a crew's threads, and free its state."""
+    ref state = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
+    _ = external_call["pthread_mutex_lock", Int32](state._mutex())
+    state.stopping.store(1)
+    _ = external_call["pthread_cond_broadcast", Int32](state._cond())
+    _ = external_call["pthread_mutex_unlock", Int32](state._mutex())
+    # The first thread may still be creating the others.
+    while state.spawned.load() == 1:
+        _ = external_call["sched_yield", Int32]()
+    var ids = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=state.ids)
+    for t in range(state.threads):
+        _ = external_call["pthread_join", Int32](ids[unsafe_offset=t], 0)
+    _ = external_call["free", NoneType](state.ids)
+    _ = external_call["free", NoneType](state.postings)
+    _ = external_call["free", NoneType](address)
+
+
 struct Crew(Movable):
     """Helper threads for the `run_jobs` calls of one operation. `start`
     begins one unless one is already running (then this one does nothing),
-    and `release` must be called when the operation ends, error or not: it
-    joins every thread."""
+    and `release` must be called when the operation ends, error or not.
+
+    The threads outlive the operation, as DuckDB's task scheduler threads
+    and Polars' rayon pool do: `release` parks a crew whose threads were
+    created, and the next `start` takes it back, so a query pays thread
+    creation once, not each time (seven threads took 266 us). A crew is
+    kept only while `DATAFRAME_THREADS` (or the core count) is what it was
+    sized for; a start under another setting joins the parked threads and
+    creates a crew of the new size, as DuckDB's `SetThreads` resizes."""
 
     var address: Int
 
@@ -1005,20 +1050,34 @@ struct Crew(Movable):
         var helpers = configured_workers() - 1
         if helpers <= 0 or _current_crew().load() != 0:
             return crew^
-        var address = external_call["malloc", Int](size_of[_Crew]())
-        var postings = external_call["calloc", Int](_POSTINGS, 16)
-        var ids = external_call["calloc", Int](max(helpers, 1), 8)
-        if address == 0 or postings == 0 or ids == 0:
-            return crew^
-        var pointer = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)
-        pointer.unsafe_write(_Crew(postings, ids, helpers))
-        ref state = pointer[]
-        _ = external_call["pthread_mutex_init", Int32](state._mutex(), 0)
-        _ = external_call["pthread_cond_init", Int32](state._cond(), 0)
-        # No thread yet: the first `run_jobs` with work for helpers creates
-        # them (`_Crew.spawn`). A query that runs nothing in parallel pays
-        # no thread creation (a 21-row filter took 290 us, 266 of them
-        # starting and joining seven threads).
+        var address = 0
+        # A parked crew of the right size is taken back.
+        var parked = _parked_crew().load()
+        if parked != 0 and _parked_crew().compare_exchange(parked, Int64(0)):
+            ref old = Pointer[_Crew, MutAnyOrigin](
+                unsafe_from_address=Int(parked)
+            )[]
+            if old.wanted == helpers:
+                address = Int(parked)
+            else:
+                _stop_crew(Int(parked))
+        if address == 0:
+            address = external_call["malloc", Int](size_of[_Crew]())
+            var postings = external_call["calloc", Int](_POSTINGS, 16)
+            var ids = external_call["calloc", Int](max(helpers, 1), 8)
+            if address == 0 or postings == 0 or ids == 0:
+                return crew^
+            var pointer = Pointer[_Crew, MutAnyOrigin](
+                unsafe_from_address=address
+            )
+            pointer.unsafe_write(_Crew(postings, ids, helpers))
+            ref state = pointer[]
+            _ = external_call["pthread_mutex_init", Int32](state._mutex(), 0)
+            _ = external_call["pthread_cond_init", Int32](state._cond(), 0)
+        # No thread yet for a new crew: the first `run_jobs` with work for
+        # helpers creates them (`_Crew.spawn`). A query that runs nothing in
+        # parallel pays no thread creation (a 21-row filter took 290 us, 266
+        # of them starting and joining seven threads).
         crew.address = address
         var none = Int64(0)
         if not _current_crew().compare_exchange(none, Int64(address)):
@@ -1026,8 +1085,18 @@ struct Crew(Movable):
             crew.release()
         return crew^
 
+    @staticmethod
+    def shutdown():
+        """Join the parked crew's threads and free it, if there is one: the
+        next operation creates its threads again."""
+        var parked = _parked_crew().load()
+        if parked != 0 and _parked_crew().compare_exchange(parked, Int64(0)):
+            _stop_crew(Int(parked))
+
     def release(mut self):
-        """Stop and join the threads, and free the state. Idempotent."""
+        """End the operation: park the crew for the next one when its
+        threads were created and none is parked already, else stop and join
+        them. Idempotent."""
         if self.address == 0:
             return
         ref state = Pointer[_Crew, MutAnyOrigin](
@@ -1035,19 +1104,12 @@ struct Crew(Movable):
         )[]
         var mine = Int64(self.address)
         _ = _current_crew().compare_exchange(mine, Int64(0))
-        _ = external_call["pthread_mutex_lock", Int32](state._mutex())
-        state.stopping.store(1)
-        _ = external_call["pthread_cond_broadcast", Int32](state._cond())
-        _ = external_call["pthread_mutex_unlock", Int32](state._mutex())
-        # The first thread may still be creating the others.
-        while state.spawned.load() == 1:
-            _ = external_call["sched_yield", Int32]()
-        var ids = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=state.ids)
-        for t in range(state.threads):
-            _ = external_call["pthread_join", Int32](ids[unsafe_offset=t], 0)
-        _ = external_call["free", NoneType](state.ids)
-        _ = external_call["free", NoneType](state.postings)
-        _ = external_call["free", NoneType](self.address)
+        if state.spawned.load() == 2 and state.threads > 0:
+            var none = Int64(0)
+            if _parked_crew().compare_exchange(none, Int64(self.address)):
+                self.address = 0
+                return
+        _stop_crew(self.address)
         self.address = 0
 
 
