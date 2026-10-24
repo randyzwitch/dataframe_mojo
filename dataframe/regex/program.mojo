@@ -53,6 +53,8 @@ comptime OP_FAIL: UInt8 = 9
 
 # Programs larger than this are rejected, like Rust's size limit.
 comptime MAX_INSTRUCTIONS = 500_000
+# Special DFA states encode up to three ASCII exclusions in seven-bit lanes.
+comptime SUFFIX_LIMIT = Int(Int32.MIN) + (1 << 23)
 
 
 @always_inline
@@ -78,6 +80,7 @@ struct Program(Movable, Sized):
     var start_unanchored: Int
     var slot_count: Int
     var looks: UInt32
+    var has_suffix: Bool
     # The DFA alphabet: `ascii_class` maps ASCII and Unicode cuts through
     # U+07FF. `boundaries` and `interval_class` describe the remaining
     # intervals. `class_rep` is one member of each class.
@@ -100,6 +103,7 @@ struct Program(Movable, Sized):
         self.start_unanchored = 0
         self.slot_count = 2
         self.looks = 0
+        self.has_suffix = False
         self.ascii_class = List[Int32]()
         self.boundaries = List[UInt32]()
         self.interval_class = List[Int32]()
@@ -111,6 +115,55 @@ struct Program(Movable, Sized):
 
     def __len__(self) -> Int:
         return len(self.op)
+
+    def _skip_slots(self, pc: Int) -> Int:
+        var at = pc
+        for _ in range(len(self)):
+            if at < 0 or at >= len(self):
+                return -1
+            if self.op[at] != OP_SAVE and self.op[at] != OP_NOP:
+                return at
+            at = Int(self.out[at])
+        return -1
+
+    def _greedy_suffix_code(self, pc: Int) -> Int32:
+        """A terminal greedy loop over all but at most three ASCII scalars.
+
+        Captures do not constrain the DFA; assertions and other consuming
+        instructions do. The first split arm must repeat this predicate.
+        """
+        var op = self.op[pc]
+        if op != OP_ANY and op != OP_ANY_NOT_NL and op != OP_CLASS:
+            return 0
+        var split = self._skip_slots(Int(self.out[pc]))
+        if split < 0 or self.op[split] != OP_SPLIT:
+            return 0
+        if self._skip_slots(Int(self.out[split])) != pc:
+            return 0
+        var accept = self._skip_slots(Int(self.arg[split]))
+        if accept < 0 or self.op[accept] != OP_MATCH:
+            return 0
+        if op == OP_ANY:
+            return Int32.MIN
+        if op == OP_ANY_NOT_NL:
+            return Int32.MIN | Int32((1 << 21) | 10)
+        ref ranges = self.class_ranges[Int(self.arg[pc])]
+        if len(ranges) == 0 or ranges[len(ranges) - 1] != MAX_CODEPOINT:
+            return 0
+        var next: UInt32 = 0
+        var count = 0
+        var bytes: UInt32 = 0
+        for i in range(0, len(ranges), 2):
+            var low = ranges[i]
+            if low > next:
+                if low > 128 or Int(low - next) > 3 - count:
+                    return 0
+                while next < low:
+                    bytes |= next << UInt32(7 * count)
+                    count += 1
+                    next += 1
+            next = ranges[i + 1] + 1
+        return Int32.MIN | Int32(bytes | UInt32(count << 21))
 
     def emit(mut self, op: UInt8, next: Int = -1, arg: Int = 0) raises -> Int:
         if len(self.op) >= MAX_INSTRUCTIONS:
@@ -604,6 +657,10 @@ def _compile_program(
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    for pc in range(len(program)):
+        if program._greedy_suffix_code(pc) != 0:
+            program.has_suffix = True
+            break
     # Only live Unicode-word assertions observe this context. ASCII-word
     # assertions use their own byte predicate and alphabet partition.
     if program.looks & LOOK_UNICODE_WORD:
