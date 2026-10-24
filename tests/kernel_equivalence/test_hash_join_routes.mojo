@@ -15,6 +15,7 @@ from dataframe.join_hash import (
 )
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
+from dataframe.join_fuse import FusedJoin
 from dataframe.frame import (
     _join_range_rows,
     _smaller_build_join_rows,
@@ -284,8 +285,11 @@ def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_li
             assert_equal(selected.value(), [9, 1003, n - 1])
             var lrows = List[Int]()
             var rrows = List[Int]()
+            var unfused = FusedJoin()
             assert_true(
-                _bounded_int64_join_rows(right, left, True, lrows, rrows)
+                _bounded_int64_join_rows(
+                    right, left, True, lrows, rrows, unfused
+                )
             )
             assert_equal(len(lrows), n)
             assert_equal(len(rrows), n)

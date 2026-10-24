@@ -149,6 +149,9 @@ struct GroupModel(Copyable, Movable):
     var w_total: Int128
     var ys: List[Float64]
     var xs: List[Float64]
+    # Rows where both x and y are valid.
+    var pair_x: List[Float64]
+    var pair_y: List[Float64]
 
     def __init__(out self):
         self.rows = 0
@@ -161,6 +164,8 @@ struct GroupModel(Copyable, Movable):
         self.w_total = 0
         self.ys = List[Float64]()
         self.xs = List[Float64]()
+        self.pair_x = List[Float64]()
+        self.pair_y = List[Float64]()
 
     def add(mut self, row: Int):
         self.rows += 1
@@ -178,6 +183,9 @@ struct GroupModel(Copyable, Movable):
             self.w_nulls += 1
         if real_valid(row):
             self.ys.append(real(row))
+            if narrow_valid(row):
+                self.pair_x.append(Float64(narrow(row)))
+                self.pair_y.append(real(row))
 
     def y_mean(self) -> Float64:
         var total = Float64(0)
@@ -192,6 +200,28 @@ struct GroupModel(Copyable, Movable):
         for value in self.ys:
             squares += (value - mean) * (value - mean)
         return sqrt(squares / Float64(len(self.ys) - 1))
+
+
+def pair_moments(model: GroupModel) -> Tuple[Float64, Float64, Float64]:
+    """Two-pass co-moment and the two second moments of the model's pairs."""
+    var n = Float64(len(model.pair_x))
+    var mx = Float64(0)
+    var my = Float64(0)
+    for k in range(len(model.pair_x)):
+        mx += model.pair_x[k]
+        my += model.pair_y[k]
+    mx /= n
+    my /= n
+    var cxy = Float64(0)
+    var sxx = Float64(0)
+    var syy = Float64(0)
+    for k in range(len(model.pair_x)):
+        var dx = model.pair_x[k] - mx
+        var dy = model.pair_y[k] - my
+        cxy += dx * dy
+        sxx += dx * dx
+        syy += dy * dy
+    return (cxy, sxx, syy)
 
 
 def linear_quantile(values: List[Float64], q: Float64) -> Float64:
@@ -346,6 +376,27 @@ def assert_groups(
                     linear_quantile(model.xs, 0.25),
                     "x quartile of " + text,
                 )
+        if "xy_corr" in actual.columns():
+            var corr_cell = actual.item(r, "xy_corr")
+            var cov_cell = actual.item(r, "xy_cov")
+            var pairs = len(model.pair_x)
+            if pairs == 0:
+                assert_true(cov_cell.is_null(), "empty covariance of " + text)
+            elif pairs == 1:
+                assert_equal(cov_cell.float64(), 0.0)
+            else:
+                var moments = pair_moments(model)
+                assert_close(
+                    cov_cell.float64(),
+                    moments[0] / Float64(pairs - 1),
+                    "covariance of " + text,
+                )
+                if moments[1] > 0 and moments[2] > 0:
+                    assert_close(
+                        corr_cell.float64(),
+                        moments[0] / sqrt(moments[1] * moments[2]),
+                        "correlation of " + text,
+                    )
         if len(model.ys) >= 2:
             assert_close(
                 actual.item(r, "y_mean").float64(),

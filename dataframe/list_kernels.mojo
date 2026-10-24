@@ -33,21 +33,30 @@ from .string_column import StringBuilder, StringColumn
 
 
 def nested_op(
-    node: Node, input: Series, input_dtype: DataType
+    node: Node,
+    input: Series,
+    input_dtype: DataType,
+    compiled: Optional[Regex] = None,
 ) raises -> Series:
     if input.is_chunked():
-        return nested_op(node, input.rechunk(), input_dtype)
+        return nested_op(node, input.rechunk(), input_dtype, compiled)
     if node.op == STR_SPLIT:
         if node.min_count > 0:
-            return _split_regex(input, node)
+            return _split_regex(input, node, compiled)
         return _split(input, node.text, node.integer == 1)
     if node.op == STR_EXTRACT_ALL:
         return regex_extract_all(
-            input._data[StringColumn], compile_pattern(node.text, False)
+            input._data[StringColumn],
+            compiled.value().copy() if compiled else compile_pattern(
+                node.text, False
+            ),
         )
     if node.op == STR_EXTRACT_GROUPS:
         return regex_extract_groups(
-            input._data[StringColumn], compile_pattern(node.text, False)
+            input._data[StringColumn],
+            compiled.value().copy() if compiled else compile_pattern(
+                node.text, False
+            ),
         )
     if node.op == STRUCT_FIELD:
         return _struct_field(input, node.text)
@@ -64,7 +73,9 @@ def nested_op(
     return _reduce(lists, node.op)
 
 
-def _split_regex(input: Series, node: Node) raises -> Series:
+def _split_regex(
+    input: Series, node: Node, compiled: Optional[Regex] = None
+) raises -> Series:
     """`str.split(literal=False)`: on a regular expression's matches; an
     empty pattern splits into code points, and with strict=False an invalid
     pattern gives null lists."""
@@ -74,7 +85,9 @@ def _split_regex(input: Series, node: Node) raises -> Series:
         return split_codepoints(column)
     var regex: Regex
     try:
-        regex = compile_pattern(pattern, False)
+        regex = compiled.value().copy() if compiled else compile_pattern(
+            pattern, False
+        )
     except e:
         if node.min_count == 1:
             raise e^

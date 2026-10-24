@@ -232,6 +232,14 @@ comptime HCONCAT = 40
 # The left input's rows at the positions the right input's one integer
 # column lists (Polars' Gather); `flags[0]` is null_on_oob.
 comptime GATHER = 41
+# Grouping sets (`group_by_rollup`, `group_by_cube`,
+# `group_by_grouping_sets`, then `agg`). `names` holds every key any set
+# names, `flags` which keys each set groups by (one row of flags per set,
+# a flag per key), `exprs` the aggregations and `grouping` columns as
+# written. The result is each set's rows in turn, a key a set does not
+# group by null. It reads its input once: the stream sinks every morsel
+# into a table per set, as DuckDB's one sink feeds every set's table.
+comptime GROUPING_SETS = 43
 
 
 @fieldwise_init
@@ -3883,7 +3891,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var skip = 0
         var limit = -1
         ref terminal = self._nodes[index]
-        if terminal.kind == AGG or terminal.kind == SELECT:
+        var grouping = terminal.kind == GROUPING_SETS
+        if grouping:
+            # The aggregations, without the grouping columns (those are
+            # constants of each set).
+            for e in terminal.exprs:
+                if not is_grouping(e):
+                    expressions.append(e.copy())
+            if not _stream_reductions(expressions, True):
+                return None
+            keys = terminal.names.copy()
+            cursor = terminal.left
+        elif terminal.kind == AGG or terminal.kind == SELECT:
             # A grouped median or quantile streams only into the aggregate
             # table (checked below): its other routes keep no such state.
             if _stream_reductions(terminal.exprs, terminal.kind == AGG):
@@ -4144,7 +4163,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                                 len(plan._nodes) - 1
                             )
                         return plan._execute(index, False, True, batch_size)
-                if node.how == JOIN_INNER and node.coalesce:
+                if (
+                    node.how == JOIN_INNER or node.how == JOIN_LEFT
+                ) and node.coalesce:
                     # DuckDB's build side (`BuildProbeSideOptimizer`): the
                     # side of fewer rows times columns builds. The right
                     # side has run; when the left one, estimated, is the
@@ -4303,6 +4324,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             and len(joins) > 0
             and not ordered
             and top < 0
+            and not grouping
             and self._nodes[cursor].kind == SCAN_FRAME
         ):
             var source_columns = self._frames[
@@ -4372,7 +4394,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for operation in operations:
                 _apply_operation(operation, empty, empty_joins, empty_indexes)
             table = table_supported(empty, keys, expressions)
-        if not table and _has_quantile(expressions):
+        # Only the aggregate table sinks every grouping set at once; the
+        # others group the collected input once per set
+        # (`_run_grouping_sets`).
+        if not table and (grouping or _has_quantile(expressions)):
             return None
         if piped and len(keys) > 0 and not table:
             var frame = self._nodes[cursor].offset
@@ -4766,6 +4791,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var step_nodes = List[PlanNode](capacity=step_count)
             for k in range(step_count):
                 step_nodes.append(operations[k].copy())
+            var set_frames = List[DataFrame]()
+            var set_indices = List[List[Int]]()
+            if grouping:
+                for members in _set_members(terminal):
+                    var indices = List[Int]()
+                    for name in members:
+                        indices.append(keys.index(name))
+                    set_indices.append(indices^)
             var piped_result = run_pipeline(
                 input,
                 _steps_of(step_nodes),
@@ -4779,6 +4812,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 rows_per_batch,
                 batch_size,
                 piped_counts,
+                set_frames,
+                sets=set_indices,
                 top=top,
                 top_names=top_names,
                 top_descending=top_descending,
@@ -4786,6 +4821,23 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 bounded=bounded,
                 table=table,
             )
+            if grouping:
+                if len(set_frames) != len(set_indices):
+                    return None
+                # The empty frame through the steps types the keys a set
+                # leaves null.
+                var dtypes = List[DataType]()
+                for name in keys:
+                    dtypes.append(piped_result.column(name).dtype())
+                var parts = List[DataFrame](capacity=len(set_frames))
+                var members = _set_members(terminal)
+                for k in range(len(set_frames)):
+                    parts.append(
+                        _set_rows(
+                            terminal, set_frames[k].copy(), members[k], dtypes
+                        )
+                    )
+                piped_result = concat(parts)
             if top > 0:
                 piped_result = piped_result.slice(skip, limit)
             for i in range(len(late_names)):
@@ -5557,6 +5609,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )
         if _is_time_window(node.kind):
             return _run_time_window(node, input)
+        if node.kind == GROUPING_SETS:
+            return _run_grouping_sets(node, input)
         if node.kind == TAIL:
             return input.tail(node.offset)
         if node.kind == REVERSE:
@@ -6116,7 +6170,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             classes.append(found)
             ref node = self._nodes[i]
             var size = 1
-            var reduces = node.kind == AGG or node.kind == UNIQUE
+            var reduces = (
+                node.kind == AGG
+                or node.kind == UNIQUE
+                or node.kind == GROUPING_SETS
+            )
             if node.left >= 0:
                 size += sizes[node.left]
                 reduces = reduces or reducing[node.left]
@@ -8825,6 +8883,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 + " AGG "
                 + _joined(_output_names(node.exprs))
             )
+        elif node.kind == GROUPING_SETS:
+            label = (
+                "GROUPING_SETS "
+                + _joined(node.names)
+                + " ("
+                + String(len(node.flags) // len(node.names))
+                + " sets) AGG "
+                + _joined(_output_names(node.exprs))
+            )
         elif node.kind == ASOF:
             label = "ASOF " + node.text + " " + _joined(node.names)
         elif node.kind == JOIN:
@@ -9323,6 +9390,74 @@ def _is_scan(kind: Int) -> Bool:
     return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
 
 
+def _set_members(node: PlanNode) -> List[List[String]]:
+    """The keys each grouping set of a GROUPING_SETS node groups by."""
+    var width = len(node.names)
+    var sets = List[List[String]]()
+    for s in range(len(node.flags) // width):
+        var members = List[String]()
+        for k in range(width):
+            if node.flags[s * width + k]:
+                members.append(node.names[k])
+        sets.append(members^)
+    return sets^
+
+
+def _set_rows(
+    node: PlanNode,
+    var part: DataFrame,
+    members: List[String],
+    dtypes: List[DataType],
+) raises -> DataFrame:
+    """One set's grouped rows (its keys, then the aggregations) in the
+    node's output shape: every key in order, null where the set does not
+    group by it, and the `grouping` columns as that set's constants."""
+    var constants = List[Expr]()
+    var marked = False
+    for e in node.exprs:
+        if is_grouping(e):
+            marked = True
+            constants.append(lit(grouping_value(e, members)).alias(e._name))
+    for k in range(len(node.names)):
+        if node.names[k] not in members:
+            constants.append(null(dtypes[k]).alias(node.names[k]))
+    if len(constants) > 0:
+        part = part.with_columns(constants)
+    var order = List[Expr]()
+    for name in node.names:
+        order.append(col(name))
+    if marked:
+        # Output names are known only for single-output expressions.
+        for e in node.exprs:
+            order.append(col(e._name))
+    else:
+        order.append(exclude(node.names))
+    return part.select_exprs(order)
+
+
+def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
+    """A GROUPING_SETS node over its collected input: one group-by per set,
+    stacked. The stream's single sink replaces this when the aggregate
+    table keeps every state."""
+    var dtypes = List[DataType]()
+    for name in node.names:
+        dtypes.append(input.column(name).dtype())
+    var aggregates = List[Expr]()
+    for e in node.exprs:
+        if not is_grouping(e):
+            aggregates.append(e.copy())
+    var members = _set_members(node)
+    var parts = List[DataFrame](capacity=len(members))
+    for one in members:
+        var part: DataFrame
+        if len(one) == 0:
+            part = input.select_exprs(aggregates)
+        else:
+            part = input.group_by(one).agg(aggregates)
+        parts.append(_set_rows(node, part^, one, dtypes))
+    return concat(parts)
+
+
 def _is_time_window(kind: Int) -> Bool:
     return kind == GROUP_BY_DYNAMIC or kind == ROLLING
 
@@ -9785,74 +9920,47 @@ struct LazyGroupingSets(Copyable):
         whole input, even when it has no rows. Row order is unspecified
         unless the result is sorted.
 
-        The plan contains one `group_by(set).agg` per set, concatenated;
-        each grouping reads the input.
+        The plan has one node that reads its input once: when the
+        aggregations keep their states inline, every morsel of the input is
+        sunk into one aggregate table per set (DuckDB's single sink over all
+        grouping sets); otherwise each set groups the collected input.
         """
         if len(self._sets) == 0:
             raise Error("grouping sets need at least one set")
         var keys = List[String]()
-        var sets = List[List[String]]()
+        var membership = List[Bool]()
         for one in self._sets:
-            var members = List[String]()
             for name in one:
-                if name not in members:
-                    members.append(name)
                 if name not in keys:
                     keys.append(name)
-            sets.append(members^)
         if len(keys) == 0:
             raise Error("grouping sets need at least one key")
+        for one in self._sets:
+            for name in keys:
+                membership.append(name in one)
         var schema = self._frame._input_schema()
-        var dtypes = List[DataType]()
         for name in keys:
-            dtypes.append(schema.column(name).dtype())
-        var marked = False
+            _ = schema.column(name)
+        var aggregates = 0
         for e in exprs:
             if is_grouping(e):
-                marked = True
-            elif has_grouping(e):
+                continue
+            if has_grouping(e):
                 raise Error(
                     "grouping and grouping_id must be whole aggregation "
                     "expressions, not parts of one"
                 )
-        var order = List[Expr]()
-        for name in keys:
-            order.append(col(name))
-        if marked:
-            # Output names are known only for single-output expressions.
-            for e in exprs:
-                order.append(col(e._name))
-        else:
-            order.append(exclude(keys))
-        var result = Optional[LazyFrame]()
-        for members in sets:
-            var aggregates = List[Expr](capacity=len(exprs))
-            var constants = List[Expr]()
-            for e in exprs:
-                if is_grouping(e):
-                    constants.append(
-                        lit(grouping_value(e, members)).alias(e._name)
-                    )
-                else:
-                    aggregates.append(e.copy())
-            var part: LazyFrame
-            if len(aggregates) == 0:
-                raise Error("agg needs an aggregation besides grouping")
-            if len(members) == 0:
-                part = self._frame.select_exprs(aggregates)
-            else:
-                part = self._frame.group_by(members).agg(aggregates)
-            for k in range(len(keys)):
-                if keys[k] not in members:
-                    constants.append(null(dtypes[k]).alias(keys[k]))
-            if len(constants) > 0:
-                part = part.with_columns(constants)
-            part = part.select_exprs(order)
-            if result:
-                result = result.take().concat(part)
-            else:
-                result = part^
-        return result.take()
+            aggregates += 1
+        if aggregates == 0:
+            raise Error("agg needs an aggregation besides grouping")
+        return self._frame._push(
+            _plan_node(
+                GROUPING_SETS,
+                exprs=exprs.copy(),
+                names=keys,
+                flags=membership,
+            )
+        )
 
     def agg(self, expr: Expr) raises -> LazyFrame:
         return self.agg([expr.copy()])
