@@ -4,7 +4,7 @@ and every row the written join gives, and a join whose left cannot be the
 smaller keeps building on its right."""
 # contract-group: planner.relational
 from std.testing import assert_true
-from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
+from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -101,3 +101,83 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
             right_on=["p_key"],
         ),
     )
+
+
+def test_string_keys_from_one_build_group_by_its_row_number_and_merge_equal_values() raises:
+    # 6,000 dimension rows whose names repeat (rows i and i + 4,000 hold the
+    # same values) with a null name and a null region; 90K fact rows, some of them
+    # without a dimension row (a left join). Grouped by two dimension strings
+    # and a fact column, the sink groups by the dimension's row number and the
+    # groups of equal values merge afterwards: the result must be the eager
+    # join's, whose rows the sums, minimums and maximums are taken over.
+    var d_key = List[Int64]()
+    var d_name = List[String]()
+    var d_name_valid = List[Bool]()
+    var d_region = List[String]()
+    var d_region_valid = List[Bool]()
+    for i in range(6000):
+        d_key.append(Int64(i))
+        d_name.append("name " + String(i % 4000))
+        d_name_valid.append(i % 4000 != 7)
+        d_region.append("region " + String(i % 5))
+        d_region_valid.append(i % 4000 != 11)
+    var f_key = List[Int64]()
+    var f_year = List[Int64]()
+    var f_amount = List[Float64]()
+    var f_amount_valid = List[Bool]()
+    for row in range(90_000):
+        f_key.append(Int64((row * 7) % 6500))
+        f_year.append(Int64(2000 + row % 3))
+        f_amount.append(Float64(row % 97) / 4.0)
+        f_amount_valid.append(row % 11 != 0)
+    var dimension = DataFrame(
+        [
+            ints("d_key", d_key),
+            Series("d_name", Column[String](d_name^, d_name_valid^)),
+            Series("d_region", Column[String](d_region^, d_region_valid^)),
+        ]
+    )
+    var facts = DataFrame(
+        [
+            ints("f_key", f_key),
+            ints("f_year", f_year),
+            Series("f_amount", Column[Float64](f_amount^, f_amount_valid^)),
+        ]
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var keys: List[String] = ["d_name", "d_region", "f_year"]
+    var reductions: List[Expr] = [
+        col("f_amount").sum(min_count=1).alias("total"),
+        col("f_amount").min().alias("low"),
+        col("f_amount").max().alias("high"),
+    ]
+    for how in ["inner", "left"]:
+        var rows = (
+            facts.lazy()
+            .join(
+                dimension.lazy(),
+                left_on=["f_key"],
+                right_on=["d_key"],
+                how=how,
+            )
+            .group_by(keys)
+            .agg(reductions)
+            .collect()
+            .sort(keys)
+        )
+        var expected = (
+            facts.join(
+                dimension, left_on=["f_key"], right_on=["d_key"], how=how
+            )
+            .group_by(keys)
+            .agg(reductions)
+            .sort(keys)
+        )
+        assert_frame(rows, expected)
+    assert_true(
+        "dataframe-path: lazy.row_number_keys\n" in observed.text(),
+        "the keys were not grouped by the build's row number",
+    )
+    _ = observed^
+    _ = trace^
