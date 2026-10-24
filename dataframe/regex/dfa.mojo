@@ -489,14 +489,57 @@ struct LazyDFA(Movable):
     @always_inline
     def _class_at(
         self, program: Program, text: Span[UInt8, ImmutAnyOrigin], at: Int
-    ) -> Int:
-        """The class of the code point at `at` and its width, packed as
-        `class << 3 | width`."""
+    ) -> Tuple[Int, Int]:
+        """The class of the code point at `at` and its byte width."""
         var b = text.unsafe_ptr()[unsafe_offset=at]
         if b < 0x80:
-            return (Int(program.ascii_class[Int(b)]) << 3) | 1
+            return Int(program.ascii_class[Int(b)]), 1
         var packed = decode(text, at)
-        return (program.class_of(UInt32(packed >> 3)) << 3) | (packed & 7)
+        return program.class_of(UInt32(packed >> 3)), packed & 7
+
+    @no_inline
+    def _advance_cached(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var off: Int,
+        var at: Int,
+        end: Int,
+    ) -> Tuple[Int, Int]:
+        """Group four untagged transitions without enlarging tag dispatch.
+        Sixteen remaining bytes bound four UTF8 decodes. The first tagged
+        edge leaves its code point untouched for ordinary dispatch. Only
+        the state and cursor cross the call boundary."""
+        var table = self.transitions.unsafe_ptr()
+        var cls = 0
+        var width = 0
+        var e = 0
+        while end - at >= 16:
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+        return off, at
 
     @always_inline
     def find_forward(
@@ -587,6 +630,8 @@ struct LazyDFA(Movable):
             if e >= 0:
                 off = e
                 at += width
+                if n - at >= 16:
+                    off, at = self._advance_cached(program, text, off, at, n)
                 continue
             if e == Int(UNKNOWN):
                 var s = off // stride
