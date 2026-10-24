@@ -16,6 +16,7 @@ from .charclass import (
     word_class,
     ascii_class,
 )
+from .class_lookup import build_unicode_membership, unicode_class_has
 from .syntax import (
     Ast,
     LOOK_NOT_WORD,
@@ -70,6 +71,7 @@ struct Program(Movable, Sized):
     var class_ranges: List[List[UInt32]]
     # Packed ASCII membership (two words per class), followed by thirty
     # words per class for U+0080..U+07FF: all two-byte UTF-8 code points.
+    # Bounded higher-Unicode lookup directories follow that fixed prefix.
     var class_ascii: List[UInt64]
     var start: Int
     var start_unanchored: Int
@@ -133,8 +135,12 @@ struct Program(Movable, Sized):
                 unsafe_offset=2 * len(self.class_ranges) + 30 * id + (bit >> 6)
             ]
             return (word >> UInt64(bit & 63)) & 1 == 1
-        return class_contains(
-            self.class_ranges.unsafe_ptr()[unsafe_offset=id], cp
+        return unicode_class_has(
+            self.class_ascii,
+            self.class_ranges.unsafe_ptr()[unsafe_offset=id],
+            len(self.class_ranges),
+            id,
+            cp,
         )
 
     @always_inline
@@ -159,6 +165,14 @@ struct Program(Movable, Sized):
             return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
         if cp < UInt32(len(self.word_ascii)):
             return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
+        if self.looks & LOOK_UNICODE_WORD:
+            return unicode_class_has(
+                self.class_ascii,
+                self.word,
+                len(self.class_ranges),
+                len(self.class_ranges),
+                cp,
+            )
         return class_contains(self.word, cp)
 
     @always_inline
@@ -581,6 +595,12 @@ def _compile_program(
         for cp in range(128):
             program.word_ascii[cp] = class_contains(program.word, UInt32(cp))
     _build_two_byte_membership(program)
+    build_unicode_membership(
+        program.class_ascii,
+        program.class_ranges,
+        program.word,
+        program.looks & LOOK_UNICODE_WORD != 0,
+    )
     _build_word_lookup(program)
     _build_alphabet(program)
     return program^
