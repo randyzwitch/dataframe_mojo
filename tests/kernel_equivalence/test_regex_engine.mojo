@@ -8,6 +8,7 @@ from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
 from dataframe.parallel import Job, run_jobs
 from dataframe.regex import Matcher, Regex, escape
+from dataframe.regex.program import Program
 
 
 def _span(text: String) -> Span[UInt8, ImmutAnyOrigin]:
@@ -942,6 +943,19 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
                 )
 
 
+def _assert_alphabet_and_word_context(
+    actual: Program, expected: Program, independent: Program
+) raises:
+    assert_equal(actual.class_ranges, expected.class_ranges)
+    assert_equal(actual.boundaries, expected.boundaries)
+    assert_equal(actual.interval_class, expected.interval_class)
+    assert_equal(actual.ascii_class, expected.ascii_class)
+    assert_equal(actual.class_rep, expected.class_rep)
+    assert_equal(actual.class_word, expected.class_word)
+    assert_equal(actual.word, independent.word)
+    assert_equal(actual.word_ascii, independent.word_ascii)
+
+
 def test_repeated_classes_preserve_alphabet_and_word_context() raises:
     from dataframe.regex.program import compile_program
     from dataframe.regex.syntax import parse
@@ -961,24 +975,18 @@ def test_repeated_classes_preserve_alphabet_and_word_context() raises:
             var ast = parse(pattern)
             for reverse in [False, True]:
                 var independent = compile_program(ast, reverse)
-                ref actual = (
-                    repeated._compiled[]
-                    .reverse if reverse else repeated._compiled[]
-                    .forward
-                )
-                ref expected = (
-                    base._compiled[]
-                    .reverse if reverse else base._compiled[]
-                    .forward
-                )
-                assert_equal(actual.class_ranges, expected.class_ranges)
-                assert_equal(actual.boundaries, expected.boundaries)
-                assert_equal(actual.interval_class, expected.interval_class)
-                assert_equal(actual.ascii_class, expected.ascii_class)
-                assert_equal(actual.class_rep, expected.class_rep)
-                assert_equal(actual.class_word, expected.class_word)
-                assert_equal(actual.word, independent.word)
-                assert_equal(actual.word_ascii, independent.word_ascii)
+                if reverse:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].reverse,
+                        base._compiled[].reverse,
+                        independent,
+                    )
+                else:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].forward,
+                        base._compiled[].forward,
+                        independent,
+                    )
 
 
 def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
