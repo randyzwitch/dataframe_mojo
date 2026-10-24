@@ -16,6 +16,7 @@ struct _PatternCache(Deinitable, Movable):
         self.entries = List[Regex](capacity=_CAPACITY)
         # Aligned storage for pthread_mutex_t on the supported hosts.
         self.mutex = List[UInt64](length=16, fill=0)
+        self.ready = False
         self.ready = (
             external_call["pthread_mutex_init", Int32](self._mutex(), 0) == 0
         )
