@@ -794,13 +794,15 @@ def test_search_engines_allocate_buffers_only_when_used() raises:
             assert_equal(len(matcher.reverse.q1.dense), 0)
             assert_equal(len(matcher.pike.current.slots), 0)
         _ = text
-    # Variable-width unanchored matches use both directions. A cleared
+    # Variable-width span searches use both DFA directions. A cleared
     # cache keeps its allocated buffers and reconstructs the same spans.
     var regex = Regex("(a+)(β+)")
     var matcher = Matcher(regex)
     var text = String("xaaaββ!")
     for _ in range(2):
-        assert_true(matcher.captures(_span(text)))
+        var span = matcher.find(_span(text))
+        assert_equal(span, (1, 8))
+        assert_true(matcher._groups(_span(text), span[0], span[1]))
         assert_equal(matcher.slots[0], 1)
         assert_equal(matcher.slots[1], 8)
         assert_equal(matcher.slots[2], 1)
