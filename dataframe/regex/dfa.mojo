@@ -40,6 +40,7 @@ from .program import (
     consumes,
 )
 from .suffix import suffix_end
+from .unicode_dfa_run import has_packet_layout, scan_unicode_self_loop
 from .syntax import (
     LOOK_END_LINE,
     LOOK_END_TEXT,
@@ -498,7 +499,9 @@ struct LazyDFA(Movable):
         return program.class_of(UInt32(packed >> 3)), packed & 7
 
     @no_inline
-    def _advance_cached(
+    def _advance_cached[
+        unicode_packets: Bool
+    ](
         self,
         program: Program,
         text: Span[UInt8, ImmutAnyOrigin],
@@ -515,6 +518,11 @@ struct LazyDFA(Movable):
         var width = 0
         var e = 0
         while end - at >= 16:
+            comptime if unicode_packets:
+                if text.unsafe_ptr()[unsafe_offset=at] >= 128:
+                    return self._advance_unicode_cached(
+                        program, text, off, at, end
+                    )
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
@@ -540,6 +548,92 @@ struct LazyDFA(Movable):
             off = e
             at += width
         return off, at
+
+    @no_inline
+    def _advance_unicode_cached(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var off: Int,
+        var at: Int,
+        end: Int,
+    ) -> Tuple[Int, Int]:
+        """Batch Unicode runs and leave failed probes to the scalar loop.
+        After a successful packet, finish its short tail before testing the
+        next state. A failed first probe transfers the remaining cached run
+        to the original four-edge scalar loop until a tagged transition."""
+        var table = self.transitions.unsafe_ptr()
+        var batched = False
+        while end - at >= 16:
+            var cls, width = self._class_at(program, text, at)
+            var e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            if e == off:
+                if width > 1 and has_packet_layout(text, at, width):
+                    var stop = scan_unicode_self_loop(
+                        program,
+                        self.transitions,
+                        off,
+                        text,
+                        at,
+                        end,
+                        Int32(off),
+                    )
+                    if stop > at:
+                        batched = True
+                        at = stop
+                        continue
+                    return self._advance_cached[False](
+                        program, text, off, at, end
+                    )
+                if not batched or width == 1:
+                    return self._advance_cached[False](
+                        program, text, off, at, end
+                    )
+            else:
+                batched = False
+            off = e
+            at += width
+        return off, at
+
+    @no_inline
+    def _advance_unicode_self_loop(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        off: Int,
+        var at: Int,
+        end: Int,
+        expected: Int32,
+    ) -> Tuple[Int, Int]:
+        """Group self-loops, preserving the last consumed character's start.
+        A failed fixed-width packet falls back to four cached scalar edges
+        against the same row, without a chain of next-state dependencies.
+        The cursor also supplies delayed-match positions for tagged edges."""
+        var table = self.transitions.unsafe_ptr()
+        var last = at
+        while end - at >= 16:
+            var cls, width = self._class_at(program, text, at)
+            if table[unsafe_offset=off + cls] != expected:
+                return at, last
+            if width > 1 and has_packet_layout(text, at, width):
+                var stop = scan_unicode_self_loop(
+                    program, self.transitions, off, text, at, end, expected
+                )
+                if stop > at:
+                    last = stop - width
+                    at = stop
+                    continue
+            last = at
+            at += width
+            comptime for _ in range(3):
+                cls, width = self._class_at(program, text, at)
+                if table[unsafe_offset=off + cls] != expected:
+                    return at, last
+                last = at
+                at += width
+        return at, last
 
     @always_inline
     def find_forward(
@@ -589,8 +683,6 @@ struct LazyDFA(Movable):
         ends (with `earliest`, the end of the first match seen instead),
         -1 for no match, or GAVE_UP."""
         var n = len(text)
-        var p = text.unsafe_ptr()
-        var ascii = program.ascii_class.unsafe_ptr()
         var stride = self.stride
         var at = start
         # Literal sets extend coverage when no cheap start-state scanner is
@@ -612,9 +704,101 @@ struct LazyDFA(Movable):
             if candidate != at:
                 at = candidate
                 off = Int(self.start_state(program, text, at, False)) * stride
-        var last = -1
-        var budget_mark = start
-        var resets = self.resets
+        return self._forward_cached_loop[use_suffix, False](
+            program,
+            prefilter,
+            text,
+            at,
+            off,
+            -1,
+            start,
+            self.resets,
+            accel,
+            earliest,
+        )
+
+    @always_inline
+    def _continue_unicode[
+        use_suffix: Bool
+    ](
+        mut self,
+        program: Program,
+        prefilter: Prefilter,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var at: Int,
+        var off: Int,
+        var last: Int,
+        var budget_mark: Int,
+        resets: Int,
+        accel: Bool,
+        earliest: Bool,
+    ) -> Int:
+        if accel:
+            if earliest:
+                return self._unicode_loop[use_suffix, True, True](
+                    program, prefilter, text, at, off, last, budget_mark, resets
+                )
+            return self._unicode_loop[use_suffix, True, False](
+                program, prefilter, text, at, off, last, budget_mark, resets
+            )
+        if earliest:
+            return self._unicode_loop[use_suffix, False, True](
+                program, prefilter, text, at, off, last, budget_mark, resets
+            )
+        return self._unicode_loop[use_suffix, False, False](
+            program, prefilter, text, at, off, last, budget_mark, resets
+        )
+
+    @no_inline
+    def _unicode_loop[
+        use_suffix: Bool, has_prefilter: Bool, first_match: Bool
+    ](
+        mut self,
+        program: Program,
+        prefilter: Prefilter,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var at: Int,
+        var off: Int,
+        var last: Int,
+        var budget_mark: Int,
+        resets: Int,
+    ) -> Int:
+        return self._forward_cached_loop[use_suffix, True](
+            program,
+            prefilter,
+            text,
+            at,
+            off,
+            last,
+            budget_mark,
+            resets,
+            has_prefilter,
+            first_match,
+        )
+
+    @always_inline
+    def _forward_cached_loop[
+        use_suffix: Bool, unicode_batches: Bool
+    ](
+        mut self,
+        program: Program,
+        prefilter: Prefilter,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var at: Int,
+        var off: Int,
+        var last: Int,
+        var budget_mark: Int,
+        resets: Int,
+        accel: Bool,
+        earliest: Bool,
+    ) -> Int:
+        """Share dispatch while keeping Unicode packet calls off the ASCII loop.
+        The first non-ASCII byte transfers the live cursor to the outlined
+        Unicode continuation without rescanning or rebuilding any state."""
+        var n = len(text)
+        var p = text.unsafe_ptr()
+        var ascii = program.ascii_class.unsafe_ptr()
+        var stride = self.stride
         var table = self.transitions.unsafe_ptr()
         while at < n:
             var b = p[unsafe_offset=at]
@@ -623,15 +807,31 @@ struct LazyDFA(Movable):
             if b < 0x80:
                 cls = Int(ascii[unsafe_offset=Int(b)])
             else:
-                var packed = decode(text, at)
-                cls = program.class_of(UInt32(packed >> 3))
-                width = packed & 7
+                comptime if unicode_batches:
+                    var packed = decode(text, at)
+                    cls = program.class_of(UInt32(packed >> 3))
+                    width = packed & 7
+                else:
+                    return self._continue_unicode[use_suffix](
+                        program,
+                        prefilter,
+                        text,
+                        at,
+                        off,
+                        last,
+                        budget_mark,
+                        resets,
+                        accel,
+                        earliest,
+                    )
             var e = Int(table[unsafe_offset=off + cls])
             if e >= 0:
                 off = e
                 at += width
                 if n - at >= 16:
-                    off, at = self._advance_cached(program, text, off, at, n)
+                    off, at = self._advance_cached[True](
+                        program, text, off, at, n
+                    )
                 continue
             if e == Int(UNKNOWN):
                 var s = off // stride
@@ -662,11 +862,26 @@ struct LazyDFA(Movable):
                     # The transition already consumed this code point.
                     return suffix_end[False](text, at + width, n, Int32(e))
             var v = -e - 3
-            off = v >> 2
+            var next_offset = v >> 2
             if v & 1:
                 last = at
                 if earliest:
                     return last
+                comptime if unicode_batches:
+                    if (
+                        width > 1
+                        and next_offset == off
+                        and not (v & 2)
+                        and n - at >= 16
+                    ):
+                        var stop, last_start = self._advance_unicode_self_loop(
+                            program, text, off, at, n, Int32(e)
+                        )
+                        if stop > at:
+                            last = last_start
+                            at = stop
+                            continue
+            off = next_offset
             at += width
             if (v & 2) and accel and at < n:
                 var candidate = prefilter.find(text, at)
