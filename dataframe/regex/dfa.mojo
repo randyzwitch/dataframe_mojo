@@ -497,6 +497,50 @@ struct LazyDFA(Movable):
         var packed = decode(text, at)
         return program.class_of(UInt32(packed >> 3)), packed & 7
 
+    @no_inline
+    def _advance_cached(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var off: Int,
+        var at: Int,
+        end: Int,
+    ) -> Tuple[Int, Int, Int, Int]:
+        """Group four untagged transitions without enlarging tag dispatch.
+        Sixteen remaining bytes bound four UTF8 decodes. The first tagged
+        edge leaves its code point untouched and returns the decoded class
+        and width once, avoiding packing work on each warm transition."""
+        var table = self.transitions.unsafe_ptr()
+        var cls = 0
+        var width = 0
+        var e = 0
+        while end - at >= 16:
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at, e, (cls << 3) | width
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at, e, (cls << 3) | width
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at, e, (cls << 3) | width
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at, e, (cls << 3) | width
+            off = e
+            at += width
+        return off, at, 0, 0
+
     @always_inline
     def find_forward(
         mut self,
@@ -586,38 +630,16 @@ struct LazyDFA(Movable):
             if e >= 0:
                 off = e
                 at += width
-                # Group cached, untagged transitions as in regex-automata's
-                # hybrid search loop. Sixteen remaining bytes bound four UTF8
-                # decodes; tagged edges leave the current code point untouched.
-                while n - at >= 16:
-                    cls, width = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + cls])
-                    if e < 0:
-                        break
-                    off = e
-                    at += width
-                    cls, width = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + cls])
-                    if e < 0:
-                        break
-                    off = e
-                    at += width
-                    cls, width = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + cls])
-                    if e < 0:
-                        break
-                    off = e
-                    at += width
-                    cls, width = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + cls])
-                    if e < 0:
-                        break
-                    off = e
-                    at += width
+                if n - at < 16:
+                    continue
+                var packed: Int
+                off, at, e, packed = self._advance_cached(
+                    program, text, off, at, n
+                )
                 if e >= 0:
                     continue
-                # The tagged edge and its decoded class/width are ready
-                # for ordinary dispatch below.
+                cls = packed >> 3
+                width = packed & 7
             if e == Int(UNKNOWN):
                 var s = off // stride
                 if self._full():
