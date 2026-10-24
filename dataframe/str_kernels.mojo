@@ -31,6 +31,7 @@ from .regex_kernels import (
     regex_replace,
 )
 from .series import Series
+from .string_bytes import _Bytes
 from .string_predicates import (
     decode_values,
     is_in_literals,
@@ -247,11 +248,18 @@ def concat_strings(
         raise Error("Incompatible expression lengths")
     var n = 0 if len(a) == 0 or len(b) == 0 else max(len(a), len(b))
     var out = StringBuilder(n)
+    var a_rows = _Bytes(a)
+    var b_rows = _Bytes(b)
+    var delimiter = separator.as_bytes()
     for i in range(n):
         var x = 0 if len(a) == 1 else i
         var y = 0 if len(b) == 1 else i
         if a._valid(x) and b._valid(y):
-            out.append(String(a._get(x)) + separator + String(b._get(y)))
+            out._bytes.extend(a_rows.get(x))
+            out._bytes.extend(delimiter)
+            out._bytes.extend(b_rows.get(y))
+            out._offsets.append(Int64(len(out._bytes)))
+            out._push_bit(True)
         elif skip_nulls and a._valid(x):
             out.append(a._get(x))
         elif skip_nulls and b._valid(y):
