@@ -27,9 +27,14 @@ def ranges(members: list[int]) -> list[list[int]]:
 
 
 def numeric_constructor(name: str, values: list[int]) -> str:
-    lines = ["def %s() -> List[UInt32]:" % name, "    return ["]
-    lines.extend("        0x%X," % cp for cp in values)
-    lines.append("    ]")
+    lines = [
+        "def %s() -> List[UInt32]:" % name,
+        "    var values = List[UInt32](unsafe_uninit_length=%d)" % len(values),
+        "    var data = values.unsafe_ptr()",
+    ]
+    # Every scalar slot is initialized before the owned list is returned.
+    lines.extend("    data[unsafe_offset=%d] = 0x%X" % (i, cp) for i, cp in enumerate(values))
+    lines.append("    return values^")
     return "\n".join(lines)
 
 
