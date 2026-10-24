@@ -6,7 +6,7 @@ the logical types from the binder, so their inputs may carry either tag.
 from .column import Column
 from .bool_column import BoolColumn
 from .calendar import civil_from_days, days_in_month, is_leap
-from .string_column import StringColumn
+from .string_column import StringColumn, StringBuilder
 from .dtype import DataType
 from .expr import (
     Node,
@@ -57,6 +57,10 @@ from .series import Series
 from .expr_kernels import fit_mask
 from .temporal import (
     NANOS_PER_DAY,
+    PreparedFormat,
+    default_format,
+    parse_prepared_in,
+    format_prepared_in,
     Parts,
     add_months,
     checked_add,
@@ -740,16 +744,22 @@ def dt_op(
         return field.value().copy()
     ref column = input._data[Column[Int64]]
     var n = len(column)
-    var valid = List[Bool](length=n, fill=False)
     var aware = dtype.is_datetime() and dtype.time_zone().byte_length() > 0
     var zone = zone_of(dtype)
     if op == DT_STRFTIME:
-        var texts = List[String](length=n, fill="")
+        var out = StringBuilder(n)
+        var plan = PreparedFormat(
+            node.text if node.text.byte_length() else default_format(dtype)
+        )
         for i in range(n):
-            valid[i] = column._valid(i) and (not len(mask) or mask[i])
-            if valid[i]:
-                texts[i] = format_in(column._get(i), dtype, node.text, zone)
-        return Series("", StringColumn(texts, valid))
+            if column._valid(i) and (not len(mask) or mask[i]):
+                out.append(
+                    format_prepared_in(column._get(i), dtype, plan, zone)
+                )
+            else:
+                out.append_null()
+        return Series("", out^.finish())
+    var valid = List[Bool](length=n, fill=False)
     var values = List[Int64](length=n, fill=0)
     # Intervals parsed once, when some observed value is valid: an all-null
     # or fully masked column raises no interval error, as before. The
@@ -953,12 +963,16 @@ def _strptime(
     var valid = List[Bool](length=n, fill=False)
     var result_type = strptime_target(target, format)
     var zone = zone_of(result_type)
+    var plan = PreparedFormat(format)
     for i in range(n):
         if not column._valid(i) or (len(active) and not active[i]):
             continue
         try:
-            values[i] = parse_in(
-                String(column._get(i)), result_type, format, zone
+            var text = String(column._get(i))
+            values[i] = parse_prepared_in(
+                text, result_type, plan, zone
+            ) if format.byte_length() else parse_in(
+                text, result_type, format, zone
             )
             valid[i] = True
         except e:
@@ -985,14 +999,17 @@ def cast_temporal(
     # casts between datetimes keep the instant, as in Polars.
     var zone = zone_of(source)
     if target == DataType.STRING:
-        var texts = List[String](length=n, fill="")
-        var valid = List[Bool](length=n, fill=False)
+        var out = StringBuilder(n)
+        var plan = PreparedFormat(default_format(source))
         ref column = input._data[Column[Int64]]
         for i in range(n):
-            valid[i] = column._valid(i) and (not len(active) or active[i])
-            if valid[i]:
-                texts[i] = format_in(column._get(i), source, "", zone)
-        return Series(input.name(), StringColumn(texts, valid))
+            if column._valid(i) and (not len(active) or active[i]):
+                out.append(
+                    format_prepared_in(column._get(i), source, plan, zone)
+                )
+            else:
+                out.append_null()
+        return Series(input.name(), out^.finish())
     if source == DataType.STRING:
         return _strptime(input, target, "", strict, active).renamed(
             input.name()

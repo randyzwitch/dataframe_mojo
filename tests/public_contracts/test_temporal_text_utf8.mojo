@@ -3,6 +3,7 @@
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.temporal import format, parse
+from tests.public_contracts.test_text_binary import _source as text_source
 
 
 def test_temporal_format_utf8_and_percent_literal_roundtrip() raises:
@@ -17,6 +18,39 @@ def test_temporal_format_utf8_and_percent_literal_roundtrip() raises:
     assert_equal(format(0, dtype, "%%%%"), "%%")
     assert_equal(format(0, dtype, "%%Y %Y%%m fin%"), "%Y 1970%m fin%")
     assert_equal(format(0, dtype, "é🕰日期"), "é🕰日期")
+
+
+def test_prepared_temporal_calendar_names_across_string_layouts() raises:
+    var values: List[String] = [
+        "tHu 01 jAnUaRy 1970",
+        "wED 31 dEcEmBeR 1969",
+        "Fri 01 January 1970",
+        "unobserved",
+    ]
+    var valid: List[Bool] = [True, True, True, False]
+    for layout in range(4):
+        var source = text_source(values, valid, layout)
+        var expression = (
+            col("s")
+            .str()
+            .strptime("date", "%a %d %B %Y", strict=False)
+            .alias("d")
+        )
+        for mode in range(2):
+            var dates = source.select(expression) if mode == 0 else (
+                source.lazy().select(expression).collect(engine="cpu")
+            )
+            var rendered = dates.select(
+                col("d").dt().strftime("%Y%m%d %% %a %B").alias("s")
+            )
+            assert_equal(
+                rendered.item(0, "s").string(), "19700101 % Thu January"
+            )
+            assert_equal(
+                rendered.item(1, "s").string(), "19691231 % Wed December"
+            )
+            assert_equal(rendered.item(2, "s").is_null(), True)
+            assert_equal(rendered.item(3, "s").is_null(), True)
 
 
 def test_temporal_strftime_utf8_literals_preserve_nulls_and_sliced_rows() raises:
