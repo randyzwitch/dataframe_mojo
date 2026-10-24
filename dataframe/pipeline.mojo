@@ -418,8 +418,8 @@ def _column_bounds[
 
 
 comptime _ZONE_ROWS = 2048
-# Rows a worker checks against a bloom filter (one vector) before it may
-# leave it alone.
+# Rows a worker checks against a bloom filter (a vector, so its first morsel)
+# before it may leave it alone.
 comptime _BLOOM_TRIAL_ROWS = 2048
 
 
@@ -2619,23 +2619,17 @@ struct _PipelineJob(Job):
             var selection = Optional[BoolColumn]()
             if plain:
                 selection = Optional(morsel.mask.copy())
-            # On trial, only the first rows are looked up. Only the rows
-            # still selected are looked up and counted: what the filter
-            # prunes is what earlier filters left.
-            var limit = Int.MAX
-            if self.bloom_state[k] == 0:
-                limit = _BLOOM_TRIAL_ROWS - self.bloom_checked[k]
-            var found = bloom_mask(
-                _unchunked(column), shared[], selection, limit
-            )
-            self.bloom_checked[k] += found.looked
-            self.bloom_kept[k] += found.looked_kept
-            if found.kept == 0:
+            # Only the rows still selected are looked up and counted: what
+            # the filter prunes is what earlier filters left.
+            var found = bloom_mask(_unchunked(column), shared[], selection)
+            self.bloom_checked[k] += found[1]
+            self.bloom_kept[k] += found[2]
+            if found[2] == 0:
                 self.bloom_ns[k] += Int(perf_counter_ns()) - began
                 return False
             var rows = morsel.count if plain else morsel.frame.height()
-            if 2 * found.kept <= rows:
-                morsel.keep(found.mask, found.kept)
+            if 2 * found[2] <= rows:
+                morsel.keep(found[0], found[2])
             self.bloom_ns[k] += Int(perf_counter_ns()) - began
             if morsel.count == 0:
                 return False

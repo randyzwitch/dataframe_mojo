@@ -141,18 +141,6 @@ def build_bloom(key: Series, rows: Int) -> Optional[ArcPointer[KeyBloom]]:
     return Optional(ArcPointer(bloom^))
 
 
-@fieldwise_init
-struct BloomRows(Movable):
-    """What a bloom filter did to a column: the mask of rows that stay,
-    their count, and over the rows it looked up (a `limit`: the rest stay
-    unlooked) how many it looked up and how many of those stayed."""
-
-    var mask: BoolColumn
-    var kept: Int
-    var looked: Int
-    var looked_kept: Int
-
-
 def _bloom_bits[
     D: DType
 ](
@@ -161,15 +149,13 @@ def _bloom_bits[
     target: Pointer[UInt8, MutAnyOrigin],
     selection: Pointer[UInt8, MutAnyOrigin],
     selected: Bool,
-    limit: Int,
-) -> Tuple[Int, Int, Int]:
-    """Rows kept in all, rows looked up, and rows kept of those."""
+) -> Tuple[Int, Int]:
+    """Rows looked up, and rows kept of those."""
     var values = column._ptr()
     var n = len(column)
     var all_valid = column.null_count() == 0
-    var kept = 0
     var looked = 0
-    var looked_kept = 0
+    var kept = 0
     for byte in range((n + 7) // 8):
         var bits = selection[unsafe_offset=byte] if selected else UInt8(255)
         if bits == 0:
@@ -180,31 +166,24 @@ def _bloom_bits[
                 break
             if (bits >> UInt8(lane)) & 1 == 0:
                 continue
-            var stays = True
-            if i < limit:
-                looked += 1
-                stays = (all_valid or column._valid(i)) and bloom.contains(
-                    Int64(values[unsafe_offset=i])
-                )
-                if stays:
-                    looked_kept += 1
-            if stays:
+            looked += 1
+            if (all_valid or column._valid(i)) and bloom.contains(
+                Int64(values[unsafe_offset=i])
+            ):
                 target[unsafe_offset=byte] |= UInt8(1) << UInt8(lane)
                 kept += 1
-    return (kept, looked, looked_kept)
+    return (looked, kept)
 
 
 def bloom_mask(
     series: Series,
     bloom: KeyBloom,
     selection: Optional[BoolColumn] = None,
-    limit: Int = Int.MAX,
-) raises -> BloomRows:
+) raises -> Tuple[BoolColumn, Int, Int]:
     """The rows of an unchunked integer column whose value is valid and may
-    be in the filter, as a packed mask. With a `selection` (a mask of no
-    nulls and no offset) only its rows are looked up, and the mask holds
-    only those. Rows from `limit` on are not looked up, and stay (a trial
-    of the filter on the first rows only)."""
+    be in the filter, as a packed mask; how many rows were looked up and how
+    many stay. With a `selection` (a mask of no nulls and no offset) only
+    its rows are looked up, and the mask holds only those."""
     var n = len(series)
     var values = List[UInt8](length=(n + 7) // 8, fill=0)
     var target = values.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
@@ -217,18 +196,17 @@ def bloom_mask(
             .unsafe_ptr()
             .unsafe_origin_cast[MutAnyOrigin]()
         )
-    var counts: Tuple[Int, Int, Int]
+    var counts: Tuple[Int, Int]
     if series.dtype().physical() == DataType.INT64:
         counts = _bloom_bits(
-            series._data[Column[Int64]], bloom, target, rows, picked, limit
+            series._data[Column[Int64]], bloom, target, rows, picked
         )
     else:
         counts = _bloom_bits(
-            series._data[Column[Int32]], bloom, target, rows, picked, limit
+            series._data[Column[Int32]], bloom, target, rows, picked
         )
-    return BloomRows(
+    return (
         BoolColumn(values=values^, bits=List[UInt8](), length=n),
         counts[0],
         counts[1],
-        counts[2],
     )
