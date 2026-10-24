@@ -1,7 +1,6 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
 from .bool_column import BoolColumn
-from .column import Column
 from .regex import Regex, escape
 from .string_column import StringColumn, StringBuilder
 from .expr import (
@@ -31,6 +30,7 @@ from .regex_kernels import (
     regex_replace,
 )
 from .series import Series
+from .string_lengths import string_lengths
 from .string_predicates import (
     decode_values,
     is_in_literals,
@@ -176,21 +176,15 @@ def string_op(
         return Series(
             "", slice_strings(column, Int(node.integer), node.min_count)
         )
+    if node.op == STR_LEN_BYTES:
+        return string_lengths[False](column)
+    if node.op == STR_LEN_CHARS:
+        return string_lengths[True](column)
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):
         valid.append(column._valid(i))
     var op = node.op
-    if op == STR_LEN_CHARS or op == STR_LEN_BYTES:
-        var lengths = List[Int64](length=n, fill=0)
-        for i in range(n):
-            if valid[i]:
-                var text = column._get(i)
-                lengths[i] = Int64(
-                    len(text.codepoints()) if op
-                    == STR_LEN_CHARS else text.byte_length()
-                )
-        return Series("", Column[Int64](lengths^, valid))
     if op == STR_STARTS_WITH or op == STR_ENDS_WITH or op == STR_CONTAINS:
         var flags = List[Bool](length=n, fill=False)
         for i in range(n):
