@@ -126,9 +126,12 @@ from .join_hash import (
     int64_progression,
     PreparedHashIndex,
     prefer_left_build,
+    prepare_hash_index,
+    prepared_hash_join_gather,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
+from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -2204,6 +2207,23 @@ struct DataFrame(Copyable, Sized, Writable):
             var right_rows = List[Int]()
             var direct = False
             var direct_identity = False
+            # Probe and gather one block of rows at a time (`fused_gather`),
+            # unless the left columns are many chunks and an inner join's
+            # ascending rows gather from them in place, without a rechunk.
+            var fused = FusedJoin()
+            if not build_left:
+                var in_place = how == JOIN_INNER
+                for column in self._columns:
+                    if (
+                        not column.is_chunked()
+                        or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
+                    ):
+                        in_place = False
+                if not in_place:
+                    fused.enabled = True
+                    fused.left_sources = self._columns.copy()
+                    for c in right_output:
+                        fused.right_sources.append(right._columns[c].copy())
             # Every route returns the pairs in left row order except a
             # left build whose caller ignores order, which returns them in
             # the order the right side probed.
@@ -2227,22 +2247,44 @@ struct DataFrame(Copyable, Sized, Writable):
                     how == JOIN_LEFT,
                     left_rows,
                     right_rows,
+                    fused,
                 )
             if (
                 not direct
                 and right.height() <= Int(Int32.MAX)
                 and not low_cardinality(right_sources)
             ):
-                var pairs = direct_hash_join_rows(
-                    left_sources,
-                    right_sources,
-                    how == JOIN_LEFT,
-                    omit_identity=True,
+                if fused.enabled:
+                    prepared_hash_join_gather(
+                        left_sources,
+                        prepare_hash_index(
+                            right_sources,
+                            allow_progression=False,
+                            probe_rows=len(left_sources[0]),
+                        ),
+                        how == JOIN_LEFT,
+                        True,
+                        fused,
+                    )
+                    direct = True
+                else:
+                    var pairs = direct_hash_join_rows(
+                        left_sources,
+                        right_sources,
+                        how == JOIN_LEFT,
+                        omit_identity=True,
+                    )
+                    direct = True
+                    direct_identity = pairs[2]
+                    swap(left_rows, pairs[0])
+                    swap(right_rows, pairs[1])
+            if fused.done:
+                var columns = (
+                    self._columns.copy() if fused.identity else fused.left.copy()
                 )
-                direct = True
-                direct_identity = pairs[2]
-                swap(left_rows, pairs[0])
-                swap(right_rows, pairs[1])
+                for k in range(len(right_output)):
+                    columns.append(fused.right[k].renamed(right_names[k]))
+                return Self(columns^, height=fused.height)
             if direct:
                 var workers = worker_count(len(right_rows))
                 var columns = self._columns.copy()
@@ -2300,6 +2342,7 @@ struct DataFrame(Copyable, Sized, Writable):
             for k in range(len(left_keys)):
                 right_probe_keys.append(right._columns[right_keys[k]].copy())
                 left_build_keys.append(self._columns[left_keys[k]].copy())
+            var unfused = FusedJoin()
             if len(left_keys) == 1:
                 direct_right = _bounded_int64_join_rows(
                     right_probe_keys[0],
@@ -2307,6 +2350,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     True,
                     right_rows,
                     left_rows,
+                    unfused,
                 )
             if (
                 not direct_right
@@ -4460,7 +4504,7 @@ struct _RangeMembershipJob(Job):
                 self.rows.append(row)
 
 
-struct _RangeJoinProbeJob(Job):
+struct _RangeJoinProbeJob(MatchJob):
     """Match rows [start, end) of one left chunk, which begins at row
     `base`, against a bounded right Int64 index."""
 
@@ -4502,6 +4546,16 @@ struct _RangeJoinProbeJob(Job):
         self.include_unmatched = include_unmatched
         self.left_rows = huge_capacity[Int](end - start)
         self.right_rows = huge_capacity[Int](end - start)
+
+    def take_matches(
+        mut self, mut left: List[Int], mut right: List[Int]
+    ) -> Bool:
+        swap(left, self.left_rows)
+        swap(right, self.right_rows)
+        return False
+
+    def row_range(self) -> Tuple[Int, Int]:
+        return (self.base + self.start, self.base + self.end)
 
     def run(mut self) raises:
         var all_valid = len(self.left._bits[]) == 0
@@ -4596,6 +4650,7 @@ def _bounded_int64_join_rows(
     include_unmatched: Bool,
     mut left_rows: List[Int],
     mut right_rows: List[Int],
+    mut request: FusedJoin,
 ) raises -> Bool:
     """Direct-address right-row chains when its Int64 domain is compact.
     On success the matched row pairs are written to `left_rows` and
@@ -4693,6 +4748,12 @@ def _bounded_int64_join_rows(
     var height = len(left)
     var workers = worker_count(height)
     var step = max(1, (height + workers - 1) // workers)
+    if request.enabled:
+        step = min(
+            step,
+            (height + probe_blocks(height, request) - 1)
+            // probe_blocks(height, request),
+        )
     var shared_heads = ArcPointer(heads^)
     var shared_next = ArcPointer(next_rows^)
     var jobs = List[_RangeJoinProbeJob]()
@@ -4718,6 +4779,11 @@ def _bounded_int64_join_rows(
             )
             at = end
         base += len(chunk)
+    if request.enabled:
+        # Each block gathers its own columns: no row list of the output.
+        fused_gather(jobs, request, include_unmatched)
+        trace_path("join.bounded_index")
+        return True
     run_jobs(jobs)
     # Concatenate on every worker: each job's matches are copied to their
     # offset in the output. One thread appending them row by row was a
