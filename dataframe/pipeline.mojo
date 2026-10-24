@@ -593,13 +593,16 @@ def _key_bloom(
     low: Int64,
     high: Int64,
     equalities: Int,
+    step: Int,
 ) raises -> Optional[ArcPointer[KeyBloom]]:
     """A bloom filter over a build's keys when it pays, by Polars' rules
     (`join_runtime_filter.rs`): the build holds at most an eighth of the
     rows it filters, and, where the column's distinct count is known (a
     loaded table's statistics), at most 0.3 of it."""
-    if equalities != 1:
-        # As DuckDB's, only a join with one equality condition.
+    if equalities != 1 or step == 0:
+        # As DuckDB's, only a join with one equality condition; and not the
+        # first step, where the join's own probe drops a row as the filter
+        # would.
         return None
     var keys = len(key) - key.null_count()
     if keys == 0 or LOPSIDED_FACTOR * keys > frame.height():
@@ -659,6 +662,7 @@ def _key_ranges(
                                     bounds.value()[0],
                                     bounds.value()[1],
                                     len(step.names),
+                                    at,
                                 ),
                                 at,
                             )
@@ -2439,13 +2443,8 @@ struct _PipelineJob(Job):
     # The join builds' key ranges on source columns (`_key_ranges`).
     var key_ranges: List[_KeyRange]
     # Per range with a bloom filter: this worker's rows checked and kept.
-    # A filter that keeps most of what it checks is left alone, as Polars'
-    # scans stop checking rows once a runtime filter keeps most of them.
     var bloom_checked: List[Int]
     var bloom_kept: List[Int]
-    var bloom_ns: List[Int]
-    # 0: on trial, 1: kept, 2: left alone.
-    var bloom_state: List[Int]
 
     def __init__(
         out self,
@@ -2474,8 +2473,6 @@ struct _PipelineJob(Job):
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
-        self.bloom_ns = List[Int](length=len(key_ranges), fill=0)
-        self.bloom_state = List[Int](length=len(key_ranges), fill=0)
         self.layout = layout.copy()
         self.sets = sets.copy()
         self.sinks = List[AggregateSink]()
@@ -2576,28 +2573,6 @@ struct _PipelineJob(Job):
             self.shared_bound.publish(self.bound)
         self.parts = [merged^]
 
-    def _judge_bloom(mut self, k: Int):
-        """End the trial of range `k`'s bloom filter on this worker: left
-        alone when it keeps most rows, or when what the pruned rows would
-        have cost the steps before its join (their time per row that
-        entered the first step, from this worker's morsels so far) is less
-        than the time spent checking. The join drops a row it does not
-        match as it probes; the steps before it are what a pruned row
-        saves."""
-        var checked = self.bloom_checked[k]
-        var kept = self.bloom_kept[k]
-        if 2 * kept > checked:
-            self.bloom_state[k] = 2
-            return
-        var entered = self.counts[1]
-        if entered <= 0:
-            return
-        var busy = 0
-        for i in range(self.key_ranges[k].step):
-            busy += self.counts[2 * len(self.steps) + 1 + i]
-        var saved = Float64(busy) / Float64(entered) * Float64(checked - kept)
-        self.bloom_state[k] = 1 if saved > Float64(self.bloom_ns[k]) else 2
-
     def _in_key_ranges(mut self, mut morsel: Morsel) raises -> Bool:
         """Narrow a fresh morsel to the rows inside every join build's key
         range; False when none is. A morsel whose keys all fall outside a
@@ -2641,21 +2616,15 @@ struct _PipelineJob(Job):
                 continue
             var shared = r.bloom.value().copy()
             # Rows whose key the bloom filter lacks join nothing. It is
-            # tried on this worker's first rows, then kept only where the
-            # steps it saves cost more than checking it: the filter must
-            # drop over half the rows it checks (DuckDB's selectivity
-            # check), and the pruned rows' share of the time the steps before
-            # the join take per row must exceed the checking time.
-            if self.bloom_state[k] == 2:
-                continue
+            # left alone once, on this worker's first rows, it keeps more
+            # than one in eight of the rows it looks at: the join drops a
+            # row it does not match about as cheaply as the filter would
+            # (the maintainers' rule for passing a key set, too).
             if (
-                self.bloom_state[k] == 0
-                and self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS
+                self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS
+                and 8 * self.bloom_kept[k] > self.bloom_checked[k]
             ):
-                self._judge_bloom(k)
-                if self.bloom_state[k] == 2:
-                    continue
-            var began = Int(perf_counter_ns())
+                continue
             var plain = (
                 morsel.selected
                 and morsel.mask._offset == 0
@@ -2670,12 +2639,10 @@ struct _PipelineJob(Job):
             self.bloom_checked[k] += found[1]
             self.bloom_kept[k] += found[2]
             if found[2] == 0:
-                self.bloom_ns[k] += Int(perf_counter_ns()) - began
                 return False
             var rows = morsel.count if plain else morsel.frame.height()
             if 2 * found[2] <= rows:
                 morsel.keep(found[0], found[2])
-            self.bloom_ns[k] += Int(perf_counter_ns()) - began
             if morsel.count == 0:
                 return False
         return True

@@ -13,6 +13,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType
 from .execution import _valid_lanes
+from .parallel import Job, run_jobs, worker_count
 from .series import Series
 
 # Bits per key a filter is sized for, the smallest and largest filter
@@ -125,20 +126,58 @@ struct KeyBloom(Movable):
                 self.insert(Int64(values[unsafe_offset=i]))
 
 
-def build_bloom(key: Series, rows: Int) -> Optional[ArcPointer[KeyBloom]]:
+struct _BloomBuild(Job):
+    """One worker's filter over a slice of the build's keys."""
+
+    var keys: Series
+    var bloom: KeyBloom
+
+    def __init__(out self, var keys: Series, blocks: Int):
+        self.keys = keys^
+        self.bloom = KeyBloom(blocks)
+
+    def run(mut self) raises:
+        var physical = self.keys.dtype().physical()
+        for part in self.keys.chunks():
+            if physical == DataType.INT64:
+                self.bloom.add_column(part._data[Column[Int64]])
+            else:
+                self.bloom.add_column(part._data[Column[Int32]])
+
+
+def build_bloom(
+    key: Series, rows: Int
+) raises -> Optional[ArcPointer[KeyBloom]]:
     """A filter over the non-null values of an integer key column of up to
-    `rows` keys, or None when it would be larger than is built."""
+    `rows` keys, or None when it would be larger than is built. The keys
+    are split over the workers, each filling a filter of its own, and the
+    filters are merged by or-ing their words."""
     var blocks = bloom_blocks_for(rows)
     if blocks == 0:
         return None
-    var bloom = KeyBloom(blocks)
-    var physical = key.dtype().physical()
-    for part in key.chunks():
-        if physical == DataType.INT64:
-            bloom.add_column(part._data[Column[Int64]])
-        else:
-            bloom.add_column(part._data[Column[Int32]])
-    return Optional(ArcPointer(bloom^))
+    var n = len(key)
+    var parts = worker_count(n)
+    var jobs = List[_BloomBuild](capacity=parts)
+    var step = (n + parts - 1) // parts
+    for p in range(parts):
+        var offset = min(n, p * step)
+        jobs.append(
+            _BloomBuild(key.slice(offset, min(step, n - offset)), blocks)
+        )
+    if parts == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var merged = KeyBloom(1)
+    swap(merged.words, jobs[0].bloom.words)
+    merged.blocks = blocks
+    merged.start = jobs[0].bloom.start
+    for j in range(1, parts):
+        for w in range(blocks * 8):
+            merged.words[merged.start + w] |= jobs[j].bloom.words[
+                jobs[j].bloom.start + w
+            ]
+    return Optional(ArcPointer(merged^))
 
 
 def _bloom_bits[
