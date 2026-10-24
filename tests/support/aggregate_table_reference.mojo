@@ -7,7 +7,7 @@ key (short, longer than twelve bytes with Unicode, empty, or null), an Int64
 key (null only where the string is not), a Float64 key whose zero arrives as
 -0.0 or 0.0 and which may be NaN, and a nullable Boolean. Row r belongs to
 group (r * 7919) % groups, so a group's rows are scattered."""
-from std.math import isnan, sqrt
+from std.math import floor, isnan, sqrt
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true
 
@@ -148,6 +148,7 @@ struct GroupModel(Copyable, Movable):
     var w_nulls: Int
     var w_total: Int128
     var ys: List[Float64]
+    var xs: List[Float64]
 
     def __init__(out self):
         self.rows = 0
@@ -159,12 +160,14 @@ struct GroupModel(Copyable, Movable):
         self.w_nulls = 0
         self.w_total = 0
         self.ys = List[Float64]()
+        self.xs = List[Float64]()
 
     def add(mut self, row: Int):
         self.rows += 1
         if narrow_valid(row):
             var value = narrow(row)
             self.x_count += 1
+            self.xs.append(Float64(value))
             self.x_total += Int128(value)
             self.x_min = min(self.x_min, value)
             self.x_max = max(self.x_max, value)
@@ -189,6 +192,18 @@ struct GroupModel(Copyable, Movable):
         for value in self.ys:
             squares += (value - mean) * (value - mean)
         return sqrt(squares / Float64(len(self.ys) - 1))
+
+
+def linear_quantile(values: List[Float64], q: Float64) -> Float64:
+    """The `q` quantile of non-empty `values` by linear interpolation
+    between the order statistics around q * (n - 1), from a full sort."""
+    var ordered = values.copy()
+    sort(ordered)
+    var position = q * Float64(len(ordered) - 1)
+    var lower = Int(floor(position))
+    var upper = min(lower + 1, len(ordered) - 1)
+    var fraction = position - Float64(lower)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
 
 
 def group_models(rows: Int, groups: Int, start: Int = 0) -> List[GroupModel]:
@@ -260,7 +275,8 @@ def assert_groups(
 ) raises:
     """Every model group with rows appears once with its keys and states
     (sum, mean, min, max and count of x; sum and null count of w; row
-    count; mean and standard deviation of y), in any order. `replaced`:
+    count; mean and standard deviation of y; median of y and the first
+    quartile of x when they are asked for), in any order. `replaced`:
     the string keys are `replaced_key`'s."""
     var groups = len(models)
     var lookup = Dict[String, Int]()
@@ -311,6 +327,25 @@ def assert_groups(
         else:
             assert_equal(integer(w_sum), model.w_total)
         assert_equal(integer(actual.item(r, "w_nulls")), Int128(model.w_nulls))
+        if "y_median" in actual.columns():
+            var median = actual.item(r, "y_median")
+            var quartile = actual.item(r, "x_q25")
+            if len(model.ys) == 0:
+                assert_true(median.is_null(), "empty y median of " + text)
+            else:
+                assert_close(
+                    median.float64(),
+                    linear_quantile(model.ys, 0.5),
+                    "y median of " + text,
+                )
+            if len(model.xs) == 0:
+                assert_true(quartile.is_null(), "empty x quartile of " + text)
+            else:
+                assert_close(
+                    quartile.float64(),
+                    linear_quantile(model.xs, 0.25),
+                    "x quartile of " + text,
+                )
         if len(model.ys) >= 2:
             assert_close(
                 actual.item(r, "y_mean").float64(),

@@ -1,8 +1,10 @@
 """A crew creates its threads on the first `run_jobs` that has work for
 them, not when its operation starts: an operation with nothing to run in
 parallel creates none. The first thread creates the others, so that first
-call is served by helpers as they come up; every thread is joined on
-release, whether or not any was created."""
+call is served by helpers as they come up. Release parks a crew whose
+threads were created and the next operation takes it back, with no thread
+created; a crew whose threads were never created is freed, and one sized for
+another thread setting is joined and replaced."""
 # contract-group: execution.lifecycle
 from std.atomic import Atomic
 from std.ffi import external_call
@@ -56,6 +58,7 @@ def state(crew: Crew) -> ref[MutAnyOrigin] _Crew:
 
 def test_a_crew_creates_no_thread_until_work_arrives() raises:
     var setting = WorkerSetting(4)
+    Crew.shutdown()
     var idle = Crew.start()
     assert_true(idle.address != 0)
     assert_equal(state(idle).spawned.load(), Int64(0))
@@ -66,7 +69,7 @@ def test_a_crew_creates_no_thread_until_work_arrives() raises:
     _ = setting^
 
 
-def test_the_first_call_is_served_by_helpers_and_every_thread_is_joined() raises:
+def test_the_first_call_is_served_by_helpers_and_the_crew_is_parked_on_release() raises:
     for workers in [2, 4, 8]:
         var setting = WorkerSetting(workers)
         var crew = Crew.start()
@@ -93,3 +96,48 @@ def test_the_first_call_is_served_by_helpers_and_every_thread_is_joined() raises
         crew.release()
         assert_equal(_helpers().load(), Int64(0))
         _ = setting^
+
+
+def _run_meeting(workers: Int) raises -> Int64:
+    var meeting = ArcPointer(Meeting())
+    var jobs = List[MeetingJob]()
+    for _ in range(workers):
+        jobs.append(MeetingJob(meeting, workers))
+    run_jobs(jobs)
+    return meeting[].peak.load()
+
+
+def test_a_released_crew_is_taken_back_without_creating_threads() raises:
+    var setting = WorkerSetting(4)
+    var first = Crew.start()
+    assert_equal(_run_meeting(4), Int64(4))
+    var address = first.address
+    first.release()
+    assert_equal(first.address, 0)
+    var second = Crew.start()
+    # The same state, its threads already up.
+    assert_equal(second.address, address)
+    assert_equal(state(second).spawned.load(), Int64(2))
+    assert_equal(state(second).threads, 3)
+    assert_equal(_run_meeting(4), Int64(4))
+    assert_equal(state(second).threads, 3)
+    second.release()
+    assert_equal(_helpers().load(), Int64(0))
+    _ = setting^
+
+
+def test_a_parked_crew_follows_the_thread_setting() raises:
+    var first_setting = WorkerSetting(4)
+    var first = Crew.start()
+    assert_equal(_run_meeting(4), Int64(4))
+    first.release()
+    _ = first_setting^
+    # Another setting joins the parked threads and starts a crew of its size.
+    var other_setting = WorkerSetting(2)
+    var second = Crew.start()
+    assert_equal(state(second).spawned.load(), Int64(0))
+    assert_equal(_run_meeting(2), Int64(2))
+    assert_equal(state(second).threads, 1)
+    second.release()
+    assert_equal(_helpers().load(), Int64(0))
+    _ = other_setting^

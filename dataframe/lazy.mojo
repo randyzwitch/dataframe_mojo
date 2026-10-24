@@ -1555,6 +1555,15 @@ def _same_names(a: List[String], b: List[String]) -> Bool:
     return True
 
 
+def _has_quantile(expressions: List[Expr]) -> Bool:
+    """Whether some expression reduces to a median or quantile."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op == MEDIAN or node.op == QUANTILE:
+                return True
+    return False
+
+
 def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's results are the same whatever order
     its rows arrive in: the aggregate table's states, and distinct counts,
@@ -3875,7 +3884,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var limit = -1
         ref terminal = self._nodes[index]
         if terminal.kind == AGG or terminal.kind == SELECT:
-            if _stream_reductions(terminal.exprs):
+            # A grouped median or quantile streams only into the aggregate
+            # table (checked below): its other routes keep no such state.
+            if _stream_reductions(terminal.exprs, terminal.kind == AGG):
                 expressions = terminal.exprs.copy()
                 if terminal.kind == AGG:
                     keys = terminal.names.copy()
@@ -4361,6 +4372,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for operation in operations:
                 _apply_operation(operation, empty, empty_joins, empty_indexes)
             table = table_supported(empty, keys, expressions)
+        if not table and _has_quantile(expressions):
+            return None
         if piped and len(keys) > 0 and not table:
             var frame = self._nodes[cursor].offset
             ref source_frame = self._frames[frame]
