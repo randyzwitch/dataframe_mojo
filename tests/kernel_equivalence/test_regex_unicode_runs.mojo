@@ -2,14 +2,14 @@
 # contract-group: kernel.regex
 from std.testing import assert_equal, assert_true
 from dataframe.regex import Matcher, Regex
-from dataframe.regex.onepass import _UNICODE_INTERVAL, _LOOP_PC
+from dataframe.regex.onepass import _UNICODE_RUN, _LOOP_PC
 from dataframe.regex.pikevm import decode, previous_start
 from dataframe.regex.program import consumes
-from dataframe.regex.unicode_run import _scan_width, scan_unicode_interval
+from dataframe.regex.unicode_run import _scan_width, scan_unicode_run
 from .test_regex_engine import _span
 
 
-def test_unicode_run_metadata_requires_a_supported_interval() raises:
+def test_unicode_run_metadata_requires_a_unicode_predicate() raises:
     var patterns: List[String] = [
         "^(一+)(!*)",
         "^([一-丂]+)(!*)",
@@ -19,7 +19,7 @@ def test_unicode_run_metadata_requires_a_supported_interval() raises:
         "^([一-丂丅-丆]+)(!*)",
         "^(\\w+) (\\w+) (\\w+)",
     ]
-    var expected: List[Bool] = [True, True, True, True, False, False, False]
+    var expected: List[Bool] = [True, True, True, True, False, True, True]
     for i in range(len(patterns)):
         var regex = Regex(patterns[i])
         assert_true(Bool(regex._compiled[].onepass), patterns[i])
@@ -30,7 +30,7 @@ def test_unicode_run_metadata_requires_a_supported_interval() raises:
                 continue
             var pc = Int(encoded) & _LOOP_PC
             assert_true(consumes(regex._compiled[].forward.op[pc]))
-            found = found or (Int(encoded) & _UNICODE_INTERVAL) != 0
+            found = found or (Int(encoded) & _UNICODE_RUN) != 0
         assert_equal(found, expected[i], patterns[i])
 
 
