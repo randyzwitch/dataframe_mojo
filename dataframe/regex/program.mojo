@@ -543,18 +543,13 @@ def compile_program(ast: Ast, reverse: Bool) raises -> Program:
     the whole-match slots and adds the unanchored entry `(?s:.)*?`; a
     reverse program matches the pattern backwards (concatenations
     reversed) and keeps no slots, for finding where a match starts."""
-    return _compile_program(ast, reverse, word_class())
+    return _compile_program(ast, reverse, List[UInt32]())
 
 
 def _compile_program(
     ast: Ast, reverse: Bool, var word: List[UInt32]
 ) raises -> Program:
     var compiler = _Compiler(reverse)
-    compiler.program.word = word^
-    for cp in range(128):
-        compiler.program.word_ascii[cp] = class_contains(
-            compiler.program.word, UInt32(cp)
-        )
     compiler.program.slot_count = 2 * (ast.group_count() + 1)
     if reverse:
         var body = compiler.compile(ast, ast.root)
@@ -577,6 +572,14 @@ def _compile_program(
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    # Only live Unicode-word assertions observe this context. ASCII-word
+    # assertions use their own byte predicate and alphabet partition.
+    if program.looks & LOOK_UNICODE_WORD:
+        program.word = word^
+        if len(program.word) == 0:
+            program.word = word_class()
+        for cp in range(128):
+            program.word_ascii[cp] = class_contains(program.word, UInt32(cp))
     _build_two_byte_membership(program)
     _build_word_lookup(program)
     _build_alphabet(program)
