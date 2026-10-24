@@ -15,7 +15,7 @@ from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
-from .huge_pages import huge_list, huge_uninit
+from .huge_pages import huge_capacity, huge_list, huge_uninit
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _mix
 from .series import Series
@@ -880,11 +880,11 @@ struct _HashProbeJob(Job):
         )
         self.identity = False
         self.membership = membership
-        self.left_rows = List[Int](
-            capacity=0 if self.omit_identity else end - start
+        self.left_rows = huge_capacity[Int](
+            0 if self.omit_identity else end - start
         )
-        self.right_rows = List[Int](
-            capacity=0 if membership >= 0 else end - start
+        self.right_rows = huge_capacity[Int](
+            0 if membership >= 0 else end - start
         )
         self.filter = filter.copy()
         self.filter_base = filter_base
@@ -1097,7 +1097,7 @@ struct _HashProbeJob(Job):
                     self.identity = True
                     return
                 # Materialize the prefix once, then use the ordinary path.
-                self.left_rows = List[Int](capacity=self.end - self.start)
+                self.left_rows = huge_capacity[Int](self.end - self.start)
                 for previous in range(self.start, row):
                     self.left_rows.append(previous)
                 generic_start = row
@@ -1950,8 +1950,8 @@ def prepared_hash_join_rows(
                 swap(left_only, jobs[0].left_rows)
             swap(right_only, jobs[0].right_rows)
             return (left_only^, right_only^, identity)
-        var left_rows = List[Int](capacity=0 if identity else total)
-        var right_rows = List[Int](capacity=total)
+        var left_rows = huge_capacity[Int](0 if identity else total)
+        var right_rows = huge_capacity[Int](total)
         for k in range(len(jobs)):
             if not identity:
                 left_rows.extend(Span(jobs[k].left_rows))
@@ -1984,8 +1984,8 @@ def prepared_hash_join_rows(
         total += len(jobs[worker].right_rows)
         identity = identity and jobs[worker].identity
     # Every worker copies its own matches to their offset in the output.
-    var left_rows = List[Int](unsafe_uninit_length=0 if identity else total)
-    var right_rows = List[Int](unsafe_uninit_length=total)
+    var left_rows = huge_uninit[Int](0 if identity else total)
+    var right_rows = huge_uninit[Int](total)
     var copies = List[RowsCopyJob](capacity=len(jobs))
     var at = 0
     for worker in range(len(jobs)):

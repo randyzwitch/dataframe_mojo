@@ -6914,17 +6914,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for name in reads.value():
             if name not in names:
                 names.append(name)
+        # A large table's runs are copied end to end (zero-copy slices
+        # merged into one array), not gathered row by row, once for the
+        # table: its statistics keep them.
         var sample = self._frames[source.offset].select(names)
         if height > runs * run:
-            # Each column's runs are copied end to end (zero-copy slices
-            # merged into one array), not gathered row by row.
-            var columns = List[Series](capacity=sample.width())
-            for column in sample._columns:
-                var parts = List[Series](capacity=runs)
-                for k in range(runs):
-                    parts.append(column.slice(k * (height // runs), run))
-                columns.append(Series._from_chunks(parts).rechunk())
-            sample = DataFrame(columns^, height=runs * run)
+            sample = self._frames[source.offset]._sampled(names, runs, run)
         # Only the matches are counted: the predicate's mask, as DuckDB
         # counts a selection vector, with no filtered frame built.
         var kept = true_count(sample._selection(node.exprs[0], 8192))

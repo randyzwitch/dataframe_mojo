@@ -149,9 +149,12 @@ struct GroupModel(Copyable, Movable):
     var w_total: Int128
     var ys: List[Float64]
     var xs: List[Float64]
+<<<<<<< HEAD
     # Rows where both x and y are valid.
     var pair_x: List[Float64]
     var pair_y: List[Float64]
+=======
+>>>>>>> origin/main
 
     def __init__(out self):
         self.rows = 0
@@ -164,8 +167,11 @@ struct GroupModel(Copyable, Movable):
         self.w_total = 0
         self.ys = List[Float64]()
         self.xs = List[Float64]()
+<<<<<<< HEAD
         self.pair_x = List[Float64]()
         self.pair_y = List[Float64]()
+=======
+>>>>>>> origin/main
 
     def add(mut self, row: Int):
         self.rows += 1
@@ -202,6 +208,7 @@ struct GroupModel(Copyable, Movable):
         return sqrt(squares / Float64(len(self.ys) - 1))
 
 
+<<<<<<< HEAD
 def pair_moments(model: GroupModel) -> Tuple[Float64, Float64, Float64]:
     """Two-pass co-moment and the two second moments of the model's pairs."""
     var n = Float64(len(model.pair_x))
@@ -224,6 +231,8 @@ def pair_moments(model: GroupModel) -> Tuple[Float64, Float64, Float64]:
     return (cxy, sxx, syy)
 
 
+=======
+>>>>>>> origin/main
 def linear_quantile(values: List[Float64], q: Float64) -> Float64:
     """The `q` quantile of non-empty `values` by linear interpolation
     between the order statistics around q * (n - 1), from a full sort."""
@@ -376,6 +385,7 @@ def assert_groups(
                     linear_quantile(model.xs, 0.25),
                     "x quartile of " + text,
                 )
+<<<<<<< HEAD
         if "xy_corr" in actual.columns():
             var corr_cell = actual.item(r, "xy_corr")
             var cov_cell = actual.item(r, "xy_cov")
@@ -397,6 +407,8 @@ def assert_groups(
                         moments[0] / sqrt(moments[1] * moments[2]),
                         "correlation of " + text,
                     )
+=======
+>>>>>>> origin/main
         if len(model.ys) >= 2:
             assert_close(
                 actual.item(r, "y_mean").float64(),

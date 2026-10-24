@@ -234,7 +234,7 @@ def concat(frames: List[LazyFrame], how: String = "vertical") -> LazyFrame
 
 ## `concat_str`
 
-Join String expressions row-wise; any null input makes the row null. With ignore_nulls, null inputs are skipped along with their separator, and a row whose inputs are all null is "" (DuckDB's concat_ws).
+Join String expressions row-wise; any null input makes the row null. With ignore_nulls, null inputs are skipped along with their separator; a row whose inputs are all null is an empty string.
 
 ```mojo
 def concat_str(exprs: List[Expr], separator: String = "", ignore_nulls: Bool = False) -> Expr
@@ -345,19 +345,19 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def reverse(self) -> Self`
 - `def shift(self, n: Int = Int(1), *, fill_value: Optional[Expr] = None) -> Self`
-  Every column's values moved n rows later (earlier when n is negative), as Polars' DataFrame.shift. Height and schema stay the same. The min(|n|, height) rows left empty at the start (or, for a negative n, the end) are null, or `fill_value` cast to each column's type. `fill_value` is a scalar expression evaluated against this frame: a literal, or a reduction such as `col("a").max()`.
+  Every column's values moved n rows later (earlier when n is negative). Height and schema stay the same. The min(|n|, height) rows left empty at the start (or, for a negative n, the end) are null, or `fill_value` cast to each column's type. `fill_value` is a scalar expression evaluated against this frame: a literal, or a reduction such as `col("a").max()`.
 - `def vstack(self, other: Self) -> Self`
   Append other's rows; schemas must match exactly.
 - `def hstack(self, other: Self) -> Self`
   Append other's columns; heights must match, names stay unique.
 - `def hstack(self, columns: List[Series]) -> Self`
 - `def clear(self, n: Int = Int(0)) -> Self`
-  The same schema with n rows of nulls (zero rows by default), as Polars' clear.
+  The same schema with n rows of nulls (zero rows by default).
 - `def drop(self, name: String) -> Self`
 - `def drop(self, names: List[String]) -> Self`
   Remove columns; every name must exist and appear once.
 - `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
-  Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored, as in Polars.
+  Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row index starting at offset.
 - `def select(self, names: List[String]) -> Self`
@@ -365,9 +365,9 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
-  Summary statistics per column, laid out as Polars' describe().
+  Summary statistics per column.
 - `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
-  The rows at `indices`, in that order, as Polars' gather: a negative index counts from the end. An index out of range raises, or with null_on_oob=True gives a row of nulls.
+  The rows at `indices`, in that order: a negative index counts from the end. An index out of range raises, or with null_on_oob=True gives a row of nulls.
 - `def take(self, indices: List[Int]) -> Self`
 - `def filter(self, mask: Column[Bool]) -> Self`
   Filter with a byte-per-value Boolean column (packed first).
@@ -394,7 +394,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
   Row order of a stable sort; equal keys keep input order.
 - `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
-  The k rows that sort(by, descending=True) would put first (sort(by) with reverse=True, as Polars' reverse flips the order).
+  The k rows with greatest values by `by` (ascending when `reverse=True`).
 - `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows that sort(by) would put first (sort(by, descending=True) with reverse=True); nulls rank last.
@@ -454,11 +454,11 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
 - `def group_by_rollup(self, keys: List[String]) -> GroupingSets`
-  DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (). Finish it with `agg`; see GroupingSets for the output. Runs the lazy plan.
+  Group by the rollup sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), and (). Finish with `agg`; see GroupingSets for the output. Runs the lazy plan.
 - `def group_by_cube(self, keys: List[String]) -> GroupingSets`
-  DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys as a grouping set. Finish it with `agg`.
+  Every subset of the keys as a grouping set. Finish it with `agg`.
 - `def group_by_grouping_sets(self, sets: List[List[String]]) -> GroupingSets`
-  DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping per listed set, an empty set being the grand total. Finish it with `agg`.
+  One grouping per listed set, an empty set being the grand total. Finish it with `agg`.
 - `def group_indices(self, key: String) -> GroupIndices`
 - `def group_indices(self, keys: List[String]) -> GroupIndices`
   Which rows belong to which group, without aggregating them.
@@ -562,9 +562,9 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def bit_width(self) -> Int`
   Bits per value for fixed-width types; 0 for variable-width.
 - `def sum_type(self) -> Self`
-  The result type of sum and cumulative sums: 8- and 16-bit integers widen to INT64 (as in Polars), decimals to decimal(38) at their scale (as in DuckDB); other types keep their type.
+  The result type of sum and cumulative sums: 8- and 16-bit integers widen to INT64, decimals to decimal(38) at their scale, and other types retain their type.
 - `def product_type(self) -> Self`
-  The result type of product and cum_prod, as in Polars: INT64 for Bool and integers up to 32 bits, which would soon overflow their own width, and the type itself for Int64, UInt64 and floats. A decimal's product has a scale no column of it shares, so FLOAT64, as DuckDB's product is.
+  The result type of product and cum_prod: INT64 for Bool and integers up to 32 bits, which would soon overflow their own width; retain Int64, UInt64, and floating types. Decimal products use FLOAT64 because the product's scale may exceed the input scale.
 - `def write_to(self, mut writer: T)`
 
 ## `date`
@@ -606,8 +606,7 @@ Temporal operations on date, datetime, time, and duration expressions.
 Fields use the proleptic Gregorian calendar. For a datetime with a time
 zone, fields, date, time, truncate, calendar offsets (d, w, mo, y) and
 strftime use local time in that zone; fixed offsets (h, m, s, ...) and
-duration arithmetic act on the UTC instant, as in Polars. Nulls
-propagate.
+duration arithmetic act on the UTC instant. Nulls propagate.
 
 - `def quarter(self) -> Expr`
   Quarter, 1 through 4.
@@ -636,7 +635,7 @@ propagate.
 - `def timestamp(self, time_unit: String = "us") -> Expr`
   UTC timestamp in ms, us or ns.
 - `def round(self, every: String) -> Expr`
-  Round local time as in Polars: shift by half the interval, then truncate. Calendar months use a 28-day estimate; fixed-unit ties round forward.
+  Round local time by shifting by half the interval, then truncating. Calendar months use a 28-day estimate; fixed-unit ties round forward.
 - `def with_time_unit(self, time_unit: String) -> Expr`
   Retag datetime/duration ticks without rescaling them.
 - `def combine(self, time: Expr, time_unit: String = "us") -> Expr`
@@ -699,7 +698,7 @@ def exclude(names: List[String]) -> Expr
 
 ## `export_arrow`
 
-Export a frame as an Arrow struct array (format `+s`), the shape pyarrow and Polars import as a RecordBatch.
+Export a frame as an Arrow struct array (format `+s`), the shape used for a record batch.
 
 ```mojo
 def export_arrow(frame: DataFrame, mut array: ArrowArray, mut schema: ArrowSchema)
@@ -799,7 +798,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def log1p(self) -> Self`
   ln(1 + x), accurate near zero; -inf at -1, NaN below.
 - `def sign(self) -> Self`
-  -1, 0 or 1 in the input's type. A float NaN stays NaN and a signed zero keeps its sign, as in Polars.
+  -1, 0, or 1 in the input's type. A float NaN stays NaN and a signed zero keeps its sign.
 - `def cbrt(self) -> Self`
   Cube root (negative for negative input).
 - `def truncate(self) -> Self`
@@ -965,7 +964,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def interpolate_by(self, by: Self) -> Self`
   Linearly interpolate interior nulls using `by` as the x axis.
 - `def cut(self, breaks: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False) -> Self`
-  Bin numeric values at explicit sorted edges. Default labels match Polars, including the open-ended outer bins.
+  Bin numeric values at explicit sorted edges, including open-ended outer bins.
 - `def qcut(self, quantiles: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False, allow_duplicates: Bool = False) -> Self`
   Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true.
 - `def over(self, partition_by: String) -> Self`
@@ -982,9 +981,9 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def dt(self) -> DtNamespace`
   Temporal operations: col("when").dt().year().
 - `def min(self) -> Self`
-  Smallest non-null value. NaN is skipped, as in Polars, so it is the minimum only when every valid value is NaN.
+  Smallest non-null value. NaN is skipped, so it is the minimum only when every valid value is NaN.
 - `def max(self) -> Self`
-  Largest non-null value. NaN is skipped, as in Polars, so it is the maximum only when every valid value is NaN.
+  Largest non-null value. NaN is skipped, so it is the maximum only when every valid value is NaN.
 - `def mean(self) -> Self`
   Arithmetic mean of non-null values as Float64; null when empty. A Bool's mean is the share of true values.
 - `def first(self) -> Self`
@@ -1003,7 +1002,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def len(self) -> Self`
   Number of rows including nulls, as Int64.
 - `def sum(self, min_count: Int = Int(0)) -> Self`
-  Skip nulls; zero when empty unless fewer than min_count are valid. A Bool sums to its number of true values, as UInt32 (Polars).
+  Skip nulls; zero when empty unless fewer than min_count are valid. A Bool sum counts true values as UInt32.
 - `def product(self) -> Self`
   Product of the non-null values; 1 when there are none.
 - `def arg_min(self) -> Self`
@@ -1092,7 +1091,7 @@ It owns a snapshot of the input and the evaluated key columns.
 - `def n_unique(self) -> DataFrame`
   Each other column's distinct values per group, null counted once, as Int64.
 - `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> DataFrame`
-  Each other column's quantile per group, as Float64; the interpolation defaults to "nearest", as in Polars.
+  Each other column's quantile per group, as Float64; interpolation defaults to "nearest".
 
 ## `GroupIndices`
 
@@ -1123,7 +1122,7 @@ group g, which is where to read that group's key values from.
 
 ## `grouping`
 
-DuckDB's `GROUPING(a)`: 1 in rows where key `a` is aggregated away (a subtotal row), else 0; Int64. See `grouping_id`.
+Return 1 in rows where key `a` is aggregated away (a subtotal row), else 0; Int64. See `grouping_id`.
 
 ```mojo
 def grouping(name: String) -> Expr
@@ -1131,7 +1130,7 @@ def grouping(name: String) -> Expr
 
 ## `grouping_id`
 
-DuckDB's `GROUPING(a, b, ...)` inside the `agg` of `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`: an Int64 bit mask with one bit per name, the first name the highest bit, set to 1 when that key is aggregated away in the row (a subtotal) and 0 when the row groups by it. It tells a subtotal null from a null key value. Elsewhere it is an error: the expansion of the grouping sets replaces it with a literal for each set.
+Use inside the `agg` of `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`: an Int64 bit mask with one bit per name, the first name the highest bit, set to 1 when that key is aggregated away in the row (a subtotal) and 0 when the row groups by it. It tells a subtotal null from a null key value. Elsewhere it is an error: the expansion of the grouping sets replaces it with a literal for each set.
 
 ```mojo
 def grouping_id(names: List[String]) -> Expr
@@ -1196,13 +1195,13 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False) -> LazyGroupBy`
   Group by computed keys, as DataFrame.group_by(List[Expr]): each key is evaluated once and named by its output name, and the aggregations still read the input's columns. Keys that are columns under their own names group as names do.
 - `def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets`
-  DuckDB's `GROUP BY ROLLUP (k1, k2, ...)`: the grouping sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), (), as one plan. Finish it with `agg`; see LazyGroupingSets for the output.
+  Expand to the rollup sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), and () in one plan. Finish with `agg`; see LazyGroupingSets for the output.
 - `def group_by_cube(self, keys: List[String]) -> LazyGroupingSets`
-  DuckDB's `GROUP BY CUBE (k1, k2, ...)`: every subset of the keys as a grouping set, 2^n of them (a key listed twice doubles them, as in DuckDB). Finish it with `agg`.
+  Every subset of the keys as a grouping set, for 2^n sets. A repeated key in `keys` yields repeated sets. Finish with `agg`.
 - `def group_by_grouping_sets(self, sets: List[List[String]]) -> LazyGroupingSets`
-  DuckDB's `GROUP BY GROUPING SETS ((a, b), (a), ())`: one grouping per listed set, an empty set being the grand total. A set listed twice yields its rows twice, as in DuckDB. Finish it with `agg`.
+  One grouping per listed set; an empty set produces the grand total. A set listed twice yields its rows twice. Finish with `agg`.
 - `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Sort by `by`. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order (Polars' `maintain_order`; DuckDB's ORDER BY makes no promise either).
+  Sort by `by`. Rows with equal keys have unspecified order unless `maintain_order` preserves their input order.
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
   Sort with a direction and null placement per key, as the eager DataFrame.sort takes them; equal keys in no particular order unless `maintain_order`.
 - `def sort(self, by: String, descending: Bool = False, *, maintain_order: Bool = False) -> Self`
@@ -1210,27 +1209,27 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def head(self, n: Int = Int(5)) -> Self`
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def pivot(self, on: String, on_columns: List[String], *, index: List[String], values: String, aggregate_function: String = "") -> Self`
-  Long to wide, as DataFrame.pivot, with the new columns named up front, as Polars' LazyFrame.pivot takes them, so the plan's schema is known before it runs: one column per entry of `on_columns`, in that order, holding the cells whose `on` value reads as that name ("null" for a null). A name no row has gives a column of nulls; rows whose `on` value is not listed still give their index key a row. Filters above it on index columns alone move below it.
+  Long to wide, as DataFrame.pivot, with the new columns named up front so the plan's schema is known before it runs: one column per entry of `on_columns`, in that order, holding the cells whose `on` value reads as that name ("null" for a null). A name no row has gives a column of nulls; rows whose `on` value is not listed still give their index key a row. Filters above it on index columns alone move below it.
 - `def pivot(self, on: String, on_columns: Series, *, index: List[String], values: String, aggregate_function: String = "") -> Self`
   `pivot` with the new columns given as `on` values, named as DataFrame.pivot names them.
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
 - `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
-  Rename columns by old name, with the result and errors of DataFrame.rename. As Polars builds it, this is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
+  Rename columns by old name, with the result and errors of DataFrame.rename. This is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
 - `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
-  Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, as Polars builds it, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
+  Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> DataFrame`
-  DataFrame.describe's summary of this plan's result, computed as Polars computes it: one select of the summary reductions over the plan, collected, so the rows are never materialized whole.
+  DataFrame.describe's summary of this plan's result: one select of the summary reductions over the plan, collected without materializing all rows.
 - `def clear(self, n: Int = Int(0)) -> Self`
-  This plan's schema with n rows of nulls, as DataFrame.clear. With n = 0 it is head(0) of this plan; otherwise, as in Polars, a new plan over a frame of nulls built from the schema.
+  This plan's schema with n rows of nulls, as DataFrame.clear. With n = 0 it is head(0) of this plan; otherwise a new plan over a frame of nulls built from the schema.
 - `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
   The rows at `indices`, in that order; see DataFrame.gather.
 - `def gather(self, indices: Self, *, null_on_oob: Bool = False) -> Self`
-  The rows at the positions `indices` (a plan with one integer column) lists, in its order, as Polars' gather: a negative index counts from the end, a null index gives a row of nulls, and an index out of range raises when the plan runs, or with null_on_oob=True gives a row of nulls. Filters and slices above it stay above it.
+  The rows at the positions `indices` (a plan with one integer column) lists, in its order: a negative index counts from the end, a null index gives a row of nulls, and an index out of range raises when the plan runs, or with null_on_oob=True gives a row of nulls. Filters and slices above it stay above it.
 - `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
-  The k rows DataFrame.top_k gives: as Polars builds it, a sort by `by` descending (ascending with reverse=True), nulls last, then head(k), which the optimizer runs as one top-k selection.
+  The k rows with greatest keys in `by`, using descending order (ascending with reverse=True), nulls last, and a top-k selection.
 - `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows DataFrame.bottom_k gives: a sort by `by` ascending (descending with reverse=True), nulls last, then head(k).
@@ -1253,11 +1252,11 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
   Fill nulls in string columns with a string; see the Expr overload.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
-  Fill nulls with a scalar value, choosing the columns as DataFrame.fill_null does from this plan's schema: a with_columns of `col(c).fill_null(value)` for each, as Polars' LazyFrame.fill_null is a with_columns over the columns its dtype selector matches. Unknown subset names raise here, while the plan is built.
+  Fill nulls with a scalar value, choosing columns from this plan's schema: a with_columns of `col(c).fill_null(value)` for each selected column. Unknown subset names raise here, while the plan is built.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
-  Keep rows with no null in subset (default: every column), as a filter on each column's `is_not_null`, as Polars builds it.
+  Keep rows with no null in subset (default: every column), using each column's `is_not_null` predicate.
 - `def null_count(self) -> Self`
-  One row holding each column's null count as Int64, as DataFrame.null_count: a select of `col(c).null_count()` per column, as Polars builds it.
+  One row holding each column's null count as Int64, as DataFrame.null_count: a select of `col(c).null_count()` per column.
 - `def n_unique(self, subset: List[String] = List()) -> Self`
   One row, one Int64 column "n_unique": the number of distinct rows on subset (default: every column), the value DataFrame.n_unique returns. Built as the subset's unique rows counted.
 - `def is_duplicated(self, subset: List[String] = List()) -> Self`
@@ -1539,7 +1538,7 @@ def parquet_row_group_statistics(path: String) -> DataFrame
 
 ## `read_csv`
 
-Read CSV through the Polars-derived scanner and typed builders.
+Read CSV through the range-splitting scanner and typed builders.
 
 ```mojo
 def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
@@ -1802,7 +1801,7 @@ String expressions. Character operations work on Unicode code points; there is n
 
 `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
 `replace_all` and `split(literal=False)` take regular expressions in
-the syntax of Rust's `regex` crate, as Polars does; see
+the syntax of Rust's `regex` crate; see
 docs/expressions.md for what is supported. A pattern that is plain text
 is searched as a substring.
 
@@ -1831,7 +1830,7 @@ is searched as a substring.
 - `def like(self, pattern: String) -> Expr`
   SQL LIKE: '%' matches any run of characters (including none) and '_' exactly one; every other character matches itself. There is no escape character. `like("%special%requests%")` is SQL's `LIKE '%special%requests%'`.
 - `def replace(self, pattern: String, value: String, literal: Bool = False, n: Int = Int(1)) -> Expr`
-  Replace the first `n` matches of the pattern. `value` may refer to capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a dollar sign) unless the pattern is literal; as in Polars, a pattern without ASCII punctuation counts as literal. A regex `n` above 1 is not supported.
+  Replace the first `n` matches of the pattern. `value` may refer to capture groups as `$1`, `${1}`, `$name` or `${name}` (`$$` is a dollar sign), unless the pattern is literal. A pattern without ASCII punctuation is treated as literal. A regex `n` above 1 is not supported.
 - `def replace_all(self, pattern: String, value: String, literal: Bool = False) -> Expr`
   Replace every non-overlapping match, as `replace`.
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Expr`
@@ -1857,19 +1856,19 @@ is searched as a substring.
 - `def splitn(self, by: String, n: Int) -> Expr`
   Split on a literal separator into at most n parts, as a struct of n String fields named field_0 onwards; the last field keeps the rest of the string, and missing parts are null.
 - `def to_titlecase(self) -> Expr`
-  Lowercase, then uppercase each letter that follows a character that is not alphabetic (a space, digit or punctuation), as Polars does: "hello wORLD 1st" becomes "Hello World 1St".
+  Lowercase, then uppercase each letter following a character that is not alphabetic (a space, digit, or punctuation): "hello wORLD 1st" becomes "Hello World 1St".
 - `def strip_prefix(self, prefix: String) -> Expr`
   Remove the prefix once if the string starts with it.
 - `def strip_suffix(self, suffix: String) -> Expr`
   Remove the suffix once if the string ends with it.
 - `def find(self, pattern: String, literal: Bool = False) -> Expr`
-  Byte offset (UInt32) of the first occurrence of the pattern, or null when it does not occur; an empty pattern is found at 0. Offsets count bytes, as in Polars. The pattern is a regular expression unless `literal`.
+  Byte offset (UInt32) of the first occurrence of the pattern, or null when it does not occur; an empty pattern is found at 0. Offsets count bytes. The pattern is a regular expression unless `literal`.
 - `def count_matches(self, pattern: String, literal: Bool = False) -> Expr`
   Number of non-overlapping occurrences (UInt32); an empty pattern matches at every code point boundary. The pattern is a regular expression unless `literal`.
 - `def contains_any(self, patterns: List[String], ascii_case_insensitive: Bool = False) -> Expr`
   Whether any of the literal patterns occurs. With ascii_case_insensitive, ASCII letters match either case.
 - `def replace_many(self, patterns: List[String], replace_with: List[String], ascii_case_insensitive: Bool = False, leftmost: Bool = False) -> Expr`
-  Replace every occurrence of each literal pattern in one pass; `replace_with` holds one replacement per pattern, or one for all of them. Scanning left to right, the match that ends first wins, the longer one when two end together (Polars' default); with leftmost, the match that starts first wins, the earlier pattern when two start together.
+  Replace every occurrence of each literal pattern in one pass; `replace_with` holds one replacement per pattern, or one for all of them. Scanning left to right, the match that ends first wins, the longer one when two end together; with leftmost, the match that starts first wins, the earlier pattern when two start together.
 - `def replace_many(self, patterns: List[String], replace_with: String, ascii_case_insensitive: Bool = False, leftmost: Bool = False) -> Expr`
   Replace every occurrence of each literal pattern with one string.
 - `def encode(self, encoding: String) -> Expr`

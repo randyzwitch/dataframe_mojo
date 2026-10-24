@@ -12,6 +12,7 @@ null, as in validity bitmaps.
 """
 from std.sys.intrinsics import prefetch
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from .huge_pages import huge_uninit
 from .column import (
     _append_validity_bit,
     _count_valid,
@@ -233,7 +234,7 @@ struct StringViewStorage(Copyable, Sized):
         # Each view is 16 bytes copied as four words into a buffer sized
         # once: a join's gather of seven customer strings per fact row
         # (TPC-DS q4) spent 19 ns a view appending them one by one.
-        var views = List[StringView](unsafe_uninit_length=count)
+        var views = huge_uninit[StringView](count)
         var target = views.unsafe_ptr().unsafe_bitcast[SIMD[DType.uint32, 4]]()
         var source = source_views.unsafe_bitcast[SIMD[DType.uint32, 4]]()
         # Random rows make each view's load a cache miss; the view sixteen
