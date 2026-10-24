@@ -21,6 +21,7 @@ from .program import (
 )
 from .pikevm import decode, look_holds, previous_start
 from .ascii_run import scan_ascii_run
+from .reverse_run import scan_reverse_run
 from .unicode_run import has_unicode_run, scan_unicode_run
 
 comptime _MAX_STATES = 256
@@ -351,6 +352,10 @@ struct OnePass(Movable):
                             at = scan_ascii_run[True](
                                 program, pc, text, at, floor
                             )
+                    comptime if unicode_input:
+                        if unicode_run:
+                            at = scan_reverse_run(program, pc, text, at, floor)
+                            continue
                     while at > floor:
                         var cp: UInt32
                         comptime if unicode_input:
