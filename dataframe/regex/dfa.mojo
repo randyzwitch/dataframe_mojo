@@ -489,14 +489,13 @@ struct LazyDFA(Movable):
     @always_inline
     def _class_at(
         self, program: Program, text: Span[UInt8, ImmutAnyOrigin], at: Int
-    ) -> Int:
-        """The class of the code point at `at` and its width, packed as
-        `class << 3 | width`."""
+    ) -> Tuple[Int, Int]:
+        """The class of the code point at `at` and its byte width."""
         var b = text.unsafe_ptr()[unsafe_offset=at]
         if b < 0x80:
-            return (Int(program.ascii_class[Int(b)]) << 3) | 1
+            return Int(program.ascii_class[Int(b)]), 1
         var packed = decode(text, at)
-        return (program.class_of(UInt32(packed >> 3)) << 3) | (packed & 7)
+        return program.class_of(UInt32(packed >> 3)), packed & 7
 
     @always_inline
     def find_forward(
@@ -590,37 +589,35 @@ struct LazyDFA(Movable):
                 # Group cached, untagged transitions as in regex-automata's
                 # hybrid search loop. Sixteen remaining bytes bound four UTF8
                 # decodes; tagged edges leave the current code point untouched.
-                var packed = 0
                 while n - at >= 16:
-                    packed = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    cls, width = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + cls])
                     if e < 0:
                         break
                     off = e
-                    at += packed & 7
-                    packed = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    at += width
+                    cls, width = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + cls])
                     if e < 0:
                         break
                     off = e
-                    at += packed & 7
-                    packed = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    at += width
+                    cls, width = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + cls])
                     if e < 0:
                         break
                     off = e
-                    at += packed & 7
-                    packed = self._class_at(program, text, at)
-                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    at += width
+                    cls, width = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + cls])
                     if e < 0:
                         break
                     off = e
-                    at += packed & 7
+                    at += width
                 if e >= 0:
                     continue
-                # Reuse the tagged transition instead of decoding it again.
-                cls = packed >> 3
-                width = packed & 7
+                # The tagged edge and its decoded class/width are ready
+                # for ordinary dispatch below.
             if e == Int(UNKNOWN):
                 var s = off // stride
                 if self._full():
