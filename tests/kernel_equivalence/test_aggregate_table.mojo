@@ -20,6 +20,8 @@ from dataframe import (
     Series,
     col,
     concat,
+    corr,
+    cov,
     lit,
 )
 from tests.support.aggregate_table_reference import (
@@ -54,6 +56,8 @@ def reductions() -> List[Expr]:
         col("y").std().alias("y_std"),
         col("y").median().alias("y_median"),
         col("x").quantile(0.25).alias("x_q25"),
+        corr(col("x"), col("y")).alias("xy_corr"),
+        cov(col("x"), col("y")).alias("xy_cov"),
     ]
 
 
@@ -580,3 +584,50 @@ def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
         assert_frame(piped.sort("k"), expected.sort("k"))
         _ = trace^
         _ = workers^
+
+
+def test_medians_of_few_large_groups_match_the_single_thread_route() raises:
+    # Ten groups of 8,000 values each: every worker's sink holds all of
+    # them, and the finish splits them across threads by the values they
+    # hold, not by how few group rows there are.
+    var rows = 80_000
+    var keys = List[Int64](capacity=rows)
+    var values = List[Float64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    for row in range(rows):
+        keys.append(Int64((row * 7) % 10))
+        values.append(Float64((row * 104729) % 9973) / 16)
+        valid.append(row % 13 != 6)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("v", Column[Float64](values^, valid)),
+        ]
+    )
+    var aggregations: List[Expr] = [
+        col("v").median().alias("median"),
+        col("v").quantile(0.9).alias("q90"),
+    ]
+    var single = ScopedEnvironment("DATAFRAME_THREADS", "1")
+    var expected = frame.group_by(["k"], maintain_order=True).agg(
+        aggregations.copy()
+    )
+    _ = single^
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var piped = (
+        frame.lazy()
+        .filter(col("k") >= lit(Int64(0)))
+        .group_by(["k"])
+        .agg(aggregations.copy())
+        .collect()
+    )
+    assert_true(
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
+        "medians of few groups did not reach the aggregate table sink",
+    )
+    _ = observed^
+    assert_frame(piped.sort("k"), expected.sort("k"))
+    _ = trace^
+    _ = workers^

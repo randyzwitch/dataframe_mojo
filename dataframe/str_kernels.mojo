@@ -112,9 +112,11 @@ def _pad(text: String, fill: String, mode: Int64, width: Int) -> String:
     return padding + text
 
 
-def string_op(node: Node, input: Series) raises -> Series:
+def string_op(
+    node: Node, input: Series, compiled: Optional[Regex] = None
+) raises -> Series:
     if input.is_chunked():
-        return string_op(node, input.rechunk())
+        return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
     if node.op == STR_IS_IN:
         return is_in_literals(column, decode_values(node.text))
@@ -128,7 +130,9 @@ def string_op(node: Node, input: Series) raises -> Series:
             return string_contains(column, node.text)
         var regex: Regex
         try:
-            regex = compile_pattern(node.text, False)
+            regex = compiled.value().copy() if compiled else compile_pattern(
+                node.text, False
+            )
         except e:
             if node.integer == 1:
                 raise e^
@@ -144,7 +148,11 @@ def string_op(node: Node, input: Series) raises -> Series:
         return regex_contains(column, regex)
     if node.op == STR_EXTRACT:
         return regex_extract(
-            column, compile_pattern(node.text, False), Int(node.integer)
+            column,
+            compiled.value().copy() if compiled else compile_pattern(
+                node.text, False
+            ),
+            Int(node.integer),
         )
     if node.op == STR_REPLACE:
         # Polars replaces a pattern without ASCII punctuation literally, and
@@ -154,7 +162,9 @@ def string_op(node: Node, input: Series) raises -> Series:
         if not literal and limit == 0:
             # Polars' regex path ignores n=0 and replaces the first match.
             limit = 1
-        var regex = compile_pattern(node.text, literal)
+        var regex = compiled.value().copy() if compiled else compile_pattern(
+            node.text, literal
+        )
         return regex_replace(
             column, regex, regex.template(node.text2, not literal), limit
         )
