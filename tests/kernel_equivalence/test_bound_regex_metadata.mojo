@@ -23,13 +23,15 @@ def test_cloned_bound_regex_patterns_follow_occurrences() raises:
         _node(AND, left=2, right=2),
     ]
     var bound = bind(Expr(nodes^, "both"), columns)
-    var original = bound._regex(2).take()
+    var cached = bound._regex(2)
+    var original = cached.take()
     var cloned = occurrences(bound, 128)
     assert_equal(len(cloned[0].expr._nodes), 5)
     assert_true(Bool(cloned[0].regexes))
     assert_equal(len(cloned[0].regexes.value()[]), 2)
     for index in [1, 3]:
-        var regex = cloned[0]._regex(index).take()
+        cached = cloned[0]._regex(index)
+        var regex = cached.take()
         assert_equal(
             Int(Pointer(to=regex._compiled[])),
             Int(Pointer(to=original._compiled[])),
