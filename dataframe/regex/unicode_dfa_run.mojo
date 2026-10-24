@@ -1,5 +1,6 @@
 """Consume valid UTF8 packets whose cached DFA edges keep one state."""
-from .alphabet_batch import alphabet_batch
+from .alphabet_batch import alphabet_batch, alphabet_interval
+from .class_batch import _contains
 from .program import Program
 from .unicode_run import _decode_block, _structure
 
@@ -20,6 +21,7 @@ def _scan_width[
     comptime consumed = width * lanes
     var p = text.unsafe_ptr()
     var table = transitions.unsafe_ptr()
+    var interval: UInt64 = 0
     while end - at >= 16:
         var block = p.unsafe_load[width=16](at)
         if not _structure[width, False](block):
@@ -27,12 +29,18 @@ def _scan_width[
         var cp, valid = _decode_block[width, False](block)
         if not valid.reduce_and():
             return at
-        var classes = alphabet_batch[lanes](program, cp)
-        var entries = table.unsafe_gather[width=lanes](
-            classes.cast[DType.int]() + offset
-        )
-        if not entries.eq(expected).reduce_and():
-            return at
+        if interval == 0:
+            var cls: Int32
+            interval, cls = alphabet_interval(program, cp[0])
+            if table[unsafe_offset=offset + Int(cls)] != expected:
+                return at
+        if not _contains(interval, cp).reduce_and():
+            var classes = alphabet_batch[lanes](program, cp)
+            var entries = table.unsafe_gather[width=lanes](
+                classes.cast[DType.int]() + offset
+            )
+            if not entries.eq(expected).reduce_and():
+                return at
         at += consumed
     return at
 

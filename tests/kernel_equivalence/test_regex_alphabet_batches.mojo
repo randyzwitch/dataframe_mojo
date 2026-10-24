@@ -2,7 +2,7 @@
 # contract-group: kernel.regex
 from std.testing import assert_equal
 from dataframe.regex import Regex
-from dataframe.regex.alphabet_batch import alphabet_batch
+from dataframe.regex.alphabet_batch import alphabet_batch, alphabet_interval
 from dataframe.regex.alphabet_lookup import build_alphabet_lookup
 from dataframe.regex.program import Program, compile_program
 from dataframe.regex.syntax import Ast, NODE_CLASS
@@ -40,6 +40,16 @@ def _check_alphabet_batches(mut program: Program) raises:
                         )
                     ),
                 )
+                if cp[lane] <= 0x10FFFF:
+                    var bounds, cls = alphabet_interval(program, cp[lane])
+                    var low = UInt32(bounds & ((UInt64(1) << 21) - 1))
+                    var length = UInt32(
+                        (bounds >> 21) & ((UInt64(1) << 21) - 1)
+                    )
+                    assert_equal(cls, actual[lane])
+                    assert_equal(
+                        cp[lane] >= low and cp[lane] - low <= length, True
+                    )
             var short = alphabet_batch[4](program, cp.slice[4]())
             for lane in range(4):
                 assert_equal(short[lane], actual[lane])

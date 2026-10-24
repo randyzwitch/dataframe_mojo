@@ -2,6 +2,27 @@
 from .program import Program
 
 
+def alphabet_interval(program: Program, cp: UInt32) -> Tuple[UInt64, Int32]:
+    """Pack the canonical interval containing a valid code point and its ID."""
+    var cuts = program.boundaries.unsafe_ptr()
+    var lo = 0
+    var hi = len(program.boundaries)
+    while hi - lo > 1:
+        var mid = (lo + hi) >> 1
+        if cuts[unsafe_offset=mid] <= cp:
+            lo = mid
+        else:
+            hi = mid
+    var low = cuts[unsafe_offset=lo]
+    var high = UInt32(0x10FFFF)
+    if lo + 1 < len(program.boundaries):
+        high = cuts[unsafe_offset=lo + 1] - 1
+    return (
+        UInt64(low) | (UInt64(high - low) << 21),
+        program.interval_class.unsafe_ptr()[unsafe_offset=lo],
+    )
+
+
 @always_inline
 def alphabet_batch[
     lanes: Int
@@ -43,6 +64,8 @@ def alphabet_batch[
         lo = mixed.select(info >> 8, lo)
         hi = mixed.select(lo + (info & 255) + 1, hi)
         active &= ~uniform & ~page_uniform
+        if not active.reduce_or():
+            return result
     var search = active & (hi - lo).gt(1)
     while search.reduce_or():
         var mid = (lo + hi) >> 1

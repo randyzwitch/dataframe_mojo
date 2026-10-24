@@ -81,7 +81,16 @@ def test_unicode_dfa_packets_match_scalar_edges_at_bounds_and_class_changes() ra
         ]:
             for cls in range(program.alphabet):
                 table[7 + cls] = -1 if cls == blocked else expected
-            for unit in [String("αβ"), "中文", "𐐀𐐁", "䶿一", "中𐐀", "α中"]:
+            for unit in [
+                String("αβ"),
+                "中文",
+                "𐐀𐐁",
+                "䶿一",
+                "中𐐀",
+                "α中",
+                "aα中𐐀",
+                "a" * 20 + "中" * 20,
+            ]:
                 for offset in range(8):
                     var body = unit * 24 + "!!!!!!!!!!!!!!!!"
                     var text = "x" * offset + body
@@ -208,7 +217,16 @@ def test_unicode_dfa_packet_searches_preserve_vm_ends_and_capture_priority() rai
         var matcher = Matcher(regex)
         ref c = regex._compiled[]
         var expected = List[Int](length=c.forward.slot_count, fill=-1)
-        for unit in [String("αβ"), "中文", "𐐀𐐁", "䶿一", "中𐐀", "α中"]:
+        for unit in [
+            String("αβ"),
+            "中文",
+            "𐐀𐐁",
+            "䶿一",
+            "中𐐀",
+            "α中",
+            "aα中𐐀",
+            "a" * 20 + "中" * 20,
+        ]:
             for length in [0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33]:
                 for tail in [
                     String(""),

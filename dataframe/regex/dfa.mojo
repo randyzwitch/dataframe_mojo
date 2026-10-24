@@ -517,12 +517,57 @@ struct LazyDFA(Movable):
         var e = 0
         while end - at >= 16:
             if text.unsafe_ptr()[unsafe_offset=at] >= 128:
-                var stop = scan_unicode_self_loop(
-                    program, self.transitions, off, text, at, end, Int32(off)
-                )
-                if stop > at:
-                    at = stop
-                    continue
+                return self._advance_unicode_cached(program, text, off, at, end)
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+            cls, width = self._class_at(program, text, at)
+            e = Int(table[unsafe_offset=off + cls])
+            if e < 0:
+                return off, at
+            off = e
+            at += width
+        return off, at
+
+    @no_inline
+    def _advance_unicode_cached(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        var off: Int,
+        var at: Int,
+        end: Int,
+    ) -> Tuple[Int, Int]:
+        """Consume cached Unicode packets and scalar groups until a tag.
+        An ASCII group returns to the caller's ordinary cached loop."""
+        var table = self.transitions.unsafe_ptr()
+        var cls = 0
+        var width = 0
+        var e = 0
+        while end - at >= 16:
+            if text.unsafe_ptr()[unsafe_offset=at] < 128:
+                return off, at
+            var stop = scan_unicode_self_loop(
+                program, self.transitions, off, text, at, end, Int32(off)
+            )
+            if stop > at:
+                at = stop
+                continue
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
