@@ -16,6 +16,7 @@ from .charclass import (
     word_class,
     ascii_class,
 )
+from .alphabet_lookup import wide_alphabet_class
 from .class_lookup import build_unicode_membership, unicode_class_has
 from .syntax import (
     Ast,
@@ -52,6 +53,8 @@ comptime OP_FAIL: UInt8 = 9
 
 # Programs larger than this are rejected, like Rust's size limit.
 comptime MAX_INSTRUCTIONS = 500_000
+# Special DFA states encode up to three ASCII exclusions in seven-bit lanes.
+comptime SUFFIX_LIMIT = Int(Int32.MIN) + (1 << 23)
 
 
 @always_inline
@@ -77,6 +80,7 @@ struct Program(Movable, Sized):
     var start_unanchored: Int
     var slot_count: Int
     var looks: UInt32
+    var has_suffix: Bool
     # The DFA alphabet: `ascii_class` maps ASCII and Unicode cuts through
     # U+07FF. `boundaries` and `interval_class` describe the remaining
     # intervals. `class_rep` is one member of each class.
@@ -99,6 +103,7 @@ struct Program(Movable, Sized):
         self.start_unanchored = 0
         self.slot_count = 2
         self.looks = 0
+        self.has_suffix = False
         self.ascii_class = List[Int32]()
         self.boundaries = List[UInt32]()
         self.interval_class = List[Int32]()
@@ -110,6 +115,55 @@ struct Program(Movable, Sized):
 
     def __len__(self) -> Int:
         return len(self.op)
+
+    def _skip_slots(self, pc: Int) -> Int:
+        var at = pc
+        for _ in range(len(self)):
+            if at < 0 or at >= len(self):
+                return -1
+            if self.op[at] != OP_SAVE and self.op[at] != OP_NOP:
+                return at
+            at = Int(self.out[at])
+        return -1
+
+    def _greedy_suffix_code(self, pc: Int) -> Int32:
+        """A terminal greedy loop over all but at most three ASCII scalars.
+
+        Captures do not constrain the DFA; assertions and other consuming
+        instructions do. The first split arm must repeat this predicate.
+        """
+        var op = self.op[pc]
+        if op != OP_ANY and op != OP_ANY_NOT_NL and op != OP_CLASS:
+            return 0
+        var split = self._skip_slots(Int(self.out[pc]))
+        if split < 0 or self.op[split] != OP_SPLIT:
+            return 0
+        if self._skip_slots(Int(self.out[split])) != pc:
+            return 0
+        var accept = self._skip_slots(Int(self.arg[split]))
+        if accept < 0 or self.op[accept] != OP_MATCH:
+            return 0
+        if op == OP_ANY:
+            return Int32.MIN
+        if op == OP_ANY_NOT_NL:
+            return Int32.MIN | Int32((1 << 21) | 10)
+        ref ranges = self.class_ranges[Int(self.arg[pc])]
+        if len(ranges) == 0 or ranges[len(ranges) - 1] != MAX_CODEPOINT:
+            return 0
+        var next: UInt32 = 0
+        var count = 0
+        var bytes: UInt32 = 0
+        for i in range(0, len(ranges), 2):
+            var low = ranges[i]
+            if low > next:
+                if low > 128 or Int(low - next) > 3 - count:
+                    return 0
+                while next < low:
+                    bytes |= next << UInt32(7 * count)
+                    count += 1
+                    next += 1
+            next = ranges[i + 1] + 1
+        return Int32.MIN | Int32(bytes | UInt32(count << 21))
 
     def emit(mut self, op: UInt8, next: Int = -1, arg: Int = 0) raises -> Int:
         if len(self.op) >= MAX_INSTRUCTIONS:
@@ -182,19 +236,10 @@ struct Program(Movable, Sized):
             return Int(self.ascii_class.unsafe_ptr()[unsafe_offset=Int(cp)])
         var points = self.boundaries.unsafe_ptr()
         var classes = self.interval_class.unsafe_ptr()
-        var lo = 0
         var hi = len(self.boundaries)
         if cp >= points[unsafe_offset=hi - 1]:
             return Int(classes[unsafe_offset=hi - 1])
-        while hi - lo > 1:
-            # Every compiled alphabet starts at zero. The search keeps
-            # lo < hi <= len(boundaries), with nonnegative midpoints.
-            var mid = (lo + hi) >> 1
-            if points[unsafe_offset=mid] <= cp:
-                lo = mid
-            else:
-                hi = mid
-        return Int(classes[unsafe_offset=lo])
+        return wide_alphabet_class(self.boundaries, self.interval_class, cp)
 
 
 def _build_two_byte_membership(mut program: Program):
@@ -272,10 +317,12 @@ struct _Frag(Movable):
 struct _Compiler(Movable):
     var program: Program
     var reverse: Bool
+    var keep_reverse_captures: Bool
 
-    def __init__(out self, reverse: Bool):
+    def __init__(out self, reverse: Bool, keep_reverse_captures: Bool = False):
         self.program = Program()
         self.reverse = reverse
+        self.keep_reverse_captures = keep_reverse_captures
 
     def finish(deinit self) -> Program:
         return self.program^
@@ -338,13 +385,17 @@ struct _Compiler(Movable):
             self.program.looks |= UInt32(ast.a[node])
             return self.one(OP_LOOK, ast.a[node])
         if kind == NODE_GROUP:
-            if self.reverse:
+            if self.reverse and not self.keep_reverse_captures:
                 return self.compile(ast, ast.kid(node, 0))
             var index = ast.a[node]
-            var open = self.program.emit(OP_SAVE, -1, 2 * index)
+            var open = self.program.emit(
+                OP_SAVE, -1, 2 * index + Int(self.reverse)
+            )
             var body = self.compile(ast, ast.kid(node, 0))
             self.program.out[open] = Int32(body.start)
-            var close = self.program.emit(OP_SAVE, -1, 2 * index + 1)
+            var close = self.program.emit(
+                OP_SAVE, -1, 2 * index + Int(not self.reverse)
+            )
             self.patch(body.holes, close)
             return _Frag(open, [close * 2])
         if kind == NODE_CONCAT:
@@ -578,29 +629,35 @@ def _build_alphabet(mut program: Program):
         program.class_word.append(program.is_word(program.class_rep[c]))
 
 
-def compile_program(ast: Ast, reverse: Bool) raises -> Program:
+def compile_program(
+    ast: Ast, reverse: Bool, keep_reverse_captures: Bool = False
+) raises -> Program:
     """Compile a syntax tree. A forward program brackets the pattern with
     the whole-match slots and adds the unanchored entry `(?s:.)*?`; a
     reverse program matches the pattern backwards (concatenations
-    reversed) and keeps no slots, for finding where a match starts."""
-    return _compile_program(ast, reverse, List[UInt32]())
+    reversed). Reverse captures are optional; each group's end is saved
+    before its body and its start after the body."""
+    return _compile_program(ast, reverse, List[UInt32](), keep_reverse_captures)
 
 
 def _compile_program(
-    ast: Ast, reverse: Bool, var word: List[UInt32]
+    ast: Ast,
+    reverse: Bool,
+    var word: List[UInt32],
+    keep_reverse_captures: Bool = False,
 ) raises -> Program:
-    var compiler = _Compiler(reverse)
+    var compiler = _Compiler(reverse, keep_reverse_captures)
     compiler.program.slot_count = 2 * (ast.group_count() + 1)
-    if reverse:
+    if reverse and not keep_reverse_captures:
         var body = compiler.compile(ast, ast.root)
         var done = compiler.program.emit(OP_MATCH)
         compiler.patch(body.holes, done)
         compiler.program.start = body.start
     else:
-        var open = compiler.program.emit(OP_SAVE, -1, 0)
+        var open = compiler.program.emit(OP_SAVE, -1, Int(reverse))
         var body = compiler.compile(ast, ast.root)
         compiler.program.out[open] = Int32(body.start)
-        var close = compiler.program.emit(OP_SAVE, -1, 1)
+        var close = compiler.program.emit(OP_SAVE, -1, Int(not reverse))
         compiler.patch(body.holes, close)
         var done = compiler.program.emit(OP_MATCH)
         compiler.program.out[close] = Int32(done)
@@ -612,6 +669,10 @@ def _compile_program(
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    for pc in range(len(program)):
+        if program._greedy_suffix_code(pc) != 0:
+            program.has_suffix = True
+            break
     # Only live Unicode-word assertions observe this context. ASCII-word
     # assertions use their own byte predicate and alphabet partition.
     if program.looks & LOOK_UNICODE_WORD:

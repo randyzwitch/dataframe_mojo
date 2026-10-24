@@ -9,6 +9,7 @@ dense class tables; Unicode tests the state's disjoint consuming predicates
 without searching the complete alphabet. Assertions see the full input.
 """
 from std.bit import count_trailing_zeros
+from std.memory import ArcPointer
 from .program import (
     Program,
     consumes,
@@ -18,12 +19,16 @@ from .program import (
     OP_LOOK,
     OP_NOP,
 )
-from .pikevm import decode, look_holds
+from .pikevm import decode, look_holds, previous_start
+from .ascii_run import scan_ascii_run
+from .unicode_run import has_unicode_interval, scan_unicode_interval
 
 comptime _MAX_STATES = 256
 comptime _MAX_CELLS = 32768
 comptime _MAX_PROGRAM = 512
 comptime _MAX_SLOTS = 64
+comptime _UNICODE_INTERVAL = 1 << 30
+comptime _LOOP_PC = _UNICODE_INTERVAL - 1
 
 
 struct OnePass(Movable):
@@ -41,6 +46,7 @@ struct OnePass(Movable):
     var terminal_edge: List[Int32]
     # A consuming self-loop with no captures, assertions or match priority
     # changes can scan a run without repeating the state bookkeeping.
+    # The high bit marks predicates supported by the Unicode batch scanner.
     var loop_pc: List[Int32]
     var has_loops: Bool
 
@@ -189,6 +195,23 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
+                    var interval = (pc & _UNICODE_INTERVAL) != 0
+                    pc &= _LOOP_PC
+                    comptime if unicode_input:
+                        if end - at >= 16:
+                            if bytes[unsafe_offset=at] < 128:
+                                at = scan_ascii_run[False](
+                                    program, pc, text, at, end
+                                )
+                            elif interval:
+                                at = scan_unicode_interval[False](
+                                    program, pc, text, at, end
+                                )
+                    else:
+                        if end - at >= 16:
+                            at = scan_ascii_run[False](
+                                program, pc, text, at, end
+                            )
                     while at < end:
                         var cp: UInt32
                         var run_width = 1
@@ -201,6 +224,153 @@ struct OnePass(Movable):
                         if not program.step(pc, cp):
                             break
                         at += run_width
+
+    @always_inline
+    def search_reverse[
+        unicode_input: Bool
+    ](
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        end: Int,
+        floor: Int,
+        mut current: List[Int],
+        mut slots: List[Int],
+    ) -> Bool:
+        if self.has_loops:
+            return self._search_reverse[unicode_input, True](
+                program, text, end, floor, current, slots
+            )
+        return self._search_reverse[unicode_input, False](
+            program, text, end, floor, current, slots
+        )
+
+    def _search_reverse[
+        unicode_input: Bool, accelerate: Bool
+    ](
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        end: Int,
+        floor: Int,
+        mut current: List[Int],
+        mut slots: List[Int],
+    ) -> Bool:
+        # The forward match fixes the end. Longest reverse acceptance finds
+        # its leftmost start. First writes retain the last participating
+        # forward capture when a group repeats.
+        var captures = current.unsafe_ptr()
+        var output = slots.unsafe_ptr()
+        var bytes = text.unsafe_ptr()
+        var count = len(slots)
+        for k in range(count):
+            captures[unsafe_offset=k] = -1
+        var at = end
+        var state = 0
+        var found = False
+        while True:
+            var edge = -1
+            var prev = at
+            if at > floor:
+                var cp: UInt32
+                comptime if unicode_input:
+                    prev = previous_start(text, at)
+                    cp = UInt32(decode(text, prev) >> 3)
+                else:
+                    prev = at - 1
+                    cp = UInt32(bytes[unsafe_offset=prev])
+                if prev >= floor:
+                    if cp < 128:
+                        edge = state * program.alphabet + Int(
+                            program.ascii_class[Int(cp)]
+                        )
+                    else:
+                        for k in range(
+                            Int(self.terminal_starts[state]),
+                            Int(self.terminal_starts[state + 1]),
+                        ):
+                            if program.step(Int(self.terminal_pc[k]), cp):
+                                edge = Int(self.terminal_edge[k])
+                                break
+            var accepts = self.matched[state] and _holds(
+                program, self.match_looks[state], text, at
+            )
+            var next = -1
+            if edge >= 0:
+                next = Int(self.next[edge])
+                if next >= 0 and not _holds(
+                    program, self.looks[edge], text, at
+                ):
+                    next = -1
+            # An unconditional acceptance on the next step supersedes this
+            # snapshot. Do not copy every slot on a long accepting run.
+            if (
+                accepts
+                and next >= 0
+                and self.matched[next]
+                and self.match_looks[next] == 0
+            ):
+                accepts = False
+            if accepts:
+                for k in range(count):
+                    output[unsafe_offset=k] = captures[unsafe_offset=k]
+                var mask = self.match_save[state]
+                while mask:
+                    var k = Int(count_trailing_zeros(mask))
+                    if output[unsafe_offset=k] < 0:
+                        output[unsafe_offset=k] = at
+                    mask &= mask - 1
+                found = True
+            if next < 0:
+                return found
+            var mask = self.save[edge]
+            while mask:
+                var k = Int(count_trailing_zeros(mask))
+                if captures[unsafe_offset=k] < 0:
+                    captures[unsafe_offset=k] = at
+                mask &= mask - 1
+            state = next
+            at = prev
+            comptime if accelerate:
+                var pc = Int(self.loop_pc[state])
+                if pc >= 0:
+                    var interval = (pc & _UNICODE_INTERVAL) != 0
+                    pc &= _LOOP_PC
+                    comptime if unicode_input:
+                        if at - floor >= 16:
+                            if bytes[unsafe_offset=at - 1] < 128:
+                                at = scan_ascii_run[True](
+                                    program, pc, text, at, floor
+                                )
+                            elif interval:
+                                at = scan_unicode_interval[True](
+                                    program, pc, text, at, floor
+                                )
+                    else:
+                        if at - floor >= 16:
+                            at = scan_ascii_run[True](
+                                program, pc, text, at, floor
+                            )
+                    while at > floor:
+                        var cp: UInt32
+                        comptime if unicode_input:
+                            prev = previous_start(text, at)
+                            cp = UInt32(decode(text, prev) >> 3)
+                        else:
+                            prev = at - 1
+                            cp = UInt32(bytes[unsafe_offset=prev])
+                        if prev < floor or not program.step(pc, cp):
+                            break
+                        at = prev
+
+
+struct CaptureTables(Movable):
+    var forward: OnePass
+    var reverse: Optional[ArcPointer[OnePass]]
+
+    def __init__(out self, var forward: OnePass):
+        self.forward = forward^
+        self.reverse = None
 
 
 @always_inline
@@ -332,7 +502,10 @@ def compile_onepass(program: Program) -> OnePass:
                     and (match_rank < 0 or match_looks == 0)
                 ):
                     loop_pc = terminals[k]
-        result.loop_pc.append(Int32(loop_pc))
+        var encoded_pc = loop_pc
+        if loop_pc >= 0 and has_unicode_interval(program, loop_pc):
+            encoded_pc |= _UNICODE_INTERVAL
+        result.loop_pc.append(Int32(encoded_pc))
         result.has_loops = result.has_loops or loop_pc >= 0
         state += 1
     result.terminal_starts.append(Int32(len(result.terminal_pc)))

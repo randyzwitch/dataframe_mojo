@@ -585,14 +585,16 @@ struct _Parser(Movable):
         if c == 100 or c == 68 or c == 119 or c == 87 or c == 115 or c == 83:
             var result = _Escape(_ESC_CLASS)
             var lower = c | 32
-            var ranges = digit_class() if lower == 100 else (
-                word_class() if lower == 119 else space_class()
-            )
+            var ranges: List[UInt32]
             if self.flags & _FLAG_ASCII:
                 ranges = ascii_class(
                     "digit" if lower
                     == 100 else "word" if lower
                     == 119 else "space"
+                )
+            else:
+                ranges = digit_class() if lower == 100 else (
+                    word_class() if lower == 119 else space_class()
                 )
             result.ranges = negate(ranges) if c < 97 else ranges^
             self.check_ascii(result.ranges)
