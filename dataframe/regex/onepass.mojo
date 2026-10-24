@@ -39,6 +39,10 @@ struct OnePass(Movable):
     var terminal_starts: List[Int32]
     var terminal_pc: List[Int32]
     var terminal_edge: List[Int32]
+    # A consuming self-loop with no captures, assertions or match priority
+    # changes can scan a run without repeating the state bookkeeping.
+    var loop_pc: List[Int32]
+    var has_loops: Bool
 
     def __init__(out self):
         self.next = List[Int32]()
@@ -51,13 +55,35 @@ struct OnePass(Movable):
         self.terminal_starts = List[Int32]()
         self.terminal_pc = List[Int32]()
         self.terminal_edge = List[Int32]()
+        self.loop_pc = List[Int32]()
+        self.has_loops = False
 
     @always_inline
     def active(self) -> Bool:
         return len(self.matched) > 0
 
+    @always_inline
     def search[
         unicode_input: Bool
+    ](
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        start: Int,
+        end: Int,
+        mut current: List[Int],
+        mut slots: List[Int],
+    ) -> Bool:
+        if self.has_loops:
+            return self._search[unicode_input, True](
+                program, text, start, end, current, slots
+            )
+        return self._search[unicode_input, False](
+            program, text, start, end, current, slots
+        )
+
+    def _search[
+        unicode_input: Bool, accelerate: Bool
     ](
         self,
         program: Program,
@@ -160,6 +186,21 @@ struct OnePass(Movable):
                 mask &= mask - 1
             state = next
             at += width
+            comptime if accelerate:
+                var pc = Int(self.loop_pc[state])
+                if pc >= 0:
+                    while at < end:
+                        var cp: UInt32
+                        var run_width = 1
+                        comptime if unicode_input:
+                            var packed = decode(text, at)
+                            cp = UInt32(packed >> 3)
+                            run_width = packed & 7
+                        else:
+                            cp = UInt32(bytes[unsafe_offset=at])
+                        if not program.step(pc, cp):
+                            break
+                        at += run_width
 
 
 @always_inline
@@ -276,10 +317,23 @@ def compile_onepass(program: Program) -> OnePass:
             result.save.append(save)
             result.looks.append(flags)
             result.match_first.append(first)
+        var loop_pc = -1
         for k in range(len(terminals)):
             if edges[k] >= 0:
                 result.terminal_pc.append(Int32(terminals[k]))
                 result.terminal_edge.append(Int32(edges[k]))
+                var edge = edges[k]
+                if (
+                    loop_pc < 0
+                    and result.next[edge] == state
+                    and result.save[edge] == 0
+                    and result.looks[edge] == 0
+                    and not result.match_first[edge]
+                    and (match_rank < 0 or match_looks == 0)
+                ):
+                    loop_pc = terminals[k]
+        result.loop_pc.append(Int32(loop_pc))
+        result.has_loops = result.has_loops or loop_pc >= 0
         state += 1
     result.terminal_starts.append(Int32(len(result.terminal_pc)))
     return result^
