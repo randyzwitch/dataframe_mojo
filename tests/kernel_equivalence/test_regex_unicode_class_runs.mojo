@@ -12,20 +12,6 @@ from dataframe.regex.unicode_run import _scan_class_width
 from .test_regex_engine import _span
 
 
-def _single_page(ranges: List[UInt32], cp: UInt32) -> Bool:
-    var start = cp & ~UInt32(255)
-    var end = start + 255
-    var lo = 0
-    var hi = len(ranges) // 2
-    while lo < hi:
-        var mid = (lo + hi) >> 1
-        if ranges[2 * mid + 1] < start:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo + 1 >= len(ranges) // 2 or ranges[2 * (lo + 1)] > end
-
-
 def _point(mut points: List[UInt32], cp: UInt32):
     if cp >= 128 and cp <= 0x10FFFF and not (cp >= 0xD800 and cp <= 0xDFFF):
         points.append(cp)
@@ -44,13 +30,7 @@ def _check_packets[
         for k in range(lanes):
             var expected = class_contains(ranges, cp[k])
             assert_true(not accepted[k] or expected)
-            var complete = (
-                width == 2
-                or root == 1
-                or (root >> 62) == 1
-                or (root >> 62) == 2
-            )
-            if complete or ((root >> 62) == 3 and _single_page(ranges, cp[k])):
+            if width == 2 or root == 1 or (root >> 62) != 0:
                 assert_equal(accepted[k], expected)
 
 

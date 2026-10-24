@@ -1,7 +1,7 @@
 """Prove Unicode class membership in batches using existing directories.
 
-False may mean that a page needs the scalar interval search. True always
-means canonical membership, so a caller can safely consume that character.
+False may mean that the lookup budget left no directory. True always means
+canonical membership, so a caller can safely consume that character.
 Inputs must be Unicode scalars in the selected UTF8 width.
 """
 from .program import Program
@@ -62,12 +62,28 @@ def class_batch[
             DType.uint32
         ]()
         var uniform = pages.eq(1) | (has_table & info.eq(1))
-        var single = has_table & info.gt(1) & (info & 255).eq(0)
-        var first = single.select((info >> 8) - 1, SIMD[DType.uint32, lanes](0))
-        var indices = first.cast[DType.int]() * 2
+        var mixed = has_table & info.gt(1)
+        if not mixed.reduce_or():
+            return uniform
+        var lo = mixed.select((info >> 8) - 1, SIMD[DType.uint32, lanes](0))
+        var hi = mixed.select(
+            lo + (info & 255) + 1, SIMD[DType.uint32, lanes](0)
+        )
         var ranges = program.class_ranges.unsafe_ptr()[
             unsafe_offset=id
         ].unsafe_ptr()
-        var low = ranges.unsafe_gather[width=lanes](indices, single, 0)
-        var high = ranges.unsafe_gather[width=lanes](indices + 1, single, 0)
-        return uniform | (single & (cp - low).le(high - low))
+        var active = (hi - lo).gt(1) & mixed
+        # Each mixed page intersects at most 256 canonical intervals. Find
+        # the last lower endpoint <= cp, independently in each active lane.
+        while active.reduce_or():
+            var mid = (lo + hi) >> 1
+            var point = ranges.unsafe_gather[width=lanes](
+                mid.cast[DType.int]() * 2, active, 0
+            )
+            lo = (active & point.le(cp)).select(mid, lo)
+            hi = (active & point.gt(cp)).select(mid, hi)
+            active = (hi - lo).gt(1) & mixed
+        var indices = lo.cast[DType.int]() * 2
+        var low = ranges.unsafe_gather[width=lanes](indices, mixed, 0)
+        var high = ranges.unsafe_gather[width=lanes](indices + 1, mixed, 0)
+        return uniform | (mixed & (cp - low).le(high - low))
