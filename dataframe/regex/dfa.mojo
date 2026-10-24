@@ -40,7 +40,7 @@ from .program import (
     consumes,
 )
 from .suffix import suffix_end
-from .unicode_dfa_run import scan_unicode_self_loop
+from .unicode_dfa_run import has_packet_layout, scan_unicode_self_loop
 from .syntax import (
     LOOK_END_LINE,
     LOOK_END_TEXT,
@@ -565,7 +565,7 @@ struct LazyDFA(Movable):
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
                 return off, at
-            if width > 1 and e == off:
+            if width > 1 and e == off and has_packet_layout(text, at, width):
                 var stop = scan_unicode_self_loop(
                     program, self.transitions, off, text, at, end, Int32(off)
                 )
@@ -613,7 +613,7 @@ struct LazyDFA(Movable):
             var cls, width = self._class_at(program, text, at)
             if table[unsafe_offset=off + cls] != expected:
                 return at, last
-            if width > 1:
+            if width > 1 and has_packet_layout(text, at, width):
                 var stop = scan_unicode_self_loop(
                     program, self.transitions, off, text, at, end, expected
                 )

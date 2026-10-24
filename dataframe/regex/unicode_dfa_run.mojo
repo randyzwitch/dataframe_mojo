@@ -54,6 +54,23 @@ def _scan_width[
     return at
 
 
+@always_inline
+def has_packet_layout(
+    text: Span[UInt8, ImmutAnyOrigin], at: Int, width: Int
+) -> Bool:
+    """Whether sixteen readable bytes have one complete fixed-width layout.
+    The caller bounds the load. Code point validity and cached transitions
+    still belong to the packet scanner."""
+    var block = text.unsafe_ptr().unsafe_load[width=16](at)
+    if width == 2:
+        return _structure[2, False](block)
+    if width == 3:
+        return _structure[3, False](block)
+    if width == 4:
+        return _structure[4, False](block)
+    return False
+
+
 @no_inline
 def scan_unicode_self_loop(
     program: Program,
