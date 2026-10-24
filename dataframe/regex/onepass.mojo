@@ -21,14 +21,15 @@ from .program import (
 )
 from .pikevm import decode, look_holds, previous_start
 from .ascii_run import scan_ascii_run
-from .unicode_run import has_unicode_interval, scan_unicode_interval
+from .reverse_run import scan_reverse_run
+from .unicode_run import has_unicode_run, scan_unicode_run
 
 comptime _MAX_STATES = 256
 comptime _MAX_CELLS = 32768
 comptime _MAX_PROGRAM = 512
 comptime _MAX_SLOTS = 64
-comptime _UNICODE_INTERVAL = 1 << 30
-comptime _LOOP_PC = _UNICODE_INTERVAL - 1
+comptime _UNICODE_RUN = 1 << 30
+comptime _LOOP_PC = _UNICODE_RUN - 1
 
 
 struct OnePass(Movable):
@@ -195,7 +196,7 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
-                    var interval = (pc & _UNICODE_INTERVAL) != 0
+                    var unicode_run = (pc & _UNICODE_RUN) != 0
                     pc &= _LOOP_PC
                     comptime if unicode_input:
                         if end - at >= 16:
@@ -203,8 +204,8 @@ struct OnePass(Movable):
                                 at = scan_ascii_run[False](
                                     program, pc, text, at, end
                                 )
-                            elif interval:
-                                at = scan_unicode_interval[False](
+                            elif unicode_run:
+                                at = scan_unicode_run[False](
                                     program, pc, text, at, end
                                 )
                     else:
@@ -334,7 +335,7 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
-                    var interval = (pc & _UNICODE_INTERVAL) != 0
+                    var unicode_run = (pc & _UNICODE_RUN) != 0
                     pc &= _LOOP_PC
                     comptime if unicode_input:
                         if at - floor >= 16:
@@ -342,8 +343,8 @@ struct OnePass(Movable):
                                 at = scan_ascii_run[True](
                                     program, pc, text, at, floor
                                 )
-                            elif interval:
-                                at = scan_unicode_interval[True](
+                            elif unicode_run:
+                                at = scan_unicode_run[True](
                                     program, pc, text, at, floor
                                 )
                     else:
@@ -351,6 +352,10 @@ struct OnePass(Movable):
                             at = scan_ascii_run[True](
                                 program, pc, text, at, floor
                             )
+                    comptime if unicode_input:
+                        if unicode_run:
+                            at = scan_reverse_run(program, pc, text, at, floor)
+                            continue
                     while at > floor:
                         var cp: UInt32
                         comptime if unicode_input:
@@ -503,8 +508,8 @@ def compile_onepass(program: Program) -> OnePass:
                 ):
                     loop_pc = terminals[k]
         var encoded_pc = loop_pc
-        if loop_pc >= 0 and has_unicode_interval(program, loop_pc):
-            encoded_pc |= _UNICODE_INTERVAL
+        if loop_pc >= 0 and has_unicode_run(program, loop_pc):
+            encoded_pc |= _UNICODE_RUN
         result.loop_pc.append(Int32(encoded_pc))
         result.has_loops = result.has_loops or loop_pc >= 0
         state += 1
