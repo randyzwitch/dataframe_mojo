@@ -4,6 +4,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .regex import Regex, escape
 from .string_column import StringColumn, StringBuilder
+from .string_transform import transform_strings
 from .expr import (
     Node,
     STR_LEN_CHARS,
@@ -56,40 +57,6 @@ def _join(parts: List[String], start: Int, end: Int) -> String:
     return out^
 
 
-def _is_space(part: String) -> Bool:
-    return (
-        part == " "
-        or part == "\t"
-        or part == "\n"
-        or part == "\r"
-        or part == "\x0b"
-        or part == "\x0c"
-    )
-
-
-def _strip(text: String, characters: String, mode: Int64) -> String:
-    var parts = _codepoints(text)
-    var remove = _codepoints(characters)
-    var start = 0
-    var end = len(parts)
-
-    def strippable(part: String) {imm remove} -> Bool:
-        if len(remove) == 0:
-            return _is_space(part)
-        for r in remove:
-            if r == part:
-                return True
-        return False
-
-    if mode != 2:
-        while start < end and strippable(parts[start]):
-            start += 1
-    if mode != 1:
-        while end > start and strippable(parts[end - 1]):
-            end -= 1
-    return _join(parts, start, end)
-
-
 def _slice(text: String, offset: Int, length: Int) -> String:
     var parts = _codepoints(text)
     var n = len(parts)
@@ -99,25 +66,18 @@ def _slice(text: String, offset: Int, length: Int) -> String:
     return _join(parts, start, end)
 
 
-def _pad(text: String, fill: String, mode: Int64, width: Int) -> String:
-    var parts = _codepoints(text)
-    var missing = width - len(parts)
-    if missing <= 0:
-        return text
-    var padding = fill * missing
-    if mode == 1:
-        return text + padding
-    if mode == 2 and len(parts) > 0 and (parts[0] == "-" or parts[0] == "+"):
-        return parts[0] + padding + _join(parts, 1, len(parts))
-    return padding + text
-
-
 def string_op(
     node: Node, input: Series, compiled: Optional[Regex] = None
 ) raises -> Series:
     if input.is_chunked():
         return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
+    if node.op == STR_STRIP:
+        return transform_strings[STR_STRIP](node, column)
+    if node.op == STR_REVERSE:
+        return transform_strings[STR_REVERSE](node, column)
+    if node.op == STR_PAD:
+        return transform_strings[STR_PAD](node, column)
     if node.op == STR_IS_IN:
         return is_in_literals(column, decode_values(node.text))
     # Predicates and slices over the raw bytes, on every worker (#374).
@@ -215,18 +175,8 @@ def string_op(
             out.append(text.upper())
         elif op == STR_LOWER:
             out.append(text.lower())
-        elif op == STR_STRIP:
-            out.append(_strip(text, node.text, node.integer))
         elif op == STR_SLICE:
             out.append(_slice(text, Int(node.integer), node.min_count))
-        elif op == STR_REVERSE:
-            var parts = _codepoints(text)
-            var reversed = String()
-            for j in range(len(parts) - 1, -1, -1):
-                reversed += parts[j]
-            out.append(reversed)
-        elif op == STR_PAD:
-            out.append(_pad(text, node.text, node.integer, node.min_count))
         else:
             raise Error("Unsupported string operation")
     return Series("", out^.finish())
