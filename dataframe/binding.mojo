@@ -246,8 +246,7 @@ struct BoundExpr(Copyable):
     def _regex(self, index: Int) -> Optional[Regex]:
         if self.regexes:
             ref patterns = self.regexes.value()[]
-            if index in patterns:
-                return patterns[index].copy()
+            return patterns.get(index)
         return None
 
     def shape(self) -> Int:
@@ -280,7 +279,7 @@ def _text_function_name(op: Int) -> String:
 
 def _check_pattern(node: Node) raises -> Optional[Regex]:
     """Raise now for an invalid regular expression in a strict regex
-    string operation, rather than waiting until execution."""
+    string operation, and retain the validated pattern for execution."""
     var regex = False
     if node.op == STR_CONTAINS:
         regex = node.integer == 1
