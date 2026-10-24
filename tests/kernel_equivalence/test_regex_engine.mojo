@@ -77,19 +77,22 @@ def test_one_regex_shared_by_workers() raises:
 
 
 def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
-    # Unanchored, a(a|b){20}c tracks which of the last 25 code points were
+    # Unanchored, a(a|b){24}c tracks which of the last 25 code points were
     # `a`: up to 2^25 DFA states over random a/b text, past the cache.
     var regex = Regex("a(a|b){24}c")
     var matcher = Matcher(regex)
+    assert_equal(len(matcher.pike.current.dense), 0)
     var bytes = List[UInt8]()
     var state: UInt64 = 12345
-    for _ in range(250_000):
+    # Two cache fills are needed before the progress check gives up.
+    for _ in range(500_000):
         state = state * 6364136223846793005 + 1442695040888963407
         bytes.append(UInt8(97) if (state >> 33) & 1 else UInt8(98))
     var text = String(unsafe_from_utf8=bytes)
     var tail = text + "a" + String("b") * 24 + "c"
     assert_false(matcher.is_match(_span(text)))
     assert_true(matcher.forward.resets > 0)
+    assert_true(len(matcher.pike.current.dense) > 0)
     assert_true(matcher.is_match(_span(tail)))
     var m = matcher.find(_span(tail))
     assert_equal(m[0], text.byte_length())
@@ -544,6 +547,8 @@ def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
     assert_true(Bool(regex._compiled[].onepass))
     var matcher = Matcher(regex)
     var long = String("a") * 100000 + String("β") * 100000
+    assert_equal(len(matcher.pike.current.slots), 0)
+    assert_equal(len(matcher.pike.next.slots), 0)
     for _ in range(2):
         var short = String("aaa")
         assert_true(matcher.captures(_span(short)))
@@ -560,6 +565,29 @@ def test_onepass_ascii_and_unicode_can_reuse_vm_scratch() raises:
         var bad = String("aaa!")
         assert_false(matcher.captures(_span(bad)))
         _ = bad
+    assert_equal(len(matcher.pike.current.slots), 0)
+    assert_equal(len(matcher.pike.next.slots), 0)
+    # Allocate the fallback's matrices after one-pass searches, then reuse
+    # the same scratch in both engines without leaking earlier captures.
+    var text = String("aaaββ")
+    assert_true(
+        matcher.pike.search(
+            regex._compiled[].forward,
+            _span(text),
+            0,
+            text.byte_length(),
+            True,
+            matcher.slots,
+        )
+    )
+    assert_true(len(matcher.pike.current.slots) > 0)
+    assert_true(len(matcher.pike.next.slots) > 0)
+    assert_equal(matcher.slots[4], 3)
+    assert_equal(matcher.slots[5], 7)
+    assert_true(matcher.captures(_span(long)))
+    assert_equal(matcher.slots[4], 100000)
+    assert_equal(matcher.slots[5], 300000)
+    _ = text
     _ = long
 
 
@@ -637,6 +665,55 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
                     for k in range(len(slots)):
                         assert_equal(matcher.slots[k], slots[k], pattern)
             _ = text
+
+
+def test_search_engines_allocate_buffers_only_when_used() raises:
+    var patterns: List[String] = ["abc", "([a-z])", "^(a+)(β*)$"]
+    var texts: List[String] = ["xabcx", "!aβ", "aaaββ"]
+    var starts: List[Int] = [1, 1, 0]
+    var ends: List[Int] = [4, 2, 7]
+    for k in range(len(patterns)):
+        var regex = Regex(patterns[k])
+        var matcher = Matcher(regex)
+        var text = texts[k]
+        for _ in range(2):
+            matcher.forward.clear()
+            matcher.reverse.clear()
+            assert_true(matcher.captures(_span(text)))
+            assert_equal(matcher.slots[0], starts[k])
+            assert_equal(matcher.slots[1], ends[k])
+            assert_equal(len(matcher.forward.table), 0)
+            assert_equal(len(matcher.reverse.table), 0)
+            assert_equal(len(matcher.forward.q0.dense), 0)
+            assert_equal(len(matcher.reverse.q1.dense), 0)
+            assert_equal(len(matcher.pike.current.slots), 0)
+        _ = text
+    # Variable-width unanchored matches use both directions. A cleared
+    # cache keeps its allocated buffers and reconstructs the same spans.
+    var regex = Regex("(a+)(β+)")
+    var matcher = Matcher(regex)
+    var text = String("xaaaββ!")
+    for _ in range(2):
+        assert_true(matcher.captures(_span(text)))
+        assert_equal(matcher.slots[0], 1)
+        assert_equal(matcher.slots[1], 8)
+        assert_equal(matcher.slots[2], 1)
+        assert_equal(matcher.slots[3], 4)
+        assert_equal(matcher.slots[4], 4)
+        assert_equal(matcher.slots[5], 8)
+        assert_true(matcher.forward.state_count() > 0)
+        assert_true(matcher.reverse.state_count() > 0)
+        assert_true(len(matcher.forward.table) >= 1024)
+        assert_true(len(matcher.reverse.table) >= 1024)
+        assert_equal(
+            len(matcher.forward.q0.dense), len(regex._compiled[].forward)
+        )
+        assert_equal(
+            len(matcher.reverse.q1.dense), len(regex._compiled[].reverse)
+        )
+        matcher.forward.clear()
+        matcher.reverse.clear()
+    _ = text
 
 
 def test_cached_start_states_preserve_context_sensitive_matches() raises:

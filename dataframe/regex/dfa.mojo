@@ -134,9 +134,9 @@ struct LazyDFA(Movable):
         self.flags = List[UInt32]()
         self.hashes = List[UInt64]()
         self.transitions = List[Int32]()
-        self.table = List[Int32](length=1024, fill=-1)
-        self.q0 = _Workq(len(program))
-        self.q1 = _Workq(len(program))
+        self.table = List[Int32]()
+        self.q0 = _Workq(0)
+        self.q1 = _Workq(0)
         self.stack = List[Int32]()
         self.start_states = List[Int32](length=10, fill=UNKNOWN)
         self.accel = List[Bool]()
@@ -425,6 +425,12 @@ struct LazyDFA(Movable):
     def _new_start_state(
         mut self, program: Program, context: Int, key: Int, anchored: Bool
     ) -> Int32:
+        # Literal, single-class and anchored one-pass searches need no DFA
+        # buffers. Allocate them on the first cold start-state lookup.
+        if len(self.table) == 0:
+            self.table = List[Int32](length=1024, fill=-1)
+            self.q0 = _Workq(len(program))
+            self.q1 = _Workq(len(program))
         var flag: UInt32 = 0
         if context == 0:
             if self.reverse:
