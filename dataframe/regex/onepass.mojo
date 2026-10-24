@@ -191,7 +191,12 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
-                    comptime if not unicode_input:
+                    comptime if unicode_input:
+                        if end - at >= 16 and bytes[unsafe_offset=at] < 128:
+                            at = scan_ascii_run[False](
+                                program, pc, text, at, end
+                            )
+                    else:
                         if end - at >= 16:
                             at = scan_ascii_run[False](
                                 program, pc, text, at, end
@@ -318,7 +323,15 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
-                    comptime if not unicode_input:
+                    comptime if unicode_input:
+                        if (
+                            at - floor >= 16
+                            and bytes[unsafe_offset=at - 1] < 128
+                        ):
+                            at = scan_ascii_run[True](
+                                program, pc, text, at, floor
+                            )
+                    else:
                         if at - floor >= 16:
                             at = scan_ascii_run[True](
                                 program, pc, text, at, floor
