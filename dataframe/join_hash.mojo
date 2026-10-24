@@ -1842,7 +1842,7 @@ def prepared_hash_join_gather(
     if prepared.progression:
         var key = left_keys[0].rechunk()
         var n = len(key)
-        var blocks = probe_blocks(n)
+        var blocks = probe_blocks(n, request)
         var bounds = partitions(n, blocks, 1)
         var probes = List[_DirectProbeJob](capacity=blocks)
         for block in range(blocks):
@@ -1859,7 +1859,7 @@ def prepared_hash_join_gather(
         return
     var index = prepared.probe(left_keys, 0)
     var n = len(index.left[0])
-    var blocks = probe_blocks(n)
+    var blocks = probe_blocks(n, request)
     var bounds = partitions(n, blocks, 1)
     var probes = List[_HashProbeJob](capacity=blocks)
     for block in range(blocks):

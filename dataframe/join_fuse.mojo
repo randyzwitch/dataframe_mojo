@@ -16,26 +16,10 @@ column's chunks (a column with a single block stays one array).
 """
 from std.memory import ArcPointer
 
+from .huge_pages import HUGE_PAGE_BYTES
 from .gather import _RechunkJob, take_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
-
-# Probe rows per block. Polars' morsel is about 100K rows, but a block's output
-# columns are fresh buffers whose first touch faults every page, and only a
-# buffer that holds whole 2 MB pages (an 8-byte column of 1M rows is 8 MB) can
-# be backed by huge pages (`huge_pages.mojo`); with 128K-row blocks the
-# faults came back and the join was slower than with whole-output lists.
-comptime PROBE_BLOCK_ROWS = 1 << 20
-
-
-def probe_blocks(rows: Int) -> Int:
-    """Blocks to cut `rows` probe rows into: none longer than the block
-    size, and a whole number per worker so no worker runs a round alone."""
-    var workers = worker_count(rows)
-    var blocks = (rows + PROBE_BLOCK_ROWS - 1) // PROBE_BLOCK_ROWS
-    if blocks <= workers:
-        return workers
-    return (blocks + workers - 1) // workers * workers
 
 
 trait MatchJob(Job):
@@ -75,6 +59,46 @@ struct FusedJoin(Copyable, Movable):
         self.left = List[Series]()
         self.right = List[Series]()
         self.height = 0
+
+
+# Huge pages a block's narrowest output column piece should hold at least
+# a few of: a piece is a fresh buffer whose first touch faults every page, and
+# only a buffer that holds whole 2 MB pages can be backed by huge pages
+# (`huge_pages.mojo`). Polars' morsel is about 100K rows, but with blocks that
+# short the faults came back and the join was slower than with whole-output
+# row lists (1 MB pieces cannot hold a huge page).
+comptime _PIECE_HUGE_PAGES = 4
+
+
+def probe_block_rows(request: FusedJoin) -> Int:
+    """Probe rows per block: the fewest for which a piece of the widest
+    output column (8 bytes for most columns, 16 for string views and wide
+    decimals) is `_PIECE_HUGE_PAGES` huge pages, so every column piece is
+    huge-page backed. 1M rows for 8-byte columns, 512K with a string view."""
+    var widest = 1
+    for column in request.left_sources:
+        widest = max(widest, _row_bytes(column))
+    for column in request.right_sources:
+        widest = max(widest, _row_bytes(column))
+    return _PIECE_HUGE_PAGES * HUGE_PAGE_BYTES // widest
+
+
+def _row_bytes(column: Series) -> Int:
+    var bits = column.dtype().bit_width()
+    # Variable-width and nested columns gather 16-byte descriptors.
+    return max(1, bits // 8) if bits > 0 else 16
+
+
+def probe_blocks(rows: Int, request: FusedJoin) -> Int:
+    """Blocks to cut `rows` probe rows into: none longer than
+    `probe_block_rows`, and a whole number per worker so no worker runs a
+    round alone."""
+    var workers = worker_count(rows)
+    var block_rows = probe_block_rows(request)
+    var blocks = (rows + block_rows - 1) // block_rows
+    if blocks <= workers:
+        return workers
+    return (blocks + workers - 1) // workers * workers
 
 
 struct _FusedJob[P: MatchJob](Job):
