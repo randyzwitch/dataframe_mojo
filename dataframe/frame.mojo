@@ -4729,7 +4729,9 @@ def _bounded_int64_join_rows(
     var workers = worker_count(height)
     var step = max(1, (height + workers - 1) // workers)
     if request.enabled:
-        step = min(step, (height + probe_blocks(height) - 1) // probe_blocks(height))
+        step = min(
+            step, (height + probe_blocks(height) - 1) // probe_blocks(height)
+        )
     var shared_heads = ArcPointer(heads^)
     var shared_next = ArcPointer(next_rows^)
     var jobs = List[_RangeJoinProbeJob]()

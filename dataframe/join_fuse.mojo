@@ -41,7 +41,9 @@ def probe_blocks(rows: Int) -> Int:
 trait MatchJob(Job):
     """A probe job that leaves its matches as row lists to take."""
 
-    def take_matches(mut self, mut left: List[Int], mut right: List[Int]) -> Bool:
+    def take_matches(
+        mut self, mut left: List[Int], mut right: List[Int]
+    ) -> Bool:
         """Move the matched rows out. True means every probe row in
         `row_range` matched once, in order, and `left` is left empty."""
         ...
@@ -148,9 +150,17 @@ def _contiguous(var columns: List[Series]) raises -> List[Series]:
     return columns^
 
 
-def _assemble(columns: Int, pieces: List[List[Series]]) raises -> List[Series]:
-    var out = List[Series](capacity=columns)
-    for c in range(columns):
+def _assemble(
+    sources: List[Series], pieces: List[List[Series]]
+) raises -> List[Series]:
+    """Each output column from its pieces, one per block, in block order. A
+    join with no block (no probe rows) has an empty column of the source's
+    type."""
+    var out = List[Series](capacity=len(sources))
+    for c in range(len(sources)):
+        if len(pieces) == 0:
+            out.append(sources[c].slice(0, 0))
+            continue
         var parts = List[Series](capacity=len(pieces))
         for block in pieces:
             parts.append(block[c].copy())
@@ -160,11 +170,7 @@ def _assemble(columns: Int, pieces: List[List[Series]]) raises -> List[Series]:
 
 def fused_gather[
     P: MatchJob
-](
-    mut probes: List[P],
-    mut request: FusedJoin,
-    include_unmatched: Bool,
-) raises:
+](mut probes: List[P], mut request: FusedJoin, include_unmatched: Bool,) raises:
     """Run every probe job and gather its block's columns from
     `request.left_sources` and `request.right_sources`; the joined columns
     are left in `request`."""
@@ -172,9 +178,7 @@ def fused_gather[
     var right = ArcPointer(_contiguous(request.right_sources.copy()))
     var jobs = List[_FusedJob[P]](capacity=len(probes))
     while len(probes) > 0:
-        jobs.append(
-            _FusedJob[P](probes.pop(0), left, right, include_unmatched)
-        )
+        jobs.append(_FusedJob[P](probes.pop(0), left, right, include_unmatched))
     run_jobs(jobs)
     var identity = True
     var height = 0
@@ -191,6 +195,6 @@ def fused_gather[
     # A block that matched every row once left its columns as slices of the
     # source; they are chunks like any other gathered piece.
     if not identity:
-        request.left = _assemble(len(left[]), left_pieces)
-    request.right = _assemble(len(right[]), right_pieces)
+        request.left = _assemble(left[], left_pieces)
+    request.right = _assemble(right[], right_pieces)
     request.done = True
