@@ -164,7 +164,7 @@ def test_a_bloom_filter_never_loses_a_key() raises:
         values.append(keys[r] if r % 3 == 0 else Int64(SPAN + 7 + r))
     var series = Series("k", Column[Int64](values^))
     var found = bloom_mask(series, bloom)
-    assert_true(found[1] >= 334)
-    assert_true(found[1] < 334 + 60)
+    assert_true(found.kept >= 334)
+    assert_true(found.kept < 334 + 60)
     for r in range(0, 1000, 3):
-        assert_true(found[0].value(r))
+        assert_true(found.mask.value(r))
