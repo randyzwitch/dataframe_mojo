@@ -351,60 +351,63 @@ def test_unicode_matched_groups_preserve_last_start_across_variable_widths() rai
     var regex = Regex("([α-ω中日𐐀-𐐅]+)!")
     var matcher = Matcher(regex)
     ref program = regex._compiled[].forward
-    comptime expected = Int32(-32)
-    for blocked in [
-        -1,
-        program.class_of(0x3B1),
-        program.class_of(0x4E2D),
-        program.class_of(0x10400),
-    ]:
-        matcher.forward.transitions = List[Int32](
-            length=program.alphabet + 7, fill=expected
-        )
-        for cls in range(program.alphabet):
-            if cls == blocked:
-                matcher.forward.transitions[7 + cls] = -1
-        for unit in [String("αβ"), "中文", "𐐀𐐁", "中𐐀अα", "aα中𐐀"]:
-            for offset in range(8):
-                var body = unit * 24
-                var text = "x" * offset + body
-                var span = _span(text)
-                for size in [
-                    0,
-                    1,
-                    7,
-                    8,
-                    15,
-                    16,
-                    17,
-                    31,
-                    32,
-                    33,
-                    body.byte_length(),
-                ]:
-                    var end = offset + size
-                    # Bound the scalar decoder to the same logical slice.
-                    var bounded = span[:end]
-                    var stop, last = matcher.forward._advance_matched_unicode(
-                        program, bounded, 7, offset, end, expected
-                    )
-                    var pos = offset
-                    var last_start = offset
-                    while pos < stop:
-                        var packed = decode(bounded, pos)
-                        var cls = program.class_of(UInt32(packed >> 3))
-                        assert_equal(
-                            matcher.forward.transitions[7 + cls], expected
+    for expected in [Int32(7), Int32(-32)]:
+        for blocked in [
+            -1,
+            program.class_of(0x3B1),
+            program.class_of(0x4E2D),
+            program.class_of(0x10400),
+        ]:
+            matcher.forward.transitions = List[Int32](
+                length=program.alphabet + 7, fill=expected
+            )
+            for cls in range(program.alphabet):
+                if cls == blocked:
+                    matcher.forward.transitions[7 + cls] = -1
+            for unit in [String("αβ"), "中文", "𐐀𐐁", "中𐐀अα", "aα中𐐀"]:
+                for offset in range(8):
+                    var body = unit * 24
+                    var text = "x" * offset + body
+                    var span = _span(text)
+                    for size in [
+                        0,
+                        1,
+                        7,
+                        8,
+                        15,
+                        16,
+                        17,
+                        31,
+                        32,
+                        33,
+                        body.byte_length(),
+                    ]:
+                        var end = offset + size
+                        # Bound the scalar decoder to the same logical slice.
+                        var bounded = span[:end]
+                        var stop, last = (
+                            matcher.forward._advance_unicode_self_loop(
+                                program, bounded, 7, offset, end, expected
+                            )
                         )
-                        last_start = pos
-                        pos += packed & 7
-                    assert_equal(pos, stop)
-                    assert_equal(last, last_start)
-                    if end - stop >= 16:
-                        var packed = decode(bounded, stop)
-                        var cls = program.class_of(UInt32(packed >> 3))
-                        assert_equal(
-                            matcher.forward.transitions[7 + cls] == expected,
-                            False,
-                        )
-                _ = text
+                        var pos = offset
+                        var last_start = offset
+                        while pos < stop:
+                            var packed = decode(bounded, pos)
+                            var cls = program.class_of(UInt32(packed >> 3))
+                            assert_equal(
+                                matcher.forward.transitions[7 + cls], expected
+                            )
+                            last_start = pos
+                            pos += packed & 7
+                        assert_equal(pos, stop)
+                        assert_equal(last, last_start)
+                        if end - stop >= 16:
+                            var packed = decode(bounded, stop)
+                            var cls = program.class_of(UInt32(packed >> 3))
+                            assert_equal(
+                                matcher.forward.transitions[7 + cls]
+                                == expected,
+                                False,
+                            )
+                    _ = text

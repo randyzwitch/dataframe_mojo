@@ -565,9 +565,9 @@ struct LazyDFA(Movable):
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
                 return off, at
-            if width > 1 and e == off and has_packet_layout(text, at, width):
-                var stop = scan_unicode_self_loop(
-                    program, self.transitions, off, text, at, end, Int32(off)
+            if e == off:
+                var stop, _ = self._advance_unicode_self_loop(
+                    program, text, off, at, end, Int32(off)
                 )
                 if stop > at:
                     at = stop
@@ -595,7 +595,7 @@ struct LazyDFA(Movable):
         return off, at
 
     @no_inline
-    def _advance_matched_unicode(
+    def _advance_unicode_self_loop(
         self,
         program: Program,
         text: Span[UInt8, ImmutAnyOrigin],
@@ -604,9 +604,10 @@ struct LazyDFA(Movable):
         end: Int,
         expected: Int32,
     ) -> Tuple[Int, Int]:
-        """Group matching self-loops, preserving the last character's start.
-        A failed fixed-width packet falls back to four cached scalar edges,
-        so mixed widths do not retry the packet at every character."""
+        """Group self-loops, preserving the last consumed character's start.
+        A failed fixed-width packet falls back to four cached scalar edges
+        against the same row, without a chain of next-state dependencies.
+        The cursor also supplies delayed-match positions for tagged edges."""
         var table = self.transitions.unsafe_ptr()
         var last = at
         while end - at >= 16:
@@ -868,7 +869,7 @@ struct LazyDFA(Movable):
                         and not (v & 2)
                         and n - at >= 16
                     ):
-                        var stop, last_start = self._advance_matched_unicode(
+                        var stop, last_start = self._advance_unicode_self_loop(
                             program, text, off, at, n, Int32(e)
                         )
                         if stop > at:
