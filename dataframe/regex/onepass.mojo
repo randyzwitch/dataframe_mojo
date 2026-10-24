@@ -9,6 +9,7 @@ dense class tables; Unicode tests the state's disjoint consuming predicates
 without searching the complete alphabet. Assertions see the full input.
 """
 from std.bit import count_trailing_zeros
+from std.memory import ArcPointer
 from .program import (
     Program,
     consumes,
@@ -322,6 +323,15 @@ struct OnePass(Movable):
                         if prev < floor or not program.step(pc, cp):
                             break
                         at = prev
+
+
+struct CaptureTables(Movable):
+    var forward: OnePass
+    var reverse: Optional[ArcPointer[OnePass]]
+
+    def __init__(out self, var forward: OnePass):
+        self.forward = forward^
+        self.reverse = None
 
 
 @always_inline

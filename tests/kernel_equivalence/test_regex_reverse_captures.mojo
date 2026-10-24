@@ -61,10 +61,13 @@ def test_reverse_onepass_capture_priorities_and_repeated_groups() raises:
                     floors.append(text.byte_length())
                 var span = _span(text)
                 for floor in floors:
-                    if not matcher.pike.search(
+                    var found = matcher.pike.search(
                         forward, span, floor, len(span), False, expected
-                    ):
+                    )
+                    assert_equal(matcher.captures(span, floor), found, pattern)
+                    if not found:
                         continue
+                    assert_equal(matcher.slots, expected, pattern)
                     var message = pattern + " @" + String(floor) + " " + text
                     assert_true(
                         engine.search_reverse[True](

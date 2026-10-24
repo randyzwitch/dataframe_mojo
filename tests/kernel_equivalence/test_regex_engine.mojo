@@ -651,7 +651,7 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
                 var found = (
                     regex._compiled[]
                     .onepass.value()[]
-                    .search[True](
+                    .forward.search[True](
                         program,
                         span,
                         start,
