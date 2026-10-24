@@ -2226,16 +2226,15 @@ struct DataFrame(Copyable, Sized, Writable):
                         fused.right_sources.append(right._columns[c].copy())
             # Every route returns the pairs in left row order except a
             # left build whose caller ignores order, which returns them in
-            # the order the right side probed.
-            var left_ascending = (
-                not build_left or keep_order or how != JOIN_INNER
-            )
+            # the order the right side probed (a left join's unmatched
+            # left rows after them).
+            var left_ascending = not build_left or keep_order
             if build_left:
                 var pairs = _smaller_build_join_rows(
                     left_sources,
                     right_sources,
                     how == JOIN_LEFT,
-                    keep_order or how != JOIN_INNER,
+                    keep_order,
                 )
                 swap(left_rows, pairs[0])
                 swap(right_rows, pairs[1])
@@ -3851,15 +3850,34 @@ def _smaller_build_join_rows(
     The physical probe emits right-major pairs. Stable counting scatter by
     logical left row preserves the original right-row ordering within every
     left group, including duplicate keys on either side. Without
-    `keep_order` (an inner join whose consumers ignore order) the pairs are
+    `keep_order` (a join whose consumers ignore order) the pairs are
     returned right-major as probed: the scatter cost more than the probe
-    (PDS-H q5: 750K pairs over 187K orders, 18 ms against 13).
+    (PDS-H q5: 750K pairs over 187K orders, 18 ms against 13). A left join
+    then emits the unmatched build rows after the pairs, as Polars'
+    `emit_unmatched_build` and DuckDB's right-outer scan of a swapped join
+    do: the build rows no probe row matched are flagged while the pairs are
+    taken, and appended with no right row.
     """
     trace_path("join.smaller_build")
     var pairs = direct_hash_join_rows(right, left, False)
-    if not keep_order and not include_unmatched:
+    if not keep_order:
         trace_path("join.smaller_build_unordered")
-        return (pairs[1].copy(), pairs[0].copy())
+        var left_rows = List[Int]()
+        var right_rows = List[Int]()
+        swap(left_rows, pairs[1])
+        swap(right_rows, pairs[0])
+        if include_unmatched:
+            var count = len(left[0])
+            var matched = List[Bool](length=count, fill=False)
+            var seen = matched.unsafe_ptr()
+            var rows = left_rows.unsafe_ptr()
+            for k in range(len(left_rows)):
+                seen[unsafe_offset=rows[unsafe_offset=k]] = True
+            for i in range(count):
+                if not seen[unsafe_offset=i]:
+                    left_rows.append(i)
+                    right_rows.append(-1)
+        return (left_rows^, right_rows^)
     # A counting sort of the pairs by left row, written straight into the
     # output: the probe's right rows land in their left group in probe
     # order, and the left row of every output position follows from the

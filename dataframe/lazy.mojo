@@ -4144,7 +4144,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                                 len(plan._nodes) - 1
                             )
                         return plan._execute(index, False, True, batch_size)
-                if node.how == JOIN_INNER and node.coalesce:
+                if (
+                    node.how == JOIN_INNER or node.how == JOIN_LEFT
+                ) and node.coalesce:
                     # DuckDB's build side (`BuildProbeSideOptimizer`): the
                     # side of fewer rows times columns builds. The right
                     # side has run; when the left one, estimated, is the
