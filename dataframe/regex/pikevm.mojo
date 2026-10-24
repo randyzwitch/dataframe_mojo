@@ -173,8 +173,9 @@ struct PikeVM(Movable):
         """`slots` is how many capture slots to track: 2 for the whole
         match, up to `program.slot_count` for every group."""
         self.width = slots
-        self.current = _Threads(len(program), slots)
-        self.next = _Threads(len(program), slots)
+        # Other search engines share scratch but need no NFA thread matrix.
+        self.current = _Threads(0, slots)
+        self.next = _Threads(0, slots)
         self.stack = List[Int]()
         self.scratch = List[Int](length=slots, fill=-1)
 
@@ -252,6 +253,9 @@ struct PikeVM(Movable):
         at or before `end` (assertions see the whole text). Fills `slots`
         (length >= the VM's slot count) and returns whether one was
         found."""
+        if len(self.current.dense) == 0:
+            self.current = _Threads(len(program), self.width)
+            self.next = _Threads(len(program), self.width)
         self.current.size = 0
         self.next.size = 0
         var matched = False
