@@ -167,6 +167,7 @@ from .join_type import (
     JOIN_CROSS,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_RIGHT,
     JOIN_SEMI,
     join_code,
     join_type,
@@ -1628,8 +1629,9 @@ def _pipeline_steps(
     operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
 ) -> Bool:
     """Whether every operation is a step a pipeline runs: a row-local
-    step, or an inner, left, semi or anti join whose build index was
-    prepared (its morsels probe the shared index on their own worker)."""
+    step, or an inner, left, semi, anti or (uncoalesced) right join whose
+    build index was prepared (its morsels probe the shared index on their
+    own worker)."""
     for node in operations:
         if (
             node.kind == FILTER
@@ -1639,7 +1641,12 @@ def _pipeline_steps(
             if not _row_local(node.exprs):
                 return False
         elif node.kind == JOIN:
-            if node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
+            if node.how == JOIN_RIGHT:
+                # Only without coalescing: its unmatched build rows come
+                # out as a final morsel with the probe columns null.
+                if node.coalesce:
+                    return False
+            elif node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
                 return False
             if node.offset >= len(indexes) or not indexes[node.offset]:
                 return False
@@ -3523,6 +3530,73 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         trace_path("lazy.swap_join_sides")
         return Optional(plan^)
 
+    def _swap_left_join_sides(
+        self, at: Int, built: DataFrame, batch_size: Int
+    ) raises -> Optional[LazyFrame]:
+        """A copy of the plan in which the left join at `at` becomes a
+        right join of its executed right side, `built`, as the probe and
+        its left side, run now, as the build, under a selection that
+        restores the join's columns: the left's, then the right's other
+        than its keys. The probe streams through the pipeline against the
+        build's index, and the build rows no probe row matched come out
+        last (`_emit_unmatched`), as in Polars' `emit_unmatched_build` and
+        DuckDB's right-outer scan of a swapped join. None, with nothing
+        run, when the sides share a column name, a key repeats, or the
+        left's key types differ from the right's or need the general join
+        (categorical, nested)."""
+        ref node = self._nodes[at]
+        if not node.coalesce or node.how != JOIN_LEFT:
+            return None
+        var left_names = self._columns_of(node.left)
+        var right_names = built.columns()
+        for i in range(len(node.right_keys)):
+            for j in range(i):
+                if node.right_keys[i] == node.right_keys[j]:
+                    return None
+        for name in right_names:
+            if name in left_names:
+                return None
+        var left_frame = self._execute(node.left, False, True, batch_size)
+        for i in range(len(node.names)):
+            var ltype = left_frame.column(node.names[i]).dtype()
+            var rtype = built.column(node.right_keys[i]).dtype()
+            if (
+                ltype != rtype
+                or ltype.is_categorical()
+                or ltype.is_nested()
+                or ltype.is_struct()
+            ):
+                return None
+        var exprs = List[Expr]()
+        for name in left_frame.columns():
+            exprs.append(col(name))
+        for name in right_names:
+            if name not in node.right_keys:
+                exprs.append(col(name))
+        var plan = self.copy()
+        plan._frames.append(built.copy())
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        var probe = len(plan._nodes) - 1
+        plan._frames.append(left_frame^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        var build = len(plan._nodes) - 1
+        var join = node.copy()
+        join.left = probe
+        join.right = build
+        join.names = node.right_keys.copy()
+        join.right_keys = node.names.copy()
+        join.how = JOIN_RIGHT
+        join.text = "right"
+        join.coalesce = False
+        plan._nodes.append(join^)
+        plan._nodes[at] = _plan_node(
+            SELECT, left=len(plan._nodes) - 1, exprs=exprs
+        )
+        trace_path("lazy.swap_left_join_sides")
+        return Optional(plan^)
+
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
         the scanned frame's height through steps that only drop or keep
@@ -3961,18 +4035,30 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # aggregate. Batched, a grouped reduction over it ran on one thread
         # (TPC-DS q76's three channels). It is found and run before any
         # join below builds, so no build is made twice.
+        # Whether the stream's consumer ignores row order: a right join then
+        # streams, its unmatched build rows coming out last.
+        var order_free = (
+            len(keys) > 0
+            and len(expressions) > 0
+            and not ordered
+            and _order_free_reductions(keys, expressions)
+        )
         var first = cursor
         while first >= 0:
             ref step = self._nodes[first]
             if _stream_rows(step):
                 first = step.left
-            elif step.kind == JOIN and step.how in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]:
+            elif step.kind == JOIN and (
+                step.how
+                in [
+                    JOIN_INNER,
+                    JOIN_LEFT,
+                    JOIN_SEMI,
+                    JOIN_ANTI,
+                    JOIN_CROSS,
+                ]
+                or (step.how == JOIN_RIGHT and not step.coalesce and order_free)
+            ):
                 first = step.left
             else:
                 break
@@ -3994,13 +4080,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if _stream_rows(node):
                 operations.append(node.copy())
                 operation_nodes.append(cursor)
-            elif node.kind == JOIN and node.how in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]:
+            elif node.kind == JOIN and (
+                node.how
+                in [
+                    JOIN_INNER,
+                    JOIN_LEFT,
+                    JOIN_SEMI,
+                    JOIN_ANTI,
+                    JOIN_CROSS,
+                ]
+                or (node.how == JOIN_RIGHT and not node.coalesce and order_free)
+            ):
                 var prepared = Optional[PreparedHashIndex]()
                 # A left input that can only be small next to a large known
                 # right may be the side to hash: decline streaming, so the
@@ -4182,6 +4272,39 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     if most < 0 or most * columns < right_cost:
                         var rows = self._estimated_rows(node.left)
                         if rows >= 0 and rows * columns < right_cost:
+                            # A left join under a consumer that ignores row
+                            # order builds on the smaller left inside the
+                            # pipeline: the right streams through the left's
+                            # index and the left rows nothing matched come
+                            # out last. The join's output is then never
+                            # materialized outside the pipeline.
+                            if node.how == JOIN_LEFT and order_free:
+                                var swapped = self._swap_left_join_sides(
+                                    cursor, built, batch_size
+                                )
+                                if swapped:
+                                    var plan = swapped.take()
+                                    for k in range(len(operations)):
+                                        if operations[k].kind != JOIN:
+                                            continue
+                                        plan._frames.append(
+                                            joins[operations[k].offset].copy()
+                                        )
+                                        plan._schemas.append(
+                                            Optional[CsvSchema]()
+                                        )
+                                        plan._nodes.append(
+                                            _plan_node(
+                                                SCAN_FRAME,
+                                                offset=len(plan._frames) - 1,
+                                            )
+                                        )
+                                        plan._nodes[
+                                            operation_nodes[k]
+                                        ].right = (len(plan._nodes) - 1)
+                                    return plan._execute(
+                                        index, False, True, batch_size
+                                    )
                             trace_path("stream.smaller_left_build")
                             var left_frame = self._execute(
                                 node.left, False, True, batch_size
@@ -4533,6 +4656,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )
             late_values.append(values^)
             late_rows.append(groups.representatives.copy())
+        # A right join's unmatched build rows come out of the pipeline
+        # alone: where the stream does not run as a pipeline, the plan runs
+        # eagerly.
+        if not piped:
+            for operation in operations:
+                if operation.kind == JOIN and operation.how == JOIN_RIGHT:
+                    return None
         # Grouped aggregations over an in-memory frame, filtered or
         # projected at most: whether the eager group-by is faster.
         var eager = False

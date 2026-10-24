@@ -1853,10 +1853,14 @@ struct DataFrame(Copyable, Sized, Writable):
         range_filtered: Bool = False,
         keep_order: Bool = True,
         workers: Int = 0,
+        marks: Int = 0,
     ) raises -> Self:
         """`keep_order=False` lets an inner join emit its pairs in whatever
         order its probe produced them, for a caller whose consumers ignore
-        row order (a lazy plan feeding an aggregation)."""
+        row order (a lazy plan feeding an aggregation). A right join
+        probing a `prepared` index emits only its matched pairs, and sets
+        the byte at `marks` (the address of one byte per build row, when
+        not 0) of every build row it matched: the caller emits the rest."""
         if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -2049,6 +2053,13 @@ struct DataFrame(Copyable, Sized, Writable):
             # The row lists are swapped out of the tuple: copying them
             # doubled the index traffic of a 10M-row join (#335).
             var output_height = len(pairs[1])
+            if marks != 0 and how == JOIN_RIGHT:
+                var flags = Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=marks
+                )
+                var matched = pairs[1].unsafe_ptr()
+                for r in range(output_height):
+                    flags[unsafe_offset=matched[unsafe_offset=r]] = 1
             var left_rows = List[Int]()
             var right_rows = List[Int]()
             swap(left_rows, pairs[0])
