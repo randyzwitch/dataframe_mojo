@@ -3524,7 +3524,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         trace_path("lazy.swap_join_sides")
         return Optional(plan^)
 
-    def _row_number_keys_pay(
+    def _row_number_shape(
         self,
         source: Int,
         keys: List[String],
@@ -3532,32 +3532,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         holder: Int,
         joins: List[DataFrame],
         operations: List[PlanNode],
-    ) raises -> Bool:
-        """Whether grouping by the holder build's row number (and merging
-        equal values afterwards) beats grouping by the `carried` string
-        keys, from the sizes the planner can estimate. Costs are in units of
-        one string key carried for one row: gathered from the build, hashed
-        and compared by the sink.
+    ) raises -> Tuple[Float64, Float64]:
+        """The rows the joins leave for the sink and the groups of the
+        first pass if it groups by the holder build's row number instead of
+        the `carried` string keys, estimated from the planner's statistics
+        as the join order estimates them; (-1, -1) when a key has none.
 
-        - Saved: `P * k`, the P rows the joins leave, each no longer
-          carrying the k string keys.
-        - Paid: the regroup of the G groups of the first pass by all K
-          keys. It reads each key of a group's row from the build (1), hashes
-          and partitions it (1), inserts and compares it (1) and writes it
-          out (1): `4 * K` per group, plus 4 for the group itself (its slot,
-          its states' merge, its output row).
-        - P: the source rows times, for each inner join whose probe key is a
-          source column, the share of probe keys its build holds,
+        - Rows: the source rows times, for each inner join whose probe key
+          is a source column, the share of probe keys its build holds,
           min(1, distinct build keys / distinct probe keys) (DuckDB's join
           cardinality estimate); a join with no statistics for its probe key
           leaves the rows as they are.
-        - G: min(P, R * O), with R the build rows the probe reaches (the
-          build's rows, or fewer when the holder join's probe key has fewer
-          distinct values) and O the product of the other keys' distinct
-          counts. A key with no estimate makes O unbounded.
-        The path is taken when the saving is the larger: it needs the groups
-        to be several times fewer than the rows, so a plan whose groups are
-        about its rows keeps its string keys."""
+        - Groups: min(rows, R * O), with R the build rows the probe reaches
+          (the build's rows, or fewer when the holder join's probe key has
+          fewer distinct values) and O the product of the other keys'
+          distinct counts."""
         ref table = self._frames[source]
         var rows = Float64(table.height())
         var holder_probe = String("")
@@ -3594,12 +3583,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         count = distinct_estimate(build.column(key))
                         break
             if count <= 0:
-                return False
+                return (-1.0, -1.0)
             others *= Float64(count)
-        var groups = min(rows, reached * others)
-        var saved = rows * Float64(len(carried))
-        var paid = groups * Float64(4 * len(keys) + 4)
-        return saved > paid
+        return (rows, min(rows, reached * others))
 
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
@@ -4399,6 +4385,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # Group keys carried as one build's row numbers (see below).
         var row_names = List[String]()
         var row_holder = -1
+        var row_unique = False
         var row_merge = List[Expr]()
         var row_original = Optional[DataFrame]()
         var original_keys = keys.copy()
@@ -4603,7 +4590,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # from the build and merge where two build rows hold the same
             # values.
             if table and piped and not distinct and top < 0:
-                var merge = _row_merge_reductions(expressions)
                 var best = -1
                 var best_count = 1
                 for h in late_builds:
@@ -4616,12 +4602,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         best_count = count
                 var carried = List[String]()
                 for k in range(len(late_names)):
-                    if late_builds[k] == best:
+                    if best >= 0 and late_builds[k] == best:
                         carried.append(late_names[k])
-                if (
-                    merge
-                    and best >= 0
-                    and self._row_number_keys_pay(
+                if best >= 0:
+                    var shape = self._row_number_shape(
                         self._nodes[cursor].offset,
                         keys,
                         carried,
@@ -4629,10 +4613,33 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         joins,
                         operations,
                     )
-                ):
-                    row_holder = best
-                    row_merge = merge.take()
-                    row_names = carried^
+                    var merge = _row_merge_reductions(expressions)
+                    var unique = _unique_key_column(joins[best], carried)
+                    var rows = shape[0]
+                    var groups = shape[1]
+                    var width = Float64(len(carried))
+                    var build = Float64(joins[best].height())
+                    if rows >= 0 and unique:
+                        # Unique values per build row: no two row numbers
+                        # hold equal values, so the first pass's groups are
+                        # final (any reduction) and only their key values
+                        # are read. Paid: the uniqueness check (hash and
+                        # insert one key per build row, 2 units each) and
+                        # reading the k keys of the G groups (k units).
+                        if rows * width > 2.0 * build + groups * width:
+                            row_holder = best
+                            row_unique = True
+                            row_names = carried^
+                    elif rows >= 0 and merge:
+                        # Paid: the regroup of the G groups by all K keys,
+                        # 4 units a key (read from the build, hashed and
+                        # partitioned, inserted and compared, written out)
+                        # and 4 for the group (slot, states' merge, row).
+                        var paid = groups * Float64(4 * len(keys) + 4)
+                        if rows * width > paid:
+                            row_holder = best
+                            row_merge = merge.take()
+                            row_names = carried^
             late_names = List[String]()
         if len(row_names) > 0:
             trace_path("lazy.row_number_keys")
@@ -5020,9 +5027,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         columns.append(piped_result.column(name))
                 for e in expressions:
                     columns.append(piped_result.column(e._name))
-                piped_result = (
-                    DataFrame(columns^).group_by(original_keys).agg(row_merge)
-                )
+                if row_unique:
+                    piped_result = DataFrame(columns^)
+                else:
+                    piped_result = (
+                        DataFrame(columns^)
+                        .group_by(original_keys)
+                        .agg(row_merge)
+                    )
             for i in range(len(late_names)):
                 # The groups' codes back to their values (a code is a
                 # representative build row; a left join's missing row is a
@@ -9369,6 +9381,23 @@ def _key_group_bound(
         if bound > limit:
             return -1
     return bound
+
+
+def _unique_key_column(build: DataFrame, names: List[String]) raises -> Bool:
+    """Whether one of the build's columns `names` holds no null and no value
+    twice, so no two rows of the build hold the same values for all of
+    them. A column whose sampled distinct count is under nine tenths of the
+    rows is not checked."""
+    var height = build.height()
+    for name in names:
+        var column = build.column(name)
+        if column.null_count() > 0:
+            continue
+        if 10 * distinct_estimate(column) < 9 * height:
+            continue
+        if column.n_unique() == height:
+            return True
+    return False
 
 
 def _row_merge_reductions(expressions: List[Expr]) -> Optional[List[Expr]]:

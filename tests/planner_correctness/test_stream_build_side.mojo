@@ -151,7 +151,9 @@ def _facts(rows: Int, spread: Int, step: Int) raises -> DataFrame:
     )._with_statistics()
 
 
-def _row_number_trace(dimension: DataFrame, facts: DataFrame) raises -> Bool:
+def _row_number_trace(
+    dimension: DataFrame, facts: DataFrame, means: Bool = False
+) raises -> Bool:
     """Whether the row-number keys ran, after checking that the lazy
     grouped result is the eager join's, for an inner and a left join."""
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -168,6 +170,9 @@ def _row_number_trace(dimension: DataFrame, facts: DataFrame) raises -> Bool:
         col("f_amount").min().alias("low"),
         col("f_amount").max().alias("high"),
     ]
+    if means:
+        reductions.append(col("f_amount").mean().alias("average"))
+        reductions.append(col("f_amount").count().alias("seen"))
     for how in ["inner", "left"]:
         var rows = (
             facts.lazy()
@@ -217,4 +222,16 @@ def test_string_keys_stay_when_every_joined_row_is_its_own_group() raises:
             _dimension(40_000, 40_000), _facts(40_000, 40_000, 1)
         ),
         "keys grouped by row number although the groups are about the rows",
+    )
+
+
+def test_unique_build_values_group_by_the_row_number_for_any_reduction() raises:
+    # No two dimension rows hold the same values, so the groups of the row
+    # numbers are the final groups and a mean or a count (which do not merge)
+    # are taken over them directly.
+    assert_true(
+        _row_number_trace(
+            _dimension(6000, 6000), _facts(400_000, 6500, 7), means=True
+        ),
+        "unique build values were not grouped by the build's row number",
     )
