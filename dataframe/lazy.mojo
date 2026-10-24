@@ -4318,6 +4318,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # into 287K joined rows that formed 90 groups.
         var late_names = List[String]()
         var late_builds = List[Int]()
+        # Group keys carried as one build's row numbers (see below).
+        var row_names = List[String]()
+        var row_holder = -1
+        var row_merge = List[Expr]()
+        var row_original = Optional[DataFrame]()
+        var original_keys = keys.copy()
         if (
             len(keys) > 0
             and len(expressions) > 0
@@ -4511,7 +4517,69 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # aggregate table groups the strings themselves.
             if len(operations) > 0 and not table:
                 piped = False
+            # Several of these keys from one build side, under the aggregate
+            # table: the sink groups by that build's row number alone
+            # (DuckDB carries a build row's payload by its address through
+            # the join and reads it once, at the output), and the finished
+            # groups, far fewer than the joined rows, read their key values
+            # from the build and merge where two build rows hold the same
+            # values.
+            if table and piped and not distinct and top < 0:
+                var merge = _row_merge_reductions(expressions)
+                var best = -1
+                var best_count = 1
+                for h in late_builds:
+                    var count = 0
+                    for other in late_builds:
+                        if other == h:
+                            count += 1
+                    if count > best_count:
+                        best = h
+                        best_count = count
+                if merge and best >= 0:
+                    row_holder = best
+                    row_merge = merge.take()
+                    for k in range(len(late_names)):
+                        if late_builds[k] == best:
+                            row_names.append(late_names[k])
             late_names = List[String]()
+        if len(row_names) > 0:
+            trace_path("lazy.row_number_keys")
+            row_original = Optional(joins[row_holder].copy())
+            var first = row_names[0]
+            var ids = List[Int64](capacity=joins[row_holder].height())
+            for r in range(joins[row_holder].height()):
+                ids.append(Int64(r))
+            var surplus = List[String]()
+            for k in range(1, len(row_names)):
+                surplus.append(row_names[k])
+            var carried = joins[row_holder].drop(surplus)
+            joins[row_holder] = carried.with_column(
+                Series(first, Column[Int64](ids^))
+            )
+            var kept_keys = List[String]()
+            for name in keys:
+                if name == first or name not in row_names:
+                    kept_keys.append(name)
+            keys = kept_keys^
+            # The select steps that passed the dropped names on.
+            for k in range(len(operations)):
+                if operations[k].kind != SELECT:
+                    continue
+                var passed = List[Expr]()
+                for e in operations[k].exprs:
+                    var dropped = False
+                    if (
+                        len(e._nodes) == 1
+                        and e._nodes[0].op == COL
+                        and e._name == e._nodes[0].text
+                        and e._name in row_names
+                        and e._name != first
+                    ):
+                        dropped = True
+                    if not dropped:
+                        passed.append(e.copy())
+                operations[k].exprs = passed^
         var late_values = List[Series]()
         var late_rows = List[List[Int]]()
         for k in range(len(late_names)):
@@ -4840,6 +4908,30 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 piped_result = concat(parts)
             if top > 0:
                 piped_result = piped_result.slice(skip, limit)
+            if len(row_names) > 0:
+                # The groups' build row numbers back to the key values,
+                # merging the groups whose rows hold the same values.
+                var numbers = piped_result.column(row_names[0]).rechunk()
+                ref ids = numbers._data[Column[Int64]]
+                var rows = List[Int](capacity=len(numbers))
+                for r in range(len(numbers)):
+                    rows.append(Int(ids._get(r)) if ids._valid(r) else -1)
+                var columns = List[Series]()
+                for name in original_keys:
+                    if name in row_names:
+                        columns.append(
+                            row_original.value()
+                            .column(name)
+                            .take_or_null(rows)
+                            .renamed(name)
+                        )
+                    else:
+                        columns.append(piped_result.column(name))
+                for e in expressions:
+                    columns.append(piped_result.column(e._name))
+                piped_result = (
+                    DataFrame(columns^).group_by(original_keys).agg(row_merge)
+                )
             for i in range(len(late_names)):
                 # The groups' codes back to their values (a code is a
                 # representative build row; a left join's missing row is a
@@ -9186,6 +9278,27 @@ def _key_group_bound(
         if bound > limit:
             return -1
     return bound
+
+
+def _row_merge_reductions(expressions: List[Expr]) -> Optional[List[Expr]]:
+    """The reductions that merge groups' partial results, when each of
+    `expressions` is a sum (skipping nulls, or null when none is valid), a
+    minimum or a maximum: the same reduction over the partial results.
+    None when one is anything else."""
+    var merge = List[Expr]()
+    for e in expressions:
+        var root = e._nodes[len(e._nodes) - 1].copy()
+        var again = col(e._name)
+        if root.op == SUM and root.min_count <= 1:
+            again = again.sum(min_count=root.min_count)
+        elif root.op == MIN:
+            again = again.min()
+        elif root.op == MAX:
+            again = again.max()
+        else:
+            return None
+        merge.append(again.alias(e._name))
+    return Optional(merge^)
 
 
 def _late_key_build(
