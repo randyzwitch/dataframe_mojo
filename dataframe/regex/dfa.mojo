@@ -574,36 +574,6 @@ struct LazyDFA(Movable):
         var resets = self.resets
         var table = self.transitions.unsafe_ptr()
         while at < n:
-            # Group cached, untagged transitions as in regex-automata's
-            # hybrid search loop. Sixteen remaining bytes bound four UTF8
-            # decodes; tagged edges leave the current code point untouched.
-            while n - at >= 16:
-                var packed = self._class_at(program, text, at)
-                var e = Int(table[unsafe_offset=off + (packed >> 3)])
-                if e < 0:
-                    break
-                off = e
-                at += packed & 7
-                packed = self._class_at(program, text, at)
-                e = Int(table[unsafe_offset=off + (packed >> 3)])
-                if e < 0:
-                    break
-                off = e
-                at += packed & 7
-                packed = self._class_at(program, text, at)
-                e = Int(table[unsafe_offset=off + (packed >> 3)])
-                if e < 0:
-                    break
-                off = e
-                at += packed & 7
-                packed = self._class_at(program, text, at)
-                e = Int(table[unsafe_offset=off + (packed >> 3)])
-                if e < 0:
-                    break
-                off = e
-                at += packed & 7
-            if at == n:
-                break
             var b = p[unsafe_offset=at]
             var cls: Int
             var width = 1
@@ -617,7 +587,40 @@ struct LazyDFA(Movable):
             if e >= 0:
                 off = e
                 at += width
-                continue
+                # Group cached, untagged transitions as in regex-automata's
+                # hybrid search loop. Sixteen remaining bytes bound four UTF8
+                # decodes; tagged edges leave the current code point untouched.
+                var packed = 0
+                while n - at >= 16:
+                    packed = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    if e < 0:
+                        break
+                    off = e
+                    at += packed & 7
+                    packed = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    if e < 0:
+                        break
+                    off = e
+                    at += packed & 7
+                    packed = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    if e < 0:
+                        break
+                    off = e
+                    at += packed & 7
+                    packed = self._class_at(program, text, at)
+                    e = Int(table[unsafe_offset=off + (packed >> 3)])
+                    if e < 0:
+                        break
+                    off = e
+                    at += packed & 7
+                if e >= 0:
+                    continue
+                # Reuse the tagged transition instead of decoding it again.
+                cls = packed >> 3
+                width = packed & 7
             if e == Int(UNKNOWN):
                 var s = off // stride
                 if self._full():
