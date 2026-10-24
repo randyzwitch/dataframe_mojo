@@ -553,20 +553,19 @@ struct LazyDFA(Movable):
         var at: Int,
         end: Int,
     ) -> Tuple[Int, Int]:
-        """Consume cached Unicode packets and scalar groups until a tag.
-        An ASCII group returns to the caller's ordinary cached loop."""
+        """Consume cached packets and mixed scalar groups until a tag.
+        After entering on Unicode, keep ASCII in the same cached loop so
+        ordinary mixed text does not bounce through the caller."""
         var table = self.transitions.unsafe_ptr()
         var cls = 0
         var width = 0
         var e = 0
         while end - at >= 16:
-            if text.unsafe_ptr()[unsafe_offset=at] < 128:
-                return off, at
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
                 return off, at
-            if e == off:
+            if width > 1 and e == off:
                 var stop = scan_unicode_self_loop(
                     program, self.transitions, off, text, at, end, Int32(off)
                 )
