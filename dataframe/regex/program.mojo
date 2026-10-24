@@ -16,6 +16,7 @@ from .charclass import (
     word_class,
     ascii_class,
 )
+from .alphabet_lookup import wide_alphabet_class
 from .class_lookup import build_unicode_membership, unicode_class_has
 from .syntax import (
     Ast,
@@ -182,19 +183,10 @@ struct Program(Movable, Sized):
             return Int(self.ascii_class.unsafe_ptr()[unsafe_offset=Int(cp)])
         var points = self.boundaries.unsafe_ptr()
         var classes = self.interval_class.unsafe_ptr()
-        var lo = 0
         var hi = len(self.boundaries)
         if cp >= points[unsafe_offset=hi - 1]:
             return Int(classes[unsafe_offset=hi - 1])
-        while hi - lo > 1:
-            # Every compiled alphabet starts at zero. The search keeps
-            # lo < hi <= len(boundaries), with nonnegative midpoints.
-            var mid = (lo + hi) >> 1
-            if points[unsafe_offset=mid] <= cp:
-                lo = mid
-            else:
-                hi = mid
-        return Int(classes[unsafe_offset=lo])
+        return wide_alphabet_class(self.boundaries, self.interval_class, cp)
 
 
 def _build_two_byte_membership(mut program: Program):
