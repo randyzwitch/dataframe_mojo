@@ -40,6 +40,7 @@ from .program import (
     consumes,
 )
 from .suffix import suffix_end
+from .unicode_dfa_run import scan_unicode_self_loop
 from .syntax import (
     LOOK_END_LINE,
     LOOK_END_TEXT,
@@ -515,6 +516,13 @@ struct LazyDFA(Movable):
         var width = 0
         var e = 0
         while end - at >= 16:
+            if text.unsafe_ptr()[unsafe_offset=at] >= 128:
+                var stop = scan_unicode_self_loop(
+                    program, self.transitions, off, text, at, end, Int32(off)
+                )
+                if stop > at:
+                    at = stop
+                    continue
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
@@ -662,11 +670,25 @@ struct LazyDFA(Movable):
                     # The transition already consumed this code point.
                     return suffix_end[False](text, at + width, n, Int32(e))
             var v = -e - 3
-            off = v >> 2
+            var next_offset = v >> 2
             if v & 1:
                 last = at
                 if earliest:
                     return last
+                if (
+                    width > 1
+                    and next_offset == off
+                    and not (v & 2)
+                    and n - at >= 16
+                ):
+                    var stop = scan_unicode_self_loop(
+                        program, self.transitions, off, text, at, n, Int32(e)
+                    )
+                    if stop > at:
+                        last = stop - width
+                        at = stop
+                        continue
+            off = next_offset
             at += width
             if (v & 2) and accel and at < n:
                 var candidate = prefilter.find(text, at)
