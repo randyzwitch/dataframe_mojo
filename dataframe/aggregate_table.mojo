@@ -57,7 +57,7 @@ from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
-from .aggregate import Reducer, _from_canonical, float_key
+from .aggregate import Reducer, _from_canonical, float_key, quantile_in
 from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
 from .column import Column, _count_set, _pack_bits, _validity_at
@@ -67,8 +67,10 @@ from .expr import (
     LEN,
     MAX,
     MEAN,
+    MEDIAN,
     MIN,
     NULL_COUNT,
+    QUANTILE,
     STD,
     SUM,
     VAR,
@@ -144,10 +146,22 @@ def _stride(hash: UInt64) -> Int:
 
 
 def reduction_supported(op: Int) -> Bool:
-    """Whether a reduction has a fixed-size state that can be merged in
-    any order. First, last, positional reductions, and growing states such
-    as distinct sets or samples use other execution routes."""
-    return op in [SUM, MEAN, MIN, MAX, COUNT, LEN, STD, VAR, NULL_COUNT]
+    """Whether a reduction has a state that can be merged in any order: a
+    fixed-size one, or a quantile's chain of values. First, last,
+    positional reductions and distinct sets use other execution routes."""
+    return op in [
+        SUM,
+        MEAN,
+        MIN,
+        MAX,
+        COUNT,
+        LEN,
+        STD,
+        VAR,
+        NULL_COUNT,
+        MEDIAN,
+        QUANTILE,
+    ]
 
 
 # What a state slot holds, in words after the group's key words.
@@ -170,8 +184,116 @@ comptime _K_DECIMAL_SUM = 9
 # `row_number() OVER (PARTITION BY ... ORDER BY value) <= k`): how many are
 # held, then each pair's order key and row, kept sorted, first best.
 comptime _K_TOP_ROWS = 10
+# A median or quantile: three words, the newest and the oldest segment of
+# the group's chain of values (DuckDB's `QuantileState`, a vector of every
+# valid value) and how many it holds; all 0 when it has none.
+comptime _K_VALUES = 11
 # The most pairs a group row holds inline: 33 state words, four cache lines.
 comptime TOP_ROWS_INLINE = 16
+
+
+# A median or quantile's values are kept in segments cut from the sink's
+# value arena, chained from the newest back: a segment is its previous
+# segment's address, the values it holds, its capacity, then the values as
+# Float64. Segments double from two values to 1024, so a group's values
+# are never copied as they grow (DuckDB's `QuantileState` vector is, on
+# each doubling), and merging two groups links one chain under the other.
+comptime _VALUES_FIRST = 2
+comptime _VALUES_LAST = 1024
+comptime _SEGMENT_HEAD = 3
+
+
+struct _ValueArena(Movable):
+    """The segments of a sink's quantile values, cut from arenas on huge
+    pages where granted."""
+
+    var arenas: List[List[UInt8]]
+    var next: Int
+    var end: Int
+
+    def __init__(out self):
+        self.arenas = List[List[UInt8]]()
+        self.next = 0
+        self.end = 0
+
+    @no_inline
+    def _refill(mut self, bytes: Int):
+        var size = max(_ARENA_BYTES, bytes)
+        self.arenas.append(huge_uninit[UInt8](size))
+        self.next = Int(self.arenas[len(self.arenas) - 1].unsafe_ptr())
+        self.end = self.next + size
+
+    @always_inline
+    def segment(mut self, capacity: Int, previous: Int) -> Int:
+        """A new empty segment after `previous`; its address."""
+        var bytes = 8 * (_SEGMENT_HEAD + capacity)
+        if self.next + bytes > self.end:
+            self._refill(bytes)
+        var at = self.next
+        self.next += bytes
+        var head = _words_at(at)
+        head[unsafe_offset=0] = UInt64(previous)
+        head[unsafe_offset=1] = 0
+        head[unsafe_offset=2] = UInt64(capacity)
+        return at
+
+
+@always_inline
+def _values_push(
+    state: Pointer[UInt64, MutAnyOrigin],
+    value: Float64,
+    arena: Pointer[_ValueArena, MutAnyOrigin],
+):
+    """A value onto the chain whose newest segment, oldest segment and
+    value count are the three words at `state` (all 0 for none)."""
+    var tail = Int(state[])
+    var head = _words_at(tail)
+    if tail == 0 or head[unsafe_offset=1] == head[unsafe_offset=2]:
+        var capacity = _VALUES_FIRST
+        if tail != 0:
+            capacity = min(2 * Int(head[unsafe_offset=2]), _VALUES_LAST)
+        var fresh = arena[].segment(capacity, tail)
+        if tail == 0:
+            state[unsafe_offset=1] = UInt64(fresh)
+        state[] = UInt64(fresh)
+        tail = fresh
+        head = _words_at(tail)
+    var fill = Int(head[unsafe_offset=1])
+    head[unsafe_offset=_SEGMENT_HEAD + fill] = bitcast[DType.uint64](value)
+    head[unsafe_offset=1] = UInt64(fill + 1)
+    state[unsafe_offset=2] += 1
+
+
+def _values_append(into: Pointer[UInt64, MutAnyOrigin], other: Int):
+    """The chain whose three state words start at `other` appended to the
+    one at `into`: the older chain's oldest segment now follows the other's
+    newest."""
+    var added = _words_at(other)
+    if added[unsafe_offset=2] == 0:
+        return
+    if into[unsafe_offset=2] == 0:
+        for w in range(3):
+            into[unsafe_offset=w] = added[unsafe_offset=w]
+        return
+    _words_at(Int(into[unsafe_offset=1]))[] = added[]
+    into[unsafe_offset=1] = added[unsafe_offset=1]
+    into[unsafe_offset=2] += added[unsafe_offset=2]
+
+
+def _values_gather(
+    state: Pointer[UInt64, MutAnyOrigin], into: Pointer[Float64, MutAnyOrigin]
+):
+    """The chain's values copied to `into`, which holds room for them."""
+    var at = Int(state[])
+    var end = Int(state[unsafe_offset=2])
+    while at != 0:
+        var segment = _words_at(at)
+        var fill = Int(segment[unsafe_offset=1])
+        end -= fill
+        _ = external_call["memcpy", Int](
+            Int(into) + 8 * end, at + 8 * _SEGMENT_HEAD, 8 * fill
+        )
+        at = Int(segment[])
 
 
 @fieldwise_init
@@ -194,6 +316,7 @@ struct _Slot(Copyable, Movable):
             return 1 + 2 * self.k
         if (
             self.kind == _K_INT_SUM
+            or self.kind == _K_VALUES
             or self.kind == _K_MOMENTS
             or self.kind == _K_DECIMAL_SUM
         ):
@@ -237,6 +360,8 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
     var part = _numeric_part(input)
     if not part:
         return -1
+    if spec.op == MEDIAN or spec.op == QUANTILE:
+        return _K_VALUES
     var floating = part.value().dtype().is_float()
     var dtype = spec.make(0).dtype
     if dtype != DataType.INT64 and dtype != DataType.FLOAT64:
@@ -295,6 +420,8 @@ def _update_slot[
     count: Int,
     rows: Pointer[Int, _],
     base: Int,
+    arena: Pointer[_ValueArena, MutAnyOrigin],
+    discard: Int,
 ):
     """Update group state words with a batch's column values from rows
     [start, start + count). `base` is the byte offset in each group row,
@@ -313,6 +440,20 @@ def _update_slot[
         for k in range(count):
             if _validity_at(valid, bit + start + k) == (kind == _K_COUNT):
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
+        return
+    if kind == _K_VALUES:
+        for k in range(count):
+            var i = start + k
+            if nulls and not _validity_at(valid, bit + i):
+                continue
+            # Rows a filter dropped keep no value.
+            if rows[unsafe_offset=k] == discard:
+                continue
+            _values_push(
+                _words_at(rows[unsafe_offset=k] + base),
+                Float64(values[unsafe_offset=i]),
+                arena,
+            )
         return
     for k in range(count):
         var i = start + k
@@ -438,6 +579,8 @@ def _update_states(
     rows: Pointer[Int, _],
     states_at: Int,
     first: Int,
+    arena: Pointer[_ValueArena, MutAnyOrigin],
+    discard: Int,
 ) raises:
     """Every reduction's states for a batch (`inputs` are the morsel's
     slices, one chunk each; `rows` the addresses of the rows' groups, whose
@@ -494,6 +637,8 @@ def _update_states(
                     count,
                     rows,
                     base,
+                    arena,
+                    discard,
                 )
                 done = True
         if not done:
@@ -577,6 +722,11 @@ def _combine(slots: List[_Slot], into: Int, other: Int) raises:
                     b[unsafe_offset=w + 1 + 2 * p],
                     b[unsafe_offset=w + 2 + 2 * p],
                 )
+        elif kind == _K_VALUES:
+            _values_append(
+                Pointer[UInt64, MutAnyOrigin](unsafe_from_address=into + 8 * w),
+                other + 8 * w,
+            )
         elif kind <= _K_NULLS:
             a[unsafe_offset=w] += b[unsafe_offset=w]
         elif kind == _K_NARROW_SUM:
@@ -732,6 +882,7 @@ comptime _F_COUNTS = 2
 comptime _F_INT_SUM = 3
 comptime _F_FLOAT_SUM = 4
 comptime _F_MEAN = 5
+comptime _F_QUANTILE = 6
 
 
 def _finalize_mode(slot: _Slot, template: Reducer) -> Int:
@@ -744,6 +895,8 @@ def _finalize_mode(slot: _Slot, template: Reducer) -> Int:
         return _F_SKIP
     if kind == _K_LEN or kind == _K_COUNT or kind == _K_NULLS:
         return _F_COUNTS
+    if kind == _K_VALUES:
+        return _F_QUANTILE
     var summed = (
         kind == _K_INT_SUM or kind == _K_NARROW_SUM or kind == _K_FLOAT_SUM
     )
@@ -770,6 +923,9 @@ struct _Finalizer(Movable):
     var slot: _Slot
     var mode: Int
     var min_count: Int64
+    var q: Float64
+    var method: String
+    var gathered: List[Float64]
     var state: Reducer
     var ints: List[Int64]
     var floats: List[Float64]
@@ -781,6 +937,9 @@ struct _Finalizer(Movable):
         var template = spec.make(0)
         self.mode = _finalize_mode(slot, template)
         self.min_count = Int64(template.min_count)
+        self.q = template.floating
+        self.method = template.text
+        self.gathered = List[Float64]()
         var direct = self.mode >= _F_COUNTS
         var integer = self.mode == _F_COUNTS or self.mode == _F_INT_SUM
         self.ints = List[Int64](
@@ -830,6 +989,33 @@ struct _Finalizer(Movable):
                 floats[unsafe_offset=g] = bitcast[DType.float64](
                     at[unsafe_offset=w]
                 ) if ok else 0
+        elif self.mode == _F_QUANTILE:
+            for g in range(lo, hi):
+                var state = _words_at(Int(at.unsafe_offset(g * stride + w0)))
+                var n = Int(state[unsafe_offset=2])
+                var ok = n > 0
+                floats[unsafe_offset=g] = 0
+                if ok:
+                    if len(self.gathered) < n:
+                        self.gathered = List[Float64](
+                            unsafe_uninit_length=2 * n
+                        )
+                    var values = Pointer[Float64, MutAnyOrigin](
+                        unsafe_from_address=Int(self.gathered.unsafe_ptr())
+                    )
+                    _values_gather(state, values)
+                    var result = quantile_in(
+                        Span[Float64, MutAnyOrigin](
+                            unsafe_ptr=values, length=n
+                        ),
+                        self.q,
+                        self.method,
+                    )
+                    ok = Bool(result)
+                    if ok:
+                        floats[unsafe_offset=g] = result.value()
+                valid[unsafe_offset=g] = ok
+                nulls = nulls or not ok
         elif self.mode == _F_MEAN:
             for g in range(lo, hi):
                 var w = g * stride + w0
@@ -1830,6 +2016,8 @@ struct AggregateSink(Movable):
     # A group row's worth of words that rows a filter dropped update
     # (`sink`'s `keep`): read by nothing.
     var discard: List[UInt64]
+    # The segments of the quantile values, which the finish reads.
+    var values: _ValueArena
 
     def __init__(out self, layout: AggregateLayout, workers: Int):
         self.slots = layout.slots.copy()
@@ -1867,6 +2055,7 @@ struct AggregateSink(Movable):
         self.held = List[Series]()
         self.numbering = False
         self.discard = List[UInt64](length=self.parts.stride + 8, fill=0)
+        self.values = _ValueArena()
         self.row_ids = List[Int]()
         self.representatives = List[Int]()
 
@@ -2043,6 +2232,10 @@ struct AggregateSink(Movable):
                 group_at,
                 self.parts.states_at,
                 first,
+                Pointer[_ValueArena, MutAnyOrigin](
+                    unsafe_from_address=Int(Pointer(to=self.values))
+                ),
+                Int(self.discard.unsafe_ptr()),
             )
         self.sunk += length
 
