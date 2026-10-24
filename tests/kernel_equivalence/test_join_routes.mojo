@@ -11,6 +11,7 @@ from dataframe.frame import (
     _JoinCountJob,
 )
 from dataframe.join_hash import int64_progression
+from dataframe.join_type import JOIN_LEFT
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -171,6 +172,75 @@ def test_unordered_left_build_over_many_chunks_gathers_every_left_row() raises:
         var key = joined.item(row, "k").int64()
         assert_equal(joined.item(row, "l").int64(), key * 10)
         assert_equal(joined.item(row, "r").int64(), key * 7)
+
+
+def test_unordered_left_join_on_a_smaller_left_emits_unmatched_left_rows_after_the_pairs() raises:
+    # A left join whose left side is the smaller builds on it and, when its
+    # consumers ignore order, returns the probed pairs and then the left rows
+    # no right row matched (a null key and keys the right does not hold),
+    # each once with a null right payload.
+    var left_keys = List[Int64]()
+    var left_valid = List[Bool]()
+    var left_ids = List[Int64]()
+    for i in range(50):
+        left_keys.append(Int64(i % 13))
+        left_valid.append(i != 7)
+        left_ids.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^, left_valid^)),
+            Series("l", Column[Int64](left_ids^)),
+        ]
+    )
+    var right_keys = List[Int64]()
+    var right_ids = List[Int64]()
+    for j in range(6000):
+        right_keys.append(Int64(j % 10))
+        right_ids.append(Int64(j))
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_ids^)),
+        ]
+    )
+    var expected_rows = 0
+    var expected_unmatched = 0
+    for i in range(50):
+        if i != 7 and i % 13 < 10:
+            expected_rows += 600
+        else:
+            expected_rows += 1
+            expected_unmatched += 1
+    for ordered in [False, True]:
+        var joined = left._join_impl(
+            right,
+            left_on=["k"],
+            right_on=["k"],
+            how=JOIN_LEFT,
+            keep_order=ordered,
+        )
+        assert_equal(joined.height(), expected_rows)
+        var seen = List[Int](length=50, fill=0)
+        var unmatched = 0
+        for row in range(joined.height()):
+            var id = Int(joined.item(row, "l").int64())
+            seen[id] += 1
+            if joined.item(row, "r").is_null():
+                unmatched += 1
+                assert_true(id == 7 or id % 13 >= 10)
+            else:
+                assert_equal(Int(joined.item(row, "r").int64()) % 10, id % 13)
+                assert_equal(Int(joined.item(row, "k").int64()), Int(id % 13))
+        assert_equal(unmatched, expected_unmatched)
+        for id in range(50):
+            assert_true(seen[id] >= 1)
+        if ordered:
+            # Left-major order: each left row's rows are together, ascending.
+            var last = Int64(-1)
+            for row in range(joined.height()):
+                var id = joined.item(row, "l").int64()
+                assert_true(id >= last)
+                last = id
 
 
 def test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell() raises:
