@@ -2458,12 +2458,6 @@ struct AggregateSink(Movable):
         var group_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=groups)
         var keep_at = Pointer[Bool, MutAnyOrigin](unsafe_from_address=keep)
         var discard = Int(self.discard.unsafe_ptr())
-        if not self.grow:
-            for k in range(count):
-                comptime if masked:
-                    if not keep_at[unsafe_offset=k]:
-                        continue
-                self.hll.add(hash_ptr[unsafe_offset=k])
         if 3 * (self.live + count) >= 2 * self.capacity:
             self._full(count)
         self.cycle += count
@@ -2482,6 +2476,14 @@ struct AggregateSink(Movable):
                     k,
                     row + k,
                 )
+            if not self.grow:
+                # While lookups are skipped every row is a group, and the
+                # sketch sees them all (DuckDB's `ObserveHashes`).
+                for k in range(count):
+                    comptime if masked:
+                        if not keep_at[unsafe_offset=k]:
+                            continue
+                    self.hll.add(hash_ptr[unsafe_offset=k])
             self.made += appended
             self.live += appended
             self.skipped += appended
@@ -2509,6 +2511,10 @@ struct AggregateSink(Movable):
                         )
                         self.representatives.append(row + k)
                     table[unsafe_offset=slot] = _entry(hash, at)
+                    # The sketch sees only new groups: a row whose group
+                    # is in the table has had its hash seen already.
+                    if not self.grow:
+                        self.hll.add(hash)
                     self.live += 1
                     self.made += 1
                     group_at[unsafe_offset=k] = at
@@ -3350,17 +3356,38 @@ def aggregate_finish(
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))
     var parts = 1 << bits
     var rows = List[Int](length=parts, fill=0)
+    # What finishing a partition reads, in bytes: its group rows, and the
+    # values of every quantile state in them, which a job flattens and
+    # selects from. Jobs are cut by this, so a few groups of many values
+    # (a median over ten groups of a million values) still spread over
+    # the workers.
+    var weight = List[Int](length=parts, fill=0)
+    var counted = List[Int]()
+    for slot in layout.slots:
+        if slot.kind == _K_VALUES:
+            counted.append(sinks[0].parts.states_at + slot.offset + 2)
     var total = 0
     for p in range(parts):
         for j in range(len(sinks)):
             for b in range(len(sinks[j].parts.blocks[p])):
-                rows[p] += sinks[j].parts.rows_in(p, b)
-        total += rows[p]
-    var per_job = max(per_run, -(-total // max(1, configured_workers())))
+                var held = sinks[j].parts.rows_in(p, b)
+                rows[p] += held
+                if len(counted) > 0:
+                    var at = sinks[j].parts.blocks[p][b]
+                    for _ in range(held):
+                        for w in counted:
+                            weight[p] += 8 * Int(_words_at(at)[unsafe_offset=w])
+                        at += 8 * stride
+        weight[p] += 8 * stride * rows[p]
+        total += weight[p]
+    var per_job = max(
+        _PARTITION_BYTES, -(-total // max(1, configured_workers()))
+    )
     var finishes = List[_FinishJob]()
     var lo = 0
     var run = 0
     var job = 0
+    var job_rows = 0
     var starts = List[Int]()
     var run_rows = List[Int]()
     var open = False
@@ -3369,20 +3396,21 @@ def aggregate_finish(
             starts.append(p)
             open = True
         run += rows[p]
-        job += rows[p]
+        job += weight[p]
+        job_rows += rows[p]
         if run >= per_run or job >= per_job or p == parts - 1:
             run_rows.append(run)
             run = 0
             open = False
         if job >= per_job or p == parts - 1:
-            if job > 0:
+            if job_rows > 0:
                 finishes.append(
                     _FinishJob(
                         Int(Pointer(to=sinks)),
                         Int(Pointer(to=held)),
                         lo,
                         p + 1,
-                        job,
+                        job_rows,
                         layout.templates,
                         layout.slots,
                         layout.key_templates,
@@ -3396,6 +3424,7 @@ def aggregate_finish(
             run_rows = List[Int]()
             lo = p + 1
             job = 0
+            job_rows = 0
     run_jobs(finishes)
     _ = held^
     for p in range(len(finishes)):
