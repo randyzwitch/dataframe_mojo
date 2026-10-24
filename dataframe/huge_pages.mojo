@@ -14,7 +14,8 @@ from std.sys import CompilationTarget, size_of
 
 # Linux `MADV_HUGEPAGE`.
 comptime _MADV_HUGEPAGE = 14
-comptime _HUGE_PAGE = 2 << 20
+comptime HUGE_PAGE_BYTES = 2 << 20
+comptime _HUGE_PAGE = HUGE_PAGE_BYTES
 comptime _PAGE = 4096
 
 

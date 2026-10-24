@@ -30,6 +30,7 @@ from .expr import (
 )
 from .dtype import DataType
 from .nested_column import StructColumn
+from .regex import Regex
 from .regex_kernels import compile_pattern, regex_count, regex_find
 from .series import Series
 from .string_bytes import _Bytes, _find_bytes, _same_bytes
@@ -41,10 +42,12 @@ from .unicode_alphabetic import alphabetic_ranges, is_alphabetic
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 
 
-def text_function(node: Node, input: Series) raises -> Series:
+def text_function(
+    node: Node, input: Series, compiled: Optional[Regex] = None
+) raises -> Series:
     """Evaluate one text_functions operation on a String series."""
     if input.is_chunked():
-        return text_function(node, input.rechunk())
+        return text_function(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
     var op = node.op
     if op == STR_STRIP_PREFIX or op == STR_STRIP_SUFFIX:
@@ -64,7 +67,11 @@ def text_function(node: Node, input: Series) raises -> Series:
         if node.integer == 0:
             # A regular expression (#219), unless it only matches one
             # literal string.
-            var regex = compile_pattern(node.text, False)
+            var regex = (
+                compiled.value().copy() if compiled else compile_pattern(
+                    node.text, False
+                )
+            )
             var literal = regex.literal()
             if not literal:
                 if op == STR_FIND:

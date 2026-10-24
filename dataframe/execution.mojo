@@ -504,11 +504,13 @@ def _eval[
     if node.op == INT_IS_IN:
         return integer_is_in(left, node.text)
     if is_string_op(node.op):
-        return string_op(node, left)
+        return string_op(node, left, bound._regex(index))
     if is_text_function(node.op):
-        return text_function(node, left)
+        return text_function(node, left, bound._regex(index))
     if is_nested_op(node.op):
-        return nested_op(node, left, bound.dtypes[node.left])
+        return nested_op(
+            node, left, bound.dtypes[node.left], bound._regex(index)
+        )
     if node.right < 0:
         if is_math(node.op):
             return math_unary[width](
