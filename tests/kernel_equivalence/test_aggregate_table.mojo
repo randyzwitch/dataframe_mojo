@@ -56,11 +56,8 @@ def reductions() -> List[Expr]:
         col("y").std().alias("y_std"),
         col("y").median().alias("y_median"),
         col("x").quantile(0.25).alias("x_q25"),
-<<<<<<< HEAD
         corr(col("x"), col("y")).alias("xy_corr"),
         cov(col("x"), col("y")).alias("xy_cov"),
-=======
->>>>>>> origin/main
     ]
 
 
@@ -587,7 +584,6 @@ def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
         assert_frame(piped.sort("k"), expected.sort("k"))
         _ = trace^
         _ = workers^
-<<<<<<< HEAD
 
 
 def test_medians_of_few_large_groups_match_the_single_thread_route() raises:
@@ -635,5 +631,3 @@ def test_medians_of_few_large_groups_match_the_single_thread_route() raises:
     assert_frame(piped.sort("k"), expected.sort("k"))
     _ = trace^
     _ = workers^
-=======
->>>>>>> origin/main
