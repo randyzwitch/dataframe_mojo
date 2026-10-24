@@ -1,8 +1,10 @@
 """Terminal greedy DFA shortcuts preserve priorities and capture slots."""
 # contract-group: kernel.regex
-from std.testing import assert_equal
+from std.testing import assert_equal, assert_true
 
 from dataframe.regex import Matcher, Regex
+from dataframe.regex.program import SUFFIX_LIMIT
+from dataframe.regex.suffix import suffix_end
 from .test_regex_engine import _span
 
 
@@ -92,6 +94,42 @@ def test_greedy_suffix_matches_vm_for_priority_and_captures() raises:
 
 
 def test_greedy_suffix_scans_vectors_and_respects_search_start() raises:
+    # Check every vector lane and short tail against an ordinary byte scan.
+    var sample = String("a中𐐀" * 7 + "x" + "a" * 17 + "y\x00" + "a" * 33)
+    var bytes = _span(sample)
+    for count in range(1, 4):
+        var code = Int32.MIN | Int32((count << 21) | (120 << 7) | (121 << 14))
+        for start in range(len(bytes) + 1):
+            for width in range(36):
+                var end = min(len(bytes), start + width)
+                var first = end
+                var last = start
+                for at in range(start, end):
+                    var b = bytes[at]
+                    if (
+                        b == 0
+                        or (count > 1 and b == 120)
+                        or (count > 2 and b == 121)
+                    ):
+                        first = min(first, at)
+                        last = at + 1
+                assert_equal(suffix_end[False](bytes, start, end, code), first)
+                assert_equal(suffix_end[True](bytes, end, start, code), last)
+    _ = sample
+    var all = String("a中𐐀" * 64)
+    var all_span = _span(all)
+    var all_regex = Regex("(?s)(.*)")
+    var all_matcher = Matcher(all_regex)
+    assert_equal(all_matcher.find(all_span), (0, len(all_span)))
+    var forward_shortcut = False
+    var reverse_shortcut = False
+    for e in all_matcher.forward.transitions:
+        forward_shortcut |= Int(e) < SUFFIX_LIMIT
+    for e in all_matcher.reverse.transitions:
+        reverse_shortcut |= Int(e) < SUFFIX_LIMIT
+    assert_true(forward_shortcut)
+    assert_true(reverse_shortcut)
+    _ = all
     var patterns: List[String] = [
         "(.*)",
         "(?s)(.*)",
