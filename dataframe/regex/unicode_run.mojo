@@ -82,6 +82,17 @@ def _scan_width[
 ) -> Int:
     comptime lanes = 8 if width == 2 else 4
     comptime consumed = width * lanes
+    comptime offset = 4 if reverse and width == 3 else 0
+    var structure_mask = SIMD[DType.uint8, 16]()
+    var headers = SIMD[DType.uint8, 16]()
+    comptime for i in range(16):
+        comptime if i >= offset and i < offset + consumed:
+            comptime if (i - offset) % width == 0:
+                structure_mask[i] = UInt8(0x100 - (1 << (7 - width)))
+                headers[i] = UInt8(0x100 - (1 << (8 - width)))
+            else:
+                structure_mask[i] = 0xC0
+                headers[i] = 0x80
     var p = text.unsafe_ptr()
     while True:
         var begin = at
@@ -93,24 +104,22 @@ def _scan_width[
             if bound - at < 16:
                 return at
         var block = p.unsafe_load[width=16](begin)
+        # Validate the selected byte layout before shuffling or decoding.
+        # Three-byte batches ignore the unused four bytes in the load.
+        if not (block & structure_mask).eq(headers).reduce_and():
+            return at
         var a = _part[width, 0, reverse](block)
         var b = _part[width, 1, reverse](block)
         var cp: SIMD[DType.uint32, lanes]
         var valid: SIMD[DType.bool, lanes]
         comptime if width == 2:
             cp = ((a & 31) << 6) | (b & 63)
-            valid = a.ge(0xC2) & a.le(0xDF) & (b & 0xC0).eq(0x80)
+            valid = cp.ge(0x80)
         else:
             var c = _part[width, 2, reverse](block)
-            valid = (b & 0xC0).eq(0x80) & (c & 0xC0).eq(0x80)
             comptime if width == 3:
                 cp = ((a & 15) << 12) | ((b & 63) << 6) | (c & 63)
-                valid &= (
-                    a.ge(0xE0)
-                    & a.le(0xEF)
-                    & cp.ge(0x800)
-                    & (cp.lt(0xD800) | cp.gt(0xDFFF))
-                )
+                valid = cp.ge(0x800) & (cp.lt(0xD800) | cp.gt(0xDFFF))
             else:
                 var d = _part[width, 3, reverse](block)
                 cp = (
@@ -119,13 +128,7 @@ def _scan_width[
                     | ((c & 63) << 6)
                     | (d & 63)
                 )
-                valid &= (
-                    a.ge(0xF0)
-                    & a.le(0xF4)
-                    & (d & 0xC0).eq(0x80)
-                    & cp.ge(0x10000)
-                    & cp.le(MAX_CODEPOINT)
-                )
+                valid = cp.ge(0x10000) & cp.le(MAX_CODEPOINT)
         var rejected = ~valid | cp.lt(low) | cp.gt(high)
         var mask: UInt64
         comptime if width == 2:
