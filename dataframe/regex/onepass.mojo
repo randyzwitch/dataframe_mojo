@@ -20,6 +20,7 @@ from .program import (
     OP_NOP,
 )
 from .pikevm import decode, look_holds, previous_start
+from .ascii_run import scan_ascii_run
 
 comptime _MAX_STATES = 256
 comptime _MAX_CELLS = 32768
@@ -190,6 +191,11 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
+                    comptime if not unicode_input:
+                        if end - at >= 16:
+                            at = scan_ascii_run[False](
+                                program, pc, text, at, end
+                            )
                     while at < end:
                         var cp: UInt32
                         var run_width = 1
@@ -312,6 +318,11 @@ struct OnePass(Movable):
             comptime if accelerate:
                 var pc = Int(self.loop_pc[state])
                 if pc >= 0:
+                    comptime if not unicode_input:
+                        if at - floor >= 16:
+                            at = scan_ascii_run[True](
+                                program, pc, text, at, floor
+                            )
                     while at > floor:
                         var cp: UInt32
                         comptime if unicode_input:
