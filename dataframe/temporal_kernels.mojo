@@ -11,6 +11,7 @@ from .dtype import DataType
 from .expr import (
     Node,
     SEP,
+    ADD,
     SUB,
     MUL,
     FLOORDIV,
@@ -83,6 +84,7 @@ from .temporal import (
     non_existent_code,
 )
 from .timezone import TimeZone
+from .temporal_fields import field_projection
 
 
 def temporal_binary(
@@ -104,6 +106,33 @@ def temporal_binary(
             result_type,
             mask,
         )
+    if op == MUL:
+        return _temporal_binary[MUL](
+            left, right, left_type, right_type, result_type, mask
+        )
+    if op == FLOORDIV:
+        return _temporal_binary[FLOORDIV](
+            left, right, left_type, right_type, result_type, mask
+        )
+    if op == SUB:
+        return _temporal_binary[SUB](
+            left, right, left_type, right_type, result_type, mask
+        )
+    return _temporal_binary[ADD](
+        left, right, left_type, right_type, result_type, mask
+    )
+
+
+def _temporal_binary[
+    op: Int
+](
+    left: Series,
+    right: Series,
+    left_type: DataType,
+    right_type: DataType,
+    result_type: DataType,
+    mask: List[Bool],
+) raises -> Series:
     ref a = left._data[Column[Int64]]
     ref b = right._data[Column[Int64]]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:
@@ -111,32 +140,54 @@ def temporal_binary(
     var n = 0 if len(a) == 0 or len(b) == 0 else max(len(a), len(b))
     var active = fit_mask(mask, n)
     var values = List[Int64](length=n, fill=0)
-    var valid = List[Bool](length=n, fill=False)
+    var nullable = (
+        len(a._bits[]) > 0
+        or len(b._bits[]) > 0
+        or len(active) > 0
+        or op == FLOORDIV
+    )
+    var bits = List[UInt8](length=(n + 7) // 8 if nullable else 0, fill=255)
+    var a_scalar = len(a) == 1
+    var b_scalar = len(b) == 1
+    var source_a = a._ptr()
+    var source_b = b._ptr()
+    var out = values.unsafe_ptr()
+    var scale_left = left_type.is_date() and right_type.is_duration()
+    var date_difference = left_type.is_date() and right_type.is_date()
+    var scale = ticks_per_day(result_type) if scale_left else Int64(1)
     for i in range(n):
-        if len(active) and not active[i]:
+        var p = 0 if a_scalar else i
+        var q = 0 if b_scalar else i
+        if nullable and (
+            (len(active) and not active[i])
+            or not a._valid(p)
+            or not b._valid(q)
+        ):
+            bits[i // 8] &= ~(UInt8(1) << UInt8(i % 8))
             continue
-        var p = 0 if len(a) == 1 else i
-        var q = 0 if len(b) == 1 else i
-        if not (a._valid(p) and b._valid(q)):
-            continue
-        var x = a._get(p)
-        var y = b._get(q)
-        valid[i] = True
-        if op == MUL:
-            values[i] = checked_mul(x, y)
+        var x = source_a.unsafe_offset(p)[]
+        var y = source_b.unsafe_offset(q)[]
+        comptime if op == MUL:
+            out.unsafe_offset(i)[] = checked_mul(x, y)
         elif op == FLOORDIV:
             if y == 0:
-                valid[i] = False
+                bits[i // 8] &= ~(UInt8(1) << UInt8(i % 8))
             else:
-                values[i] = checked_floor_div(x, y)
+                out.unsafe_offset(i)[] = checked_floor_div(x, y)
         else:
-            if left_type.is_date() and right_type.is_duration():
-                x = checked_mul(x, ticks_per_day(result_type))
-            var raw = checked_sub(x, y) if op == SUB else checked_add(x, y)
-            if left_type.is_date() and right_type.is_date():
+            if scale_left:
+                x = checked_mul(x, scale)
+            var raw: Int64
+            comptime if op == SUB:
+                raw = checked_sub(x, y)
+            else:
+                raw = checked_add(x, y)
+            if date_difference:
                 raw = checked_mul(raw, 86400000)
-            values[i] = raw
-    return Series("", Column[Int64](values^, valid)).with_dtype(result_type)
+            out.unsafe_offset(i)[] = raw
+    return Series("", Column[Int64](values=values^, bits=bits^)).with_dtype(
+        result_type
+    )
 
 
 def _weekday(days: Int64) -> Int64:
@@ -684,6 +735,9 @@ def dt_op(
             node.text, dtype.time_zone()
         ) if dtype.is_datetime() else DataType.duration(node.text)
         return input.with_dtype(target)
+    var field = field_projection(op, input, dtype, mask)
+    if field:
+        return field.value().copy()
     ref column = input._data[Column[Int64]]
     var n = len(column)
     var valid = List[Bool](length=n, fill=False)
