@@ -30,6 +30,7 @@ from .regex_kernels import (
 )
 from .series import Series
 from .string_column import StringBuilder, StringColumn
+from .string_bytes import _Bytes, _find_bytes
 
 
 def nested_op(
@@ -114,20 +115,38 @@ def _split(input: Series, by: String, inclusive: Bool) raises -> Series:
     var parts = StringBuilder(n, column._value_bytes())
     var valid = List[Bool](capacity=n)
     var total = 0
+    var rows = _Bytes(column)
+    var needle = Span[UInt8, ImmutAnyOrigin](
+        unsafe_ptr=by.unsafe_ptr()
+        .unsafe_mut_cast[False]()
+        .unsafe_origin_cast[ImmutAnyOrigin](),
+        length=by.byte_length(),
+    )
     for i in range(n):
         if not column._valid(i):
             valid.append(False)
             offsets.append(Int64(total))
             continue
         valid.append(True)
-        var text = String(column._get(i))
-        var pieces = text.split(by)
-        for k in range(len(pieces)):
-            if inclusive and k + 1 < len(pieces):
-                parts.append(String(pieces[k]) + by)
-            else:
-                parts.append(String(pieces[k]))
+        var row = rows.get(i)
+        var first = 0
+        while True:
+            var found = _find_bytes(row, needle, first)
+            var last = len(row) if found < 0 else found + (
+                len(needle) if inclusive else 0
+            )
+            parts._bytes.extend(
+                Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=row.unsafe_ptr().unsafe_offset(first),
+                    length=last - first,
+                )
+            )
+            parts._offsets.append(Int64(len(parts._bytes)))
+            parts._push_bit(True)
             total += 1
+            if found < 0:
+                break
+            first = found + len(needle)
         offsets.append(Int64(total))
     var child = Series("item", parts^.finish())
     return Series("", ListColumn(offsets^, child^, _bits_of(valid)))
@@ -201,21 +220,23 @@ def _contains(lists: ListColumn, node: Node) raises -> Series:
 def _join(lists: ListColumn, separator: String) raises -> Series:
     """Join string elements with a separator, skipping null elements."""
     var column = lists.child().string()
+    var rows = _Bytes(column)
+    var delimiter = separator.as_bytes()
     var out = StringBuilder(len(lists))
     for i in range(len(lists)):
         if not lists._valid(i):
             out.append_null()
             continue
-        var text = String()
         var first = True
         for r in range(lists._start(i), lists._end(i)):
             if not column._valid(r):
                 continue
             if not first:
-                text += separator
-            text += String(column._get(r))
+                out._bytes.extend(delimiter)
+            out._bytes.extend(rows.get(r))
             first = False
-        out.append(text)
+        out._offsets.append(Int64(len(out._bytes)))
+        out._push_bit(True)
     return Series("", out^.finish())
 
 
