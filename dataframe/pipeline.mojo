@@ -74,6 +74,13 @@ from .join_hash import (
 )
 from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from .row_encode import encodable
+from .runtime_filter import (
+    KeyBloom,
+    LOPSIDED_FACTOR,
+    MAX_BUILD_PROBE_DISTINCT_RATIO,
+    bloom_mask,
+    build_bloom,
+)
 from .gather import can_filter_aligned_chunks, take_parallel, true_rows
 from .huge_pages import huge_list
 from .mask_filter import filter_columns
@@ -326,6 +333,12 @@ struct _KeyRange(Copyable, Movable):
     var low: Int64
     var high: Int64
     var any: Bool
+    # A bloom filter over the build's keys, when the build is much smaller
+    # than the rows it filters and its keys a small share of the column's
+    # (`runtime_filter.mojo`): rows whose key it lacks join nothing.
+    var bloom: Optional[ArcPointer[KeyBloom]]
+    # The join's index among the pipeline's steps.
+    var step: Int
 
 
 def _range_key(dtype: DataType) -> Bool:
@@ -412,6 +425,9 @@ def _column_bounds[
 
 
 comptime _ZONE_ROWS = 2048
+# Rows a worker checks against a bloom filter (a vector, so its first morsel)
+# before it may leave it alone.
+comptime _BLOOM_TRIAL_ROWS = 2048
 
 
 def _zones_lock_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -572,6 +588,38 @@ def _range_bits[
     return kept
 
 
+def _key_bloom(
+    frame: DataFrame,
+    name: String,
+    key: Series,
+    low: Int64,
+    high: Int64,
+    equalities: Int,
+    step: Int,
+) raises -> Optional[ArcPointer[KeyBloom]]:
+    """A bloom filter over a build's keys when it pays, by Polars' rules
+    (`join_runtime_filter.rs`): the build holds at most an eighth of the
+    rows it filters, and, where the column's distinct count is known (a
+    loaded table's statistics), at most 0.3 of it."""
+    if equalities != 1 or step == 0:
+        # As DuckDB's, only a join with one equality condition; and not the
+        # first step, where the join's own probe drops a row as the filter
+        # would.
+        return None
+    var keys = len(key) - key.null_count()
+    if keys == 0 or LOPSIDED_FACTOR * keys > frame.height():
+        return None
+    var distinct = frame._distinct_count(name)
+    if distinct > 0 and Float64(
+        keys
+    ) > MAX_BUILD_PROBE_DISTINCT_RATIO * Float64(distinct):
+        return None
+    # Keys that fill most of their range are told by the range already.
+    if Float64(keys) * 2.0 >= Float64(high) - Float64(low) + 1.0:
+        return None
+    return build_bloom(key, keys)
+
+
 def _key_ranges(
     frame: DataFrame, steps: List[Step], joins: List[DataFrame]
 ) raises -> List[_KeyRange]:
@@ -584,7 +632,8 @@ def _key_ranges(
     var source = Dict[String, String]()
     for name in frame.columns():
         source[name] = name
-    for step in steps:
+    for at in range(len(steps)):
+        ref step = steps[at]
         if step.kind == STEP_JOIN:
             ref build = joins[step.join]
             if (step.how == JOIN_INNER or step.how == JOIN_SEMI) and len(
@@ -604,11 +653,24 @@ def _key_ranges(
                     if bounds:
                         ranges.append(
                             _KeyRange(
-                                name, bounds.value()[0], bounds.value()[1], True
+                                name,
+                                bounds.value()[0],
+                                bounds.value()[1],
+                                True,
+                                _key_bloom(
+                                    frame,
+                                    name,
+                                    key,
+                                    bounds.value()[0],
+                                    bounds.value()[1],
+                                    len(step.names),
+                                    at,
+                                ),
+                                at,
                             )
                         )
                     else:
-                        ranges.append(_KeyRange(name, 0, 0, False))
+                        ranges.append(_KeyRange(name, 0, 0, False, None, at))
             # The build's columns join the output, under their names or
             # with the suffix.
             for column in build.columns():
@@ -2394,6 +2456,9 @@ struct _PipelineJob(Job):
     var counts: List[Int]
     # The join builds' key ranges on source columns (`_key_ranges`).
     var key_ranges: List[_KeyRange]
+    # Per range with a bloom filter: this worker's rows checked and kept.
+    var bloom_checked: List[Int]
+    var bloom_kept: List[Int]
     # A right join step's flags of the build rows this worker's morsels
     # matched (one byte a build row), by step; empty for other steps.
     var marks: List[List[UInt8]]
@@ -2426,6 +2491,8 @@ struct _PipelineJob(Job):
         key_ranges: List[_KeyRange],
     ):
         self.key_ranges = key_ranges.copy()
+        self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
+        self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
         self.marks = List[List[UInt8]](capacity=len(steps))
         for step in steps:
             if step.kind == STEP_JOIN and step.how == JOIN_RIGHT:
@@ -2570,14 +2637,15 @@ struct _PipelineJob(Job):
             self.shared_bound.publish(self.bound)
         self.parts = [merged^]
 
-    def _in_key_ranges(self, mut morsel: Morsel) raises -> Bool:
+    def _in_key_ranges(mut self, mut morsel: Morsel) raises -> Bool:
         """Narrow a fresh morsel to the rows inside every join build's key
         range; False when none is. A morsel whose keys all fall outside a
         range is skipped whole, and one whose keys all fall inside is left
         as it is, both told by its keys' least and greatest values (a
         zone map); only a morsel straddling the range is filtered row by
         row."""
-        for r in self.key_ranges:
+        for k in range(len(self.key_ranges)):
+            ref r = self.key_ranges[k]
             if not r.any:
                 return False
             var column = morsel.frame.column(r.column)
@@ -2588,23 +2656,57 @@ struct _PipelineJob(Job):
             var most = bounds.value()[1]
             if most < r.low or least > r.high:
                 return False
-            if least >= r.low and most <= r.high:
+            if not (least >= r.low and most <= r.high):
+                # The share of the morsel's key span the range covers: when
+                # over half, the range likely keeps most rows, and the steps
+                # would read them through a selection for little gain.
+                var span = Float64(most) - Float64(least) + 1.0
+                var covered = (
+                    Float64(min(most, r.high))
+                    - Float64(max(least, r.low))
+                    + 1.0
+                )
+                if 2.0 * covered <= span:
+                    var narrowed = _range_mask(
+                        _unchunked(column), r.low, r.high
+                    )
+                    if narrowed[1] == 0:
+                        return False
+                    if 2 * narrowed[1] <= morsel.frame.height():
+                        morsel.keep(narrowed[0], narrowed[1])
+                        if morsel.count == 0:
+                            return False
+            if not r.bloom:
                 continue
-            # The share of the morsel's key span the range covers: when
-            # over half, the range likely keeps most rows, and the steps
-            # would read them through a selection for little gain.
-            var span = Float64(most) - Float64(least) + 1.0
-            var covered = (
-                Float64(min(most, r.high)) - Float64(max(least, r.low)) + 1.0
+            var shared = r.bloom.value().copy()
+            # Rows whose key the bloom filter lacks join nothing. It is
+            # left alone once, on this worker's first rows, it keeps more
+            # than one in eight of the rows it looks at: the join drops a
+            # row it does not match about as cheaply as the filter would
+            # (the maintainers' rule for passing a key set, too).
+            if (
+                self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS
+                and 8 * self.bloom_kept[k] > self.bloom_checked[k]
+            ):
+                continue
+            var plain = (
+                morsel.selected
+                and morsel.mask._offset == 0
+                and len(morsel.mask._bits[]) == 0
             )
-            if 2.0 * covered > span:
-                continue
-            var narrowed = _range_mask(_unchunked(column), r.low, r.high)
-            if narrowed[1] == 0:
+            var selection = Optional[BoolColumn]()
+            if plain:
+                selection = Optional(morsel.mask.copy())
+            # Only the rows still selected are looked up and counted: what
+            # the filter prunes is what earlier filters left.
+            var found = bloom_mask(_unchunked(column), shared[], selection)
+            self.bloom_checked[k] += found[1]
+            self.bloom_kept[k] += found[2]
+            if found[2] == 0:
                 return False
-            if 2 * narrowed[1] > morsel.frame.height():
-                continue
-            morsel.keep(narrowed[0], narrowed[1])
+            var rows = morsel.count if plain else morsel.frame.height()
+            if 2 * found[2] <= rows:
+                morsel.keep(found[0], found[2])
             if morsel.count == 0:
                 return False
         return True
@@ -3435,6 +3537,10 @@ def run_pipeline(
     var key_ranges = _key_ranges(frame, steps, joins[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
+    for r in key_ranges:
+        if r.bloom:
+            trace_path("pipeline.key_bloom")
+            break
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
     # A top-k on an integer key reads each morsel's key range from the

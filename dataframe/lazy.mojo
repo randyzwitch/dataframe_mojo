@@ -6673,6 +6673,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             # last). A left input is the stream's base, which nothing ranks:
             # its result is kept below, so it does not run twice.
             return False
+        if small_left:
+            trace_path("lazy.key_set_left")
+        else:
+            trace_path("lazy.key_set_right")
         self._frames.append(result.copy())
         self._schemas.append(Optional[CsvSchema]())
         self._nodes.append(_plan_node(SCAN_FRAME, offset=len(self._frames) - 1))
