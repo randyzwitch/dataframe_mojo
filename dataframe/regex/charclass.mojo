@@ -94,11 +94,12 @@ def symmetric_difference(a: List[UInt32], b: List[UInt32]) -> List[UInt32]:
     return union(difference(a, b), difference(b, a))
 
 
-def class_contains(ranges: List[UInt32], cp: UInt32) -> Bool:
-    """Binary search over the ranges."""
+@always_inline
+def class_contains_bounds(
+    ranges: List[UInt32], cp: UInt32, var lo: Int, var hi: Int
+) -> Bool:
+    """Search a bounded slice of canonical range pairs."""
     var points = ranges.unsafe_ptr()
-    var lo = 0
-    var hi = len(ranges) >> 1
     while lo < hi:
         # lo and hi index range pairs; their sum is nonnegative and
         # bounded by the Unicode domain. Both endpoints are in bounds.
@@ -110,6 +111,11 @@ def class_contains(ranges: List[UInt32], cp: UInt32) -> Bool:
         else:
             return True
     return False
+
+
+def class_contains(ranges: List[UInt32], cp: UInt32) -> Bool:
+    """Binary search over the ranges."""
+    return class_contains_bounds(ranges, cp, 0, len(ranges) >> 1)
 
 
 def class_size(ranges: List[UInt32]) -> Int:

@@ -10,6 +10,7 @@ from dataframe.frame import (
     _dense_right_int64_rows,
     _PROGRESSION_PARALLEL_KEY_BYTES,
 )
+from dataframe.join_fuse import FusedJoin
 from dataframe.join_hash import direct_hash_join_rows
 from dataframe.parallel import Pool, worker_count
 from tests.support.join_worker_setting import JoinWorkers
@@ -87,8 +88,11 @@ def test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_dup
                 expected_right.append(-1)
         var left_rows = List[Int]()
         var right_rows = List[Int]()
+        var unfused = FusedJoin()
         assert_true(
-            _bounded_int64_join_rows(probe, build, outer, left_rows, right_rows)
+            _bounded_int64_join_rows(
+                probe, build, outer, left_rows, right_rows, unfused
+            )
         )
         assert_equal(left_rows, expected_left)
         assert_equal(right_rows, expected_right)
