@@ -529,8 +529,10 @@ def _build_alphabet(mut program: Program):
         if op == OP_CHAR:
             var cp = UInt32(program.arg[pc])
             sets.append([cp, cp])
-        elif op == OP_CLASS:
-            sets.append(program.class_ranges[Int(program.arg[pc])].copy())
+    # The compiler already interns classes. Repeated instructions add no
+    # information to the alphabet partition, so visit each class once.
+    for ranges in program.class_ranges:
+        sets.append(ranges.copy())
     sets.append([10, 10])
     if program.looks & LOOK_UNICODE_WORD:
         sets.append(program.word.copy())
@@ -609,8 +611,17 @@ def compile_program(
     reverse program matches the pattern backwards (concatenations
     reversed). Reverse captures are optional; each group's end is saved
     before its body and its start after the body."""
+    return _compile_program(ast, reverse, word_class(), keep_reverse_captures)
+
+
+def _compile_program(
+    ast: Ast,
+    reverse: Bool,
+    var word: List[UInt32],
+    keep_reverse_captures: Bool = False,
+) raises -> Program:
     var compiler = _Compiler(reverse, keep_reverse_captures)
-    compiler.program.word = word_class()
+    compiler.program.word = word^
     for cp in range(128):
         compiler.program.word_ascii[cp] = class_contains(
             compiler.program.word, UInt32(cp)
