@@ -103,50 +103,66 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
     )
 
 
-def test_string_keys_from_one_build_group_by_its_row_number_and_merge_equal_values() raises:
-    # 6,000 dimension rows whose names repeat (rows i and i + 4,000 hold the
-    # same values) with a null name and a null region; 90K fact rows, some of them
-    # without a dimension row (a left join). Grouped by two dimension strings
-    # and a fact column, the sink groups by the dimension's row number and the
-    # groups of equal values merge afterwards: the result must be the eager
-    # join's, whose rows the sums, minimums and maximums are taken over.
-    var d_key = List[Int64]()
-    var d_name = List[String]()
-    var d_name_valid = List[Bool]()
-    var d_region = List[String]()
-    var d_region_valid = List[Bool]()
-    for i in range(6000):
-        d_key.append(Int64(i))
-        d_name.append("name " + String(i % 4000))
-        d_name_valid.append(i % 4000 != 7)
-        d_region.append("region " + String(i % 5))
-        d_region_valid.append(i % 4000 != 11)
-    var f_key = List[Int64]()
-    var f_year = List[Int64]()
-    var f_amount = List[Float64]()
-    var f_amount_valid = List[Bool]()
-    for row in range(90_000):
-        f_key.append(Int64((row * 7) % 6500))
-        f_year.append(Int64(2000 + row % 3))
-        f_amount.append(Float64(row % 97) / 4.0)
-        f_amount_valid.append(row % 11 != 0)
-    var dimension = DataFrame(
+def _dimension(rows: Int, repeat: Int) raises -> DataFrame:
+    # Names repeat every `repeat` rows (rows i and i + repeat hold the same
+    # values), with a null name and a null region among them.
+    var key = List[Int64]()
+    var name = List[String]()
+    var name_valid = List[Bool]()
+    var region = List[String]()
+    var region_valid = List[Bool]()
+    var city = List[String]()
+    var country = List[String]()
+    for i in range(rows):
+        key.append(Int64(i))
+        name.append("name " + String(i % repeat))
+        name_valid.append(i % repeat != 7)
+        region.append("region " + String(i % 5))
+        region_valid.append(i % repeat != 11)
+        city.append("a city called " + String(i % repeat) + " of the region")
+        country.append("country " + String(i % 3))
+    return DataFrame(
         [
-            ints("d_key", d_key),
-            Series("d_name", Column[String](d_name^, d_name_valid^)),
-            Series("d_region", Column[String](d_region^, d_region_valid^)),
+            ints("d_key", key),
+            Series("d_name", Column[String](name^, name_valid^)),
+            Series("d_region", Column[String](region^, region_valid^)),
+            Series("d_city", Column[String](city^)),
+            Series("d_country", Column[String](country^)),
         ]
-    )
-    var facts = DataFrame(
+    )._with_statistics()
+
+
+def _facts(rows: Int, spread: Int, step: Int) raises -> DataFrame:
+    var key = List[Int64]()
+    var year = List[Int64]()
+    var amount = List[Float64]()
+    var valid = List[Bool]()
+    for row in range(rows):
+        key.append(Int64((row * step) % spread))
+        year.append(Int64(2000 + row % 3))
+        amount.append(Float64(row % 97) / 4.0)
+        valid.append(row % 11 != 0)
+    return DataFrame(
         [
-            ints("f_key", f_key),
-            ints("f_year", f_year),
-            Series("f_amount", Column[Float64](f_amount^, f_amount_valid^)),
+            ints("f_key", key),
+            ints("f_year", year),
+            Series("f_amount", Column[Float64](amount^, valid^)),
         ]
-    )
+    )._with_statistics()
+
+
+def _row_number_trace(dimension: DataFrame, facts: DataFrame) raises -> Bool:
+    """Whether the row-number keys ran, after checking that the lazy
+    grouped result is the eager join's, for an inner and a left join."""
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var observed = StrategyTrace()
-    var keys: List[String] = ["d_name", "d_region", "f_year"]
+    var keys: List[String] = [
+        "d_name",
+        "d_region",
+        "d_city",
+        "d_country",
+        "f_year",
+    ]
     var reductions: List[Expr] = [
         col("f_amount").sum(min_count=1).alias("total"),
         col("f_amount").min().alias("low"),
@@ -175,9 +191,30 @@ def test_string_keys_from_one_build_group_by_its_row_number_and_merge_equal_valu
             .sort(keys)
         )
         assert_frame(rows, expected)
-    assert_true(
-        "dataframe-path: lazy.row_number_keys\n" in observed.text(),
-        "the keys were not grouped by the build's row number",
-    )
+    var taken = "dataframe-path: lazy.row_number_keys\n" in observed.text()
     _ = observed^
     _ = trace^
+    return taken
+
+
+def test_string_keys_from_one_build_group_by_its_row_number_when_groups_are_fewer_than_rows() raises:
+    # 6,000 dimension rows with four string columns whose values repeat, and
+    # 400K fact rows, some without a dimension row (a left join): about
+    # 18,000 groups for some 370,000 joined rows, so the sink groups by the
+    # dimension's row number and the groups of equal values merge afterwards,
+    # to the eager join's result.
+    assert_true(
+        _row_number_trace(_dimension(6000, 4000), _facts(400_000, 6500, 7)),
+        "the keys were not grouped by the build's row number",
+    )
+
+
+def test_string_keys_stay_when_every_joined_row_is_its_own_group() raises:
+    # Each of 40K fact rows meets its own dimension row, so the groups are
+    # the rows: the regroup would repeat the work the row numbers save.
+    assert_true(
+        not _row_number_trace(
+            _dimension(40_000, 40_000), _facts(40_000, 40_000, 1)
+        ),
+        "keys grouped by row number although the groups are about the rows",
+    )

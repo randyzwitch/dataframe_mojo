@@ -91,6 +91,7 @@ from .expr import (
     LIT_NULL,
 )
 from .frame import concat
+from .distinct_statistics import distinct_estimate
 from .frame import _describe_percentiles
 from .expr import null, is_grouping, has_grouping, grouping_value
 from .canonical_labels import label_map, remap_codes
@@ -3523,6 +3524,83 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         trace_path("lazy.swap_join_sides")
         return Optional(plan^)
 
+    def _row_number_keys_pay(
+        self,
+        source: Int,
+        keys: List[String],
+        carried: List[String],
+        holder: Int,
+        joins: List[DataFrame],
+        operations: List[PlanNode],
+    ) raises -> Bool:
+        """Whether grouping by the holder build's row number (and merging
+        equal values afterwards) beats grouping by the `carried` string
+        keys, from the sizes the planner can estimate. Costs are in units of
+        one string key carried for one row: gathered from the build, hashed
+        and compared by the sink.
+
+        - Saved: `P * k`, the P rows the joins leave, each no longer
+          carrying the k string keys.
+        - Paid: the regroup of the G groups of the first pass by all K
+          keys. It reads each key of a group's row from the build (1), hashes
+          and partitions it (1), inserts and compares it (1) and writes it
+          out (1): `4 * K` per group, plus 4 for the group itself (its slot,
+          its states' merge, its output row).
+        - P: the source rows times, for each inner join whose probe key is a
+          source column, the share of probe keys its build holds,
+          min(1, distinct build keys / distinct probe keys) (DuckDB's join
+          cardinality estimate); a join with no statistics for its probe key
+          leaves the rows as they are.
+        - G: min(P, R * O), with R the build rows the probe reaches (the
+          build's rows, or fewer when the holder join's probe key has fewer
+          distinct values) and O the product of the other keys' distinct
+          counts. A key with no estimate makes O unbounded.
+        The path is taken when the saving is the larger: it needs the groups
+        to be several times fewer than the rows, so a plan whose groups are
+        about its rows keeps its string keys."""
+        ref table = self._frames[source]
+        var rows = Float64(table.height())
+        var holder_probe = String("")
+        for op in operations:
+            if op.kind != JOIN:
+                continue
+            if op.offset == holder:
+                holder_probe = op.names[0]
+            if op.how != JOIN_INNER or len(op.names) == 0:
+                continue
+            if op.names[0] not in table.columns():
+                continue
+            var probe = table._distinct_count(op.names[0])
+            var build = distinct_estimate(
+                joins[op.offset].column(op.right_keys[0])
+            )
+            if probe > 0 and build > 0:
+                rows *= min(1.0, Float64(build) / Float64(probe))
+        var reached = Float64(joins[holder].height())
+        if holder_probe in table.columns():
+            var probe = table._distinct_count(holder_probe)
+            if probe > 0:
+                reached = min(reached, Float64(probe))
+        var others = 1.0
+        for key in keys:
+            if key in carried:
+                continue
+            var count = -1
+            if key in table.columns():
+                count = table._distinct_count(key)
+            else:
+                for build in joins:
+                    if key in build.columns():
+                        count = distinct_estimate(build.column(key))
+                        break
+            if count <= 0:
+                return False
+            others *= Float64(count)
+        var groups = min(rows, reached * others)
+        var saved = rows * Float64(len(carried))
+        var paid = groups * Float64(4 * len(keys) + 4)
+        return saved > paid
+
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
         the scanned frame's height through steps that only drop or keep
@@ -4536,12 +4614,25 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     if count > best_count:
                         best = h
                         best_count = count
-                if merge and best >= 0:
+                var carried = List[String]()
+                for k in range(len(late_names)):
+                    if late_builds[k] == best:
+                        carried.append(late_names[k])
+                if (
+                    merge
+                    and best >= 0
+                    and self._row_number_keys_pay(
+                        self._nodes[cursor].offset,
+                        keys,
+                        carried,
+                        best,
+                        joins,
+                        operations,
+                    )
+                ):
                     row_holder = best
                     row_merge = merge.take()
-                    for k in range(len(late_names)):
-                        if late_builds[k] == best:
-                            row_names.append(late_names[k])
+                    row_names = carried^
             late_names = List[String]()
         if len(row_names) > 0:
             trace_path("lazy.row_number_keys")
