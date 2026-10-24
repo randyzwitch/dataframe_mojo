@@ -319,7 +319,7 @@ def items() raises -> DataFrame:
     var class_name = List[String]()
     for i in range(40):
         item.append(Int64(i))
-        category.append("cat" + String(i % 3))
+        category.append("a category name past twelve bytes " + String(i % 3))
         class_name.append("class" + String(i % 7))
         class_valid.append(i % 9 != 0)
     return DataFrame(

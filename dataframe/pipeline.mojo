@@ -48,6 +48,8 @@ from .aggregate_table import (
     AggregateSink,
     aggregate_finish,
     aggregate_layout,
+    layout_widths,
+    reaggregable,
 )
 from .frame import (
     DataFrame,
@@ -2374,6 +2376,13 @@ struct _PipelineJob(Job):
     # morsel is sunk into each of them (DuckDB's one sink feeding every
     # grouping set's table, `PhysicalHashAggregate::Sink`).
     var sets: List[List[Int]]
+    # A set derived from another's group rows rather than sunk from the
+    # morsels: its source set (-1 for none) and, per key it groups by, that
+    # key's column among the source's.
+    var derived_from: List[Int]
+    var derived_columns: List[List[Int]]
+    # The sets by size, largest first: a set is derived after its source.
+    var derive_order: List[Int]
     var workers: Int
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
@@ -2402,12 +2411,18 @@ struct _PipelineJob(Job):
         floating_key: Bool,
         layout: List[AggregateLayout],
         sets: List[List[Int]],
+        derived_from: List[Int],
+        derived_columns: List[List[Int]],
+        derive_order: List[Int],
         workers: Int,
         key_ranges: List[_KeyRange],
     ):
         self.key_ranges = key_ranges.copy()
         self.layout = layout.copy()
         self.sets = sets.copy()
+        self.derived_from = derived_from.copy()
+        self.derived_columns = derived_columns.copy()
+        self.derive_order = derive_order.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
         self.shared_bound = shared_bound.copy()
@@ -2453,6 +2468,33 @@ struct _PipelineJob(Job):
                     names.append(name)
         return names^
 
+    def _derive_sets(mut self) raises:
+        """The sets derived from another's group rows: each worker merges
+        its own finer table's rows into a table of the coarser set, so a
+        coarser grouping reads groups, not input rows."""
+        if len(self.sets) == 0 or len(self.sinks) == 0:
+            return
+        while len(self.sinks) < len(self.sets):
+            self.sinks.append(
+                AggregateSink(
+                    self.layout[len(self.sinks)],
+                    self.workers,
+                    len(self.sets),
+                )
+            )
+        for t in self.derive_order:
+            var from_set = self.derived_from[t]
+            if from_set < 0:
+                continue
+            # The target comes out of the list while the source is read.
+            var target = self.sinks.pop(t)
+            target.sink_group_rows(
+                self.sinks[from_set if from_set < t else from_set - 1],
+                self.derived_columns[t],
+                layout_widths(self.layout[from_set]),
+            )
+            self.sinks.insert(t, target^)
+
     def _sink_sets(mut self, mut morsel: Morsel, k: Int) raises:
         """A morsel into every grouping set's sink: the reduction inputs
         are evaluated once, and each set takes the key columns it groups
@@ -2469,9 +2511,15 @@ struct _PipelineJob(Job):
         var rows = len(all_keys[0])
         while len(self.sinks) < len(self.sets):
             self.sinks.append(
-                AggregateSink(self.layout[len(self.sinks)], self.workers)
+                AggregateSink(
+                    self.layout[len(self.sinks)],
+                    self.workers,
+                    len(self.sets),
+                )
             )
         for s in range(len(self.sets)):
+            if self.derived_from[s] >= 0:
+                continue
             var keys = List[Series](capacity=len(self.sets[s]))
             if len(self.sets[s]) == 0:
                 keys.append(
@@ -2555,6 +2603,7 @@ struct _PipelineJob(Job):
                 # finish sorts at most k rows a worker.
                 if self.top > 0 and self.candidate_rows > self.top:
                     self._fold_candidates()
+                self._derive_sets()
                 return
             var offset = self.ranges[][2 * k]
             var length = self.ranges[][2 * k + 1]
@@ -3245,6 +3294,57 @@ def run_pipeline(
     var ranges = ArcPointer(
         _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
     )
+    # Grouping sets: which come from another set's group rows. Largest
+    # first, each takes the smallest earlier source whose keys hold its own,
+    # when every reduction merges (`reaggregable`).
+    var derived_from = List[Int](length=len(sets), fill=-1)
+    var derived_columns = List[List[Int]]()
+    var derive_order = List[Int]()
+    for _ in range(len(sets)):
+        derived_columns.append(List[Int]())
+    if len(layout) > 0 and len(sets) > 1:
+        var merges = True
+        for expression in expressions:
+            for node in expression._nodes:
+                if is_reduction(node.op) and not reaggregable(node.op):
+                    merges = False
+        if merges:
+            var order = derive_order.copy()
+            for t in range(len(sets)):
+                order.append(t)
+            # Stable by size, largest first.
+            for i in range(1, len(order)):
+                var j = i
+                while j > 0 and len(sets[order[j - 1]]) < len(sets[order[j]]):
+                    var held = order[j - 1]
+                    order[j - 1] = order[j]
+                    order[j] = held
+                    j -= 1
+            derive_order = order.copy()
+            var primaries = List[Int]()
+            for t in order:
+                var best = -1
+                for q in primaries:
+                    var inside = True
+                    for key in sets[t]:
+                        if key not in sets[q]:
+                            inside = False
+                    if inside and (best < 0 or len(sets[q]) < len(sets[best])):
+                        best = q
+                # Every set made so far is a source, a derived one too: a
+                # rollup's sets come each from the one above it.
+                primaries.append(t)
+                if best < 0:
+                    continue
+                derived_from[t] = best
+                for key in sets[t]:
+                    derived_columns[t].append(sets[best].index(key))
+            var primary_count = 0
+            for t in range(len(sets)):
+                if derived_from[t] < 0:
+                    primary_count += 1
+            if primary_count < len(sets):
+                trace_path("pipeline.group_table_derived_sets")
     var cursor = _Cursor.new()
     var shared_bound = _SharedBound.new()
     var floating_key = False
@@ -3293,6 +3393,9 @@ def run_pipeline(
                 floating_key,
                 layout,
                 sets,
+                derived_from,
+                derived_columns,
+                derive_order,
                 workers,
                 key_ranges,
             )
@@ -3310,27 +3413,43 @@ def run_pipeline(
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
     if len(layout) > 0 and len(sets) > 0:
-        # Each worker's sinks are in set order, so the last set's come
-        # off the ends first.
-        var finished_sets = List[DataFrame]()
+        # Derived sets finish first: their rows point at key bytes the
+        # source set's sinks hold. A worker's sinks are in set order, so a
+        # set's is found by its place among those still held.
+        var finish_order = List[Int]()
         for back in range(len(sets)):
-            var s = len(sets) - 1 - back
+            var t = len(sets) - 1 - back
+            if derived_from[t] >= 0:
+                finish_order.append(t)
+        for back in range(len(sets)):
+            var t = len(sets) - 1 - back
+            if derived_from[t] < 0:
+                finish_order.append(t)
+        var remaining = List[Int]()
+        for t in range(len(sets)):
+            remaining.append(t)
+        var finished_sets = List[DataFrame](
+            length=len(sets), fill=frame.clear()
+        )
+        for s in finish_order:
+            var place = remaining.index(s)
             var sinks = List[AggregateSink]()
             for j in range(len(jobs)):
                 if len(jobs[j].sinks) > 0:
-                    sinks.append(jobs[j].sinks.pop())
+                    sinks.append(jobs[j].sinks.pop(place))
+            _ = remaining.pop(place)
             var result = aggregate_finish(sinks, layout[s])
             var finished = table_frame(template[s], result^, False)
-            _ = sinks^
             if len(sets[s]) == 0:
                 if finished.height() == 0:
                     # No rows: the grand total is still one row.
                     finished = set_empty[0].select_exprs(expressions)
                 else:
                     finished = finished.drop([_TOTAL_KEY])
-            finished_sets.append(finished^)
-        while len(finished_sets) > 0:
-            set_frames.append(finished_sets.pop())
+            finished_sets[s] = finished^
+            _ = sinks^
+        for s in range(len(sets)):
+            set_frames.append(finished_sets[s].copy())
         # An empty frame of the steps' output types the caller's null keys.
         return set_empty[0].copy()
     if len(layout) > 0:
