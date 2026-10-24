@@ -126,9 +126,12 @@ from .join_hash import (
     int64_progression,
     PreparedHashIndex,
     prefer_left_build,
+    prepare_hash_index,
+    prepared_hash_join_gather,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
+from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -2204,18 +2207,34 @@ struct DataFrame(Copyable, Sized, Writable):
             var right_rows = List[Int]()
             var direct = False
             var direct_identity = False
+            # Probe and gather one block of rows at a time (`fused_gather`),
+            # unless the left columns are many chunks and an inner join's
+            # ascending rows gather from them in place, without a rechunk.
+            var fused = FusedJoin()
+            if not build_left:
+                var in_place = how == JOIN_INNER
+                for column in self._columns:
+                    if (
+                        not column.is_chunked()
+                        or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
+                    ):
+                        in_place = False
+                if not in_place:
+                    fused.enabled = True
+                    fused.left_sources = self._columns.copy()
+                    for c in right_output:
+                        fused.right_sources.append(right._columns[c].copy())
             # Every route returns the pairs in left row order except a
             # left build whose caller ignores order, which returns them in
-            # the order the right side probed.
-            var left_ascending = (
-                not build_left or keep_order or how != JOIN_INNER
-            )
+            # the order the right side probed (a left join's unmatched
+            # left rows after them).
+            var left_ascending = not build_left or keep_order
             if build_left:
                 var pairs = _smaller_build_join_rows(
                     left_sources,
                     right_sources,
                     how == JOIN_LEFT,
-                    keep_order or how != JOIN_INNER,
+                    keep_order,
                 )
                 swap(left_rows, pairs[0])
                 swap(right_rows, pairs[1])
@@ -2227,22 +2246,44 @@ struct DataFrame(Copyable, Sized, Writable):
                     how == JOIN_LEFT,
                     left_rows,
                     right_rows,
+                    fused,
                 )
             if (
                 not direct
                 and right.height() <= Int(Int32.MAX)
                 and not low_cardinality(right_sources)
             ):
-                var pairs = direct_hash_join_rows(
-                    left_sources,
-                    right_sources,
-                    how == JOIN_LEFT,
-                    omit_identity=True,
+                if fused.enabled:
+                    prepared_hash_join_gather(
+                        left_sources,
+                        prepare_hash_index(
+                            right_sources,
+                            allow_progression=False,
+                            probe_rows=len(left_sources[0]),
+                        ),
+                        how == JOIN_LEFT,
+                        True,
+                        fused,
+                    )
+                    direct = True
+                else:
+                    var pairs = direct_hash_join_rows(
+                        left_sources,
+                        right_sources,
+                        how == JOIN_LEFT,
+                        omit_identity=True,
+                    )
+                    direct = True
+                    direct_identity = pairs[2]
+                    swap(left_rows, pairs[0])
+                    swap(right_rows, pairs[1])
+            if fused.done:
+                var columns = (
+                    self._columns.copy() if fused.identity else fused.left.copy()
                 )
-                direct = True
-                direct_identity = pairs[2]
-                swap(left_rows, pairs[0])
-                swap(right_rows, pairs[1])
+                for k in range(len(right_output)):
+                    columns.append(fused.right[k].renamed(right_names[k]))
+                return Self(columns^, height=fused.height)
             if direct:
                 var workers = worker_count(len(right_rows))
                 var columns = self._columns.copy()
@@ -2300,6 +2341,7 @@ struct DataFrame(Copyable, Sized, Writable):
             for k in range(len(left_keys)):
                 right_probe_keys.append(right._columns[right_keys[k]].copy())
                 left_build_keys.append(self._columns[left_keys[k]].copy())
+            var unfused = FusedJoin()
             if len(left_keys) == 1:
                 direct_right = _bounded_int64_join_rows(
                     right_probe_keys[0],
@@ -2307,6 +2349,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     True,
                     right_rows,
                     left_rows,
+                    unfused,
                 )
             if (
                 not direct_right
@@ -3807,15 +3850,34 @@ def _smaller_build_join_rows(
     The physical probe emits right-major pairs. Stable counting scatter by
     logical left row preserves the original right-row ordering within every
     left group, including duplicate keys on either side. Without
-    `keep_order` (an inner join whose consumers ignore order) the pairs are
+    `keep_order` (a join whose consumers ignore order) the pairs are
     returned right-major as probed: the scatter cost more than the probe
-    (PDS-H q5: 750K pairs over 187K orders, 18 ms against 13).
+    (PDS-H q5: 750K pairs over 187K orders, 18 ms against 13). A left join
+    then emits the unmatched build rows after the pairs, as Polars'
+    `emit_unmatched_build` and DuckDB's right-outer scan of a swapped join
+    do: the build rows no probe row matched are flagged while the pairs are
+    taken, and appended with no right row.
     """
     trace_path("join.smaller_build")
     var pairs = direct_hash_join_rows(right, left, False)
-    if not keep_order and not include_unmatched:
+    if not keep_order:
         trace_path("join.smaller_build_unordered")
-        return (pairs[1].copy(), pairs[0].copy())
+        var left_rows = List[Int]()
+        var right_rows = List[Int]()
+        swap(left_rows, pairs[1])
+        swap(right_rows, pairs[0])
+        if include_unmatched:
+            var count = len(left[0])
+            var matched = List[Bool](length=count, fill=False)
+            var seen = matched.unsafe_ptr()
+            var rows = left_rows.unsafe_ptr()
+            for k in range(len(left_rows)):
+                seen[unsafe_offset=rows[unsafe_offset=k]] = True
+            for i in range(count):
+                if not seen[unsafe_offset=i]:
+                    left_rows.append(i)
+                    right_rows.append(-1)
+        return (left_rows^, right_rows^)
     # A counting sort of the pairs by left row, written straight into the
     # output: the probe's right rows land in their left group in probe
     # order, and the left row of every output position follows from the
@@ -4460,7 +4522,7 @@ struct _RangeMembershipJob(Job):
                 self.rows.append(row)
 
 
-struct _RangeJoinProbeJob(Job):
+struct _RangeJoinProbeJob(MatchJob):
     """Match rows [start, end) of one left chunk, which begins at row
     `base`, against a bounded right Int64 index."""
 
@@ -4502,6 +4564,16 @@ struct _RangeJoinProbeJob(Job):
         self.include_unmatched = include_unmatched
         self.left_rows = huge_capacity[Int](end - start)
         self.right_rows = huge_capacity[Int](end - start)
+
+    def take_matches(
+        mut self, mut left: List[Int], mut right: List[Int]
+    ) -> Bool:
+        swap(left, self.left_rows)
+        swap(right, self.right_rows)
+        return False
+
+    def row_range(self) -> Tuple[Int, Int]:
+        return (self.base + self.start, self.base + self.end)
 
     def run(mut self) raises:
         var all_valid = len(self.left._bits[]) == 0
@@ -4596,6 +4668,7 @@ def _bounded_int64_join_rows(
     include_unmatched: Bool,
     mut left_rows: List[Int],
     mut right_rows: List[Int],
+    mut request: FusedJoin,
 ) raises -> Bool:
     """Direct-address right-row chains when its Int64 domain is compact.
     On success the matched row pairs are written to `left_rows` and
@@ -4693,6 +4766,12 @@ def _bounded_int64_join_rows(
     var height = len(left)
     var workers = worker_count(height)
     var step = max(1, (height + workers - 1) // workers)
+    if request.enabled:
+        step = min(
+            step,
+            (height + probe_blocks(height, request) - 1)
+            // probe_blocks(height, request),
+        )
     var shared_heads = ArcPointer(heads^)
     var shared_next = ArcPointer(next_rows^)
     var jobs = List[_RangeJoinProbeJob]()
@@ -4718,6 +4797,11 @@ def _bounded_int64_join_rows(
             )
             at = end
         base += len(chunk)
+    if request.enabled:
+        # Each block gathers its own columns: no row list of the output.
+        fused_gather(jobs, request, include_unmatched)
+        trace_path("join.bounded_index")
+        return True
     run_jobs(jobs)
     # Concatenate on every worker: each job's matches are copied to their
     # offset in the output. One thread appending them row by row was a
@@ -7426,26 +7510,41 @@ def table_inputs(
 ) raises -> List[Series]:
     """Each reduction's input over every row of `frame`, in the order of
     the template's states: its column, or its input expression evaluated
-    once (a row count reads the first key)."""
+    once (a row count reads the first key). The second input of each
+    correlation or covariance follows all of those, in order."""
     var inputs = List[Series]()
+    var seconds = List[Series]()
     for expression in expressions:
         for i in range(len(expression._nodes)):
             ref node = expression._nodes[i]
             if not is_reduction(node.op):
                 continue
-            if node.left < 0:
-                inputs.append(keys[0].copy())
-            elif (
-                expression._nodes[node.left].op == COL
-                and expression._nodes[node.left].text in frame.columns()
-            ):
-                inputs.append(frame.column(expression._nodes[node.left].text))
-            else:
-                var evaluated = frame.select_exprs(
-                    [subtree(expression, node.left).alias("__input")]
+            inputs.append(_table_input(frame, keys, expression, node.left))
+            if node.op == CORR or node.op == COV:
+                seconds.append(
+                    _table_input(frame, keys, expression, node.right)
                 )
-                inputs.append(evaluated._columns[0].copy())
+    for second in seconds:
+        inputs.append(second.copy())
     return inputs^
+
+
+def _table_input(
+    frame: DataFrame, keys: List[Series], expression: Expr, at: Int
+) raises -> Series:
+    """The column of the expression's node `at` over every row of `frame`
+    (a row count, with none, reads the first key)."""
+    if at < 0:
+        return keys[0].copy()
+    if (
+        expression._nodes[at].op == COL
+        and expression._nodes[at].text in frame.columns()
+    ):
+        return frame.column(expression._nodes[at].text)
+    var evaluated = frame.select_exprs(
+        [subtree(expression, at).alias("__input")]
+    )
+    return evaluated._columns[0].copy()
 
 
 def table_supported(
