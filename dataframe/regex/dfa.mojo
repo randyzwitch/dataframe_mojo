@@ -36,8 +36,10 @@ from .program import (
     OP_SAVE,
     OP_SPLIT,
     Program,
+    SUFFIX_LIMIT,
     consumes,
 )
+from .suffix import suffix_end
 from .syntax import (
     LOOK_END_LINE,
     LOOK_END_TEXT,
@@ -215,6 +217,12 @@ struct LazyDFA(Movable):
         if count == 0 and flag == 0:
             self._truncate(mark)
             return DEAD
+        if program.has_suffix and flag & FLAG_MATCH and count == 2:
+            if program.op[Int(self.pool[mark + 1])] == OP_MATCH:
+                var code = program._greedy_suffix_code(Int(self.pool[mark]))
+                if code != 0:
+                    self._truncate(mark)
+                    return code
         flag |= need << NEED_SHIFT
         var h: UInt64 = 0xCBF29CE484222325
         h = _mix(h, UInt64(flag))
@@ -490,7 +498,42 @@ struct LazyDFA(Movable):
         var packed = decode(text, at)
         return (program.class_of(UInt32(packed >> 3)) << 3) | (packed & 7)
 
+    @always_inline
     def find_forward(
+        mut self,
+        program: Program,
+        prefilter: Prefilter,
+        text: Span[UInt8, ImmutAnyOrigin],
+        start: Int,
+        anchored: Bool,
+        earliest: Bool,
+    ) -> Int:
+        if program.has_suffix:
+            return self._find_forward_suffix(
+                program, prefilter, text, start, anchored, earliest
+            )
+        return self._find_forward[False](
+            program, prefilter, text, start, anchored, earliest
+        )
+
+    @no_inline
+    def _find_forward_suffix(
+        mut self,
+        program: Program,
+        prefilter: Prefilter,
+        text: Span[UInt8, ImmutAnyOrigin],
+        start: Int,
+        anchored: Bool,
+        earliest: Bool,
+    ) -> Int:
+        return self._find_forward[True](
+            program, prefilter, text, start, anchored, earliest
+        )
+
+    @always_inline
+    def _find_forward[
+        use_suffix: Bool
+    ](
         mut self,
         program: Program,
         prefilter: Prefilter,
@@ -567,6 +610,12 @@ struct LazyDFA(Movable):
                     continue
             elif e == Int(DEAD):
                 return last
+            comptime if use_suffix:
+                if e < SUFFIX_LIMIT:
+                    if earliest:
+                        return at
+                    # The transition already consumed this code point.
+                    return suffix_end[False](text, at + width, n, Int32(e))
             var v = -e - 3
             off = v >> 2
             if v & 1:
@@ -604,7 +653,32 @@ struct LazyDFA(Movable):
             last = n
         return last
 
+    @always_inline
     def find_reverse(
+        mut self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        end: Int,
+        floor: Int,
+    ) -> Int:
+        if program.has_suffix:
+            return self._find_reverse_suffix(program, text, end, floor)
+        return self._find_reverse[False](program, text, end, floor)
+
+    @no_inline
+    def _find_reverse_suffix(
+        mut self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        end: Int,
+        floor: Int,
+    ) -> Int:
+        return self._find_reverse[True](program, text, end, floor)
+
+    @always_inline
+    def _find_reverse[
+        use_suffix: Bool
+    ](
         mut self,
         program: Program,
         text: Span[UInt8, ImmutAnyOrigin],
@@ -657,6 +731,11 @@ struct LazyDFA(Movable):
                 e = Int(self._entry(next))
             if e == Int(DEAD):
                 return last
+            comptime if use_suffix:
+                if e < SUFFIX_LIMIT:
+                    if at <= floor:
+                        return floor
+                    return suffix_end[True](text, prev, floor, Int32(e))
             if e >= 0:
                 off = e
             else:
