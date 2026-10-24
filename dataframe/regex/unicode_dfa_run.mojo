@@ -35,12 +35,21 @@ def _scan_width[
             if table[unsafe_offset=offset + Int(cls)] != expected:
                 return at
         if not _contains(interval, cp).reduce_and():
-            var classes = alphabet_batch[lanes](program, cp)
-            var entries = table.unsafe_gather[width=lanes](
-                classes.cast[DType.int]() + offset
-            )
-            if not entries.eq(expected).reduce_and():
-                return at
+            comptime if width == 2:
+                # Two-byte code points use the bounded direct map.
+                var classes = alphabet_batch[lanes](program, cp)
+                var entries = table.unsafe_gather[width=lanes](
+                    classes.cast[DType.int]() + offset
+                )
+                if not entries.eq(expected).reduce_and():
+                    return at
+            else:
+                # Wider mixed pages retain the scalar directory search;
+                # decoding is still shared by all four characters.
+                for lane in range(lanes):
+                    var cls = program.class_of(cp[lane])
+                    if table[unsafe_offset=offset + cls] != expected:
+                        return at
         at += consumed
     return at
 
