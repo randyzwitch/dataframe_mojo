@@ -4,7 +4,7 @@ and every row the written join gives, and a join whose left cannot be the
 smaller keeps building on its right."""
 # contract-group: planner.relational
 from std.testing import assert_true
-from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
+from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -100,6 +100,140 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
             left_on=["s_part"],
             right_on=["p_key"],
         ),
+    )
+
+
+def _dimension(rows: Int, repeat: Int) raises -> DataFrame:
+    # Names repeat every `repeat` rows (rows i and i + repeat hold the same
+    # values), with a null name and a null region among them.
+    var key = List[Int64]()
+    var name = List[String]()
+    var name_valid = List[Bool]()
+    var region = List[String]()
+    var region_valid = List[Bool]()
+    var city = List[String]()
+    var country = List[String]()
+    for i in range(rows):
+        key.append(Int64(i))
+        name.append("name " + String(i % repeat))
+        name_valid.append(i % repeat != 7)
+        region.append("region " + String(i % 5))
+        region_valid.append(i % repeat != 11)
+        city.append("a city called " + String(i % repeat) + " of the region")
+        country.append("country " + String(i % 3))
+    return DataFrame(
+        [
+            ints("d_key", key),
+            Series("d_name", Column[String](name^, name_valid^)),
+            Series("d_region", Column[String](region^, region_valid^)),
+            Series("d_city", Column[String](city^)),
+            Series("d_country", Column[String](country^)),
+        ]
+    )._with_statistics()
+
+
+def _facts(rows: Int, spread: Int, step: Int) raises -> DataFrame:
+    var key = List[Int64]()
+    var year = List[Int64]()
+    var amount = List[Float64]()
+    var valid = List[Bool]()
+    for row in range(rows):
+        key.append(Int64((row * step) % spread))
+        year.append(Int64(2000 + row % 3))
+        amount.append(Float64(row % 97) / 4.0)
+        valid.append(row % 11 != 0)
+    return DataFrame(
+        [
+            ints("f_key", key),
+            ints("f_year", year),
+            Series("f_amount", Column[Float64](amount^, valid^)),
+        ]
+    )._with_statistics()
+
+
+def _row_number_trace(
+    dimension: DataFrame, facts: DataFrame, means: Bool = False
+) raises -> Bool:
+    """Whether the row-number keys ran, after checking that the lazy
+    grouped result is the eager join's, for an inner and a left join."""
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var keys: List[String] = [
+        "d_name",
+        "d_region",
+        "d_city",
+        "d_country",
+        "f_year",
+    ]
+    var reductions: List[Expr] = [
+        col("f_amount").sum(min_count=1).alias("total"),
+        col("f_amount").min().alias("low"),
+        col("f_amount").max().alias("high"),
+    ]
+    if means:
+        reductions.append(col("f_amount").mean().alias("average"))
+        reductions.append(col("f_amount").count().alias("seen"))
+    for how in ["inner", "left"]:
+        var rows = (
+            facts.lazy()
+            .join(
+                dimension.lazy(),
+                left_on=["f_key"],
+                right_on=["d_key"],
+                how=how,
+            )
+            .group_by(keys)
+            .agg(reductions)
+            .collect()
+            .sort(keys)
+        )
+        var expected = (
+            facts.join(
+                dimension, left_on=["f_key"], right_on=["d_key"], how=how
+            )
+            .group_by(keys)
+            .agg(reductions)
+            .sort(keys)
+        )
+        assert_frame(rows, expected)
+    var taken = "dataframe-path: lazy.row_number_keys\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    return taken
+
+
+def test_string_keys_from_one_build_group_by_its_row_number_when_groups_are_fewer_than_rows() raises:
+    # 6,000 dimension rows with four string columns whose values repeat, and
+    # 400K fact rows, some without a dimension row (a left join): about
+    # 18,000 groups for some 370,000 joined rows, so the sink groups by the
+    # dimension's row number and the groups of equal values merge afterwards,
+    # to the eager join's result.
+    assert_true(
+        _row_number_trace(_dimension(6000, 4000), _facts(400_000, 6500, 7)),
+        "the keys were not grouped by the build's row number",
+    )
+
+
+def test_string_keys_stay_when_every_joined_row_is_its_own_group() raises:
+    # Each of 40K fact rows meets its own dimension row, so the groups are
+    # the rows: the regroup would repeat the work the row numbers save.
+    assert_true(
+        not _row_number_trace(
+            _dimension(40_000, 40_000), _facts(40_000, 40_000, 1)
+        ),
+        "keys grouped by row number although the groups are about the rows",
+    )
+
+
+def test_unique_build_values_group_by_the_row_number_for_any_reduction() raises:
+    # No two dimension rows hold the same values, so the groups of the row
+    # numbers are the final groups and a mean or a count (which do not merge)
+    # are taken over them directly.
+    assert_true(
+        _row_number_trace(
+            _dimension(6000, 6000), _facts(400_000, 6500, 7), means=True
+        ),
+        "unique build values were not grouped by the build's row number",
     )
 
 
