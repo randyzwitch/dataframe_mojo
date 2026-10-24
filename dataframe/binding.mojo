@@ -1,4 +1,6 @@
 """Schema-only binding and expression shape analysis before execution."""
+from std.memory import ArcPointer
+from .regex import Regex
 from .regex_kernels import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,
@@ -238,6 +240,15 @@ struct BoundExpr(Copyable):
     var sources: List[Int]
     # True where the node's whole subtree can run in one fused Float64 kernel.
     var fusible: List[Bool]
+    # Validated constant patterns are immutable and shared by every batch.
+    var regexes: Optional[ArcPointer[Dict[Int, Regex]]]
+
+    def _regex(self, index: Int) -> Optional[Regex]:
+        if self.regexes:
+            ref patterns = self.regexes.value()[]
+            if index in patterns:
+                return patterns[index].copy()
+        return None
 
     def shape(self) -> Int:
         return self.shapes[len(self.shapes) - 1]
@@ -267,7 +278,7 @@ def _text_function_name(op: Int) -> String:
     return "str.split_exact"
 
 
-def _check_pattern(node: Node) raises:
+def _check_pattern(node: Node) raises -> Optional[Regex]:
     """Raise now for an invalid regular expression in a strict regex
     string operation, rather than waiting until execution."""
     var regex = False
@@ -287,10 +298,12 @@ def _check_pattern(node: Node) raises:
         regex = node.min_count == 0 and not is_literal_pattern(node.text)
         if regex and node.integer > 1:
             raise Error("regex replacement with 'n > 1' not yet supported")
+    var compiled: Optional[Regex] = None
     if regex:
-        _ = compile_pattern(node.text, False)
+        compiled = compile_pattern(node.text, False)
     if node.op == STR_EXTRACT and node.integer < 0:
         raise Error("str.extract group_index must be nonnegative")
+    return compiled^
 
 
 def op_name(op: Int) -> String:
@@ -1076,7 +1089,6 @@ def _text_function_dtype(node: Node) raises -> DataType:
     its arguments."""
     var op = node.op
     if op == STR_FIND or op == STR_COUNT_MATCHES:
-        _check_pattern(node)
         return DataType.UINT32
     if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:
         var patterns = _packed_count(node.text)
@@ -1209,6 +1221,7 @@ def bind(
     var shapes = List[Int]()
     var aggregated = List[Bool]()
     var sources = List[Int]()
+    var regexes = Dict[Int, Regex]()
     # Untyped literals are resolved in place, so bind works on a copy.
     var nodes = expr._nodes.copy()
     for i in range(len(nodes)):
@@ -1599,7 +1612,9 @@ def bind(
                     raise Error("pad width must be nonnegative")
                 if len(node.text.codepoints()) != 1:
                     raise Error("pad fill_char must be one character")
-            _check_pattern(node)
+            var regex = _check_pattern(node)
+            if regex:
+                regexes[i] = regex.take()
             if node.op == STR_LEN_CHARS or node.op == STR_LEN_BYTES:
                 dtype = DataType.INT64
             elif (
@@ -1673,6 +1688,9 @@ def bind(
                     + types[node.left].name()
                 )
             dtype = _text_function_dtype(node)
+            var regex = _check_pattern(node)
+            if regex:
+                regexes[i] = regex.take()
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif node.op == STRUCT_PACK:
@@ -1707,6 +1725,7 @@ def bind(
                     )
                 var regex = compile_pattern(node.text, False)
                 var names = regex.group_names()
+                regexes[i] = regex.copy()
                 dtype = DataType.struct(
                     names,
                     List[DataType](length=len(names), fill=DataType.STRING),
@@ -1721,7 +1740,9 @@ def bind(
                         + " requires a string expression, found "
                         + input.name()
                     )
-                _check_pattern(node)
+                var regex = _check_pattern(node)
+                if regex:
+                    regexes[i] = regex.take()
                 dtype = DataType.list(DataType.STRING)
             elif node.op == STRUCT_FIELD:
                 if not input.is_struct():
@@ -1877,6 +1898,9 @@ def bind(
     _default(nodes, types, len(nodes) - 1)
     var resolved = Expr(nodes^, expr._name)
     var fusible = _fusible(resolved, types, fuse)
+    var compiled: Optional[ArcPointer[Dict[Int, Regex]]] = None
+    if len(regexes) > 0:
+        compiled = ArcPointer(regexes^)
     return BoundExpr(
-        resolved^, types^, shapes^, aggregated^, sources^, fusible^
+        resolved^, types^, shapes^, aggregated^, sources^, fusible^, compiled^
     )
