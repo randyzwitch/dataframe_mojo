@@ -104,8 +104,8 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
 
 
 def test_string_keys_from_one_build_group_by_its_row_number_and_merge_equal_values() raises:
-    # 500 dimension rows whose names repeat (rows i and i + 300 hold the same
-    # values) with a null name and a null region; 90K fact rows, some of them
+    # 6,000 dimension rows whose names repeat (rows i and i + 4,000 hold the
+    # same values) with a null name and a null region; 90K fact rows, some of them
     # without a dimension row (a left join). Grouped by two dimension strings
     # and a fact column, the sink groups by the dimension's row number and the
     # groups of equal values merge afterwards: the result must be the eager
@@ -115,18 +115,18 @@ def test_string_keys_from_one_build_group_by_its_row_number_and_merge_equal_valu
     var d_name_valid = List[Bool]()
     var d_region = List[String]()
     var d_region_valid = List[Bool]()
-    for i in range(500):
+    for i in range(6000):
         d_key.append(Int64(i))
-        d_name.append("name " + String(i % 300))
-        d_name_valid.append(i % 300 != 7)
+        d_name.append("name " + String(i % 4000))
+        d_name_valid.append(i % 4000 != 7)
         d_region.append("region " + String(i % 5))
-        d_region_valid.append(i % 300 != 11)
+        d_region_valid.append(i % 4000 != 11)
     var f_key = List[Int64]()
     var f_year = List[Int64]()
     var f_amount = List[Float64]()
     var f_amount_valid = List[Bool]()
     for row in range(90_000):
-        f_key.append(Int64((row * 7) % 560))
+        f_key.append(Int64((row * 7) % 6500))
         f_year.append(Int64(2000 + row % 3))
         f_amount.append(Float64(row % 97) / 4.0)
         f_amount_valid.append(row % 11 != 0)
