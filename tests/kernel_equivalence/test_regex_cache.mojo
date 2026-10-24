@@ -86,5 +86,5 @@ def test_process_pattern_cache_handles_concurrent_hits_misses_and_evictions() ra
     for i in range(8):
         jobs.append(_CompileJob(i, 0))
     run_jobs(jobs)
-    for job in jobs:
-        assert_equal(job.checked, 64)
+    for i in range(len(jobs)):
+        assert_equal(jobs[i].checked, 64)
