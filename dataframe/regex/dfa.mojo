@@ -595,6 +595,43 @@ struct LazyDFA(Movable):
             at += width
         return off, at
 
+    @no_inline
+    def _advance_matched_unicode(
+        self,
+        program: Program,
+        text: Span[UInt8, ImmutAnyOrigin],
+        off: Int,
+        var at: Int,
+        end: Int,
+        expected: Int32,
+    ) -> Tuple[Int, Int]:
+        """Group matching self-loops, preserving the last character's start.
+        A failed fixed-width packet falls back to four cached scalar edges,
+        so mixed widths do not retry the packet at every character."""
+        var table = self.transitions.unsafe_ptr()
+        var last = at
+        while end - at >= 16:
+            var cls, width = self._class_at(program, text, at)
+            if table[unsafe_offset=off + cls] != expected:
+                return at, last
+            if width > 1:
+                var stop = scan_unicode_self_loop(
+                    program, self.transitions, off, text, at, end, expected
+                )
+                if stop > at:
+                    last = stop - width
+                    at = stop
+                    continue
+            last = at
+            at += width
+            comptime for _ in range(3):
+                cls, width = self._class_at(program, text, at)
+                if table[unsafe_offset=off + cls] != expected:
+                    return at, last
+                last = at
+                at += width
+        return at, last
+
     @always_inline
     def find_forward(
         mut self,
@@ -832,17 +869,11 @@ struct LazyDFA(Movable):
                         and not (v & 2)
                         and n - at >= 16
                     ):
-                        var stop = scan_unicode_self_loop(
-                            program,
-                            self.transitions,
-                            off,
-                            text,
-                            at,
-                            n,
-                            Int32(e),
+                        var stop, last_start = self._advance_matched_unicode(
+                            program, text, off, at, n, Int32(e)
                         )
                         if stop > at:
-                            last = stop - width
+                            last = last_start
                             at = stop
                             continue
             off = next_offset
