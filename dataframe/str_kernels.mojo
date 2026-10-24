@@ -1,5 +1,6 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
+from .string_bytes import _Bytes
 from .bool_column import BoolColumn
 from .column import Column
 from .regex import Regex, escape
@@ -31,7 +32,6 @@ from .regex_kernels import (
     regex_replace,
 )
 from .series import Series
-from .string_bytes import _Bytes
 from .string_predicates import (
     decode_values,
     is_in_literals,
