@@ -5,7 +5,7 @@ disjoint and not adjacent, as regex-syntax's `ClassUnicode` keeps them; the
 set operations below keep that form. Case-insensitive classes are closed
 under simple case folding with the orbit table in `unicode_tables`.
 """
-from .unicode_tables import DIGIT, FOLD, SPACE, WORD
+from .unicode_tables import FOLD, digit_ranges, space_ranges, word_ranges
 from .property_tables import PROPERTY_INDEX, PROPERTY_RANGES
 
 comptime MAX_CODEPOINT: UInt32 = 0x10FFFF
@@ -156,17 +156,17 @@ def parse_ranges(
 def word_class() -> List[UInt32]:
     """Unicode `\\w`: alphabetic, marks, decimal numbers, connector
     punctuation and join controls."""
-    return parse_ranges(WORD)
+    return word_ranges()
 
 
 def digit_class() -> List[UInt32]:
     """Unicode `\\d`: general category Nd."""
-    return parse_ranges(DIGIT)
+    return digit_ranges()
 
 
 def space_class() -> List[UInt32]:
     """Unicode `\\s`: the White_Space property."""
-    return parse_ranges(SPACE)
+    return space_ranges()
 
 
 def ascii_class(name: String) -> List[UInt32]:
