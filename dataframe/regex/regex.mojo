@@ -29,10 +29,10 @@ from std.memory import ArcPointer
 
 from .backtrack import Backtracker
 from .onepass import OnePass, ascii_span, compile_onepass
-from .charclass import class_size
+from .charclass import class_size, word_class
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode, previous_start
-from .program import Program, compile_program
+from .program import Program, _compile_program
 from .syntax import (
     Ast,
     LOOK_START_TEXT,
@@ -497,8 +497,9 @@ struct _Compiled(Movable):
     def __init__(out self, pattern: String) raises:
         var ast = parse(pattern)
         self.pattern = pattern
-        self.forward = compile_program(ast, False)
-        self.reverse = compile_program(ast, True)
+        var word = word_class()
+        self.forward = _compile_program(ast, False, word.copy())
+        self.reverse = _compile_program(ast, True, word^)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
         var root = ast.root

@@ -19,6 +19,7 @@ from .column import Column, _copy_validity
 from .nested_column import ListColumn, StructColumn
 from .parallel import Job, run_jobs, worker_count
 from .regex import Matcher, Regex, Template, escape
+from .regex_cache import cached_pattern
 from .series import Series
 from .string_bytes import _Bytes
 from .string_column import StringColumn, StringBuilder
@@ -38,7 +39,7 @@ def compile_pattern(pattern: String, literal: Bool) raises -> Regex:
     """The regex for a pattern argument; with `literal` the pattern's text
     is matched as is."""
     try:
-        return Regex(escape(pattern) if literal else pattern)
+        return cached_pattern(escape(pattern) if literal else pattern)
     except e:
         raise Error("Invalid regular expression: " + String(e))
 

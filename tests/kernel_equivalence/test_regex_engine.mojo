@@ -8,6 +8,7 @@ from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
 from dataframe.parallel import Job, run_jobs
 from dataframe.regex import Matcher, Regex, escape
+from dataframe.regex.program import Program
 
 
 def _span(text: String) -> Span[UInt8, ImmutAnyOrigin]:
@@ -667,6 +668,112 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
             _ = text
 
 
+def test_unicode_class_directories_and_budget() raises:
+    from dataframe.regex.charclass import class_contains
+    from dataframe.regex.class_lookup import build_unicode_membership
+    from dataframe.regex.program import compile_program
+    from dataframe.regex.syntax import LOOK_UNICODE_WORD, parse
+
+    var patterns: List[String] = [
+        "([a-z])",
+        "([一-丂])",
+        "([^丁])",
+        "([\\p{Han}])",
+        "([\\p{Deseret}])",
+        "(\\w)(\\d)(\\W)",
+        "\\b([\\p{Han}\\p{Deseret}])\\b",
+        "\\bcat\\b",
+    ]
+    var budgets: List[Int] = [0, 1, 9, 137, 1024, 4096]
+    for pattern in patterns:
+        var ast = parse(pattern)
+        var program = compile_program(ast, False)
+        var points = List[UInt32]()
+        for page in range(0x1100):
+            points.append(UInt32(page << 8))
+            points.append(UInt32((page << 8) + 127))
+            points.append(UInt32((page << 8) + 255))
+        for ranges in program.class_ranges:
+            for boundary in ranges:
+                points.append(boundary)
+                if boundary > 0:
+                    points.append(boundary - 1)
+                if boundary < 0x10FFFF:
+                    points.append(boundary + 1)
+        for boundary in program.word:
+            points.append(boundary)
+            if boundary > 0:
+                points.append(boundary - 1)
+            if boundary < 0x10FFFF:
+                points.append(boundary + 1)
+        points.append(0x110000)
+        points.append(UInt32.MAX)
+        var word_assertions = program.looks & LOOK_UNICODE_WORD != 0
+        for budget in budgets:
+            build_unicode_membership(
+                program.class_ascii,
+                program.class_ranges,
+                program.word,
+                word_assertions,
+                budget,
+            )
+            assert_true(
+                len(program.class_ascii)
+                <= 33 * len(program.class_ranges)
+                + Int(word_assertions)
+                + budget
+            )
+            for cp in points:
+                for cls in range(len(program.class_ranges)):
+                    assert_equal(
+                        program.class_has(cls, cp),
+                        class_contains(program.class_ranges[cls], cp),
+                        pattern,
+                    )
+                assert_equal(
+                    program.is_word(cp),
+                    class_contains(program.word, cp),
+                    pattern,
+                )
+
+
+def test_wide_unicode_captures_match_vm() raises:
+    var patterns: List[String] = [
+        "^(\\w+)([!?]*)$",
+        "^([\\p{Han}\\p{Deseret}]+)([!?]*)$",
+        "^(\\p{Han}+)(\\p{Deseret}+)(\\p{Han}*)$",
+        "^([^丁]+)$",
+        "^([一-丂]+)([𐐀-𐐂]*)$",
+    ]
+    # Include both interval endpoints, points just outside them, different
+    # classes, and alternating scripts within the same class.
+    var alphabet: List[String] = ["一", "丁", "丂", "七", "𐐀", "𐐂", "𐐃", "!"]
+    for pattern in patterns:
+        var regex = Regex(pattern)
+        assert_true(Bool(regex._compiled[].onepass), pattern)
+        var matcher = Matcher(regex)
+        ref program = regex._compiled[].forward
+        var slots = List[Int](length=program.slot_count, fill=-1)
+        var combinations = 1
+        for length in range(5):
+            for encoded in range(combinations):
+                var digits = encoded
+                var text = String()
+                for _ in range(length):
+                    text += alphabet[digits & 7]
+                    digits >>= 3
+                var span = _span(text)
+                var expected = matcher.pike.search(
+                    program, span, 0, len(span), True, slots
+                )
+                assert_equal(matcher.captures(span), expected, pattern)
+                if expected:
+                    for k in range(len(slots)):
+                        assert_equal(matcher.slots[k], slots[k], pattern)
+                _ = text
+            combinations *= 8
+
+
 def test_search_engines_allocate_buffers_only_when_used() raises:
     var patterns: List[String] = ["abc", "([a-z])", "^(a+)(β*)$"]
     var texts: List[String] = ["xabcx", "!aβ", "aaaββ"]
@@ -940,6 +1047,52 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
                     class_contains(ranges, cp),
                     pattern,
                 )
+
+
+def _assert_alphabet_and_word_context(
+    actual: Program, expected: Program, independent: Program
+) raises:
+    assert_equal(actual.class_ranges, expected.class_ranges)
+    assert_equal(actual.boundaries, expected.boundaries)
+    assert_equal(actual.interval_class, expected.interval_class)
+    assert_equal(actual.ascii_class, expected.ascii_class)
+    assert_equal(actual.class_rep, expected.class_rep)
+    assert_equal(actual.class_word, expected.class_word)
+    assert_equal(actual.word, independent.word)
+    assert_equal(actual.word_ascii, independent.word_ascii)
+
+
+def test_repeated_classes_preserve_alphabet_and_word_context() raises:
+    from dataframe.regex.program import compile_program
+    from dataframe.regex.syntax import parse
+
+    var classes: List[String] = [
+        "\\w",
+        "\\d",
+        "[a-z]",
+        "[\\p{Han}\\p{Deseret}]",
+    ]
+    for cls in classes:
+        var single = "\\b" + cls + "\\b"
+        var base = Regex(single)
+        for count in [3, 31]:
+            var pattern = "\\b(?:" + cls + "){" + String(count) + "}\\b"
+            var repeated = Regex(pattern)
+            var ast = parse(pattern)
+            for reverse in [False, True]:
+                var independent = compile_program(ast, reverse)
+                if reverse:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].reverse,
+                        base._compiled[].reverse,
+                        independent,
+                    )
+                else:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].forward,
+                        base._compiled[].forward,
+                        independent,
+                    )
 
 
 def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:

@@ -16,6 +16,7 @@ from .charclass import (
     word_class,
     ascii_class,
 )
+from .class_lookup import build_unicode_membership, unicode_class_has
 from .syntax import (
     Ast,
     LOOK_NOT_WORD,
@@ -70,6 +71,7 @@ struct Program(Movable, Sized):
     var class_ranges: List[List[UInt32]]
     # Packed ASCII membership (two words per class), followed by thirty
     # words per class for U+0080..U+07FF: all two-byte UTF-8 code points.
+    # Bounded higher-Unicode lookup directories follow that fixed prefix.
     var class_ascii: List[UInt64]
     var start: Int
     var start_unanchored: Int
@@ -133,8 +135,12 @@ struct Program(Movable, Sized):
                 unsafe_offset=2 * len(self.class_ranges) + 30 * id + (bit >> 6)
             ]
             return (word >> UInt64(bit & 63)) & 1 == 1
-        return class_contains(
-            self.class_ranges.unsafe_ptr()[unsafe_offset=id], cp
+        return unicode_class_has(
+            self.class_ascii,
+            self.class_ranges.unsafe_ptr()[unsafe_offset=id],
+            len(self.class_ranges),
+            id,
+            cp,
         )
 
     @always_inline
@@ -159,6 +165,14 @@ struct Program(Movable, Sized):
             return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
         if cp < UInt32(len(self.word_ascii)):
             return self.word_ascii.unsafe_ptr()[unsafe_offset=Int(cp)]
+        if self.looks & LOOK_UNICODE_WORD:
+            return unicode_class_has(
+                self.class_ascii,
+                self.word,
+                len(self.class_ranges),
+                len(self.class_ranges),
+                cp,
+            )
         return class_contains(self.word, cp)
 
     @always_inline
@@ -464,8 +478,10 @@ def _build_alphabet(mut program: Program):
         if op == OP_CHAR:
             var cp = UInt32(program.arg[pc])
             sets.append([cp, cp])
-        elif op == OP_CLASS:
-            sets.append(program.class_ranges[Int(program.arg[pc])].copy())
+    # The compiler already interns classes. Repeated instructions add no
+    # information to the alphabet partition, so visit each class once.
+    for ranges in program.class_ranges:
+        sets.append(ranges.copy())
     sets.append([10, 10])
     if program.looks & LOOK_UNICODE_WORD:
         sets.append(program.word.copy())
@@ -541,8 +557,14 @@ def compile_program(ast: Ast, reverse: Bool) raises -> Program:
     the whole-match slots and adds the unanchored entry `(?s:.)*?`; a
     reverse program matches the pattern backwards (concatenations
     reversed) and keeps no slots, for finding where a match starts."""
+    return _compile_program(ast, reverse, word_class())
+
+
+def _compile_program(
+    ast: Ast, reverse: Bool, var word: List[UInt32]
+) raises -> Program:
     var compiler = _Compiler(reverse)
-    compiler.program.word = word_class()
+    compiler.program.word = word^
     for cp in range(128):
         compiler.program.word_ascii[cp] = class_contains(
             compiler.program.word, UInt32(cp)
@@ -570,6 +592,12 @@ def compile_program(ast: Ast, reverse: Bool) raises -> Program:
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
     _build_two_byte_membership(program)
+    build_unicode_membership(
+        program.class_ascii,
+        program.class_ranges,
+        program.word,
+        program.looks & LOOK_UNICODE_WORD != 0,
+    )
     _build_word_lookup(program)
     _build_alphabet(program)
     return program^

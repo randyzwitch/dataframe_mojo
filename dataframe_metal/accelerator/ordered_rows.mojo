@@ -1,6 +1,8 @@
 """CPU metadata for ordered direct terminal ROWS expression occurrences."""
+from std.memory import ArcPointer
 from dataframe.binding import BoundExpr, ROWS
 from dataframe.dtype import DataType
+from dataframe.regex import Regex
 from dataframe.expr import (
     DT_REPLACE_TZ,
     DT_TRUNCATE,
@@ -179,6 +181,7 @@ def occurrences(
     var aggregated = List[Bool]()
     var sources = List[Int]()
     var fusible = List[Bool]()
+    var regexes = Dict[Int, Regex]()
     var ranks = List[UInt32]()
     var next_rank = UInt32(1)
     while len(pending):
@@ -211,8 +214,14 @@ def occurrences(
         aggregated.append(bound.aggregated[index])
         sources.append(bound.sources[index])
         fusible.append(bound.fusible[index])
+        var regex = bound._regex(index)
+        if regex:
+            regexes[len(nodes)] = regex.take()
         nodes.append(node^)
         roots.append(len(nodes) - 1)
+    var compiled: Optional[ArcPointer[Dict[Int, Regex]]] = None
+    if len(regexes) > 0:
+        compiled = ArcPointer(regexes^)
     return (
         BoundExpr(
             Expr(nodes^, bound.expr._name),
@@ -221,6 +230,7 @@ def occurrences(
             aggregated^,
             sources^,
             fusible^,
+            compiled^,
         ),
         ranks^,
     )
