@@ -325,7 +325,7 @@ def compile_onepass(program: Program) -> OnePass:
                 var edge = edges[k]
                 if (
                     loop_pc < 0
-                    and result.next[edge] == state
+                    and Int(result.next[edge]) == state
                     and result.save[edge] == 0
                     and result.looks[edge] == 0
                     and not result.match_first[edge]
