@@ -52,6 +52,8 @@ def reductions() -> List[Expr]:
         col("x").len().alias("rows"),
         col("y").mean().alias("y_mean"),
         col("y").std().alias("y_std"),
+        col("y").median().alias("y_median"),
+        col("x").quantile(0.25).alias("x_q25"),
     ]
 
 
@@ -496,3 +498,85 @@ def test_int32_sum_past_its_type_raises_from_group_rows() raises:
     with assert_raises():
         _ = frame.group_by(["k"]).agg([col("v").sum().alias("total")])
     _ = workers^
+
+
+def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
+    # A quantile's values sit in chains of segments behind three words of
+    # the group's row; merging groups from several workers links the chains.
+    # NaN sorts above every number, a group of nulls is null, and a
+    # Float32 and an unsigned input read as Float64 (a group's values
+    # arrive from every worker in any order).
+    var rows = 72_000
+    var groups = 6_000
+    var keys = List[Int64](capacity=rows)
+    var floats = List[Float64](capacity=rows)
+    var float_valid = List[Bool](capacity=rows)
+    var narrow = List[Float32](capacity=rows)
+    var wide = List[UInt64](capacity=rows)
+    var wide_valid = List[Bool](capacity=rows)
+    for row in range(rows):
+        var g = (row * 7919) % groups
+        keys.append(Int64(g))
+        var value = Float64((row * 104729) % 1999) / 8 - 100
+        if row % 23 == 5:
+            value = Float64(0) / Float64(0)
+        floats.append(value)
+        # Every tenth group has no valid float at all.
+        float_valid.append(g % 10 != 3 and row % 11 != 4)
+        narrow.append(Float32((row * 31) % 257) / 4)
+        wide.append(UInt64((row * 977) % 65_537) * 4_000_000_007)
+        wide_valid.append(row % 5 != 1)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("f", Column[Float64](floats^, float_valid)),
+            Series("n", Column[Float32](narrow^)),
+            Series("u", Column[UInt64](wide^, wide_valid)),
+        ]
+    )
+    var aggregations: List[Expr] = [
+        col("f").median().alias("f_median"),
+        col("f").quantile(0.9).alias("f_q90"),
+        col("f").quantile(0.3, "lower").alias("f_lower"),
+        col("f").quantile(0.3, "higher").alias("f_higher"),
+        col("f").quantile(0.3, "nearest").alias("f_nearest"),
+        col("f").quantile(0.3, "midpoint").alias("f_midpoint"),
+        col("n").median().alias("n_median"),
+        col("u").quantile(0.75).alias("u_q75"),
+    ]
+    var single = ScopedEnvironment("DATAFRAME_THREADS", "1")
+    var expected = frame.group_by(["k"], maintain_order=True).agg(
+        aggregations.copy()
+    )
+    _ = single^
+    for threads in [2, 8]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var ordered = frame.group_by(["k"], maintain_order=True).agg(
+            aggregations.copy()
+        )
+        var unordered = frame.group_by(["k"]).agg(aggregations.copy())
+        assert_true(
+            "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+            "quantiles did not reach the aggregate table",
+        )
+        _ = observed^
+        assert_frame(ordered, expected)
+        assert_frame(unordered.sort("k"), expected.sort("k"))
+        observed = StrategyTrace()
+        var piped = (
+            frame.lazy()
+            .filter(col("k") >= lit(Int64(0)))
+            .group_by(["k"])
+            .agg(aggregations.copy())
+            .collect()
+        )
+        assert_true(
+            "dataframe-path: pipeline.group_table\n" in observed.text(),
+            "quantiles did not reach the aggregate table sink",
+        )
+        _ = observed^
+        assert_frame(piped.sort("k"), expected.sort("k"))
+        _ = trace^
+        _ = workers^

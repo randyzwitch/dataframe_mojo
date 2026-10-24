@@ -1555,6 +1555,15 @@ def _same_names(a: List[String], b: List[String]) -> Bool:
     return True
 
 
+def _has_quantile(expressions: List[Expr]) -> Bool:
+    """Whether some expression reduces to a median or quantile."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op == MEDIAN or node.op == QUANTILE:
+                return True
+    return False
+
+
 def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's results are the same whatever order
     its rows arrive in: the aggregate table's states, and distinct counts,
@@ -3875,7 +3884,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var limit = -1
         ref terminal = self._nodes[index]
         if terminal.kind == AGG or terminal.kind == SELECT:
-            if _stream_reductions(terminal.exprs):
+            # A grouped median or quantile streams only into the aggregate
+            # table (checked below): its other routes keep no such state.
+            if _stream_reductions(terminal.exprs, terminal.kind == AGG):
                 expressions = terminal.exprs.copy()
                 if terminal.kind == AGG:
                     keys = terminal.names.copy()
@@ -4361,6 +4372,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for operation in operations:
                 _apply_operation(operation, empty, empty_joins, empty_indexes)
             table = table_supported(empty, keys, expressions)
+        if not table and _has_quantile(expressions):
+            return None
         if piped and len(keys) > 0 and not table:
             var frame = self._nodes[cursor].offset
             ref source_frame = self._frames[frame]
@@ -6901,17 +6914,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for name in reads.value():
             if name not in names:
                 names.append(name)
+        # A large table's runs are copied end to end (zero-copy slices
+        # merged into one array), not gathered row by row, once for the
+        # table: its statistics keep them.
         var sample = self._frames[source.offset].select(names)
         if height > runs * run:
-            # Each column's runs are copied end to end (zero-copy slices
-            # merged into one array), not gathered row by row.
-            var columns = List[Series](capacity=sample.width())
-            for column in sample._columns:
-                var parts = List[Series](capacity=runs)
-                for k in range(runs):
-                    parts.append(column.slice(k * (height // runs), run))
-                columns.append(Series._from_chunks(parts).rechunk())
-            sample = DataFrame(columns^, height=runs * run)
+            sample = self._frames[source.offset]._sampled(names, runs, run)
         # Only the matches are counted: the predicate's mask, as DuckDB
         # counts a selection vector, with no filtered frame built.
         var kept = true_count(sample._selection(node.exprs[0], 8192))
