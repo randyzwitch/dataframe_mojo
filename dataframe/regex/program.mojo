@@ -317,10 +317,12 @@ struct _Frag(Movable):
 struct _Compiler(Movable):
     var program: Program
     var reverse: Bool
+    var keep_reverse_captures: Bool
 
-    def __init__(out self, reverse: Bool):
+    def __init__(out self, reverse: Bool, keep_reverse_captures: Bool = False):
         self.program = Program()
         self.reverse = reverse
+        self.keep_reverse_captures = keep_reverse_captures
 
     def finish(deinit self) -> Program:
         return self.program^
@@ -383,13 +385,17 @@ struct _Compiler(Movable):
             self.program.looks |= UInt32(ast.a[node])
             return self.one(OP_LOOK, ast.a[node])
         if kind == NODE_GROUP:
-            if self.reverse:
+            if self.reverse and not self.keep_reverse_captures:
                 return self.compile(ast, ast.kid(node, 0))
             var index = ast.a[node]
-            var open = self.program.emit(OP_SAVE, -1, 2 * index)
+            var open = self.program.emit(
+                OP_SAVE, -1, 2 * index + Int(self.reverse)
+            )
             var body = self.compile(ast, ast.kid(node, 0))
             self.program.out[open] = Int32(body.start)
-            var close = self.program.emit(OP_SAVE, -1, 2 * index + 1)
+            var close = self.program.emit(
+                OP_SAVE, -1, 2 * index + Int(not self.reverse)
+            )
             self.patch(body.holes, close)
             return _Frag(open, [close * 2])
         if kind == NODE_CONCAT:
@@ -595,28 +601,31 @@ def _build_alphabet(mut program: Program):
         program.class_word.append(program.is_word(program.class_rep[c]))
 
 
-def compile_program(ast: Ast, reverse: Bool) raises -> Program:
+def compile_program(
+    ast: Ast, reverse: Bool, keep_reverse_captures: Bool = False
+) raises -> Program:
     """Compile a syntax tree. A forward program brackets the pattern with
     the whole-match slots and adds the unanchored entry `(?s:.)*?`; a
     reverse program matches the pattern backwards (concatenations
-    reversed) and keeps no slots, for finding where a match starts."""
-    var compiler = _Compiler(reverse)
+    reversed). Reverse captures are optional; each group's end is saved
+    before its body and its start after the body."""
+    var compiler = _Compiler(reverse, keep_reverse_captures)
     compiler.program.word = word_class()
     for cp in range(128):
         compiler.program.word_ascii[cp] = class_contains(
             compiler.program.word, UInt32(cp)
         )
     compiler.program.slot_count = 2 * (ast.group_count() + 1)
-    if reverse:
+    if reverse and not keep_reverse_captures:
         var body = compiler.compile(ast, ast.root)
         var done = compiler.program.emit(OP_MATCH)
         compiler.patch(body.holes, done)
         compiler.program.start = body.start
     else:
-        var open = compiler.program.emit(OP_SAVE, -1, 0)
+        var open = compiler.program.emit(OP_SAVE, -1, Int(reverse))
         var body = compiler.compile(ast, ast.root)
         compiler.program.out[open] = Int32(body.start)
-        var close = compiler.program.emit(OP_SAVE, -1, 1)
+        var close = compiler.program.emit(OP_SAVE, -1, Int(not reverse))
         compiler.patch(body.holes, close)
         var done = compiler.program.emit(OP_MATCH)
         compiler.program.out[close] = Int32(done)
