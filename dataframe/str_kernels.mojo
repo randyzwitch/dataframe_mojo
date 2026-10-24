@@ -4,6 +4,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .regex import Regex, escape
 from .string_column import StringColumn, StringBuilder
+from .string_transform import transform_strings
 from .expr import (
     Node,
     STR_LEN_CHARS,
@@ -31,7 +32,6 @@ from .regex_kernels import (
     regex_replace,
 )
 from .series import Series
-from .string_transform import transform_strings
 from .string_predicates import (
     decode_values,
     is_in_literals,
@@ -72,6 +72,12 @@ def string_op(
     if input.is_chunked():
         return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
+    if node.op == STR_STRIP:
+        return transform_strings[STR_STRIP](node, column)
+    if node.op == STR_REVERSE:
+        return transform_strings[STR_REVERSE](node, column)
+    if node.op == STR_PAD:
+        return transform_strings[STR_PAD](node, column)
     if node.op == STR_IS_IN:
         return is_in_literals(column, decode_values(node.text))
     # Predicates and slices over the raw bytes, on every worker (#374).
@@ -130,12 +136,6 @@ def string_op(
         return Series(
             "", slice_strings(column, Int(node.integer), node.min_count)
         )
-    if node.op == STR_STRIP:
-        return transform_strings[STR_STRIP](node, column)
-    if node.op == STR_REVERSE:
-        return transform_strings[STR_REVERSE](node, column)
-    if node.op == STR_PAD:
-        return transform_strings[STR_PAD](node, column)
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):
