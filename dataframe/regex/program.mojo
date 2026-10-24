@@ -519,6 +519,27 @@ struct _Compiler(Movable):
         return _Frag(start, holes^)
 
 
+@always_inline
+def _seek_cut(points: List[UInt32], target: UInt32, var lo: Int) -> Int:
+    # Canonical ranges advance monotonically. As in Polars' exponential
+    # search, bracket a nearby key before doing a bounded binary search.
+    var count = len(points)
+    if lo >= count or points[lo] >= target:
+        return lo
+    var bound = 1
+    while lo + bound < count and points[lo + bound] < target:
+        bound *= 2
+    var hi = min(count, lo + bound)
+    lo += bound >> 1
+    while lo < hi:
+        var mid = (lo + hi) >> 1
+        if points[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
 def _build_alphabet(mut program: Program):
     """Partition code points into classes no instruction tells apart: cut
     at every range edge, then give intervals that belong to the same sets
@@ -558,32 +579,37 @@ def _build_alphabet(mut program: Program):
         ):
             program.boundaries.append(cut)
     var intervals = len(program.boundaries)
-    # Membership signature per interval, as the list of sets holding it.
-    var signatures = List[String](length=intervals, fill=String())
+    # Refine interval colors one set at a time, as RE2's ByteMapBuilder
+    # does. Each set's canonical ranges visit disjoint intervals, so a
+    # color is replaced consistently within this batch. Equal colors mean
+    # exactly the same set membership without formatting string keys.
+    var colors = List[Int](length=intervals, fill=0)
+    var next_color = 1
+    var recolor = Dict[Int, Int]()
     for k in range(len(sets)):
+        recolor.clear()
         ref s = sets[k]
+        var j = 0
         for i in range(0, len(s), 2):
             # The interval starting at s[i] and every one up to s[i + 1].
-            var lo = 0
-            var hi = intervals
-            while hi - lo > 1:
-                var mid = (lo + hi) // 2
-                if program.boundaries[mid] <= s[i]:
-                    lo = mid
-                else:
-                    hi = mid
-            var j = lo
+            j = _seek_cut(program.boundaries, s[i], j)
             while j < intervals and program.boundaries[j] <= s[i + 1]:
-                signatures[j] += String(k) + ","
+                var old = colors[j]
+                var color = recolor.get(old, -1)
+                if color < 0:
+                    color = next_color
+                    next_color += 1
+                    recolor[old] = color
+                colors[j] = color
                 j += 1
-    var ids = Dict[String, Int]()
+    var ids = Dict[Int, Int]()
     program.interval_class = List[Int32](capacity=intervals)
     program.class_rep = List[UInt32]()
     for j in range(intervals):
-        var id = ids.get(signatures[j], -1)
+        var id = ids.get(colors[j], -1)
         if id < 0:
             id = len(program.class_rep)
-            ids[signatures[j]] = id
+            ids[colors[j]] = id
             program.class_rep.append(program.boundaries[j])
         program.interval_class.append(Int32(id))
     program.alphabet = len(program.class_rep)
