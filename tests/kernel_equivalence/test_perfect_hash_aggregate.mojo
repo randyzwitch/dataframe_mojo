@@ -3,6 +3,7 @@ grouping by string copies of the keys, which takes the hashed routes."""
 # contract-group: kernel.reduce
 from std.testing import assert_equal, assert_false, assert_true
 from dataframe import AnyValue, Column, DataFrame, DataType, Expr, Series, col
+from dataframe.categorical import encode
 from dataframe.perfect_aggregate import perfect_layout
 
 
@@ -143,3 +144,50 @@ def test_perfect_hash_layout_follows_key_span() raises:
     # A float or string key never qualifies.
     assert_false(Bool(perfect_layout([narrow.column("f")])))
     assert_false(Bool(perfect_layout([narrow.column("sa")])))
+
+
+def test_categorical_keys_group_by_their_codes() raises:
+    # A categorical with a small dictionary (what a dictionary-coded string
+    # column's codes are) gives each row its slot as an integer key does; a
+    # null code lands in slot 0. Results match grouping by the strings.
+    for n in [0, 1, 9, 3000]:
+        var frame = _frame(n, 40, False)
+        var columns = frame._columns.copy()
+        columns.append(encode(frame.column("sa")).renamed("ca"))
+        columns.append(encode(frame.column("sb")).renamed("cb"))
+        var coded = DataFrame(columns^)
+        if n > 0:
+            assert_true(Bool(perfect_layout([coded.column("ca")])))
+            assert_true(
+                Bool(perfect_layout([coded.column("ca"), coded.column("cb")]))
+            )
+        var key_sets: List[List[String]] = [["a"], ["b"], ["a", "b"]]
+        for keys in key_sets:
+            var categories = List[String]()
+            var strings = List[String]()
+            for key in keys:
+                categories.append("c" + key)
+                strings.append("s" + key)
+            var actual = coded.group_by(categories, maintain_order=True).agg(
+                _aggregates()
+            )
+            var expected = coded.group_by(strings, maintain_order=True).agg(
+                _aggregates()
+            )
+            assert_equal(actual.height(), expected.height())
+            for k in range(len(keys)):
+                var as_text = DataFrame(
+                    [actual.column(categories[k]).cast(DataType.STRING)]
+                )
+                for row in range(actual.height()):
+                    _assert_close(
+                        as_text.item(row, categories[k]),
+                        expected.item(row, strings[k]),
+                    )
+            for name in expected.columns():
+                if name in strings:
+                    continue
+                for row in range(expected.height()):
+                    _assert_close(
+                        actual.item(row, name), expected.item(row, name)
+                    )

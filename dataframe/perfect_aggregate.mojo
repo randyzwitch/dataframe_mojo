@@ -1,6 +1,7 @@
 """Group ids for a perfect hash aggregate.
 
-When every grouping key is an integer whose values span a small range, a
+When every grouping key is an integer whose values span a small range, or a
+categorical (a dictionary-coded string's codes) with a small dictionary, a
 row's group is its position in a table holding every combination: each key
 contributes `value - min + 1` (0 for a null) shifted into its own bits, so
 no table is probed and no group is numbered. the bounds come from the key buffers' zone maps
@@ -49,25 +50,33 @@ def perfect_layout(keys: List[Series]) raises -> Optional[PerfectLayout]:
     if len(keys) == 0:
         return None
     for key in keys:
-        if key.dtype().is_categorical() or not _range_key(key.dtype()):
+        if key.dtype().is_categorical():
+            if not key.dtype().has_dictionary():
+                return None
+        elif not _range_key(key.dtype()):
             return None
     var minima = List[Int64](capacity=len(keys))
     var widths = List[Int](capacity=len(keys))
     var total = 0
     for key in keys:
-        _ensure_zones(key)
-        var bounds = _window_bounds(key)
         var low = Int64(0)
         var span = UInt64(0)
-        if bounds:
-            low = bounds.value()[0]
-            var high = bounds.value()[1]
-            # As DuckDB, ranges past 2^31 never qualify; checked in 128
-            # bits so that a range across all of Int64 cannot wrap.
-            var range = Int128(high) - Int128(low)
-            if range >= Int128(Int32.MAX):
-                return None
-            span = UInt64(range)
+        if key.dtype().is_categorical():
+            # A categorical's codes are 0 to its dictionary's size less
+            # one: known without a scan.
+            span = UInt64(max(len(key.dtype().dictionary()[]) - 1, 0))
+        else:
+            _ensure_zones(key)
+            var bounds = _window_bounds(key)
+            if bounds:
+                low = bounds.value()[0]
+                var high = bounds.value()[1]
+                # As DuckDB, ranges past 2^31 never qualify; checked in 128
+                # bits so that a range across all of Int64 cannot wrap.
+                var range = Int128(high) - Int128(low)
+                if range >= Int128(Int32.MAX):
+                    return None
+                span = UInt64(range)
         # One slot for null and one more for the one-based values.
         var bits = _required_bits(span + 2)
         total += bits
@@ -102,6 +111,14 @@ def perfect_slots(
             if part.dtype().physical() == DataType.INT64:
                 _add_slots(
                     part._data[Column[Int64]],
+                    layout.minima[k],
+                    layout.shifts[k],
+                    k == 0,
+                    target,
+                )
+            elif part._data.isa[Column[UInt32]]():
+                _add_slots(
+                    part._data[Column[UInt32]],
                     layout.minima[k],
                     layout.shifts[k],
                     k == 0,
