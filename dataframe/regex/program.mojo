@@ -611,7 +611,7 @@ def compile_program(
     reverse program matches the pattern backwards (concatenations
     reversed). Reverse captures are optional; each group's end is saved
     before its body and its start after the body."""
-    return _compile_program(ast, reverse, word_class(), keep_reverse_captures)
+    return _compile_program(ast, reverse, List[UInt32](), keep_reverse_captures)
 
 
 def _compile_program(
@@ -621,11 +621,6 @@ def _compile_program(
     keep_reverse_captures: Bool = False,
 ) raises -> Program:
     var compiler = _Compiler(reverse, keep_reverse_captures)
-    compiler.program.word = word^
-    for cp in range(128):
-        compiler.program.word_ascii[cp] = class_contains(
-            compiler.program.word, UInt32(cp)
-        )
     compiler.program.slot_count = 2 * (ast.group_count() + 1)
     if reverse and not keep_reverse_captures:
         var body = compiler.compile(ast, ast.root)
@@ -648,6 +643,14 @@ def _compile_program(
     compiler.program.arg[loop] = Int32(skip)
     compiler.program.start_unanchored = loop
     var program = compiler^.finish()
+    # Only live Unicode-word assertions observe this context. ASCII-word
+    # assertions use their own byte predicate and alphabet partition.
+    if program.looks & LOOK_UNICODE_WORD:
+        program.word = word^
+        if len(program.word) == 0:
+            program.word = word_class()
+        for cp in range(128):
+            program.word_ascii[cp] = class_contains(program.word, UInt32(cp))
     for pc in range(len(program)):
         if program._greedy_suffix_code(pc) != 0:
             program.has_suffix = True
