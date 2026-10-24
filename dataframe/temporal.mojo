@@ -342,6 +342,24 @@ def parse_in(
     ).value()
 
 
+def parse_prepared_in(
+    text: String, dtype: DataType, plan: PreparedFormat, zone: TimeZone
+) raises -> Int64:
+    var seen = False
+    var value: Int64
+    try:
+        value = _parse_prepared(text, dtype, plan, seen)
+    except e:
+        raise Error(
+            "cannot parse '" + text + "' as " + dtype.name() + ": " + String(e)
+        )
+    if seen or dtype.time_zone().byte_length() == 0:
+        return value
+    return localize(
+        value, dtype, zone, AMBIGUOUS_RAISE, NON_EXISTENT_RAISE
+    ).value()
+
+
 def has_offset(text: String) -> Bool:
     """Whether ISO text for a datetime parses with a UTC offset or Z."""
     var seen = False
@@ -500,12 +518,26 @@ def _weekday_names(short: Bool) -> List[String]:
 def _parse_name(
     text: String, mut pos: Int, names: List[String]
 ) raises -> Int64:
+    # Calendar names are English ASCII. Compare their bytes case-insensitively
+    # without allocating/lowercasing two strings for every candidate.
+    var data = text.as_bytes()
     for i in range(len(names)):
-        var end = pos + names[i].byte_length()
-        if (
-            end <= text.byte_length()
-            and String(text[byte=pos:end]).lower() == names[i].lower()
-        ):
+        var name = names[i].as_bytes()
+        var end = pos + len(name)
+        if end > len(data):
+            continue
+        var matches = True
+        for j in range(len(name)):
+            var actual = data[pos + j]
+            var wanted = name[j]
+            if actual >= 65 and actual <= 90:
+                actual += 32
+            if wanted >= 65 and wanted <= 90:
+                wanted += 32
+            if actual != wanted:
+                matches = False
+                break
+        if matches:
             pos = end
             return Int64(i + 1)
     raise Error("expected a calendar name")
@@ -521,13 +553,84 @@ def _week_number(days: Int64, year: Int64, monday: Bool) -> Int64:
     return (ordinal + 7 - weekday) // 7
 
 
+@fieldwise_init
+struct _FormatPart(Copyable):
+    var code: Int
+    var text: String
+    var packed: Bool
+
+
+struct PreparedFormat(Copyable):
+    """Percent directives and name tables shared by every row of a column.
+
+    Preparation does not validate directives: an invalid format is still
+    observed only when a non-null, active row is parsed.
+    """
+
+    var parts: List[_FormatPart]
+    var short_months: List[String]
+    var months: List[String]
+    var short_weekdays: List[String]
+    var weekdays: List[String]
+    var am_pm: List[String]
+
+    def __init__(out self, pattern: String):
+        self.parts = List[_FormatPart]()
+        self.short_months = List[String]()
+        self.months = List[String]()
+        self.short_weekdays = List[String]()
+        self.weekdays = List[String]()
+        self.am_pm = List[String]()
+        var f = pattern.as_bytes()
+        var i = 0
+        while i < len(f):
+            var start = i
+            if f[i] == 37 and i + 1 < len(f):
+                var d = Int(f[i + 1])
+                i += 2
+                if d == 58 and i < len(f) and f[i] == 122:
+                    d = 256  # %:z, distinct when rendering
+                    i += 1
+                elif d >= 128:
+                    while i < len(f) and f[i] >= 128 and f[i] < 192:
+                        i += 1
+                self.parts.append(
+                    _FormatPart(
+                        d,
+                        String(pattern[byte=start:i]),
+                        i + 1 < len(f) and f[i] == 37,
+                    )
+                )
+                if d == 98 and len(self.short_months) == 0:
+                    self.short_months = _month_names(True)
+                elif d == 66 and len(self.months) == 0:
+                    self.months = _month_names(False)
+                elif d == 97 and len(self.short_weekdays) == 0:
+                    self.short_weekdays = _weekday_names(True)
+                elif d == 65 and len(self.weekdays) == 0:
+                    self.weekdays = _weekday_names(False)
+                elif d == 112 and len(self.am_pm) == 0:
+                    self.am_pm = ["AM", "PM"]
+            else:
+                i += 1
+                while i < len(f) and f[i] != 37:
+                    i += 1
+                self.parts.append(
+                    _FormatPart(-1, String(pattern[byte=start:i]), False)
+                )
+
+
 def _parse_format(
     text: String, dtype: DataType, format: String, mut seen: Bool
 ) raises -> Int64:
-    var f = format.as_bytes()
+    return _parse_prepared(text, dtype, PreparedFormat(format), seen)
+
+
+def _parse_prepared(
+    text: String, dtype: DataType, plan: PreparedFormat, mut seen: Bool
+) raises -> Int64:
     var t = text.as_bytes()
     var pos = 0
-    var i = 0
     var parts = Parts(1970, 1, 1, 0, 0, 0, 0)
     var ordinal = Int64(-1)
     var offset = Int64(0)
@@ -536,17 +639,12 @@ def _parse_format(
     var monday = False
     var hour12 = False
     var afternoon = Int64(-1)
-    while i < len(f):
-        if f[i] == 37 and i + 1 < len(f):
-            var d = f[i + 1]
-            i += 2
-            if d == 58 and i < len(f) and f[i] == 122:  # %:z
+    for part in plan.parts:
+        if part.code >= 0:
+            var d = part.code
+            if d == 256:
                 d = 122
-                i += 1
-            # With no literal between this directive and the next, the field
-            # has nothing to delimit it, so it must take exactly its width:
-            # "%Y%m%d" over "20240228" is 4 then 2 then 2, not a greedy year.
-            var packed = i + 1 < len(f) and f[i] == 37
+            var packed = part.packed
             if d == 89:  # Y
                 var negative = pos < len(t) and t[pos] == 45
                 if negative or (pos < len(t) and t[pos] == 43):
@@ -558,9 +656,13 @@ def _parse_format(
                 var year = _digits(text, pos, 2, 2)
                 parts.year = year + (Int64(2000) if year < 70 else Int64(1900))
             elif d == 98 or d == 66:  # b/B
-                parts.month = _parse_name(text, pos, _month_names(d == 98))
+                parts.month = _parse_name(
+                    text, pos, plan.short_months if d == 98 else plan.months
+                )
             elif d == 97 or d == 65:  # a/A
-                weekday = _parse_name(text, pos, _weekday_names(d == 97))
+                weekday = _parse_name(
+                    text, pos, plan.short_weekdays if d == 97 else plan.weekdays
+                )
             elif d == 117:  # u
                 weekday = _digits(text, pos, 1, 1)
                 if weekday < 1 or weekday > 7:
@@ -580,7 +682,7 @@ def _parse_format(
                     raise Error("12-hour clock hour out of range")
                 hour12 = True
             elif d == 112:  # p
-                afternoon = _parse_name(text, pos, ["AM", "PM"]) - 1
+                afternoon = _parse_name(text, pos, plan.am_pm) - 1
             elif d == 109:  # m
                 parts.month = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 100:  # d
@@ -608,8 +710,8 @@ def _parse_format(
             else:
                 raise Error("unsupported format directive %" + chr(Int(d)))
         else:
-            _expect(text, pos, f[i])
-            i += 1
+            for byte in part.text.as_bytes():
+                _expect(text, pos, byte)
     _end(text, pos)
     if ordinal >= 0:
         var days_in_year = Int64(366 if is_leap(parts.year) else 365)
@@ -698,6 +800,26 @@ def format_in(
     )
 
 
+def format_prepared_in(
+    value: Int64, dtype: DataType, plan: PreparedFormat, zone: TimeZone
+) -> String:
+    if dtype.is_duration():
+        return _format_duration(value, dtype)
+    if not dtype.is_datetime() or dtype.time_zone().byte_length() == 0:
+        return _render_prepared(value, dtype, plan, 0, "", False)
+    var per_second = dtype.per_second()
+    var type = zone.type_at(floor_div(value, per_second))
+    var offset = zone.offset_of(type)
+    return _render_prepared(
+        value + offset * per_second,
+        dtype,
+        plan,
+        offset,
+        zone.abbreviation(type),
+        True,
+    )
+
+
 def _offset_text(offset: Int64, colon: Bool) -> String:
     var minutes = (offset if offset >= 0 else -offset) // 60
     return (
@@ -716,26 +838,35 @@ def _render(
     abbreviation: String,
     aware: Bool,
 ) -> String:
-    """Render wall-clock `value`; %z, %:z and %Z are empty unless aware."""
-    var p = split(value, dtype)
-    var resolved = pattern if pattern.byte_length() > 0 else default_format(
-        dtype
+    var resolved = pattern if pattern.byte_length() else default_format(dtype)
+    return _render_prepared(
+        value, dtype, PreparedFormat(resolved), offset, abbreviation, aware
     )
-    var f = resolved.as_bytes()
+
+
+def _render_prepared(
+    value: Int64,
+    dtype: DataType,
+    plan: PreparedFormat,
+    offset: Int64,
+    abbreviation: String,
+    aware: Bool,
+) -> String:
+    var p = split(value, dtype)
     var out = String()
-    var i = 0
-    while i < len(f):
-        if f[i] == 37 and i + 1 < len(f):
-            var d = f[i + 1]
-            i += 2
+    for part in plan.parts:
+        if part.code >= 0:
+            var d = part.code
             if d == 89:
                 out += _pad(p.year, 4)
             elif d == 121:
                 out += _pad(floor_mod(p.year, 100), 2)
             elif d == 98 or d == 66:
-                out += _month_names(d == 98)[Int(p.month - 1)]
+                out += (plan.short_months if d == 98 else plan.months)[
+                    Int(p.month - 1)
+                ]
             elif d == 97 or d == 65:
-                out += _weekday_names(d == 97)[
+                out += (plan.short_weekdays if d == 97 else plan.weekdays)[
                     Int(
                         _iso_weekday(days_from_civil(p.year, p.month, p.day))
                         - 1
@@ -780,8 +911,7 @@ def _render(
             elif d == 122:  # z
                 if aware:
                     out += _offset_text(offset, False)
-            elif d == 58 and i < len(f) and f[i] == 122:  # %:z
-                i += 1
+            elif d == 256:  # %:z
                 if aware:
                     out += _offset_text(offset, True)
             elif d == 37:
@@ -790,16 +920,9 @@ def _render(
                 if aware:
                     out += abbreviation
             else:
-                var start = i - 1
-                while i < len(f) and f[i] >= 128 and f[i] < 192:
-                    i += 1
-                out += "%" + String(resolved[byte=start:i])
+                out += part.text
         else:
-            var start = i
-            i += 1
-            while i < len(f) and f[i] != 37:
-                i += 1
-            out += String(resolved[byte=start:i])
+            out += part.text
     return out^
 
 
