@@ -13,7 +13,9 @@ engine goes:
 3. The forward DFA finds where the leftmost-first match ends, skipping
    input with literal prefixes or a byte-set prefilter while it sits in its
    start state.
-4. The reverse DFA, run back from that end, finds where it starts. Anchored
+4. The reverse DFA, run back from that end, finds where it starts. When
+   deterministic capture tables exist in both directions, the backward
+   capture engine finds the start and groups together instead. Anchored
    patterns and patterns with a fixed code-point length need no reverse DFA.
 5. Only when capture groups are needed does a capture engine run.
    Eligible deterministic programs use one-pass tables; other programs use
@@ -29,7 +31,7 @@ from std.memory import ArcPointer
 
 from .backtrack import Backtracker
 from .alphabet_lookup import build_alphabet_lookup
-from .onepass import OnePass, ascii_span, compile_onepass
+from .onepass import CaptureTables, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode, previous_start
@@ -489,17 +491,17 @@ struct _Compiled(Movable):
     var anchored: Bool
     var literal: Bool
     var single_class: Bool
+    var reverse_captures: Bool
     var fixed_width: Int32
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
-    var onepass: Optional[ArcPointer[OnePass]]
+    var onepass: Optional[ArcPointer[CaptureTables]]
 
     def __init__(out self, pattern: String) raises:
         var ast = parse(pattern)
         self.pattern = pattern
         self.forward = compile_program(ast, False)
-        self.reverse = _compile_program(ast, True, self.forward.word.copy())
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
         var root = ast.root
@@ -524,9 +526,25 @@ struct _Compiled(Movable):
         # Capture tables are cold for ordinary searches. Keep their
         # vectors behind a pointer instead of widening the hot program object.
         var onepass = compile_onepass(self.forward)
+        var keep_captures = (
+            onepass.active()
+            and not self.anchored
+            and not self.literal
+            and not self.single_class
+        )
+        self.reverse = _compile_program(
+            ast, True, self.forward.word.copy(), keep_captures
+        )
         self.onepass = None
+        self.reverse_captures = False
         if onepass.active():
-            self.onepass = ArcPointer(onepass^)
+            var captures = CaptureTables(onepass^)
+            if keep_captures:
+                var backward = compile_onepass(self.reverse)
+                if backward.active():
+                    captures.reverse = ArcPointer(backward^)
+                    self.reverse_captures = True
+            self.onepass = ArcPointer(captures^)
         # These direct search engines never consult the DFA alphabet.
         if not self.literal and not self.single_class:
             build_alphabet_lookup(
@@ -848,17 +866,17 @@ struct Matcher(Movable):
             if (
                 len(text) > 0
                 and text[0] < 128
-                and not c.onepass.value()[].matched[0]
+                and not c.onepass.value()[].forward.matched[0]
             ):
                 var cls = Int(c.forward.ascii_class[Int(text[0])])
-                if c.onepass.value()[].next[cls] < 0:
+                if c.onepass.value()[].forward.next[cls] < 0:
                     return False
             if not _may_match(c, text):
                 return False
             if ascii_span(text, 0, len(text)):
                 # The capture engines run sequentially and initialize their
                 # scratch before use, so they can share this worker's slots.
-                return c.onepass.value()[].search[False](
+                return c.onepass.value()[].forward.search[False](
                     c.forward,
                     text,
                     0,
@@ -866,7 +884,7 @@ struct Matcher(Movable):
                     self.pike.scratch,
                     self.slots,
                 )
-            return c.onepass.value()[].search[True](
+            return c.onepass.value()[].forward.search[True](
                 c.forward,
                 text,
                 0,
@@ -876,6 +894,40 @@ struct Matcher(Movable):
             )
         if self._direct_captures(text):
             return start == 0 and self._anchored_captures(text)
+        if c.reverse_captures:
+            if start > len(text) or (start == 0 and not _may_match(c, text)):
+                return False
+            var end = self.forward.find_forward(
+                c.forward, c.prefilter, text, start, False, False
+            )
+            if end == -1:
+                return False
+            if end != GAVE_UP:
+                ref backward = c.onepass.value()[].reverse.value()[]
+                var found: Bool
+                if ascii_span(text, start, end):
+                    found = backward.search_reverse[False](
+                        c.reverse,
+                        text,
+                        end,
+                        start,
+                        self.pike.scratch,
+                        self.slots,
+                    )
+                else:
+                    found = backward.search_reverse[True](
+                        c.reverse,
+                        text,
+                        end,
+                        start,
+                        self.pike.scratch,
+                        self.slots,
+                    )
+                if found:
+                    return True
+            return self.pike.search(
+                c.forward, text, start, len(text), False, self.slots
+            )
         var m = self.find(text, start)
         if m[0] < 0:
             return False
@@ -914,10 +966,10 @@ struct Matcher(Movable):
             return True
         if Bool(c.onepass):
             if ascii_span(text, begin, end):
-                return c.onepass.value()[].search[False](
+                return c.onepass.value()[].forward.search[False](
                     c.forward, text, begin, end, self.pike.scratch, self.slots
                 )
-            return c.onepass.value()[].search[True](
+            return c.onepass.value()[].forward.search[True](
                 c.forward, text, begin, end, self.pike.scratch, self.slots
             )
         if Backtracker.fits(c.forward, begin, end):
@@ -936,10 +988,26 @@ struct Matcher(Movable):
         Rust's rule for empty matches: an empty match that ends where the
         previous match ended is skipped by searching again one code point
         later."""
+        return self._next[False](text)
+
+    def _capture_span(
+        mut self, text: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) -> Tuple[Int, Int]:
+        if self.captures(text, start):
+            return (self.slots[0], self.slots[1])
+        return (-1, -1)
+
+    def _next[
+        groups: Bool
+    ](mut self, text: Span[UInt8, ImmutAnyOrigin]) -> Tuple[Int, Int]:
         var n = len(text)
         if self._position > n:
             return (-1, -1)
-        var m = self.find(text, self._position)
+        var m: Tuple[Int, Int]
+        comptime if groups:
+            m = self._capture_span(text, self._position)
+        else:
+            m = self.find(text, self._position)
         if m[0] < 0:
             self._position = n + 1
             return (-1, -1)
@@ -948,7 +1016,10 @@ struct Matcher(Movable):
                 self._position = n + 1
                 return (-1, -1)
             var width = decode(text, self._position) & 7
-            m = self.find(text, self._position + width)
+            comptime if groups:
+                m = self._capture_span(text, self._position + width)
+            else:
+                m = self.find(text, self._position + width)
             if m[0] < 0:
                 self._position = n + 1
                 return (-1, -1)
@@ -988,14 +1059,22 @@ struct Matcher(Movable):
             for i in range(copied, len(text)):
                 out.append(p[unsafe_offset=i])
             return done > 0
+        var reverse_groups = (
+            template.needs_groups and self.regex._compiled[].reverse_captures
+        )
         while limit < 0 or done < limit:
-            var m = self.next(text)
+            var m: Tuple[Int, Int]
+            if reverse_groups:
+                m = self._next[True](text)
+            else:
+                m = self.next(text)
             if m[0] < 0:
                 break
             for i in range(copied, m[0]):
                 out.append(p[unsafe_offset=i])
             if template.needs_groups:
-                _ = self._groups(text, m[0], m[1])
+                if not reverse_groups:
+                    _ = self._groups(text, m[0], m[1])
             else:
                 self.slots[0] = m[0]
                 self.slots[1] = m[1]

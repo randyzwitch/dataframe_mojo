@@ -99,6 +99,12 @@ def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
     assert_equal(m[0], text.byte_length())
     assert_equal(m[1], tail.byte_length())
     assert_equal(matcher.count(_span(tail + tail)), 2)
+    assert_true(regex._compiled[].reverse_captures)
+    assert_true(matcher.captures(_span(tail)))
+    assert_equal(matcher.slots[0], text.byte_length())
+    assert_equal(matcher.slots[1], tail.byte_length())
+    assert_equal(matcher.slots[2], text.byte_length() + 24)
+    assert_equal(matcher.slots[3], text.byte_length() + 25)
     _ = text
     _ = tail
 
@@ -652,7 +658,7 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
                 var found = (
                     regex._compiled[]
                     .onepass.value()[]
-                    .search[True](
+                    .forward.search[True](
                         program,
                         span,
                         start,
@@ -795,13 +801,15 @@ def test_search_engines_allocate_buffers_only_when_used() raises:
             assert_equal(len(matcher.reverse.q1.dense), 0)
             assert_equal(len(matcher.pike.current.slots), 0)
         _ = text
-    # Variable-width unanchored matches use both directions. A cleared
+    # Variable-width span searches use both DFA directions. A cleared
     # cache keeps its allocated buffers and reconstructs the same spans.
     var regex = Regex("(a+)(β+)")
     var matcher = Matcher(regex)
     var text = String("xaaaββ!")
     for _ in range(2):
-        assert_true(matcher.captures(_span(text)))
+        var span = matcher.find(_span(text))
+        assert_equal(span, (1, 8))
+        assert_true(matcher._groups(_span(text), span[0], span[1]))
         assert_equal(matcher.slots[0], 1)
         assert_equal(matcher.slots[1], 8)
         assert_equal(matcher.slots[2], 1)
