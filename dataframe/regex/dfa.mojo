@@ -924,21 +924,36 @@ def _literal_chunk[
     return _verify_literal(hay, needle, length, at, candidates)
 
 
-@no_inline
 def find_literal(
     text: Span[UInt8, ImmutAnyOrigin], needle: List[UInt8], at: Int
 ) -> Int:
-    """memmem: the first occurrence of `needle` at or after `at`, or -1.
-    Check the first 32 candidates before scanning long misses 64 at a time,
-    filtering on the needle's first and last bytes."""
-    var m = len(needle)
+    """memmem: the first occurrence of `needle` at or after `at`, or -1."""
+    return find_literal_bytes(
+        text,
+        needle.unsafe_ptr().unsafe_origin_cast[ImmutAnyOrigin](),
+        len(needle),
+        at,
+    )
+
+
+@no_inline
+def find_literal_bytes(
+    text: Span[UInt8, ImmutAnyOrigin],
+    p: Pointer[UInt8, ImmutAnyOrigin],
+    m: Int,
+    at: Int,
+) -> Int:
+    """memmem over the `m` bytes at `p`: the first occurrence at or after
+    `at`, or -1. Check the first 32 candidates before scanning long misses
+    64 at a time, filtering on the needle's first and last bytes. Shared by
+    the regex literal prefilter and the string predicates (LIKE, contains,
+    replace, split)."""
     var n = len(text)
     if m == 0:
         return at if at <= n else -1
     if m > n - at:
         return -1
     var h = text.unsafe_ptr()
-    var p = needle.unsafe_ptr().unsafe_origin_cast[ImmutAnyOrigin]()
     var first = p[]
     var last = p[unsafe_offset=m - 1]
     comptime lanes = 32
@@ -969,18 +984,34 @@ def find_literal(
         if found >= 0:
             return found
         i += lanes
-    if i <= last_start - 15:
-        var found = _literal_chunk[16](
-            h,
-            p,
-            m,
-            i,
-            SIMD[DType.uint8, 16](first),
-            SIMD[DType.uint8, 16](last),
-        )
-        if found >= 0:
-            return found
-        i += 16
+    if i <= last_start:
+        # The positions left (fewer than 32) are covered by one vector
+        # that ends at the last start, overlapping positions already
+        # rejected: rows of a column are short, and a scalar tail of up to
+        # 31 positions was most of a short row's search.
+        if last_start - 31 >= at:
+            return _literal_chunk[32](h, p, m, last_start - 31, firsts, lasts)
+        if i <= last_start - 15:
+            var found = _literal_chunk[16](
+                h,
+                p,
+                m,
+                i,
+                SIMD[DType.uint8, 16](first),
+                SIMD[DType.uint8, 16](last),
+            )
+            if found >= 0:
+                return found
+            i += 16
+        if i <= last_start and last_start - 15 >= at:
+            return _literal_chunk[16](
+                h,
+                p,
+                m,
+                last_start - 15,
+                SIMD[DType.uint8, 16](first),
+                SIMD[DType.uint8, 16](last),
+            )
     while i <= last_start:
         if h[unsafe_offset=i] == first and h[unsafe_offset=i + m - 1] == last:
             var same = True

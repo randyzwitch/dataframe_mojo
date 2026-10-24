@@ -10,6 +10,7 @@ from std.bit import byte_swap
 
 from std.memory import ArcPointer, Pointer
 
+from .regex.dfa import find_literal_bytes
 from .string_column import StringColumn
 from .string_view import StringView
 
@@ -180,52 +181,10 @@ def _find_bytes(
     start: Int,
 ) -> Int:
     """The first position at or after `start` where `needle` occurs in
-    `hay`, or -1. Candidates are filtered on the needle's first and last
-    bytes before the rest is compared (#374)."""
-    var m = len(needle)
-    var n = len(hay)
-    if m == 0:
-        return start if start <= n else -1
-    if m > n - start:
-        return -1
-    var h = hay.unsafe_ptr()
-    var p = needle.unsafe_ptr()
-    var first = p[]
-    var last = p.unsafe_offset(m - 1)[]
-    # 32 candidate positions at a time: compare them with the needle's
-    # first and last bytes, and verify only where both match (#374).
-    comptime lanes = 32
-    var firsts = SIMD[DType.uint8, lanes](first)
-    var lasts = SIMD[DType.uint8, lanes](last)
-    var i = start
-    while i + m - 1 + lanes <= n:
-        var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
-            width=lanes
-        ](i + m - 1).eq(lasts)
-        if hits.reduce_or():
-            for k in range(lanes):
-                if hits[k]:
-                    var same = True
-                    for j in range(1, m - 1):
-                        if h.unsafe_offset(i + k + j)[] != p.unsafe_offset(j)[]:
-                            same = False
-                            break
-                    if same:
-                        return i + k
-        i += lanes
-    for i in range(i, n - m + 1):
-        if (
-            h.unsafe_offset(i)[] == first
-            and h.unsafe_offset(i + m - 1)[] == last
-        ):
-            var same = True
-            for k in range(1, m - 1):
-                if h.unsafe_offset(i + k)[] != p.unsafe_offset(k)[]:
-                    same = False
-                    break
-            if same:
-                return i
-    return -1
+    `hay`, or -1: the regex engine's SIMD memmem (`find_literal_bytes`),
+    which extracts candidate positions from a lane mask and scans 64 bytes a
+    step, as Polars' `memmem` and DuckDB's `ContainsFun` find a literal."""
+    return find_literal_bytes(hay, needle.unsafe_ptr(), len(needle), start)
 
 
 @always_inline
