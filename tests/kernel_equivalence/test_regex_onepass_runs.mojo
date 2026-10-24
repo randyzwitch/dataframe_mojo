@@ -20,7 +20,7 @@ def test_onepass_run_metadata_excludes_capture_and_assertion_changes() raises:
         var regex = Regex(patterns[i])
         assert_true(Bool(regex._compiled[].onepass), patterns[i])
         assert_equal(
-            regex._compiled[].onepass.value()[].has_loops,
+            regex._compiled[].onepass.value()[].forward.has_loops,
             expected[i],
             patterns[i],
         )
@@ -85,7 +85,7 @@ def test_onepass_runs_preserve_subrange_bounds_and_full_text_assertions() raises
         assert_true(Bool(regex._compiled[].onepass), pattern)
         var matcher = Matcher(regex)
         ref program = regex._compiled[].forward
-        ref onepass = regex._compiled[].onepass.value()[]
+        ref onepass = regex._compiled[].onepass.value()[].forward
         var expected_slots = List[Int](length=program.slot_count, fill=-1)
         for word in words:
             for suffix in suffixes:

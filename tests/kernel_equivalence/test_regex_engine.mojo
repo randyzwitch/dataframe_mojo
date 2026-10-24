@@ -8,6 +8,7 @@ from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
 from dataframe.parallel import Job, run_jobs
 from dataframe.regex import Matcher, Regex, escape
+from dataframe.regex.program import Program
 
 
 def _span(text: String) -> Span[UInt8, ImmutAnyOrigin]:
@@ -98,6 +99,12 @@ def test_dfa_cache_overflow_falls_back_to_the_pike_vm() raises:
     assert_equal(m[0], text.byte_length())
     assert_equal(m[1], tail.byte_length())
     assert_equal(matcher.count(_span(tail + tail)), 2)
+    assert_true(regex._compiled[].reverse_captures)
+    assert_true(matcher.captures(_span(tail)))
+    assert_equal(matcher.slots[0], text.byte_length())
+    assert_equal(matcher.slots[1], tail.byte_length())
+    assert_equal(matcher.slots[2], text.byte_length() + 24)
+    assert_equal(matcher.slots[3], text.byte_length() + 25)
     _ = text
     _ = tail
 
@@ -651,7 +658,7 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
                 var found = (
                     regex._compiled[]
                     .onepass.value()[]
-                    .search[True](
+                    .forward.search[True](
                         program,
                         span,
                         start,
@@ -794,13 +801,15 @@ def test_search_engines_allocate_buffers_only_when_used() raises:
             assert_equal(len(matcher.reverse.q1.dense), 0)
             assert_equal(len(matcher.pike.current.slots), 0)
         _ = text
-    # Variable-width unanchored matches use both directions. A cleared
+    # Variable-width span searches use both DFA directions. A cleared
     # cache keeps its allocated buffers and reconstructs the same spans.
     var regex = Regex("(a+)(β+)")
     var matcher = Matcher(regex)
     var text = String("xaaaββ!")
     for _ in range(2):
-        assert_true(matcher.captures(_span(text)))
+        var span = matcher.find(_span(text))
+        assert_equal(span, (1, 8))
+        assert_true(matcher._groups(_span(text), span[0], span[1]))
         assert_equal(matcher.slots[0], 1)
         assert_equal(matcher.slots[1], 8)
         assert_equal(matcher.slots[2], 1)
@@ -1046,6 +1055,52 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
                     class_contains(ranges, cp),
                     pattern,
                 )
+
+
+def _assert_alphabet_and_word_context(
+    actual: Program, expected: Program, independent: Program
+) raises:
+    assert_equal(actual.class_ranges, expected.class_ranges)
+    assert_equal(actual.boundaries, expected.boundaries)
+    assert_equal(actual.interval_class, expected.interval_class)
+    assert_equal(actual.ascii_class, expected.ascii_class)
+    assert_equal(actual.class_rep, expected.class_rep)
+    assert_equal(actual.class_word, expected.class_word)
+    assert_equal(actual.word, independent.word)
+    assert_equal(actual.word_ascii, independent.word_ascii)
+
+
+def test_repeated_classes_preserve_alphabet_and_word_context() raises:
+    from dataframe.regex.program import compile_program
+    from dataframe.regex.syntax import parse
+
+    var classes: List[String] = [
+        "\\w",
+        "\\d",
+        "[a-z]",
+        "[\\p{Han}\\p{Deseret}]",
+    ]
+    for cls in classes:
+        var single = "\\b" + cls + "\\b"
+        var base = Regex(single)
+        for count in [3, 31]:
+            var pattern = "\\b(?:" + cls + "){" + String(count) + "}\\b"
+            var repeated = Regex(pattern)
+            var ast = parse(pattern)
+            for reverse in [False, True]:
+                var independent = compile_program(ast, reverse)
+                if reverse:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].reverse,
+                        base._compiled[].reverse,
+                        independent,
+                    )
+                else:
+                    _assert_alphabet_and_word_context(
+                        repeated._compiled[].forward,
+                        base._compiled[].forward,
+                        independent,
+                    )
 
 
 def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
