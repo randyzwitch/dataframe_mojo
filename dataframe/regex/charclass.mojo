@@ -5,7 +5,13 @@ disjoint and not adjacent, as regex-syntax's `ClassUnicode` keeps them; the
 set operations below keep that form. Case-insensitive classes are closed
 under simple case folding with the orbit table in `unicode_tables`.
 """
-from .unicode_tables import FOLD, digit_ranges, space_ranges, word_ranges
+from .unicode_tables import (
+    digit_ranges,
+    fold_keys,
+    fold_next,
+    space_ranges,
+    word_ranges,
+)
 from .property_tables import PROPERTY_INDEX, PROPERTY_RANGES
 
 comptime MAX_CODEPOINT: UInt32 = 0x10FFFF
@@ -213,27 +219,8 @@ struct CaseFolds(Copyable, Movable):
     var next: List[UInt32]
 
     def __init__(out self):
-        self.keys = List[UInt32]()
-        self.next = List[UInt32]()
-        var value: UInt32 = 0
-        var key: UInt32 = 0
-        var in_token = False
-        for byte in FOLD.as_bytes():
-            if byte == 32 or byte == 10:
-                if in_token:
-                    self.keys.append(key)
-                    self.next.append(value)
-                value = 0
-                in_token = False
-            elif byte == 58:
-                key = value
-                value = 0
-            else:
-                value = value * 16 + _hex_digit(byte)
-                in_token = True
-        if in_token:
-            self.keys.append(key)
-            self.next.append(value)
+        self.keys = fold_keys()
+        self.next = fold_next()
 
     def _lower_bound(self, cp: UInt32) -> Int:
         var lo = 0
