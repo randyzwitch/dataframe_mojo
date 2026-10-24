@@ -290,3 +290,144 @@ def test_every_set_equals_group_by_on_20k_rows() raises:
             got.select(order).sort(["a", "b"]),
             want.select(order).collect().sort(["a", "b"]),
         )
+
+
+def facts() raises -> DataFrame:
+    """Enough rows for several morsels, with nulls in a measure and a key."""
+    var item = List[Int64]()
+    var m = List[Int64]()
+    var m_valid = List[Bool]()
+    var x = List[Float64]()
+    for i in range(300000):
+        item.append(Int64((i * 31) % 40))
+        m.append(Int64(i % 977))
+        m_valid.append(i % 13 != 0)
+        x.append(Float64(i % 101) / 4.0)
+    return DataFrame(
+        [
+            Series("item", Column[Int64](item^)),
+            Series("m", Column[Int64](m^, m_valid^)),
+            Series("x", Column[Float64](x^)),
+        ]
+    )
+
+
+def items() raises -> DataFrame:
+    var item = List[Int64]()
+    var category = List[String]()
+    var class_valid = List[Bool]()
+    var class_name = List[String]()
+    for i in range(40):
+        item.append(Int64(i))
+        category.append("cat" + String(i % 3))
+        class_name.append("class" + String(i % 7))
+        class_valid.append(i % 9 != 0)
+    return DataFrame(
+        [
+            Series("item", Column[Int64](item^)),
+            Series("category", Column[String](category^)),
+            Series("class", Column[String](class_name^, class_valid^)),
+        ]
+    )
+
+
+def check_sets_against_group_by(
+    source: LazyFrame,
+    keys: List[String],
+    sets: List[List[String]],
+    plain: List[Expr],
+) raises:
+    """Every set's rows of one grouping-sets aggregation (found by its
+    grouping id) equal the same `group_by` of that set, the empty set a
+    plain reduction, with the keys it leaves out null."""
+    var aggregates = plain.copy()
+    aggregates.append(grouping_id(keys).alias("gid"))
+    var result = source.group_by_grouping_sets(sets).agg(aggregates).collect()
+    var rows = 0
+    for one in sets:
+        # The first key is the id's highest bit; a bit is set where the set
+        # leaves the key out.
+        var mask = 0
+        for name in keys:
+            mask = 2 * mask + (0 if name in one else 1)
+        var want: LazyFrame
+        if len(one) == 0:
+            want = source.select_exprs(plain)
+        else:
+            want = source.group_by(one).agg(plain)
+        var fill = List[Expr]()
+        for name in keys:
+            if name not in one:
+                fill.append(null("string").alias(name))
+        if len(fill) > 0:
+            want = want.with_columns(fill)
+        var columns = keys.copy()
+        for e in plain:
+            columns.append(e._name)
+        var got = result.filter(col("gid") == mask).select(columns)
+        var expected = want.select(columns).collect()
+        rows += expected.height()
+        assert_equal(got.height(), expected.height())
+        assert_frame(got.sort(keys), expected.sort(keys))
+    assert_equal(result.height(), rows)
+
+
+def test_sets_sunk_together_over_a_join_match_group_by() raises:
+    """The aggregations the aggregate table keeps inline run in one pass
+    over the join's morsels, with a state per set."""
+    var source = (
+        facts().lazy().filter(col("x") > 3.0).join(items().lazy(), on="item")
+    )
+    var plain: List[Expr] = [
+        col("m").sum().alias("total"),
+        col("m").len().alias("n"),
+        col("m").count().alias("valid"),
+        col("m").mean().alias("avg"),
+        col("m").min().alias("low"),
+        col("m").max().alias("high"),
+        col("x").sum().alias("xs"),
+    ]
+    var keys: List[String] = ["category", "class"]
+    var sets: List[List[String]] = [
+        ["category", "class"],
+        ["category"],
+        ["class"],
+        [],
+    ]
+    check_sets_against_group_by(source, keys, sets, plain)
+
+
+def test_sets_with_reductions_the_table_lacks_match_group_by() raises:
+    """A median is not an inline state: the sets group the collected input
+    one after another, to the same rows."""
+    var source = facts().lazy().join(items().lazy(), on="item")
+    var plain: List[Expr] = [
+        col("m").median().alias("mid"),
+        col("m").n_unique().alias("distinct"),
+        col("x").sum().alias("xs"),
+    ]
+    var keys: List[String] = ["category", "class"]
+    var sets: List[List[String]] = [["category", "class"], ["category"], []]
+    check_sets_against_group_by(source, keys, sets, plain)
+
+
+def test_rolled_up_total_row_counts_every_row() raises:
+    var plan = (
+        facts()
+        .lazy()
+        .join(items().lazy(), on="item")
+        .group_by_rollup(["category", "class"])
+        .agg(
+            [
+                col("m").len().alias("n"),
+                grouping_id(["category", "class"]).alias("gid"),
+            ]
+        )
+    )
+    var result = plan.collect()
+    var total = result.filter(col("gid") == 3)
+    assert_equal(total.height(), 1)
+    assert_equal(total.item(0, "n").int64(), 300000)
+    var by_category = result.filter(col("gid") == 1)
+    assert_equal(by_category.height(), 3)
+    assert_equal(by_category.select(col("n").sum()).item().int64(), 300000)

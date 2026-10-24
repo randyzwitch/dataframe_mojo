@@ -166,10 +166,17 @@ def test_regex_functions_match_polars_eager_and_lazy() raises:
     var expected = _expected()
     for layout in range(4):
         var source = _source(layout)
-        assert_frame(source.select_exprs(_expressions()), expected)
-        assert_frame(
-            source.lazy().select_exprs(_expressions()).collect(), expected
-        )
+        for batch_size in [1, 2, 8192]:
+            assert_frame(
+                source.select_exprs(_expressions(), batch_size=batch_size),
+                expected,
+            )
+            assert_frame(
+                source.lazy()
+                .select_exprs(_expressions())
+                .collect(batch_size=batch_size),
+                expected,
+            )
         assert_frame(
             source.clear().select_exprs(_expressions()), expected.clear()
         )

@@ -16,6 +16,7 @@ from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
 from .huge_pages import huge_capacity, huge_list, huge_uninit
+from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _mix
 from .series import Series
@@ -829,7 +830,7 @@ struct _HashBuildJob(Job):
         return self.result^
 
 
-struct _HashProbeJob(Job):
+struct _HashProbeJob(MatchJob):
     var left_keys: List[Series]
     var right_keys: List[Series]
     var left_hashes: ArcPointer[List[UInt64]]
@@ -888,6 +889,16 @@ struct _HashProbeJob(Job):
         )
         self.filter = filter.copy()
         self.filter_base = filter_base
+
+    def take_matches(
+        mut self, mut left: List[Int], mut right: List[Int]
+    ) -> Bool:
+        swap(left, self.left_rows)
+        swap(right, self.right_rows)
+        return self.identity
+
+    def row_range(self) -> Tuple[Int, Int]:
+        return (self.start, self.end)
 
     def run_membership(mut self) raises:
         """Semi (membership == 1) or anti (0): each left row at most once,
@@ -1814,6 +1825,62 @@ struct RowsCopyJob(Job):
         )
 
 
+def prepared_hash_join_gather(
+    left_keys: List[Series],
+    prepared: PreparedHashIndex,
+    include_unmatched: Bool,
+    omit_identity: Bool,
+    mut request: FusedJoin,
+) raises:
+    """`prepared_hash_join_rows` and the gather of the joined columns, one
+    block of probe rows at a time (see `fused_gather`): the output is left
+    in `request`, and no row list as long as it exists."""
+    if prepared.progression:
+        trace_path("join.progression_prepared")
+    else:
+        trace_path("join.hash_index")
+    if prepared.progression:
+        var key = left_keys[0].rechunk()
+        var n = len(key)
+        var blocks = probe_blocks(n, request)
+        var bounds = partitions(n, blocks, 1)
+        var probes = List[_DirectProbeJob](capacity=blocks)
+        for block in range(blocks):
+            probes.append(
+                _DirectProbeJob(
+                    key,
+                    prepared,
+                    bounds[block],
+                    bounds[block + 1],
+                    include_unmatched,
+                )
+            )
+        fused_gather(probes, request, include_unmatched)
+        return
+    var index = prepared.probe(left_keys, 0)
+    var n = len(index.left[0])
+    var blocks = probe_blocks(n, request)
+    var bounds = partitions(n, blocks, 1)
+    var probes = List[_HashProbeJob](capacity=blocks)
+    for block in range(blocks):
+        probes.append(
+            _HashProbeJob(
+                index.left,
+                index.right,
+                index.left_hashes,
+                index.indexes,
+                index.fold,
+                bounds[block],
+                bounds[block + 1],
+                include_unmatched,
+                omit_identity,
+                filter=prepared.filter,
+                filter_base=prepared.filter_base,
+            )
+        )
+    fused_gather(probes, request, include_unmatched)
+
+
 def direct_hash_join_rows(
     left_keys: List[Series],
     right_keys: List[Series],
@@ -1835,7 +1902,7 @@ def direct_hash_join_rows(
     )
 
 
-struct _DirectProbeJob(Job):
+struct _DirectProbeJob(MatchJob):
     """Probe rows [start, stop) of an Int64 key against a progression or
     perfect hash index (`PreparedHashIndex.progression_row`)."""
 
@@ -1865,6 +1932,16 @@ struct _DirectProbeJob(Job):
         self.left_rows = List[Int]()
         self.right_rows = List[Int]()
         self.matched = 0
+
+    def take_matches(
+        mut self, mut left: List[Int], mut right: List[Int]
+    ) -> Bool:
+        swap(left, self.left_rows)
+        swap(right, self.right_rows)
+        return False
+
+    def row_range(self) -> Tuple[Int, Int]:
+        return (self.start, self.stop)
 
     def run(mut self) raises:
         ref values = self.key._data[Column[Int64]]
