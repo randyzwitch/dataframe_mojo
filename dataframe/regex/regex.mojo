@@ -5,20 +5,21 @@ worker (an `ArcPointer`); `Matcher` is one worker's mutable scratch space:
 its two lazy DFAs and Pike VM. A search goes the way Rust's `regex` meta
 engine goes:
 
-1. A pattern that is one literal string is a substring search.
+1. A pattern that is one literal string is a substring search. A single
+   character class tests its membership bitmap directly.
 2. Otherwise a literal every match must contain rejects most
    non-matching rows with one substring search (RE2's prefilter idea, for
    a single pattern).
 3. The forward DFA finds where the leftmost-first match ends, skipping
    input with literal prefixes or a byte-set prefilter while it sits in its
    start state.
-4. The reverse DFA, run back from that end, finds where it starts; a
-   pattern anchored at the start of the text needs no reverse pass.
+4. The reverse DFA, run back from that end, finds where it starts. Anchored
+   patterns and patterns with a fixed code-point length need no reverse DFA.
 5. Only when capture groups are needed does a capture engine run.
-   Eligible deterministic programs use one-pass tables on ASCII spans;
-   other spans use the bounded backtracker when its visited set fits in
-   256 KiB, the Pike VM otherwise. Anchored ASCII one-pass captures skip
-   the DFAs. As in RE2, anchored captures also skip the DFAs when the
+   Eligible deterministic programs use one-pass tables; other programs use
+   the bounded backtracker when its visited set fits in 256 KiB, the Pike VM
+   otherwise. Anchored one-pass captures skip the DFAs. As in RE2, anchored
+   captures also skip the DFAs when the
    backtracker can cover the whole text.
 
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
@@ -30,7 +31,7 @@ from .backtrack import Backtracker
 from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
-from .pikevm import PikeVM, decode
+from .pikevm import PikeVM, decode, previous_start
 from .program import Program, compile_program
 from .syntax import (
     Ast,
@@ -429,6 +430,39 @@ def _flat_sets(sets: _Sets) -> List[UInt8]:
     return out^
 
 
+def _fixed_width(ast: Ast, node: Int) -> Int:
+    """The number of code points in every match, or -1 when it varies."""
+    var kind = ast.kind[node]
+    if kind == NODE_LITERAL or kind == NODE_CLASS:
+        return 1
+    if kind == NODE_LOOK or kind == NODE_EMPTY:
+        return 0
+    if kind == NODE_GROUP:
+        return _fixed_width(ast, ast.kid(node, 0))
+    if kind == NODE_CONCAT:
+        var total = 0
+        for k in range(ast.count[node]):
+            var width = _fixed_width(ast, ast.kid(node, k))
+            if width < 0:
+                return -1
+            total += width
+        return total
+    if kind == NODE_ALTERNATE:
+        var width = _fixed_width(ast, ast.kid(node, 0))
+        for k in range(1, ast.count[node]):
+            if _fixed_width(ast, ast.kid(node, k)) != width:
+                return -1
+        return width
+    if ast.b[node] == 0:
+        return 0
+    var width = _fixed_width(ast, ast.kid(node, 0))
+    if width == 0:
+        return 0
+    if width < 0 or ast.a[node] != ast.b[node]:
+        return -1
+    return width * ast.a[node]
+
+
 def _anchored(ast: Ast, node: Int) -> Bool:
     """Whether every match starts at the start of the text."""
     var kind = ast.kind[node]
@@ -453,6 +487,8 @@ struct _Compiled(Movable):
     var names: List[String]
     var anchored: Bool
     var literal: Bool
+    var single_class: Bool
+    var fixed_width: Int32
     var text: List[UInt8]
     var required: List[UInt8]
     var prefilter: Prefilter
@@ -465,6 +501,13 @@ struct _Compiled(Movable):
         self.reverse = compile_program(ast, True)
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
+        var root = ast.root
+        while ast.kind[root] == NODE_GROUP:
+            root = ast.kid(root, 0)
+        self.single_class = (
+            ast.kind[root] == NODE_CLASS and len(self.forward.class_ranges) == 1
+        )
+        self.fixed_width = Int32(_fixed_width(ast, ast.root))
         var info = _analyze(ast, ast.root)
         # A pattern with assertions is not a plain substring search even
         # when it matches only one string.
@@ -477,12 +520,38 @@ struct _Compiled(Movable):
             var extracted = _literal_prefixes(ast, ast.root)
             prefixes = extracted.values.copy()
         self.prefilter = Prefilter(info.prefix.copy(), sets^, prefixes^)
-        # Capture tables are cold for ordinary searches. Keep their seven
+        # Capture tables are cold for ordinary searches. Keep their
         # vectors behind a pointer instead of widening the hot program object.
         var onepass = compile_onepass(self.forward)
         self.onepass = None
         if onepass.active():
             self.onepass = ArcPointer(onepass^)
+
+
+@no_inline
+def _find_class(
+    program: Program, text: Span[UInt8, ImmutAnyOrigin], at: Int
+) -> Tuple[Int, Int]:
+    """A whole pattern consisting of one class, with optional captures.
+    Its only consuming instruction uses class zero; no assertion or
+    alternative can change where that code point matches."""
+    var bytes = text.unsafe_ptr()
+    var membership = program.class_ascii.unsafe_ptr()
+    var i = at
+    while i < len(text):
+        var b = bytes[unsafe_offset=i]
+        if b < 128:
+            var word = membership[unsafe_offset=Int(b >> 6)]
+            if (word >> UInt64(b & 63)) & 1 != 0:
+                return (i, i + 1)
+            i += 1
+        else:
+            var packed = decode(text, i)
+            var width = packed & 7
+            if program.class_has(0, UInt32(packed >> 3)):
+                return (i, i + width)
+            i += width
+    return (-1, -1)
 
 
 def _may_match(c: _Compiled, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
@@ -698,6 +767,8 @@ struct Matcher(Movable):
         ref c = self.regex._compiled[]
         if c.literal:
             return find_literal(text, c.text, 0) >= 0
+        if c.single_class:
+            return _find_class(c.forward, text, 0)[0] >= 0
         if not _may_match(c, text):
             return False
         var end = self.forward.find_forward(
@@ -722,6 +793,8 @@ struct Matcher(Movable):
             if at < 0:
                 return (-1, -1)
             return (at, at + len(c.text))
+        if c.single_class:
+            return _find_class(c.forward, text, start)
         if c.anchored and start > 0:
             # Every match starts at the start of the text.
             return (-1, -1)
@@ -736,6 +809,13 @@ struct Matcher(Movable):
             # The anchored forward search already knows where the match
             # starts; RE2 runs the reverse DFA only for unanchored ones.
             return (start, end)
+        if end != GAVE_UP and c.fixed_width >= 0:
+            # The forward match's end and its code-point count determine
+            # the start. Walk UTF-8 boundaries instead of replaying the NFA.
+            var begin = end
+            for _ in range(Int(c.fixed_width)):
+                begin = previous_start(text, begin)
+            return (begin, end)
         if end != GAVE_UP:
             var begin = self.reverse.find_reverse(c.reverse, text, end, start)
             if begin >= 0:
@@ -753,15 +833,14 @@ struct Matcher(Movable):
         `slots`: group g spans `slots[2g] : slots[2g + 1]`, -1 when it took
         no part."""
         ref c = self.regex._compiled[]
-        if (
-            c.anchored
-            and start == 0
-            and Bool(c.onepass)
-            and (len(text) == 0 or text[0] < 128)
-        ):
+        if c.anchored and start == 0 and Bool(c.onepass):
             # The start state's ASCII table can reject impossible first
             # bytes before scanning a whole row for ASCII eligibility.
-            if len(text) > 0 and not c.onepass.value()[].matched[0]:
+            if (
+                len(text) > 0
+                and text[0] < 128
+                and not c.onepass.value()[].matched[0]
+            ):
                 var cls = Int(c.forward.ascii_class[Int(text[0])])
                 if c.onepass.value()[].next[cls] < 0:
                     return False
@@ -770,7 +849,7 @@ struct Matcher(Movable):
             if ascii_span(text, 0, len(text)):
                 # The capture engines run sequentially and initialize their
                 # scratch before use, so they can share this worker's slots.
-                return c.onepass.value()[].search(
+                return c.onepass.value()[].search[False](
                     c.forward,
                     text,
                     0,
@@ -778,6 +857,14 @@ struct Matcher(Movable):
                     self.pike.scratch,
                     self.slots,
                 )
+            return c.onepass.value()[].search[True](
+                c.forward,
+                text,
+                0,
+                len(text),
+                self.pike.scratch,
+                self.slots,
+            )
         if self._direct_captures(text):
             return start == 0 and self._anchored_captures(text)
         var m = self.find(text, start)
@@ -816,8 +903,12 @@ struct Matcher(Movable):
             self.slots[0] = begin
             self.slots[1] = end
             return True
-        if Bool(c.onepass) and ascii_span(text, begin, end):
-            return c.onepass.value()[].search(
+        if Bool(c.onepass):
+            if ascii_span(text, begin, end):
+                return c.onepass.value()[].search[False](
+                    c.forward, text, begin, end, self.pike.scratch, self.slots
+                )
+            return c.onepass.value()[].search[True](
                 c.forward, text, begin, end, self.pike.scratch, self.slots
             )
         if Backtracker.fits(c.forward, begin, end):

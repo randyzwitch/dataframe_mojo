@@ -96,13 +96,16 @@ def symmetric_difference(a: List[UInt32], b: List[UInt32]) -> List[UInt32]:
 
 def class_contains(ranges: List[UInt32], cp: UInt32) -> Bool:
     """Binary search over the ranges."""
+    var points = ranges.unsafe_ptr()
     var lo = 0
-    var hi = len(ranges) // 2
+    var hi = len(ranges) >> 1
     while lo < hi:
-        var mid = (lo + hi) // 2
-        if cp < ranges[2 * mid]:
+        # lo and hi index range pairs; their sum is nonnegative and
+        # bounded by the Unicode domain. Both endpoints are in bounds.
+        var mid = (lo + hi) >> 1
+        if cp < points[unsafe_offset=2 * mid]:
             hi = mid
-        elif cp > ranges[2 * mid + 1]:
+        elif cp > points[unsafe_offset=2 * mid + 1]:
             lo = mid + 1
         else:
             return True
