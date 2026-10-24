@@ -176,7 +176,17 @@ def test_unicode_class_vector_captures_match_independent_vm() raises:
         "([\\p{Greek}\\p{Cyrillic}]+)(!*)",
         "([^一]+)(一*)",
     ]
-    var words: List[String] = ["один", "中文", "𐐀", "α", "123", "中𐐀", "䶿一"]
+    var words: List[String] = [
+        "один",
+        "中文",
+        "𐐀",
+        "α",
+        "123",
+        "中𐐀",
+        "䶿一",
+        "α" * 32 + "я" * 32,
+        "一" * 32 + "㐀" * 32,
+    ]
     var suffixes: List[String] = ["", "!", "\n", "a", "一", "𐐀", " 123 文字"]
     for pattern in patterns:
         var regex = Regex(pattern)

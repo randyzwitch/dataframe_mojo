@@ -18,6 +18,24 @@ def _contains[
     )
 
 
+def find_interval(program: Program, id: Int, cp: UInt32) -> UInt64:
+    """Pack a canonical interval containing cp, or zero when absent.
+    The caller supplies a non-ASCII scalar, so zero cannot encode a hit."""
+    ref ranges = program.class_ranges[id]
+    var lo = 0
+    var hi = len(ranges) // 2
+    while lo < hi:
+        var mid = (lo + hi) >> 1
+        if ranges[2 * mid + 1] < cp:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo < len(ranges) // 2 and ranges[2 * lo] <= cp:
+        var low = ranges[2 * lo]
+        return UInt64(low) | (UInt64(ranges[2 * lo + 1] - low) << 21)
+    return 0
+
+
 @always_inline
 def class_batch[
     width: Int, lanes: Int

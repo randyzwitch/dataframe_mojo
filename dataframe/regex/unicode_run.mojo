@@ -4,7 +4,7 @@ from std.memory import pack_bits
 from .charclass import MAX_CODEPOINT
 from .pikevm import previous_start
 from .program import OP_CHAR, OP_CLASS, Program
-from .class_batch import class_batch
+from .class_batch import class_batch, find_interval, _contains
 
 
 def has_unicode_run(program: Program, pc: Int) -> Bool:
@@ -184,6 +184,7 @@ def _scan_class_width[
 ) -> Int:
     comptime lanes = 8 if width == 2 else 4
     comptime consumed = width * lanes
+    var interval: UInt64 = 0
     var p = text.unsafe_ptr()
     while True:
         var begin = at
@@ -200,7 +201,15 @@ def _scan_class_width[
         var cp, valid = _decode_block[width, reverse](block)
         # Invalid lanes use a safe directory index and cannot be consumed.
         var safe_cp = valid.select(cp, SIMD[DType.uint32, lanes](128))
-        var accepted = class_batch[width, lanes](program, id, safe_cp) & valid
+        if interval == 0:
+            interval = find_interval(
+                program, id, safe_cp[lanes - 1 if reverse else 0]
+            )
+            if interval == 0:
+                return at
+        var accepted = _contains(interval, safe_cp) & valid
+        if not accepted.reduce_and():
+            accepted = class_batch[width, lanes](program, id, safe_cp) & valid
         var mask = _mask[width, lanes](~accepted)
         if mask:
             comptime if reverse:
