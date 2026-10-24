@@ -499,7 +499,9 @@ struct LazyDFA(Movable):
         return program.class_of(UInt32(packed >> 3)), packed & 7
 
     @no_inline
-    def _advance_cached(
+    def _advance_cached[
+        unicode_packets: Bool
+    ](
         self,
         program: Program,
         text: Span[UInt8, ImmutAnyOrigin],
@@ -516,8 +518,11 @@ struct LazyDFA(Movable):
         var width = 0
         var e = 0
         while end - at >= 16:
-            if text.unsafe_ptr()[unsafe_offset=at] >= 128:
-                return self._advance_unicode_cached(program, text, off, at, end)
+            comptime if unicode_packets:
+                if text.unsafe_ptr()[unsafe_offset=at] >= 128:
+                    return self._advance_unicode_cached(
+                        program, text, off, at, end
+                    )
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
@@ -553,43 +558,41 @@ struct LazyDFA(Movable):
         var at: Int,
         end: Int,
     ) -> Tuple[Int, Int]:
-        """Consume cached packets and mixed scalar groups until a tag.
-        After entering on Unicode, keep ASCII in the same cached loop so
-        ordinary mixed text does not bounce through the caller."""
+        """Batch Unicode runs and leave failed probes to the scalar loop.
+        After a successful packet, finish its short tail before testing the
+        next state. A failed first probe transfers the remaining cached run
+        to the original four-edge scalar loop until a tagged transition."""
         var table = self.transitions.unsafe_ptr()
-        var cls = 0
-        var width = 0
-        var e = 0
+        var batched = False
         while end - at >= 16:
-            cls, width = self._class_at(program, text, at)
-            e = Int(table[unsafe_offset=off + cls])
+            var cls, width = self._class_at(program, text, at)
+            var e = Int(table[unsafe_offset=off + cls])
             if e < 0:
                 return off, at
             if e == off:
-                var stop, _ = self._advance_unicode_self_loop(
-                    program, text, off, at, end, Int32(off)
-                )
-                if stop > at:
-                    at = stop
-                    continue
-            off = e
-            at += width
-            cls, width = self._class_at(program, text, at)
-            e = Int(table[unsafe_offset=off + cls])
-            if e < 0:
-                return off, at
-            off = e
-            at += width
-            cls, width = self._class_at(program, text, at)
-            e = Int(table[unsafe_offset=off + cls])
-            if e < 0:
-                return off, at
-            off = e
-            at += width
-            cls, width = self._class_at(program, text, at)
-            e = Int(table[unsafe_offset=off + cls])
-            if e < 0:
-                return off, at
+                if width > 1 and has_packet_layout(text, at, width):
+                    var stop = scan_unicode_self_loop(
+                        program,
+                        self.transitions,
+                        off,
+                        text,
+                        at,
+                        end,
+                        Int32(off),
+                    )
+                    if stop > at:
+                        batched = True
+                        at = stop
+                        continue
+                    return self._advance_cached[False](
+                        program, text, off, at, end
+                    )
+                if not batched or width == 1:
+                    return self._advance_cached[False](
+                        program, text, off, at, end
+                    )
+            else:
+                batched = False
             off = e
             at += width
         return off, at
@@ -826,7 +829,9 @@ struct LazyDFA(Movable):
                 off = e
                 at += width
                 if n - at >= 16:
-                    off, at = self._advance_cached(program, text, off, at, n)
+                    off, at = self._advance_cached[True](
+                        program, text, off, at, n
+                    )
                 continue
             if e == Int(UNKNOWN):
                 var s = off // stride
