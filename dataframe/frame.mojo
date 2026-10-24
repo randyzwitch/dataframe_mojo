@@ -7426,26 +7426,41 @@ def table_inputs(
 ) raises -> List[Series]:
     """Each reduction's input over every row of `frame`, in the order of
     the template's states: its column, or its input expression evaluated
-    once (a row count reads the first key)."""
+    once (a row count reads the first key). The second input of each
+    correlation or covariance follows all of those, in order."""
     var inputs = List[Series]()
+    var seconds = List[Series]()
     for expression in expressions:
         for i in range(len(expression._nodes)):
             ref node = expression._nodes[i]
             if not is_reduction(node.op):
                 continue
-            if node.left < 0:
-                inputs.append(keys[0].copy())
-            elif (
-                expression._nodes[node.left].op == COL
-                and expression._nodes[node.left].text in frame.columns()
-            ):
-                inputs.append(frame.column(expression._nodes[node.left].text))
-            else:
-                var evaluated = frame.select_exprs(
-                    [subtree(expression, node.left).alias("__input")]
+            inputs.append(_table_input(frame, keys, expression, node.left))
+            if node.op == CORR or node.op == COV:
+                seconds.append(
+                    _table_input(frame, keys, expression, node.right)
                 )
-                inputs.append(evaluated._columns[0].copy())
+    for second in seconds:
+        inputs.append(second.copy())
     return inputs^
+
+
+def _table_input(
+    frame: DataFrame, keys: List[Series], expression: Expr, at: Int
+) raises -> Series:
+    """The column of the expression's node `at` over every row of `frame`
+    (a row count, with none, reads the first key)."""
+    if at < 0:
+        return keys[0].copy()
+    if (
+        expression._nodes[at].op == COL
+        and expression._nodes[at].text in frame.columns()
+    ):
+        return frame.column(expression._nodes[at].text)
+    var evaluated = frame.select_exprs(
+        [subtree(expression, at).alias("__input")]
+    )
+    return evaluated._columns[0].copy()
 
 
 def table_supported(

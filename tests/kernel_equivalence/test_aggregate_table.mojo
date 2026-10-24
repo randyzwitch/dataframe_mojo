@@ -20,6 +20,8 @@ from dataframe import (
     Series,
     col,
     concat,
+    corr,
+    cov,
     lit,
 )
 from tests.support.aggregate_table_reference import (
@@ -54,6 +56,8 @@ def reductions() -> List[Expr]:
         col("y").std().alias("y_std"),
         col("y").median().alias("y_median"),
         col("x").quantile(0.25).alias("x_q25"),
+        corr(col("x"), col("y")).alias("xy_corr"),
+        cov(col("x"), col("y")).alias("xy_cov"),
     ]
 
 

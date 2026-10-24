@@ -63,7 +63,9 @@ from .bool_column import BoolColumn
 from .column import Column, _count_set, _pack_bits, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
+    CORR,
     COUNT,
+    COV,
     LEN,
     MAX,
     MEAN,
@@ -161,6 +163,8 @@ def reduction_supported(op: Int) -> Bool:
         NULL_COUNT,
         MEDIAN,
         QUANTILE,
+        CORR,
+        COV,
     ]
 
 
@@ -188,6 +192,11 @@ comptime _K_TOP_ROWS = 10
 # the group's chain of values (DuckDB's `QuantileState`, a vector of every
 # valid value) and how many it holds; all 0 when it has none.
 comptime _K_VALUES = 11
+# A correlation or covariance of two columns (DuckDB's `CorrState` and
+# `CovarState`): pairs counted, the two means, the co-moment and the two
+# second moments (Welford's update, merged pairwise). The second column is
+# an input after the reductions' own (`_Slot.k` is its index).
+comptime _K_COMOMENT = 12
 # The most pairs a group row holds inline: 33 state words, four cache lines.
 comptime TOP_ROWS_INLINE = 16
 
@@ -314,6 +323,8 @@ struct _Slot(Copyable, Movable):
     def words(self) -> Int:
         if self.kind == _K_TOP_ROWS:
             return 1 + 2 * self.k
+        if self.kind == _K_COMOMENT:
+            return 6
         if (
             self.kind == _K_INT_SUM
             or self.kind == _K_VALUES
@@ -387,10 +398,37 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
     return -1
 
 
+def _pair_kind(spec: ReducerSpec, x: Series, y: Series) -> Int:
+    """The inline state kind of a correlation or covariance of two numeric
+    columns (Pearson only: Spearman ranks every value), or -1."""
+    if spec.op == CORR and spec.text == "spearman":
+        return -1
+    if not _numeric_part(x) or not _numeric_part(y):
+        return -1
+    return _K_COMOMENT
+
+
+def _second_input(specs: List[ReducerSpec], s: Int) -> Int:
+    """The index of reduction s's second input among the inputs: those of
+    the two-input reductions follow the reductions' own, in order."""
+    var at = len(specs)
+    for r in range(s):
+        if specs[r].op == CORR or specs[r].op == COV:
+            at += 1
+    return at
+
+
 def states_supported(specs: List[ReducerSpec], inputs: List[Series]) -> Bool:
     """Whether every reduction's state fits inline in a group row."""
     for s in range(len(specs)):
-        if _slot_kind(specs[s], inputs[s]) < 0:
+        if specs[s].op == CORR or specs[s].op == COV:
+            var at = _second_input(specs, s)
+            if (
+                at >= len(inputs)
+                or _pair_kind(specs[s], inputs[s], inputs[at]) < 0
+            ):
+                return False
+        elif _slot_kind(specs[s], inputs[s]) < 0:
             return False
     return True
 
@@ -571,6 +609,93 @@ def _update_decimal[
         at[unsafe_offset=2] += 1
 
 
+def _batch_floats[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    start: Int,
+    count: Int,
+    values_at: Int,
+    valid_at: Int,
+):
+    """Rows [start, start + count) of a column as Float64 and validity, at
+    the addresses `values_at` and `valid_at`."""
+    var values = Pointer[Float64, MutAnyOrigin](unsafe_from_address=values_at)
+    var valid = Pointer[Bool, MutAnyOrigin](unsafe_from_address=valid_at)
+    var data = column._ptr()
+    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
+    var bits = column._bits[].unsafe_ptr()
+    for k in range(count):
+        values[unsafe_offset=k] = data[unsafe_offset=start + k].cast[
+            DType.float64
+        ]()
+        valid[unsafe_offset=k] = not nulls or _validity_at(
+            bits, column._offset + start + k
+        )
+
+
+def _load_floats(
+    part: Series,
+    start: Int,
+    count: Int,
+    values_at: Int,
+    valid_at: Int,
+) raises:
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        if part._data.isa[Column[Scalar[D]]]():
+            _batch_floats[D](
+                part._data[Column[Scalar[D]]],
+                start,
+                count,
+                values_at,
+                valid_at,
+            )
+            return
+    raise Error("aggregate table: unsupported pair input")
+
+
+def _update_comoment(
+    x: Series,
+    y: Series,
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+) raises:
+    """A batch's (x, y) pairs into their groups' co-moment states; a pair
+    with a null on either side is dropped."""
+    var xs = List[Float64](unsafe_uninit_length=count)
+    var ys = List[Float64](unsafe_uninit_length=count)
+    var xv = List[Bool](unsafe_uninit_length=count)
+    var yv = List[Bool](unsafe_uninit_length=count)
+    _load_floats(x, start, count, Int(xs.unsafe_ptr()), Int(xv.unsafe_ptr()))
+    _load_floats(y, start, count, Int(ys.unsafe_ptr()), Int(yv.unsafe_ptr()))
+    for k in range(count):
+        if not (xv[k] and yv[k]):
+            continue
+        var at = _words_at(rows[unsafe_offset=k] + base)
+        var n = at[unsafe_offset=0] + 1
+        var mean_x = bitcast[DType.float64](at[unsafe_offset=1])
+        var mean_y = bitcast[DType.float64](at[unsafe_offset=2])
+        var dx = xs[k] - mean_x
+        mean_x += dx / Float64(n)
+        var dy = ys[k] - mean_y
+        mean_y += dy / Float64(n)
+        at[unsafe_offset=0] = n
+        at[unsafe_offset=1] = bitcast[DType.uint64](mean_x)
+        at[unsafe_offset=2] = bitcast[DType.uint64](mean_y)
+        at[unsafe_offset=3] = bitcast[DType.uint64](
+            bitcast[DType.float64](at[unsafe_offset=3]) + dx * (ys[k] - mean_y)
+        )
+        at[unsafe_offset=4] = bitcast[DType.uint64](
+            bitcast[DType.float64](at[unsafe_offset=4]) + dx * (xs[k] - mean_x)
+        )
+        at[unsafe_offset=5] = bitcast[DType.uint64](
+            bitcast[DType.float64](at[unsafe_offset=5]) + dy * (ys[k] - mean_y)
+        )
+
+
 def _update_states(
     slots: List[_Slot],
     inputs: List[Series],
@@ -594,6 +719,9 @@ def _update_states(
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
             continue
         ref part = inputs[s]
+        if slot.kind == _K_COMOMENT:
+            _update_comoment(part, inputs[slot.k], start, count, rows, base)
+            continue
         if slot.kind == _K_TOP_ROWS:
             var placed = False
             comptime for t in range(len(NUMERIC_DTYPES)):
@@ -722,6 +850,49 @@ def _combine(slots: List[_Slot], into: Int, other: Int) raises:
                     b[unsafe_offset=w + 1 + 2 * p],
                     b[unsafe_offset=w + 2 + 2 * p],
                 )
+        elif kind == _K_COMOMENT:
+            var m = b[unsafe_offset=w]
+            if m == 0:
+                continue
+            var n = a[unsafe_offset=w]
+            if n == 0:
+                for i in range(6):
+                    a[unsafe_offset=w + i] = b[unsafe_offset=w + i]
+                continue
+            var wa = Float64(n)
+            var wb = Float64(m)
+            var total = wa + wb
+            var dx = bitcast[DType.float64](b[unsafe_offset=w + 1]) - bitcast[
+                DType.float64
+            ](a[unsafe_offset=w + 1])
+            var dy = bitcast[DType.float64](b[unsafe_offset=w + 2]) - bitcast[
+                DType.float64
+            ](a[unsafe_offset=w + 2])
+            var cxy = (
+                bitcast[DType.float64](a[unsafe_offset=w + 3])
+                + bitcast[DType.float64](b[unsafe_offset=w + 3])
+                + dx * dy * wa * wb / total
+            )
+            var m2x = (
+                bitcast[DType.float64](a[unsafe_offset=w + 4])
+                + bitcast[DType.float64](b[unsafe_offset=w + 4])
+                + dx * dx * wa * wb / total
+            )
+            var m2y = (
+                bitcast[DType.float64](a[unsafe_offset=w + 5])
+                + bitcast[DType.float64](b[unsafe_offset=w + 5])
+                + dy * dy * wa * wb / total
+            )
+            a[unsafe_offset=w + 1] = bitcast[DType.uint64](
+                bitcast[DType.float64](a[unsafe_offset=w + 1]) + dx * wb / total
+            )
+            a[unsafe_offset=w + 2] = bitcast[DType.uint64](
+                bitcast[DType.float64](a[unsafe_offset=w + 2]) + dy * wb / total
+            )
+            a[unsafe_offset=w + 3] = bitcast[DType.uint64](cxy)
+            a[unsafe_offset=w + 4] = bitcast[DType.uint64](m2x)
+            a[unsafe_offset=w + 5] = bitcast[DType.uint64](m2y)
+            a[unsafe_offset=w] = n + m
         elif kind == _K_VALUES:
             _values_append(
                 Pointer[UInt64, MutAnyOrigin](unsafe_from_address=into + 8 * w),
@@ -853,6 +1024,25 @@ def _unload(
             )
             reducer.float_sums[g].count = bitcast[DType.int64](
                 at[unsafe_offset=w + 1]
+            )
+        elif kind == _K_COMOMENT:
+            reducer.comoments[g].count = bitcast[DType.int64](
+                at[unsafe_offset=w]
+            )
+            reducer.comoments[g].mean_x = bitcast[DType.float64](
+                at[unsafe_offset=w + 1]
+            )
+            reducer.comoments[g].mean_y = bitcast[DType.float64](
+                at[unsafe_offset=w + 2]
+            )
+            reducer.comoments[g].cxy = bitcast[DType.float64](
+                at[unsafe_offset=w + 3]
+            )
+            reducer.comoments[g].m2x = bitcast[DType.float64](
+                at[unsafe_offset=w + 4]
+            )
+            reducer.comoments[g].m2y = bitcast[DType.float64](
+                at[unsafe_offset=w + 5]
             )
         elif kind == _K_MOMENTS:
             reducer.moments[g].count = bitcast[DType.int64](at[unsafe_offset=w])
@@ -1815,11 +2005,20 @@ def aggregate_layout(
     var slots = List[_Slot](capacity=len(templates))
     var state_words = 0
     for s in range(len(templates)):
-        var kind = _slot_kind(templates[s], inputs[s])
+        var second = 0
+        var kind: Int
+        if templates[s].op == CORR or templates[s].op == COV:
+            second = _second_input(templates, s)
+            kind = (
+                _pair_kind(templates[s], inputs[s], inputs[second]) if second
+                < len(inputs) else -1
+            )
+        else:
+            kind = _slot_kind(templates[s], inputs[s])
         if kind < 0:
             raise Error("aggregate table: a state that is not inline")
         var floating = False
-        if kind != _K_LEN and kind != _K_DECIMAL_SUM:
+        if kind != _K_LEN and kind != _K_DECIMAL_SUM and kind != _K_COMOMENT:
             floating = _numeric_part(inputs[s]).value().dtype().is_float()
         slots.append(
             _Slot(
@@ -1827,7 +2026,7 @@ def aggregate_layout(
                 state_words,
                 floating,
                 templates[s].make(0).dtype,
-                0,
+                second,
                 False,
             )
         )
@@ -2382,7 +2581,10 @@ struct _SinkJob(Job):
             var inputs = List[Series](capacity=len(self.inputs))
             for s in range(len(self.inputs)):
                 # A row count reads no input.
-                var size = 0 if self.slots[s].kind == _K_LEN else length
+                var size = (
+                    0 if s < len(self.slots)
+                    and self.slots[s].kind == _K_LEN else length
+                )
                 inputs.append(_one_chunk(self.inputs[s].slice(offset, size)))
             self.sink.sink(keys, inputs, offset)
 

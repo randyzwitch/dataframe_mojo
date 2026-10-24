@@ -26,7 +26,9 @@ from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .execution import _ReduceJob, _new_reducer, _valid_lanes
 from .expr import (
+    CORR,
     COUNT,
+    COV,
     FIRST,
     LAST,
     LEN,
@@ -2764,6 +2766,10 @@ def _in_place_table_rows(
     var n = morsel.frame.height()
     if not morsel.selected or morsel.by_rows or 2 * morsel.count < n:
         return None
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op == CORR or node.op == COV:
+                return None
     var key_columns = List[Series](capacity=len(keys))
     for name in keys:
         var at = morsel._index(name)
