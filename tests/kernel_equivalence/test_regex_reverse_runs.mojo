@@ -4,7 +4,7 @@ from std.testing import assert_equal
 from dataframe.regex import Matcher, Regex
 from dataframe.regex.pikevm import decode, previous_start
 from dataframe.regex.program import Program, consumes
-from dataframe.regex.reverse_run import scan_reverse_run
+from dataframe.regex.reverse_run import _decode_previous, scan_reverse_run
 from .test_regex_engine import _span
 
 
@@ -63,25 +63,24 @@ def test_reverse_runs_preserve_malformed_complete_span_decode() raises:
         .unsafe_mut_cast[False]()
         .unsafe_origin_cast[ImmutAnyOrigin]()
     )
+    var unit: List[UInt8] = [
+        0x61,
+        0xCE,
+        0xB1,
+        0xE4,
+        0xB8,
+        0xAD,
+        0xF0,
+        0x90,
+        0x90,
+        0x80,
+    ]
     for pattern in [String("(\\w+)"), "(α+)", "(?s)(.+)", "(.+)"]:
         var regex = Regex(pattern)
         for value in range(256):
             for position in range(8):
                 for k in range(64):
-                    bytes[k] = UInt8(
-                        [
-                            0x61,
-                            0xCE,
-                            0xB1,
-                            0xE4,
-                            0xB8,
-                            0xAD,
-                            0xF0,
-                            0x90,
-                            0x90,
-                            0x80,
-                        ][k % 10]
-                    )
+                    bytes[k] = unit[k % len(unit)]
                 bytes[position] = UInt8(value)
                 for offset in [0, 1, 3]:
                     var span = Span[UInt8, ImmutAnyOrigin](
@@ -132,3 +131,93 @@ def test_reverse_mixed_runs_preserve_vm_capture_priorities() raises:
                 matcher.forward.clear()
                 matcher.reverse.clear()
                 _ = text
+
+
+def test_reverse_decode_covers_every_unicode_scalar() raises:
+    var bytes = List[UInt8](length=5, fill=0)
+    bytes[0] = 120
+    var ptr = (
+        bytes.unsafe_ptr()
+        .unsafe_mut_cast[False]()
+        .unsafe_origin_cast[ImmutAnyOrigin]()
+    )
+    for cp in range(0x110000):
+        if cp >= 0xD800 and cp <= 0xDFFF:
+            continue
+        var width = 1
+        if cp < 128:
+            bytes[1] = UInt8(cp)
+        elif cp < 0x800:
+            width = 2
+            bytes[1] = UInt8(0xC0 | (cp >> 6))
+            bytes[2] = UInt8(0x80 | (cp & 63))
+        elif cp < 0x10000:
+            width = 3
+            bytes[1] = UInt8(0xE0 | (cp >> 12))
+            bytes[2] = UInt8(0x80 | ((cp >> 6) & 63))
+            bytes[3] = UInt8(0x80 | (cp & 63))
+        else:
+            width = 4
+            bytes[1] = UInt8(0xF0 | (cp >> 18))
+            bytes[2] = UInt8(0x80 | ((cp >> 12) & 63))
+            bytes[3] = UInt8(0x80 | ((cp >> 6) & 63))
+            bytes[4] = UInt8(0x80 | (cp & 63))
+        var span = Span[UInt8, ImmutAnyOrigin](unsafe_ptr=ptr, length=width + 1)
+        var prev, actual = _decode_previous(span, len(span))
+        assert_equal(prev, 1)
+        assert_equal(actual, UInt32(cp))
+    _ = bytes
+
+
+def _check_decode(text: Span[UInt8, ImmutAnyOrigin]) raises:
+    for at in range(1, len(text) + 1):
+        var prev = previous_start(text, at)
+        var expected = UInt32(decode(text, prev) >> 3)
+        var actual_prev, actual = _decode_previous(text, at)
+        assert_equal(actual_prev, prev)
+        assert_equal(actual, expected)
+
+
+def test_reverse_decode_matches_full_span_on_malformed_bytes() raises:
+    var bytes = List[UInt8](length=10, fill=0)
+    var ptr = (
+        bytes.unsafe_ptr()
+        .unsafe_mut_cast[False]()
+        .unsafe_origin_cast[ImmutAnyOrigin]()
+    )
+    for a in range(256):
+        for b in range(256):
+            for k in range(10):
+                bytes[k] = UInt8(a if k % 2 == 0 else b)
+            for offset in [0, 1]:
+                _check_decode(
+                    Span[UInt8, ImmutAnyOrigin](
+                        unsafe_ptr=ptr.unsafe_offset(offset), length=8
+                    )
+                )
+    for a in [
+        0x7F,
+        0x80,
+        0xBF,
+        0xC0,
+        0xDF,
+        0xE0,
+        0xED,
+        0xEF,
+        0xF0,
+        0xF4,
+        0xF7,
+        0xFF,
+    ]:
+        for b in [0, 0x7F, 0x80, 0x9F, 0xBF, 0xC0, 0xFF]:
+            for c in [0, 0x7F, 0x80, 0x9F, 0xBF, 0xC0, 0xFF]:
+                for d in [0, 0x7F, 0x80, 0x9F, 0xBF, 0xC0, 0xFF]:
+                    bytes[0] = UInt8(a)
+                    bytes[1] = UInt8(b)
+                    bytes[2] = UInt8(c)
+                    bytes[3] = UInt8(d)
+                    bytes[4] = 33
+                    _check_decode(
+                        Span[UInt8, ImmutAnyOrigin](unsafe_ptr=ptr, length=5)
+                    )
+    _ = bytes
