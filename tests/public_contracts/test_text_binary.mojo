@@ -127,6 +127,36 @@ def test_unicode_lengths_slices_reverse_and_physical_string_layouts() raises:
             assert_frame(source, DataFrame([_strings("s", values, valid)]))
 
 
+def test_string_lengths_cross_utf8_vector_boundaries() raises:
+    # Four leading bytes and six continuation bytes in each ten-byte unit.
+    # Varying the prefix puts multi-byte characters across block boundaries.
+    var values = List[String]()
+    var chars = List[Int64]()
+    var bytes = List[Int64]()
+    for prefix in range(33):
+        values.append("x" * prefix + "aé中🙂" * 7)
+        chars.append(Int64(prefix + 28))
+        bytes.append(Int64(prefix + 70))
+    for mode in range(3):
+        var valid = _validity(len(values), mode)
+        var expected = DataFrame(
+            [
+                Series("chars", Column[Int64](chars.copy(), valid.copy())),
+                Series("bytes", Column[Int64](bytes.copy(), valid.copy())),
+            ]
+        )
+        for layout in range(4):
+            var source = _source(values, valid, layout)
+            var expressions: List[Expr] = [
+                col("s").str().len_chars().alias("chars"),
+                col("s").str().len_bytes().alias("bytes"),
+            ]
+            assert_frame(source.select_exprs(expressions), expected)
+            assert_frame(
+                source.lazy().select_exprs(expressions).collect(), expected
+            )
+
+
 def test_literal_search_replace_and_empty_pattern_rules() raises:
     var values: List[String] = [
         "a.a.a",
