@@ -33,7 +33,7 @@ from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode, previous_start
-from .program import Program, compile_program
+from .program import Program, compile_program, _compile_program
 from .syntax import (
     Ast,
     LOOK_START_TEXT,
@@ -499,7 +499,7 @@ struct _Compiled(Movable):
         var ast = parse(pattern)
         self.pattern = pattern
         self.forward = compile_program(ast, False)
-        self.reverse = compile_program(ast, True)
+        self.reverse = _compile_program(ast, True, self.forward.word.copy())
         self.names = ast.names.copy()
         self.anchored = _anchored(ast, ast.root)
         var root = ast.root
