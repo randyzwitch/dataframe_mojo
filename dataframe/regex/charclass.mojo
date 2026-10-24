@@ -12,21 +12,8 @@ comptime MAX_CODEPOINT: UInt32 = 0x10FFFF
 
 
 def _sort(mut keys: List[UInt64]):
-    """Shell sort; range lists are short and this keeps the module free of
-    any ordering dependency."""
-    var n = len(keys)
-    var gap = 1
-    while gap < n // 3:
-        gap = gap * 3 + 1
-    while gap >= 1:
-        for i in range(gap, n):
-            var value = keys[i]
-            var j = i
-            while j >= gap and keys[j - gap] > value:
-                keys[j] = keys[j - gap]
-                j -= gap
-            keys[j] = value
-        gap //= 3
+    """Sort packed ranges and alphabet cuts with the standard sorter."""
+    sort(Span(keys))
 
 
 def canonical(ranges: List[UInt32]) -> List[UInt32]:
