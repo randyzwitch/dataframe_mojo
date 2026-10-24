@@ -147,6 +147,15 @@ def _stride(hash: UInt64) -> Int:
     return Int((hash >> 59) | 1)
 
 
+def reaggregable(op: Int) -> Bool:
+    """Whether a reduction's state, merged with another group's state,
+    gives the state of the union of their rows: a coarser grouping's states
+    come from a finer one's group rows (`sink_group_rows`). Totals, counts
+    and extremes do (a mean is its total and count); a quantile's values
+    and the Welford moments are left to the rows."""
+    return op in [SUM, MEAN, MIN, MAX, COUNT, LEN, NULL_COUNT]
+
+
 def reduction_supported(op: Int) -> Bool:
     """Whether a reduction has a state that can be merged in any order: a
     fixed-size one, or a quantile's chain of values. First, last,
@@ -1329,6 +1338,14 @@ def key_supported(column: Series) -> Bool:
     return False
 
 
+def layout_widths(layout: AggregateLayout) -> List[Int]:
+    """Each key column's word count in a layout."""
+    var widths = List[Int](capacity=len(layout.key_templates))
+    for key in layout.key_templates:
+        widths.append(_width(key))
+    return widths^
+
+
 def _width(column: Series) -> Int:
     """Key words a column takes: two for a string or a 128-bit decimal."""
     var part = column.chunks()[
@@ -2218,7 +2235,9 @@ struct AggregateSink(Movable):
     # The segments of the quantile values, which the finish reads.
     var values: _ValueArena
 
-    def __init__(out self, layout: AggregateLayout, workers: Int):
+    def __init__(
+        out self, layout: AggregateLayout, workers: Int, shares: Int = 1
+    ):
         self.slots = layout.slots.copy()
         self.addressed = layout.addressed.copy()
         self.radix = layout.radix
@@ -2229,7 +2248,9 @@ struct AggregateSink(Movable):
         )
         self.max_bits = _maximum_bits(workers)
         self.grow = workers <= _GROW_WORKERS
-        self.memory = _worker_memory(workers)
+        # A worker with several tables (one per grouping set) divides its
+        # share among them.
+        self.memory = _worker_memory(workers) // max(1, shares)
         self.capacity = _SINK_CAPACITY
         self.entries = huge_list(self.capacity, UInt64(0))
         self.live = 0
@@ -2527,6 +2548,143 @@ struct AggregateSink(Movable):
                         group_at[unsafe_offset=k] = at
                         break
                 slot = (slot + _stride(hash)) & mask
+
+    def sink_group_rows(
+        mut self,
+        source: AggregateSink,
+        columns: List[Int],
+        widths: List[Int],
+    ) raises:
+        """The group rows of another sink, with this table's keys the
+        source's `columns` (in this order; none for a constant key of one
+        zero word), into this table with their states merged rather than
+        rebuilt from values: a coarser grouping from a finer one's groups
+        (DuckDB merges grouped states the same way across threads, and
+        `_combine` is the finish's merge of the workers'). `widths` is each
+        source key column's word count. Both tables hold the same reductions,
+        all of which `reaggregable`. Rows are read where they are; the
+        source's key buffers are kept for the long strings they point at.
+        This does not touch `sink`'s per-row update."""
+        var starts = List[Int](capacity=len(widths))
+        var at = 0
+        for c in range(len(widths)):
+            starts.append(at)
+            at += widths[c]
+        var width = len(self.addressed)
+        var word_ptrs = List[Int](capacity=width)
+        for w in range(width):
+            word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
+        var sources = List[Int](length=_BATCH, fill=0)
+        var firsts = List[UInt64](length=_BATCH, fill=0)
+        var source_at = sources.unsafe_ptr()
+        var first_at = firsts.unsafe_ptr()
+        var hashes = self.hashes.unsafe_ptr()
+        var nulls = self.nulls.unsafe_ptr()
+        var stride = source.parts.stride
+        var count = 0
+        for p in range(len(source.parts.blocks)):
+            for b in range(len(source.parts.blocks[p])):
+                var base = source.parts.blocks[p][b]
+                for r in range(source.parts.rows_in(p, b)):
+                    var address = base + 8 * r * stride
+                    var row = _words_at(address)
+                    var hash = UInt64(0)
+                    var null = UInt64(0)
+                    var to = 0
+                    if len(columns) == 0:
+                        _words_at(word_ptrs[0])[unsafe_offset=count] = 0
+                        hash = _mix(UInt64(0))
+                    for j in range(len(columns)):
+                        var c = columns[j]
+                        var from_word = _HEAD + starts[c]
+                        var part: UInt64
+                        var first = row[unsafe_offset=from_word]
+                        _words_at(word_ptrs[to])[unsafe_offset=count] = first
+                        if (row[unsafe_offset=1] >> UInt64(c)) & 1 != 0:
+                            null |= UInt64(1) << UInt64(j)
+                            part = _NULL_KEY
+                        else:
+                            part = first
+                        if widths[c] == 2:
+                            var second = row[unsafe_offset=from_word + 1]
+                            _words_at(word_ptrs[to + 1])[
+                                unsafe_offset=count
+                            ] = second
+                            var length = Int(first & 0xFFFFFFFF)
+                            if (
+                                source.addressed[starts[c] + 1]
+                                and length > 12
+                                and part != _NULL_KEY
+                            ):
+                                # A long string's bytes, not where they are.
+                                part = _hash_combine(
+                                    _hash_bytes(
+                                        Span[UInt8, ImmutAnyOrigin](
+                                            unsafe_ptr=Pointer[
+                                                UInt8, ImmutAnyOrigin
+                                            ](unsafe_from_address=Int(second)),
+                                            length=length,
+                                        )
+                                    ),
+                                    UInt64(length),
+                                )
+                            else:
+                                part = _hash_combine(part, second)
+                        to += widths[c]
+                        hash = _mix(part) if j == 0 else _hash_combine(
+                            hash, part
+                        )
+                    hashes[unsafe_offset=count] = hash
+                    nulls[unsafe_offset=count] = null
+                    source_at[unsafe_offset=count] = address
+                    first_at[unsafe_offset=count] = row[unsafe_offset=2]
+                    count += 1
+                    if count == _BATCH:
+                        self._merge_group_rows(
+                            count, source.parts.states_at, sources, firsts
+                        )
+                        count = 0
+        if count > 0:
+            self._merge_group_rows(
+                count, source.parts.states_at, sources, firsts
+            )
+        for held in source.held:
+            self.held.append(held.copy())
+
+    def _merge_group_rows(
+        mut self,
+        count: Int,
+        source_states_at: Int,
+        sources: List[Int],
+        firsts: List[UInt64],
+    ) raises:
+        """A batch of source group rows, their keys and hashes in this
+        sink's batch buffers: each into its group (made when new), the
+        states merged and the earlier first row kept."""
+        var word_ptrs = List[Int](capacity=len(self.addressed))
+        for w in range(len(self.addressed)):
+            word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
+        var group_at = self.groups.unsafe_ptr()
+        # A new group's first row starts past any real row, so the earlier
+        # of it and the source's wins.
+        self._insert[False](
+            count,
+            1 << 50,
+            Int(self.hashes.unsafe_ptr()),
+            Int(self.nulls.unsafe_ptr()),
+            word_ptrs,
+            Int(group_at),
+            0,
+        )
+        var into_states = 8 * self.parts.states_at
+        var from_states = 8 * source_states_at
+        for k in range(count):
+            var group = group_at[unsafe_offset=k]
+            _combine(self.slots, group + into_states, sources[k] + from_states)
+            var head = _words_at(group)
+            if firsts[k] < head[unsafe_offset=2]:
+                head[unsafe_offset=2] = firsts[k]
+        self.sunk += count
 
     def _reinsert(mut self):
         """Every row back into a grown table (growing strategy only, so no
