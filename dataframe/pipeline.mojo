@@ -122,6 +122,9 @@ def _flush_groups() -> Int:
 # the last sort key, so ties come out as a stable sort of the whole input
 # would place them, whichever worker held them.
 comptime _ORDER_COLUMN = "__pipeline_order"
+# The constant key a grouping sets' grand total groups by (the aggregate
+# table needs a key column); dropped from that set's result.
+comptime _TOTAL_KEY = "__grouping_total"
 # Candidate rows a worker holds before folding them to the k best: the
 # fold's setup is worth about this many rows of comparisons.
 comptime _FOLD_ROWS = 8192
@@ -2364,6 +2367,11 @@ struct _PipelineJob(Job):
     # every worker, and this worker's sink once it takes a morsel.
     var layout: List[AggregateLayout]
     var sinks: List[AggregateSink]
+    # Grouping sets: each set's key columns (indices into `keys`; empty is
+    # the grand total). Every set has its own layout and sink, and every
+    # morsel is sunk into each of them (DuckDB's one sink feeding every
+    # grouping set's table, `PhysicalHashAggregate::Sink`).
+    var sets: List[List[Int]]
     var workers: Int
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
@@ -2391,11 +2399,13 @@ struct _PipelineJob(Job):
         shared_bound: _SharedBound,
         floating_key: Bool,
         layout: List[AggregateLayout],
+        sets: List[List[Int]],
         workers: Int,
         key_ranges: List[_KeyRange],
     ):
         self.key_ranges = key_ranges.copy()
         self.layout = layout.copy()
+        self.sets = sets.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
         self.shared_bound = shared_bound.copy()
@@ -2440,6 +2450,39 @@ struct _PipelineJob(Job):
                 if name not in names:
                     names.append(name)
         return names^
+
+    def _sink_sets(mut self, mut morsel: Morsel, k: Int) raises:
+        """A morsel into every grouping set's sink: the reduction inputs
+        are evaluated once, and each set takes the key columns it groups
+        by (the grand total a constant one)."""
+        var source = morsel._compact_frame(self._table_reads()) if _reads(
+            self.expressions
+        ) else morsel.materialized()
+        var all_keys = List[Series](capacity=len(self.keys))
+        for name in self.keys:
+            all_keys.append(canonical_labels(_unchunked(source.column(name))))
+        var inputs = table_inputs(source, all_keys, self.expressions)
+        for i in range(len(inputs)):
+            inputs[i] = _unchunked(inputs[i])
+        var rows = len(all_keys[0])
+        while len(self.sinks) < len(self.sets):
+            self.sinks.append(
+                AggregateSink(self.layout[len(self.sinks)], self.workers)
+            )
+        for s in range(len(self.sets)):
+            var keys = List[Series](capacity=len(self.sets[s]))
+            if len(self.sets[s]) == 0:
+                keys.append(
+                    Series(
+                        _TOTAL_KEY,
+                        Column[Int64](List[Int64](length=rows, fill=0)),
+                    )
+                )
+            else:
+                for i in self.sets[s]:
+                    keys.append(all_keys[i].copy())
+            self.sinks[s].sink(keys, inputs, k << 32)
+        self.rows += rows
 
     def _fold_candidates(mut self) raises:
         """Fold this worker's candidates into a size-k heap, and
@@ -2560,6 +2603,9 @@ struct _PipelineJob(Job):
                 if morsel.height() == 0:
                     break
             if morsel.height() == 0:
+                continue
+            if len(self.layout) > 0 and len(self.sets) > 0:
+                self._sink_sets(morsel, k)
                 continue
             if len(self.layout) > 0:
                 if len(self.sinks) == 0:
@@ -3110,6 +3156,8 @@ def run_pipeline(
     morsel_rows: Int,
     batch_size: Int,
     mut counts: List[Int],
+    mut set_frames: List[DataFrame],
+    sets: List[List[Int]] = List[List[Int]](),
     top: Int = -1,
     top_names: List[String] = List[String](),
     top_descending: List[Bool] = List[Bool](),
@@ -3123,20 +3171,51 @@ def run_pipeline(
     in first-occurrence order; `insert`: rows go into per-worker group
     tables rather than being collected for the eager partitioned
     group-by; `table`: into the aggregate table, when it keeps every
-    state inline, whatever `insert` says). `counts` receives the rows fed,
+    state inline, whatever `insert` says; `sets`: grouping sets, each a
+    list of indices into `keys`, one sink per set fed by every morsel,
+    whose finished frames (set order) land in `set_frames`, the grand
+    total's among them with its one row, and the result is the steps'
+    empty output). `counts` receives the rows fed,
     then each step's input and output rows."""
     trace_path("pipeline.run")
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
     var layout = List[AggregateLayout]()
     var template = List[_StreamReduction]()
+    var set_empty = List[DataFrame]()
     if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
         var empty = frame.clear()
         for step in steps:
             var morsel = Morsel(empty.copy(), 0)
             morsel.apply(step, batch_size, joins, indexes)
             empty = morsel.materialized()
-        if table_supported(empty, keys, expressions):
+        if len(sets) > 0 and table_supported(empty, keys, expressions):
+            set_empty.append(empty.copy())
+            var empty_inputs = table_inputs(
+                empty, [empty.column(keys[0])], expressions
+            )
+            for one in sets:
+                var names = List[String]()
+                var typed = empty.copy()
+                if len(one) == 0:
+                    names.append(_TOTAL_KEY)
+                    typed = typed.with_column(
+                        Series(_TOTAL_KEY, Column[Int64](List[Int64]()))
+                    )
+                else:
+                    for i in one:
+                        names.append(keys[i])
+                var empty_keys = List[Series](capacity=len(names))
+                for name in names:
+                    empty_keys.append(typed.column(name))
+                var reduction = _StreamReduction(typed, expressions, names)
+                layout.append(
+                    aggregate_layout(
+                        empty_keys, empty_inputs.copy(), table_specs(reduction)
+                    )
+                )
+                template.append(reduction^)
+        elif len(sets) == 0 and table_supported(empty, keys, expressions):
             var empty_keys = List[Series](capacity=len(keys))
             for name in keys:
                 empty_keys.append(empty.column(name))
@@ -3207,6 +3286,7 @@ def run_pipeline(
                 shared_bound,
                 floating_key,
                 layout,
+                sets,
                 workers,
                 key_ranges,
             )
@@ -3223,6 +3303,30 @@ def run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    if len(layout) > 0 and len(sets) > 0:
+        # Each worker's sinks are in set order, so the last set's come
+        # off the ends first.
+        var finished_sets = List[DataFrame]()
+        for back in range(len(sets)):
+            var s = len(sets) - 1 - back
+            var sinks = List[AggregateSink]()
+            for j in range(len(jobs)):
+                if len(jobs[j].sinks) > 0:
+                    sinks.append(jobs[j].sinks.pop())
+            var result = aggregate_finish(sinks, layout[s])
+            var finished = table_frame(template[s], result^, False)
+            _ = sinks^
+            if len(sets[s]) == 0:
+                if finished.height() == 0:
+                    # No rows: the grand total is still one row.
+                    finished = set_empty[0].select_exprs(expressions)
+                else:
+                    finished = finished.drop([_TOTAL_KEY])
+            finished_sets.append(finished^)
+        while len(finished_sets) > 0:
+            set_frames.append(finished_sets.pop())
+        # An empty frame of the steps' output types the caller's null keys.
+        return set_empty[0].copy()
     if len(layout) > 0:
         var sinks = List[AggregateSink]()
         for j in range(len(jobs)):
