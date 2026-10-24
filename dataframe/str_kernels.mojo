@@ -1,9 +1,10 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
+from .string_bytes import _Bytes
 from .bool_column import BoolColumn
-from .column import Column
 from .regex import Regex, escape
 from .string_column import StringColumn, StringBuilder
+from .string_transform import transform_strings
 from .expr import (
     Node,
     STR_LEN_CHARS,
@@ -31,6 +32,7 @@ from .regex_kernels import (
     regex_replace,
 )
 from .series import Series
+from .string_lengths import string_lengths
 from .string_predicates import (
     decode_values,
     is_in_literals,
@@ -56,40 +58,6 @@ def _join(parts: List[String], start: Int, end: Int) -> String:
     return out^
 
 
-def _is_space(part: String) -> Bool:
-    return (
-        part == " "
-        or part == "\t"
-        or part == "\n"
-        or part == "\r"
-        or part == "\x0b"
-        or part == "\x0c"
-    )
-
-
-def _strip(text: String, characters: String, mode: Int64) -> String:
-    var parts = _codepoints(text)
-    var remove = _codepoints(characters)
-    var start = 0
-    var end = len(parts)
-
-    def strippable(part: String) {imm remove} -> Bool:
-        if len(remove) == 0:
-            return _is_space(part)
-        for r in remove:
-            if r == part:
-                return True
-        return False
-
-    if mode != 2:
-        while start < end and strippable(parts[start]):
-            start += 1
-    if mode != 1:
-        while end > start and strippable(parts[end - 1]):
-            end -= 1
-    return _join(parts, start, end)
-
-
 def _slice(text: String, offset: Int, length: Int) -> String:
     var parts = _codepoints(text)
     var n = len(parts)
@@ -99,25 +67,18 @@ def _slice(text: String, offset: Int, length: Int) -> String:
     return _join(parts, start, end)
 
 
-def _pad(text: String, fill: String, mode: Int64, width: Int) -> String:
-    var parts = _codepoints(text)
-    var missing = width - len(parts)
-    if missing <= 0:
-        return text
-    var padding = fill * missing
-    if mode == 1:
-        return text + padding
-    if mode == 2 and len(parts) > 0 and (parts[0] == "-" or parts[0] == "+"):
-        return parts[0] + padding + _join(parts, 1, len(parts))
-    return padding + text
-
-
 def string_op(
     node: Node, input: Series, compiled: Optional[Regex] = None
 ) raises -> Series:
     if input.is_chunked():
         return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
+    if node.op == STR_STRIP:
+        return transform_strings[STR_STRIP](node, column)
+    if node.op == STR_REVERSE:
+        return transform_strings[STR_REVERSE](node, column)
+    if node.op == STR_PAD:
+        return transform_strings[STR_PAD](node, column)
     if node.op == STR_IS_IN:
         return is_in_literals(column, decode_values(node.text))
     # Predicates and slices over the raw bytes, on every worker (#374).
@@ -176,21 +137,15 @@ def string_op(
         return Series(
             "", slice_strings(column, Int(node.integer), node.min_count)
         )
+    if node.op == STR_LEN_BYTES:
+        return string_lengths[False](column)
+    if node.op == STR_LEN_CHARS:
+        return string_lengths[True](column)
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):
         valid.append(column._valid(i))
     var op = node.op
-    if op == STR_LEN_CHARS or op == STR_LEN_BYTES:
-        var lengths = List[Int64](length=n, fill=0)
-        for i in range(n):
-            if valid[i]:
-                var text = column._get(i)
-                lengths[i] = Int64(
-                    len(text.codepoints()) if op
-                    == STR_LEN_CHARS else text.byte_length()
-                )
-        return Series("", Column[Int64](lengths^, valid))
     if op == STR_STARTS_WITH or op == STR_ENDS_WITH or op == STR_CONTAINS:
         var flags = List[Bool](length=n, fill=False)
         for i in range(n):
@@ -215,18 +170,8 @@ def string_op(
             out.append(text.upper())
         elif op == STR_LOWER:
             out.append(text.lower())
-        elif op == STR_STRIP:
-            out.append(_strip(text, node.text, node.integer))
         elif op == STR_SLICE:
             out.append(_slice(text, Int(node.integer), node.min_count))
-        elif op == STR_REVERSE:
-            var parts = _codepoints(text)
-            var reversed = String()
-            for j in range(len(parts) - 1, -1, -1):
-                reversed += parts[j]
-            out.append(reversed)
-        elif op == STR_PAD:
-            out.append(_pad(text, node.text, node.integer, node.min_count))
         else:
             raise Error("Unsupported string operation")
     return Series("", out^.finish())
@@ -247,11 +192,18 @@ def concat_strings(
         raise Error("Incompatible expression lengths")
     var n = 0 if len(a) == 0 or len(b) == 0 else max(len(a), len(b))
     var out = StringBuilder(n)
+    var a_rows = _Bytes(a)
+    var b_rows = _Bytes(b)
+    var delimiter = separator.as_bytes()
     for i in range(n):
         var x = 0 if len(a) == 1 else i
         var y = 0 if len(b) == 1 else i
         if a._valid(x) and b._valid(y):
-            out.append(String(a._get(x)) + separator + String(b._get(y)))
+            out._bytes.extend(a_rows.get(x))
+            out._bytes.extend(delimiter)
+            out._bytes.extend(b_rows.get(y))
+            out._offsets.append(Int64(len(out._bytes)))
+            out._push_bit(True)
         elif skip_nulls and a._valid(x):
             out.append(a._get(x))
         elif skip_nulls and b._valid(y):

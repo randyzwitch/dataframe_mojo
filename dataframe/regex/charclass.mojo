@@ -5,28 +5,21 @@ disjoint and not adjacent, as regex-syntax's `ClassUnicode` keeps them; the
 set operations below keep that form. Case-insensitive classes are closed
 under simple case folding with the orbit table in `unicode_tables`.
 """
-from .unicode_tables import DIGIT, FOLD, SPACE, WORD
+from .unicode_tables import (
+    digit_ranges,
+    fold_keys,
+    fold_next,
+    space_ranges,
+    word_ranges,
+)
 from .property_tables import PROPERTY_INDEX, PROPERTY_RANGES
 
 comptime MAX_CODEPOINT: UInt32 = 0x10FFFF
 
 
 def _sort(mut keys: List[UInt64]):
-    """Shell sort; range lists are short and this keeps the module free of
-    any ordering dependency."""
-    var n = len(keys)
-    var gap = 1
-    while gap < n // 3:
-        gap = gap * 3 + 1
-    while gap >= 1:
-        for i in range(gap, n):
-            var value = keys[i]
-            var j = i
-            while j >= gap and keys[j - gap] > value:
-                keys[j] = keys[j - gap]
-                j -= gap
-            keys[j] = value
-        gap //= 3
+    """Sort packed ranges and alphabet cuts with the standard sorter."""
+    sort(Span(keys))
 
 
 def canonical(ranges: List[UInt32]) -> List[UInt32]:
@@ -169,17 +162,17 @@ def parse_ranges(
 def word_class() -> List[UInt32]:
     """Unicode `\\w`: alphabetic, marks, decimal numbers, connector
     punctuation and join controls."""
-    return parse_ranges(WORD)
+    return word_ranges()
 
 
 def digit_class() -> List[UInt32]:
     """Unicode `\\d`: general category Nd."""
-    return parse_ranges(DIGIT)
+    return digit_ranges()
 
 
 def space_class() -> List[UInt32]:
     """Unicode `\\s`: the White_Space property."""
-    return parse_ranges(SPACE)
+    return space_ranges()
 
 
 def ascii_class(name: String) -> List[UInt32]:
@@ -226,27 +219,8 @@ struct CaseFolds(Copyable, Movable):
     var next: List[UInt32]
 
     def __init__(out self):
-        self.keys = List[UInt32]()
-        self.next = List[UInt32]()
-        var value: UInt32 = 0
-        var key: UInt32 = 0
-        var in_token = False
-        for byte in FOLD.as_bytes():
-            if byte == 32 or byte == 10:
-                if in_token:
-                    self.keys.append(key)
-                    self.next.append(value)
-                value = 0
-                in_token = False
-            elif byte == 58:
-                key = value
-                value = 0
-            else:
-                value = value * 16 + _hex_digit(byte)
-                in_token = True
-        if in_token:
-            self.keys.append(key)
-            self.next.append(value)
+        self.keys = fold_keys()
+        self.next = fold_next()
 
     def _lower_bound(self, cp: UInt32) -> Int:
         var lo = 0
