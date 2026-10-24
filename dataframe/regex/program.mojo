@@ -468,6 +468,27 @@ struct _Compiler(Movable):
         return _Frag(start, holes^)
 
 
+@always_inline
+def _seek_cut(points: List[UInt32], target: UInt32, var lo: Int) -> Int:
+    # Canonical ranges advance monotonically. As in Polars' exponential
+    # search, bracket a nearby key before doing a bounded binary search.
+    var count = len(points)
+    if lo >= count or points[lo] >= target:
+        return lo
+    var bound = 1
+    while lo + bound < count and points[lo + bound] < target:
+        bound *= 2
+    var hi = min(count, lo + bound)
+    lo += bound >> 1
+    while lo < hi:
+        var mid = (lo + hi) >> 1
+        if points[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
 def _build_alphabet(mut program: Program):
     """Partition code points into classes no instruction tells apart: cut
     at every range edge, then give intervals that belong to the same sets
@@ -517,17 +538,10 @@ def _build_alphabet(mut program: Program):
     for k in range(len(sets)):
         recolor.clear()
         ref s = sets[k]
+        var j = 0
         for i in range(0, len(s), 2):
             # The interval starting at s[i] and every one up to s[i + 1].
-            var lo = 0
-            var hi = intervals
-            while hi - lo > 1:
-                var mid = (lo + hi) // 2
-                if program.boundaries[mid] <= s[i]:
-                    lo = mid
-                else:
-                    hi = mid
-            var j = lo
+            j = _seek_cut(program.boundaries, s[i], j)
             while j < intervals and program.boundaries[j] <= s[i + 1]:
                 var old = colors[j]
                 var color = recolor.get(old, -1)
