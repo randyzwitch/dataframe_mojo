@@ -505,11 +505,11 @@ struct LazyDFA(Movable):
         var off: Int,
         var at: Int,
         end: Int,
-    ) -> Tuple[Int, Int, Int, Int]:
+    ) -> Tuple[Int, Int]:
         """Group four untagged transitions without enlarging tag dispatch.
         Sixteen remaining bytes bound four UTF8 decodes. The first tagged
-        edge leaves its code point untouched and returns the decoded class
-        and width once, avoiding packing work on each warm transition."""
+        edge leaves its code point untouched for ordinary dispatch. Only
+        the state and cursor cross the call boundary."""
         var table = self.transitions.unsafe_ptr()
         var cls = 0
         var width = 0
@@ -518,28 +518,28 @@ struct LazyDFA(Movable):
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
-                return off, at, e, (cls << 3) | width
+                return off, at
             off = e
             at += width
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
-                return off, at, e, (cls << 3) | width
+                return off, at
             off = e
             at += width
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
-                return off, at, e, (cls << 3) | width
+                return off, at
             off = e
             at += width
             cls, width = self._class_at(program, text, at)
             e = Int(table[unsafe_offset=off + cls])
             if e < 0:
-                return off, at, e, (cls << 3) | width
+                return off, at
             off = e
             at += width
-        return off, at, 0, 0
+        return off, at
 
     @always_inline
     def find_forward(
@@ -630,16 +630,9 @@ struct LazyDFA(Movable):
             if e >= 0:
                 off = e
                 at += width
-                if n - at < 16:
-                    continue
-                var packed: Int
-                off, at, e, packed = self._advance_cached(
-                    program, text, off, at, n
-                )
-                if e >= 0:
-                    continue
-                cls = packed >> 3
-                width = packed & 7
+                if n - at >= 16:
+                    off, at = self._advance_cached(program, text, off, at, n)
+                continue
             if e == Int(UNKNOWN):
                 var s = off // stride
                 if self._full():
