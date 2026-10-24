@@ -28,6 +28,7 @@ instead, so every search stays linear in the haystack.
 from std.memory import ArcPointer
 
 from .backtrack import Backtracker
+from .alphabet_lookup import build_alphabet_lookup
 from .onepass import OnePass, ascii_span, compile_onepass
 from .charclass import class_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
@@ -526,6 +527,14 @@ struct _Compiled(Movable):
         self.onepass = None
         if onepass.active():
             self.onepass = ArcPointer(onepass^)
+        # These direct search engines never consult the DFA alphabet.
+        if not self.literal and not self.single_class:
+            build_alphabet_lookup(
+                self.forward.boundaries, self.forward.interval_class
+            )
+            build_alphabet_lookup(
+                self.reverse.boundaries, self.reverse.interval_class
+            )
 
 
 @no_inline
