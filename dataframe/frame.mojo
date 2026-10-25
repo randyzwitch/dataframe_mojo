@@ -18,7 +18,7 @@ from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _pack_bits
 from .string_column import StringColumn
-from .series import Series, sort_indices, smallest_indices
+from .series import Series, sort_indices
 from .canonical_labels import canonical_labels
 from .distinct_statistics import TableStatistics
 from .fused_compare import (
@@ -183,7 +183,7 @@ from .aggregate_table import (
     states_supported,
 )
 from .huge_pages import huge_capacity, huge_list, huge_uninit
-from .row_sort import row_arg_sort
+from .row_sort import row_arg_sort, row_top_rows
 from .indexed_reduce import (
     indexed_reductions,
     reduce_indexed,
@@ -1374,8 +1374,9 @@ struct DataFrame(Copyable, Sized, Writable):
 
 
         Small k selects the rows instead of sorting all of them: with packed
-        keys when they pack, else a heap over dense ranks. Past a tenth of
-        the rows selection stops paying and the full sort is cut short.
+        keys when they pack, else a heap of row sort words per range
+        (`row_top_rows`). Past a tenth of the rows selection stops paying
+        and the full sort is cut short.
         """
         if k < 0:
             raise Error("k must be nonnegative")
@@ -1415,9 +1416,11 @@ struct DataFrame(Copyable, Sized, Writable):
             if packed:
                 trace_path("sort.top_k")
                 return packed.take()
-        return smallest_indices(
-            self._sort_ranks(by, descending, nulls_last), take
-        )
+        var keys = List[Series](capacity=len(by))
+        for name in by:
+            keys.append(self.column(name))
+        trace_path("sort.row_top_k")
+        return row_top_rows(keys, descending, nulls_last, take, threads)
 
     def bottom_k(
         self, k: Int, by: String, *, reverse: Bool = False

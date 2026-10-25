@@ -15,7 +15,7 @@ from dataframe.hashing import (
     _encode_categorical,
     _U64Codes,
 )
-from dataframe.row_sort import row_arg_sort
+from dataframe.row_sort import row_arg_sort, row_top_rows
 from dataframe.packed_sort import packed_arg_sort, packed_top_rows
 from dataframe.categorical import (
     decode,
@@ -991,3 +991,107 @@ def test_packed_top_k_matches_stable_full_order_prefix_at_tie_boundaries() raise
         _ = packed_top_rows(
             [Series("k", Column[Int64]([1]))], [False], [True], -1, threads=1
         )
+
+
+def test_row_top_k_matches_stable_full_order_prefix_for_keys_that_do_not_pack() raises:
+    # With the 24-byte head, values differ only past the string prefix, so
+    # the heap's long-string comparison decides; with the short head every
+    # value fits and the word compare alone decides. The float key ties
+    # often and carries NaN, and both keys carry nulls.
+    var tails: List[String] = ["-B", "-A", "-AA", "", "-A\0"]
+    var nan = Float64(0) / Float64(0)
+    var heads: List[String] = ["common-prefix-0123456789", "p"]
+    for head in heads:
+        for n in [0, 1, 9, 65, 40_000]:
+            var text = List[String]()
+            var numbers = List[Float64]()
+            var sv = List[Bool]()
+            var fv = List[Bool]()
+            var rows = List[List[KeyCell]]()
+            for row in range(n):
+                var value = head + tails[(row * 7) % len(tails)]
+                var number = nan if row % 11 == 4 else Float64((row * 3) % 5)
+                text.append(value.copy())
+                numbers.append(number)
+                sv.append(row % 13 != 6)
+                fv.append(row % 17 != 3)
+                rows.append(
+                    [
+                        KeyCell(2, row % 13 != 6, text=value^),
+                        KeyCell(1, row % 17 != 3, floating=number),
+                    ]
+                )
+            var a = Series("a", Column[String](text^, sv))
+            var b = Series("b", Column[Float64](numbers^, fv))
+            for layout in [0, 2]:
+                var keys: List[Series] = [
+                    key_layout(a, layout),
+                    key_layout(b, layout),
+                ]
+                for descending in [False, True]:
+                    for nulls_last in [False, True]:
+                        var order: List[Bool] = [descending, not descending]
+                        var nulls: List[Bool] = [nulls_last, not nulls_last]
+                        var expected = expected_order(
+                            rows, order, nulls
+                        ) if n < 100 else row_arg_sort(keys, order, nulls)
+                        for k in [0, 1, 3, 8, 64, 65, 66, 100]:
+                            for threads in [0, 1]:
+                                var actual = row_top_rows(
+                                    keys, order, nulls, k, threads=threads
+                                )
+                                var prefix = List[Int]()
+                                for row in range(min(k, n)):
+                                    prefix.append(expected[row])
+                                assert_equal(actual, prefix)
+    with assert_raises():
+        _ = row_top_rows(
+            [Series("k", Column[Int64]([1]))], [False], [True], -1, threads=1
+        )
+
+
+def test_decimal_keys_order_by_value_at_every_storage_width() raises:
+    # A key stored as decimal32, decimal64 or decimal128 orders by its
+    # scaled integer; the row sort and its top-k agree with the reference.
+    var pattern: List[Int] = [-700, 0, 12_345, -1, 99_999, 0, 3]
+    var n = 50
+    var rows = List[List[KeyCell]]()
+    var narrow = List[Int32]()
+    var middle = List[Int64]()
+    var wide = List[Int128]()
+    var valid = List[Bool]()
+    for row in range(n):
+        var value = pattern[(row * 5) % len(pattern)]
+        narrow.append(Int32(value))
+        middle.append(Int64(value))
+        wide.append(Int128(value))
+        valid.append(row % 9 != 4)
+        rows.append([KeyCell(0, row % 9 != 4, integer=Int128(value))])
+    var keys: List[Series] = [
+        Series._wrap("d", Column[Int32](narrow^, valid.copy())).with_dtype(
+            DataType.decimal(9, 2, 32)
+        ),
+        Series._wrap("d", Column[Int64](middle^, valid.copy())).with_dtype(
+            DataType.decimal(18, 2, 64)
+        ),
+        Series._wrap("d", Column[Int128](wide^, valid^)).with_dtype(
+            DataType.decimal(38, 2, 128)
+        ),
+    ]
+    for key in keys:
+        for descending in [False, True]:
+            for nulls_last in [False, True]:
+                var expected = expected_order(rows, [descending], [nulls_last])
+                assert_equal(
+                    row_arg_sort([key.copy()], [descending], [nulls_last]),
+                    expected,
+                )
+                var prefix = List[Int]()
+                for row in range(7):
+                    prefix.append(expected[row])
+                assert_equal(
+                    row_top_rows(
+                        [key.copy()], [descending], [nulls_last], 7, threads=1
+                    ),
+                    prefix,
+                )

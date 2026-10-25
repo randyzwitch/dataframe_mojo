@@ -1956,69 +1956,6 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     return comparison_arg_sort(_RankOrder(ranks.copy()), n)
 
 
-def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
-    """The k first rows of sort_indices(ranks), in order, in O(n log k).
-
-    A max-heap holds the best k rows seen so far under the same total order
-    (ranks, then row index), so ties resolve exactly as a stable sort would.
-    """
-    if len(ranks) == 0:
-        raise Error("Sorting requires at least one key")
-    if k < 0:
-        raise Error("k must be nonnegative")
-    var n = len(ranks[0])
-    var heap = List[Int](capacity=min(k, n))
-    for row in range(n):
-        if len(heap) < k:
-            heap.append(row)
-            var child = len(heap) - 1
-            while child > 0:
-                var parent = (child - 1) // 2
-                if not _rank_less(ranks, heap[parent], heap[child]):
-                    break
-                var tmp = heap[parent]
-                heap[parent] = heap[child]
-                heap[child] = tmp
-                child = parent
-        elif k > 0 and _rank_less(ranks, row, heap[0]):
-            heap[0] = row
-            var parent = 0
-            while True:
-                var largest = parent
-                var left = 2 * parent + 1
-                var right = left + 1
-                if left < len(heap) and _rank_less(
-                    ranks, heap[largest], heap[left]
-                ):
-                    largest = left
-                if right < len(heap) and _rank_less(
-                    ranks, heap[largest], heap[right]
-                ):
-                    largest = right
-                if largest == parent:
-                    break
-                var tmp = heap[parent]
-                heap[parent] = heap[largest]
-                heap[largest] = tmp
-                parent = largest
-    var selected = List[List[Int]]()
-    for key in ranks:
-        var subset = List[Int](capacity=len(heap))
-        for row in heap:
-            subset.append(key[row])
-        selected.append(subset^)
-    # Ranks alone may tie; re-sort by (ranks, original row) to keep stability.
-    var positions = List[Int](capacity=len(heap))
-    for row in heap:
-        positions.append(row)
-    selected.append(positions^)
-    var order = sort_indices(selected)
-    var result = List[Int](capacity=len(heap))
-    for i in order:
-        result.append(heap[i])
-    return result^
-
-
 struct _MergeScalarsJob[D: DType](Job):
     """Copy output rows [lo, hi) of a merge of chunks from the chunks that
     hold them: values, and validity bits when `bits` is an address (rows

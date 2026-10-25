@@ -175,20 +175,26 @@ def encode_sort_keys(
         var filled = False
         if column.dtype().is_decimal():
             var high = List[Int](length=rows, fill=0)
-            for i in range(rows):
-                if nulls and not column._decimal_valid(offset + i):
-                    ranked[i] = null_rank
-                    continue
-                var value = column._decimal_raw(offset + i)
-                var hi = Int(value >> 64)
-                var lo = Int(
-                    bitcast[DType.int64](
-                        value.cast[DType.uint64]()
-                        ^ UInt64(0x8000_0000_0000_0000)
-                    )
-                )
-                high[i] = ~hi if flip else hi
-                values[i] = ~lo if flip else lo
+            # The storage width is found once, not per row.
+            comptime widths = (DType.int32, DType.int64, DType.int128)
+            comptime for t in range(len(widths)):
+                comptime D = widths[t]
+                if column._data.isa[Column[Scalar[D]]]():
+                    ref typed = column._data[Column[Scalar[D]]]
+                    for i in range(rows):
+                        if nulls and not typed._valid(offset + i):
+                            ranked[i] = null_rank
+                            continue
+                        var value = typed._get(offset + i).cast[DType.int128]()
+                        var hi = Int(value >> 64)
+                        var lo = Int(
+                            bitcast[DType.int64](
+                                value.cast[DType.uint64]()
+                                ^ UInt64(0x8000_0000_0000_0000)
+                            )
+                        )
+                        high[i] = ~hi if flip else hi
+                        values[i] = ~lo if flip else lo
             chunks.append(high^)
             filled = True
 
