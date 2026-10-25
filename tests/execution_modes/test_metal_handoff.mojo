@@ -1,7 +1,6 @@
 """Regions the CPU executor hands to Metal: which shapes Metal accepts, and
 results equal to the CPU's for the ones it runs."""
 # contract-group: execution.backends
-from std.os import setenv, unsetenv
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
 from dataframe import (
     Column,
@@ -15,6 +14,7 @@ from dataframe import (
 )
 from dataframe_metal.handoff import plan_region
 from dataframe_metal.metal import MetalRuntime
+from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.metal_outcomes import require_metal
 
 
@@ -249,9 +249,10 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
     var plan = frame.lazy().filter(col("i") > 0).select(col("i").sum())
     var expected = plan.collect(engine="cpu")
     # Without a calibration, engine="auto" probes nothing.
-    _ = unsetenv("DATAFRAME_HANDOFF_CALIBRATION")
+    var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
     assert_false("PLACE" in plan.explain(engine="auto"))
-    _ = setenv("DATAFRAME_HANDOFF_CALIBRATION", path)
+    _ = unset^
+    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
     for accel_cheaper in [True, False]:
         # Metal at 0.1 ns/row against the CPU's 50 is estimated faster from
         # about 40,000 rows; at 100 ns/row it never is.
@@ -282,4 +283,4 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
     # An operator the calibration does not cover runs on the CPU.
     var plain = frame.lazy().select(col("i").sum())
     assert_true("no measured cost" in plain.explain(engine="auto"))
-    _ = unsetenv("DATAFRAME_HANDOFF_CALIBRATION")
+    _ = calibrated^

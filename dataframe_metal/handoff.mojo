@@ -43,7 +43,7 @@ from .accelerator.gpu.filter_sum import (
     integer_partials,
     split_total,
 )
-from .accelerator.gpu.query_scope import Scope
+from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.typed_storage import (
     NativeColumn,
@@ -269,6 +269,16 @@ def _place[
     return upload_native[dtype](scope, series)
 
 
+def _check_ran(counts: List[UInt32]) raises:
+    """Raise unless every block wrote its count: a block holds fewer than
+    2**31 rows, so the sentinel can only remain where a block never ran."""
+    for count in counts:
+        if count == UInt32.MAX:
+            raise Error(
+                "Mojo GPU hand-off kernel did not complete on the device"
+            )
+
+
 def _partials(rows: Int) -> Int:
     """Blocks to launch for `rows` rows: one per BLOCK_SIZE rows, capped
     at MAX_PARTIALS, with a grid stride covering the rest."""
@@ -291,6 +301,9 @@ def _integer_launch[
         var high = ctx.enqueue_create_buffer[DType.int64](partials)
         var low = ctx.enqueue_create_buffer[DType.uint64](partials)
         var counts = ctx.enqueue_create_buffer[DType.uint32](partials)
+        # Every block overwrites its count; one left at the sentinel means
+        # the launch did not run (`_check_ran`).
+        ctx.enqueue_memset(counts, UInt32.MAX)
         var values = column.values()
         var bits = (
             column.validity()
@@ -320,6 +333,7 @@ def _integer_launch[
         ctx.enqueue_copy(low_parts.unsafe_ptr(), low)
         ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
         scope.synchronize()
+        _check_ran(count_parts)
         return (high_parts^, low_parts^, count_parts^)
 
 
@@ -391,6 +405,9 @@ def _float32_launch[
         var sums = ctx.enqueue_create_buffer[DType.float32](partials)
         var compensations = ctx.enqueue_create_buffer[DType.float32](partials)
         var counts = ctx.enqueue_create_buffer[DType.uint32](partials)
+        # Every block overwrites its count; one left at the sentinel means
+        # the launch did not run (`_check_ran`).
+        ctx.enqueue_memset(counts, UInt32.MAX)
         var values = column.values()
         var bits = (
             column.validity()
@@ -421,6 +438,7 @@ def _float32_launch[
         ctx.enqueue_copy(compensation_parts.unsafe_ptr(), compensations)
         ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
         scope.synchronize()
+        _check_ran(count_parts)
         return (sum_parts^, compensation_parts^, count_parts^)
 
 
@@ -489,7 +507,7 @@ def _execute_on_device(
     if len(series) >= Int(Int32.MAX):
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var started = Int(perf_counter_ns())
-    var scope = Scope()
+    var scope = Scope(service=shared_service())
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var output: Series
