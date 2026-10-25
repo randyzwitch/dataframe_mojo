@@ -29,8 +29,17 @@ is never retained), then calls the producer's `release` exactly once.
 Pointers in the C structs are held as `Int` addresses: C pointer fields are
 nullable and Mojo `Pointer`s are not.
 """
-from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
+from std.memory import (
+    Allocation,
+    ArcPointer,
+    Layout,
+    Pointer,
+    alloc,
+    dealloc,
+    unsafe_memcpy,
+)
 from ..bool_column import BoolColumn
+from .._buffer import _ForeignOwner, _ReleaseForeign
 from ..column import Column, _copy_bits, _copy_validity
 from ..categorical import encode
 from ..geometry import from_wkb
@@ -777,7 +786,10 @@ comptime _INDEX_DTYPES: List[DType] = [
 
 
 def _import_dictionary(
-    array: ArrowArray, schema: ArrowSchema, name: String
+    array: ArrowArray,
+    schema: ArrowSchema,
+    name: String,
+    owner: Optional[ArcPointer[_ForeignOwner]] = None,
 ) raises -> Series:
     """A dictionary-encoded array as a categorical (#106). Its indices are
     an integer array and its values a string array. A dictionary of
@@ -796,10 +808,11 @@ def _import_dictionary(
     index_schema.format = schema.format
     index_schema.name = schema.name
     index_schema.flags = schema.flags
-    var indices = _import_child(index_array, index_schema)
+    var indices = _import_child(index_array, index_schema, owner)
     var values = _import_child(
         _at[ArrowArray](array.dictionary)[],
         _at[ArrowSchema](schema.dictionary)[],
+        owner,
     )
     if values.dtype().physical() != DataType.STRING:
         raise Error(
@@ -871,9 +884,13 @@ def _import_dictionary(
     return Series(name, coded^).with_dtype(DataType.categorical(dictionary^))
 
 
-def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
+def _import_child(
+    array: ArrowArray,
+    schema: ArrowSchema,
+    owner: Optional[ArcPointer[_ForeignOwner]] = None,
+) raises -> Series:
     var extension = _metadata_value(schema, "ARROW:extension:name")
-    var result = _import_storage(array, schema)
+    var result = _import_storage(array, schema, owner)
     if extension == "geoarrow.wkb":
         var metadata = _metadata_value(schema, "ARROW:extension:metadata")
         result = from_wkb(result, "{}" if metadata == "" else metadata)
@@ -881,13 +898,17 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     return result^
 
 
-def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
+def _import_storage(
+    array: ArrowArray,
+    schema: ArrowSchema,
+    owner: Optional[ArcPointer[_ForeignOwner]] = None,
+) raises -> Series:
     var format = _read_c_string(schema.format)
     var name = _read_c_string(schema.name)
     var length = Int(array.length)
     var offset = Int(array.offset)
     if array.dictionary != 0 and schema.dictionary != 0:
-        return _import_dictionary(array, schema, name)
+        return _import_dictionary(array, schema, name, owner)
     if array.dictionary != 0 or schema.dictionary != 0:
         raise Error("Arrow dictionary array without its dictionary")
     # A validity buffer on an array with no nulls (Arrow says 0; -1 is
@@ -910,31 +931,22 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         if width == 64:
             return Series(
                 name,
-                Column[Int64](
-                    values=_import_fixed[Int64](array, length, offset),
-                    bits=bits^,
-                ),
+                _fixed_column[Int64](array, length, offset, bits^, owner),
             ).with_dtype(dtype)
         if width == 32:
             return Series(
                 name,
-                Column[Int32](
-                    values=_import_fixed[Int32](array, length, offset),
-                    bits=bits^,
-                ),
+                _fixed_column[Int32](array, length, offset, bits^, owner),
             ).with_dtype(dtype)
         return Series(
             name,
-            Column[Int128](
-                values=_import_fixed[Int128](array, length, offset), bits=bits^
-            ),
+            _fixed_column[Int128](array, length, offset, bits^, owner),
         ).with_dtype(dtype)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if format == _numeric_format(D):
-            var column = Column[Scalar[D]](
-                values=_import_fixed[Scalar[D]](array, length, offset),
-                bits=bits^,
+            var column = _fixed_column[Scalar[D]](
+                array, length, offset, bits^, owner
             )
             return Series(name, column^)
     if format == "b":
@@ -985,7 +997,7 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     if format == "ttn":
         return Series(
             name,
-            _int64_column(_import_fixed[Int64](array, length, offset), bits^),
+            _fixed_column[Int64](array, length, offset, bits^, owner),
         ).with_dtype(DataType.TIME)
     if format == "ttu":
         return Series(
@@ -1016,13 +1028,23 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         )
         return Series(
             name,
-            _int64_column(_ticks(array, length, offset, format), bits^),
+            _int64_column(
+                _ticks(array, length, offset, format), bits^
+            ) if format[byte=2]
+            == "s" else _fixed_column[Int64](
+                array, length, offset, bits^, owner
+            ),
         ).with_dtype(dtype)
     if format.startswith("tD") and format.byte_length() == 3:
         var dtype = DataType.duration(_unit(format[byte=2]))
         return Series(
             name,
-            _int64_column(_ticks(array, length, offset, format), bits^),
+            _int64_column(
+                _ticks(array, length, offset, format), bits^
+            ) if format[byte=2]
+            == "s" else _fixed_column[Int64](
+                array, length, offset, bits^, owner
+            ),
         ).with_dtype(dtype)
     if format == "+L" or format == "+l":
         if array.n_children != 1 or schema.n_children != 1:
@@ -1037,7 +1059,7 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
 
         var child_array = _at[ArrowArray](_at[Int](array.children)[])
         var child_schema = _at[ArrowSchema](_at[Int](schema.children)[])
-        var child = _import_child(child_array[], child_schema[])
+        var child = _import_child(child_array[], child_schema[], owner)
         var first = list_offset(offset)
         var last = list_offset(offset + length)
         var offsets = List[Int64](capacity=length + 1)
@@ -1058,7 +1080,7 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
             var child_schema = _at[ArrowSchema](
                 _at[Int](schema.children + 8 * k)[]
             )
-            var child = _import_child(child_array[], child_schema[])
+            var child = _import_child(child_array[], child_schema[], owner)
             fields.append(child.slice(offset, length))
         return Series(name, StructColumn(fields^, bits^, length=length))
     raise Error("Unsupported Arrow format '" + format + "' for column " + name)
@@ -1105,17 +1127,87 @@ def _release_imported(mut array: ArrowArray, mut schema: ArrowSchema):
         )
 
 
-def import_arrow_series(
-    mut array: ArrowArray, mut schema: ArrowSchema
-) raises -> Series:
-    """Copy an exported Arrow array into a Series, then release it.
+def _release_retained_array(context: Int) abi("C"):
+    var pointer = _at[ArrowArray](context)
+    if pointer[].release != 0:
+        _call_array_release(pointer)
+    _ = _reclaim[ArrowArray](context)
 
-    The input structs are consumed (released) even when import fails.
+
+def _retain_array(mut array: ArrowArray) -> ArcPointer[_ForeignOwner]:
+    var held = ArrowArray()
+    held.length = array.length
+    held.null_count = array.null_count
+    held.offset = array.offset
+    held.n_buffers = array.n_buffers
+    held.n_children = array.n_children
+    held.buffers = array.buffers
+    held.children = array.children
+    held.dictionary = array.dictionary
+    held.release = array.release
+    held.private_data = array.private_data
+    var address = _leak(held^)
+    array.release = 0
+    array.private_data = 0
+    var callback: _ReleaseForeign = _release_retained_array
+    return ArcPointer(
+        _ForeignOwner(address, Pointer(to=callback).unsafe_bitcast[Int]()[])
+    )
+
+
+def _fixed_column[
+    T: TrivialRegisterPassable
+](
+    array: ArrowArray,
+    length: Int,
+    offset: Int,
+    var bits: List[UInt8],
+    owner: Optional[ArcPointer[_ForeignOwner]],
+) raises -> Column[T]:
+    if length < 0 or offset < 0:
+        raise Error("Arrow array length and offset must be nonnegative")
+    if owner and length > 0:
+        var base = _buffer(array, 1)
+        if base == 0:
+            raise Error("Arrow fixed-width array has no values buffer")
+        var stride = Int(_at[T](base).unsafe_offset(1)) - base
+        if offset > Int.MAX // stride - length:
+            raise Error("Arrow fixed-width array range overflows")
+        var address = base + offset * stride
+        if address % stride == 0:
+            return Column[T]._borrowed(address, length, bits^, owner.value())
+        # Foreign producers can provide unaligned storage. Copy bytes rather
+        # than issuing typed loads whose alignment contract would be false.
+        var values = List[T](unsafe_uninit_length=length)
+
+        unsafe_memcpy(
+            dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
+            src=_at[UInt8](address),
+            count=length * stride,
+        )
+        return Column[T](values=values^, bits=bits^)
+    return Column[T](values=_import_fixed[T](array, length, offset), bits=bits^)
+
+
+def import_arrow_series(
+    mut array: ArrowArray,
+    mut schema: ArrowSchema,
+    *,
+    copy: Bool = True,
+) raises -> Series:
+    """Import an exported Arrow array, copying payloads by default.
+
+    copy=False retains compatible fixed-width payloads without copying.
+    Layout conversions still allocate. The input structs are consumed even
+    on errors; borrowed buffers release the producer after their last view.
     """
     try:
         if array.release == 0 or schema.release == 0:
             raise Error("Arrow array or schema was already released")
-        var result = _import_child(array, schema)
+        var owner = Optional[ArcPointer[_ForeignOwner]]()
+        if not copy:
+            owner = _retain_array(array)
+        var result = _import_child(array, schema, owner)
         _release_imported(array, schema)
         return result^
     except e:
@@ -1124,11 +1216,16 @@ def import_arrow_series(
 
 
 def import_arrow_series(
-    array_address: Int, schema_address: Int
+    array_address: Int,
+    schema_address: Int,
+    *,
+    copy: Bool = True,
 ) raises -> Series:
     """Import from structs at raw addresses (from C or Python producers)."""
     return import_arrow_series(
-        _at[ArrowArray](array_address)[], _at[ArrowSchema](schema_address)[]
+        _at[ArrowArray](array_address)[],
+        _at[ArrowSchema](schema_address)[],
+        copy=copy,
     )
 
 
@@ -1151,28 +1248,43 @@ struct _ImportColumnJob(Job):
     var offset: Int
     var length: Int
     var result: List[Series]
+    var owner: Optional[ArcPointer[_ForeignOwner]]
 
-    def __init__(out self, array: Int, schema: Int, offset: Int, length: Int):
+    def __init__(
+        out self,
+        array: Int,
+        schema: Int,
+        offset: Int,
+        length: Int,
+        owner: Optional[ArcPointer[_ForeignOwner]],
+    ):
         self.array = array
         self.schema = schema
         self.offset = offset
         self.length = length
         self.result = List[Series]()
+        self.owner = owner
 
     def run(mut self) raises:
         var series = _import_child(
-            _at[ArrowArray](self.array)[], _at[ArrowSchema](self.schema)[]
+            _at[ArrowArray](self.array)[],
+            _at[ArrowSchema](self.schema)[],
+            self.owner,
         )
         self.result.append(series.slice(self.offset, self.length))
 
 
 def import_arrow(
-    mut array: ArrowArray, mut schema: ArrowSchema
+    mut array: ArrowArray,
+    mut schema: ArrowSchema,
+    *,
+    copy: Bool = True,
 ) raises -> DataFrame:
-    """Copy an exported Arrow record batch, then release both exports.
+    """Import an exported Arrow record batch, copying by default.
 
-    Large batches copy independent columns on the worker pool. The input
-    structs are consumed even when import fails; workers never release them.
+    copy=False shares compatible fixed-width payloads and retains their
+    producer until the last view is destroyed. Layout conversions allocate.
+    Workers share the root owner; input structs are consumed even on errors.
     """
     # One-off pool startup loses for cache-resident narrow batches: 3970X,
     # 250k x 2 Int64 values 0.09 -> 0.42 ms; 1M x 2 and 250k x 8 win.
@@ -1185,11 +1297,15 @@ def import_arrow(
         and rows >= (_ARROW_IMPORT_MIN_CELLS + columns - 1) // columns
     )
     var pool = Pool(_arrow_import_workers(rows, columns) if enough else 1)
-    return _import_arrow_with_pool(array, schema, pool)
+    return _import_arrow_with_pool(array, schema, pool, copy=copy)
 
 
 def _import_arrow_with_pool(
-    mut array: ArrowArray, mut schema: ArrowSchema, mut pool: Pool
+    mut array: ArrowArray,
+    mut schema: ArrowSchema,
+    mut pool: Pool,
+    *,
+    copy: Bool = True,
 ) raises -> DataFrame:
     try:
         if array.release == 0 or schema.release == 0:
@@ -1203,6 +1319,9 @@ def _import_arrow_with_pool(
             raise Error("Arrow array and schema child counts differ")
         if _buffer(array, 0) != 0 and array.null_count != 0:
             raise Error("Arrow struct arrays with null rows are not supported")
+        var owner = Optional[ArcPointer[_ForeignOwner]]()
+        if not copy:
+            owner = _retain_array(array)
         var jobs = List[_ImportColumnJob]()
         for k in range(Int(array.n_children)):
             jobs.append(
@@ -1211,6 +1330,7 @@ def _import_arrow_with_pool(
                     _at[Int](schema.children + 8 * k)[],
                     Int(array.offset),
                     Int(array.length),
+                    owner,
                 )
             )
         if worker_count(Int(array.length)) > 1 and len(jobs) > 1:
@@ -1232,8 +1352,12 @@ def _import_arrow_with_pool(
         raise e^
 
 
-def import_arrow(array_address: Int, schema_address: Int) raises -> DataFrame:
+def import_arrow(
+    array_address: Int, schema_address: Int, *, copy: Bool = True
+) raises -> DataFrame:
     """Import from structs at raw addresses (from C or Python producers)."""
     return import_arrow(
-        _at[ArrowArray](array_address)[], _at[ArrowSchema](schema_address)[]
+        _at[ArrowArray](array_address)[],
+        _at[ArrowSchema](schema_address)[],
+        copy=copy,
     )

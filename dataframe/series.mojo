@@ -1,4 +1,5 @@
 """Runtime-tagged, named columns without per-element type erasure."""
+from ._buffer import _Buffer
 from .field_metadata import _equal_metadata, _without_extensions
 from .wkb import GeometryBounds
 from .geometry import geometry_type, crs, bounding_box, total_bounds
@@ -251,13 +252,13 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             # A gathered column gathers its codes here, on first use.
             var own = List[UInt32](unsafe_uninit_length=len(strings))
             strings._write_codes(Int(own.unsafe_ptr()))
-            column._data = ArcPointer(own^)
+            column._data = _Buffer(own^)
             column._bits = ArcPointer(
                 _copy_validity(strings._bits[], strings._offset, len(strings))
             )
             column._offset = 0
         else:
-            column._data = codes.codes
+            column._data = codes.codes.copy()
             column._bits = strings._bits
             column._offset = strings._offset
         column._length = strings._length
@@ -386,7 +387,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             at += len(column)
         merged._data[StringColumn]._codes = ArcPointer(
             StringCodes(
-                ArcPointer(codes^),
+                _Buffer(codes^),
                 parts[0]._data[StringColumn]._codes.value()[].dtype,
             )
         )

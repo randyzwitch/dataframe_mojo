@@ -434,7 +434,7 @@ def filter_columns(
                 comptime D = GATHER_DTYPES[d]
                 if typed[j]._data.isa[Column[Scalar[D]]]():
                     address = Int(
-                        Pointer(to=typed[j]._data[Column[Scalar[D]]]._data[])
+                        Pointer(to=typed[j]._data[Column[Scalar[D]]]._data.writable())
                     )
             value_lists_fixed.append(address)
         valid_lists.append(

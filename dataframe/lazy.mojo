@@ -30,6 +30,7 @@ Filters never move past a slice, unique, right/full join, a group_by
 whose aggregates they read, or a group_by_dynamic or rolling, because
 that would change which rows those operators see.
 """
+from ._buffer import _Buffer
 from std.os import getenv
 from std.time import perf_counter_ns
 from std.io import RawFileDescriptor
@@ -1940,7 +1941,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         for row in range(len(moved)):
                             rows.append(codes._get(row))
                         text._data[StringColumn]._codes = ArcPointer(
-                            StringCodes(ArcPointer(rows^), moved.dtype())
+                            StringCodes(_Buffer(rows^), moved.dtype())
                         )
                         text._field_metadata = column._field_metadata
                         result._frames[f]._columns[c] = text^
