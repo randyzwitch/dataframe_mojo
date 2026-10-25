@@ -118,7 +118,12 @@ def run[
             var result = query(name, tables)
             for _ in range(reps):
                 var start = monotonic()
-                result = query(name, tables)
+                var next = query(name, tables)
+                # Explicit replacement avoids retaining overwritten results
+                # with the pinned compiler. Keep the previous result alive
+                # during the query and include its cleanup in the timing.
+                _ = result^
+                result = next^
                 print("time\t" + name + "\t" + String(monotonic() - start))
             var values = String()
             var columns = String()
