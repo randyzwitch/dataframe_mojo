@@ -16,6 +16,7 @@ from .lazy import (
     LazyTimeGroupBy,
     scan_csv,
     scan_parquet,
+    scan_ipc,
 )
 
 from .expr import (

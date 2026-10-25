@@ -85,6 +85,14 @@ def main() raises:
         else:
             library = "build/dfparquet/libdfparquet.so"
     run_command(["python3", "tests/support/native_stream_oracle.py", library])
+    run_command(
+        [
+            "python3",
+            "tests/support/ipc_oracle.py",
+            "--check-scan-library",
+            library,
+        ]
+    )
     print(
         "Independent PyArrow consumers passed for",
         parquet_count,

@@ -2,9 +2,10 @@
 
 Readers import one record batch at a time and retain batches as column
 chunks. Import currently copies foreign buffers, including when memory_map
-selects a mapped native input. Lazy scans and foreign-buffer ownership are
-separate features. Writers export aligned chunk windows instead of flattening
-the complete frame. No Python dependency is required at runtime.
+selects a mapped native input. Lazy file scans use the incremental batch
+reader; foreign-buffer ownership remains separate. Writers export aligned
+chunk windows instead of flattening the complete frame. No Python dependency
+is required at runtime.
 """
 from std.collections import Optional
 from std.memory import Pointer
@@ -48,6 +49,127 @@ comptime _Open = def(Int, Int, Int, Int32, Int, Int) thin abi("C") -> Int32
 comptime _Write = def(Int, Int, Int, Int) thin abi("C") -> Int32
 comptime _Close = def(Int, Int) thin abi("C") -> Int32
 comptime _Abort = def(Int) thin abi("C") -> None
+comptime _Scan = def(Int, Int32, Int, Int32, Int64, Int64, Int, Int) thin abi(
+    "C"
+) -> Int32
+
+
+def _open_scan(
+    path: String,
+    columns: List[String],
+    projected: Bool,
+    memory_map: Bool,
+    offset: Int,
+    rows: Int,
+) raises -> _ArrowArrayStream:
+    _path(path)
+    var library = _load_library()
+    var entry = _Library._symbol(library.handle, "dfq_scan_ipc")
+    var filename = _c_string(path)
+    var names = List[List[UInt8]]()
+    for name in columns:
+        names.append(_c_string(name))
+    var addresses = List[Int]()
+    for i in range(len(names)):
+        addresses.append(Int(names[i].unsafe_ptr()))
+    var stream = _ArrowArrayStream()
+    var error = 0
+    var status = Pointer(to=entry).unsafe_bitcast[_Scan]()[](
+        Int(filename.unsafe_ptr()),
+        Int32(memory_map),
+        Int(addresses.unsafe_ptr()),
+        Int32(len(columns) if projected else -1),
+        Int64(offset),
+        Int64(rows),
+        Int(Pointer(to=stream)),
+        Int(Pointer(to=error)),
+    )
+    _ = addresses^
+    _ = names^
+    _ = filename^
+    if status != 0:
+        _release_stream(stream)
+        _raise_backend_error(library, error, "scan_ipc")
+    return stream^
+
+
+def _read_scan(
+    path: String,
+    columns: List[String],
+    projected: Bool,
+    memory_map: Bool,
+    offset: Int,
+    rows: Int,
+) raises -> DataFrame:
+    var stream = _open_scan(path, columns, projected, memory_map, offset, rows)
+    return _collect(stream)
+
+
+struct _IpcBatches(Movable):
+    """Own a file stream and one imported record batch, released on stop."""
+
+    var stream: _ArrowArrayStream
+    var pending: Optional[DataFrame]
+    var offset: Int
+    var size: Int
+    var pool: Pool
+    var pool_ready: Bool
+
+    def __init__(
+        out self,
+        path: String,
+        columns: List[String],
+        projected: Bool,
+        memory_map: Bool,
+        offset: Int,
+        rows: Int,
+        size: Int,
+    ) raises:
+        self.stream = _open_scan(
+            path, columns, projected, memory_map, offset, rows
+        )
+        self.pending = None
+        self.offset = 0
+        self.size = size
+        self.pool = Pool(1)
+        self.pool_ready = False
+
+    def __deinit__(deinit self):
+        _release_stream(self.stream)
+
+    def next(mut self) raises -> Optional[DataFrame]:
+        if self.pending and self.offset < self.pending.value().height():
+            var batch = self.pending.value().slice(self.offset, self.size)
+            self.offset += batch.height()
+            return batch^
+        self.pending = None
+        if self.stream.release == 0:
+            return None
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        try:
+            if _stream_next(self.stream, array) != 0:
+                _error(self.stream)
+            if array.release == 0:
+                _release_stream(self.stream)
+                return None
+            if _stream_schema(self.stream, schema) != 0:
+                _error(self.stream)
+            if not self.pool_ready:
+                self.pool = Pool(
+                    _arrow_import_workers(
+                        Int(array.length), Int(array.n_children)
+                    )
+                )
+                self.pool_ready = True
+            self.pending = _import_arrow_with_pool(array, schema, self.pool)
+            var batch = self.pending.value().slice(0, self.size)
+            self.offset = batch.height()
+            return batch^
+        except error:
+            _release_imported(array, schema)
+            _release_stream(self.stream)
+            raise error^
 
 
 def _path(path: String) raises:
@@ -328,6 +450,11 @@ def read_ipc_schema(
     stream=True selects the IPC stream variant. Dictionary labels reside
     in data messages, so categorical schema entries have an empty dictionary.
     """
+    return _schema_frame(path, stream).schema()
+
+
+def _schema_frame(path: String, stream: Bool = False) raises -> DataFrame:
+    """A typed zero-row frame from IPC metadata, preserving field metadata."""
     _path(path)
     var library = _load_library()
     var entry = _Library._symbol(library.handle, "dfq_read_ipc_schema")
@@ -337,7 +464,7 @@ def read_ipc_schema(
     try:
         if _schema_call(entry, path, stream, array, schema, error) != 0:
             _raise_backend_error(library, error, "read_ipc_schema")
-        return import_arrow(array, schema).schema()
+        return import_arrow(array, schema)
     except caught:
         _release_imported(array, schema)
         raise caught^

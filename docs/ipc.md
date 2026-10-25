@@ -2,6 +2,7 @@
 
 `read_ipc` and `write_ipc` read and write local Arrow IPC files (Feather v2).
 `read_ipc_stream` and `write_ipc_stream` use the sequential IPC stream format.
+`scan_ipc` builds a lazy file scan with projection and slice pushdown.
 They use the same optional native library as Parquet, built with Arrow IPC
 enabled; Python is not required at runtime.
 
@@ -46,6 +47,47 @@ into owned Mojo storage. This option therefore does **not** promise zero-copy
 columns or a mapping that remains attached to the returned frame. Compression
 and representation conversions may also allocate.
 
+## Lazy file scans
+
+```mojo
+from dataframe import scan_ipc, col
+
+var query = (
+    scan_ipc("features.arrow")
+    .filter(col("score") > 0.9)
+    .select(["id", "score"])
+    .head(100)
+)
+var result = query.collect(engine="cpu", batch_size=65536)
+```
+
+Constructing a scan does not open the file. `collect_schema` reads only
+schema metadata, and each collection opens a fresh reader. The optional
+`memory_map` argument has the same copying semantics as `read_ipc`.
+
+Projection includes the columns needed by filters, join keys and aggregates,
+even when those columns are omitted from the final result. Nonnegative slices
+push their offset and length into the native reader, including through
+row-local projections. The reader checks record-batch metadata to skip whole
+batches without reading their bodies, then decodes only intersecting batches.
+A zero-column projection needs only row-count metadata. Arrow may load
+file-level dictionary messages before the selected record batches.
+
+Slices stay above filters, sorts, joins and row-order operations whenever
+moving them would change which rows are returned. IPC has no Parquet-style
+min/max statistics for pruning batches by a filter. Negative offsets retain
+the ordinary materializing slice semantics.
+
+The streaming executor imports one record batch at a time and hands smaller
+windows to the existing batch operators. Sorts and other global operators
+retain their materialization boundaries, and collection retains the final
+output. File dictionary deltas resolve to a consistent dictionary across
+batches, including nested categorical children. Early stopping and errors
+release the native reader and any pending imported batch.
+
+IPC scans need the native library rebuilt with the `dfq_scan_ipc` entry point.
+Lazy scanning of the sequential IPC stream format is separate from file scans.
+
 ## Writing
 
 Both writers accept `compression="uncompressed"`, `"lz4"`, or `"zstd"` and
@@ -72,5 +114,5 @@ checks actual Mojo writer outputs using independent PyArrow consumers. The
 consumer checks complete cells, physical types, field metadata, and record
 batch boundaries. Run these checks on Linux and macOS.
 
-Lazy IPC scans and retaining mapped buffers as foreign column storage are
-follow-up work for #795. Lazy output sinks depend on #796.
+Retaining mapped buffers as foreign column storage remains follow-up work
+for #795. Lazy output sinks depend on #796.
