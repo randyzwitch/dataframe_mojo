@@ -981,8 +981,11 @@ struct Morsel(Movable):
             if self.frame._columns[i].name() not in names:
                 kept.append(self.frame._columns[i].copy())
                 kept_compact.append(self.compact[i])
-        var height = self.frame._height
-        self.frame = DataFrame(kept^, height=height)
+        # Source columns retain source coordinates; compact columns hold
+        # only selected rows. As in select(), preserve those different
+        # lengths until gather_all() materializes the selection.
+        self.frame._columns = kept^
+        self.frame._statistics = None
         self.compact = kept_compact^
 
     def _narrow_rows(mut self, rows: List[Int]) raises:
