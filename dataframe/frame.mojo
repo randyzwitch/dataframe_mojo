@@ -3774,6 +3774,48 @@ struct _JoinRangeProbeJob(Job):
                     self.rows.append(self.offset + i)
 
 
+def _join_range_possible(right: Series, low: Int64, high: Int64) -> Int:
+    """The existing 256-point range sample without per-point Series copies.
+
+    Only physical Int64 keys enter this helper. Chunk ends locate each
+    point directly; empty chunks and nonzero physical offsets retain the
+    same row/validity interpretation as `_chunk_at`.
+    """
+    var samples = min(256, len(right))
+    if samples == 0:
+        return 0
+    var step = len(right) // samples
+    var possible = 0
+    if not right.is_chunked():
+        ref key = right._data[Column[Int64]]
+        var values = key._ptr()
+        var all_valid = len(key._bits[]) == 0
+        for i in range(samples):
+            var row = i * step
+            if all_valid or key._valid(row):
+                var value = values[unsafe_offset=row]
+                possible += Int(value >= low and value <= high)
+        return possible
+    ref chunks = right._chunked.value()[]
+    for i in range(samples):
+        var row = i * step
+        var lo = 0
+        var hi = len(chunks.ends)
+        while lo < hi:
+            var mid = lo + (hi - lo) // 2
+            if row < chunks.ends[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        var start = 0 if lo == 0 else chunks.ends[lo - 1]
+        ref key = chunks.arrays[lo][Column[Int64]]
+        var local = row - start
+        if key._valid(local):
+            var value = key._get(local)
+            possible += Int(value >= low and value <= high)
+    return possible
+
+
 def _join_range_rows(
     left: Series,
     right: Series,
@@ -3803,18 +3845,7 @@ def _join_range_rows(
     if not found or len(right) == 0:
         return List[Int]()
     var samples = min(256, len(right))
-    var possible = 0
-    for i in range(samples):
-        var row = i * (len(right) // samples)
-        var part = right.copy()
-        if right.is_chunked():
-            var located = right._chunk_at(row)
-            part = located[0].copy()
-            row = located[1]
-        ref key = part._data[Column[Int64]]
-        if key._valid(row):
-            var value = key._get(row)
-            possible += Int(value >= low and value <= high)
+    var possible = _join_range_possible(right, low, high)
     if possible > samples // 4:
         return None
     var jobs = List[_JoinRangeProbeJob]()

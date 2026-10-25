@@ -17,6 +17,7 @@ from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 from dataframe.join_fuse import FusedJoin
 from dataframe.frame import (
+    _join_range_possible,
     _join_range_rows,
     _smaller_build_join_rows,
     _bounded_int64_join_rows,
@@ -114,6 +115,53 @@ def test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_nu
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
             numeric_probes[D]()
+
+
+def test_range_samples_match_literal_rows_for_offsets_empty_chunks_nulls_and_signed_extremes() raises:
+    for n in [0, 1, 127, 257, 100003]:
+        for offset in [0, 3]:
+            var values = List[Int64](length=offset, fill=Int64.MAX)
+            var valid = List[Bool](length=offset, fill=False)
+            for row in range(n):
+                values.append(
+                    Int64.MIN if row % 17
+                    == 0 else Int64.MAX if row % 19
+                    == 0 else Int64(row % 11 - 5)
+                )
+                valid.append(row % 23 != 3)
+            var key = Series(
+                "k", Column[Int64](values.copy(), valid.copy())
+            ).slice(offset, n)
+            var chunks = Series._from_chunks(
+                [
+                    key.slice(0, 0),
+                    key.slice(0, n // 3),
+                    key.slice(n // 3, n - n // 3),
+                    key.slice(n, 0),
+                ]
+            )
+            var bounds: List[Tuple[Int64, Int64]] = [
+                (Int64(-2), Int64(3)),
+                (Int64.MIN, Int64.MIN),
+                (Int64.MAX, Int64.MAX),
+                (Int64.MIN, Int64.MAX),
+            ]
+            for bound in bounds:
+                var expected = 0
+                var samples = min(256, n)
+                for i in range(samples):
+                    var row = offset + i * (n // samples)
+                    expected += Int(
+                        valid[row]
+                        and values[row] >= bound[0]
+                        and values[row] <= bound[1]
+                    )
+                assert_equal(
+                    _join_range_possible(key, bound[0], bound[1]), expected
+                )
+                assert_equal(
+                    _join_range_possible(chunks, bound[0], bound[1]), expected
+                )
 
 
 def compact_numeric_probes[D: DType]() raises:
