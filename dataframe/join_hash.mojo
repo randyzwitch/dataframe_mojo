@@ -720,7 +720,6 @@ def _append_duplicate_rows(
 struct _HashBuildJob(Job):
     """Build one hash bucket from stable right-row positions."""
 
-    var hashes: ArcPointer[List[UInt64]]
     var order: ArcPointer[List[Int]]
     # The hashes, and for an integer key without nulls its words, in
     # bucket order: read in sequence instead of at each row (#378).
@@ -735,7 +734,6 @@ struct _HashBuildJob(Job):
 
     def __init__(
         out self,
-        hashes: ArcPointer[List[UInt64]],
         order: ArcPointer[List[Int]],
         ordered_hashes: ArcPointer[List[UInt64]],
         ordered_words: ArcPointer[List[UInt64]],
@@ -745,7 +743,6 @@ struct _HashBuildJob(Job):
         last: Int,
         skip_nulls: Bool,
     ):
-        self.hashes = hashes.copy()
         self.order = order.copy()
         self.ordered_hashes = ordered_hashes.copy()
         self.ordered_words = ordered_words.copy()
@@ -845,7 +842,11 @@ struct _HashBuildJob(Job):
                         count += 1
                         next = Int(entry.next_position)
                     groups[first] = Int32(count)
-                var hash = self.hashes[][Int(old.row)]
+                # Integer slots retain the exact key word; other slots
+                # already retain the complete hash, including compound
+                # keys. Reconstruct only while compacting duplicate groups
+                # instead of retaining every input row's original hash.
+                var hash = _mix(old.key) if self.typed_int else old.key
                 var at = Int(hash & UInt64(compact_size - 1))
                 while compact[at].row >= 0:
                     at = (at + 1) & (compact_size - 1)
@@ -1670,7 +1671,9 @@ def prepare_hash_index(
     swap(ordered_hashes, right_parts.hashes)
     var ordered_words = List[UInt64]()
     swap(ordered_words, right_parts.words)
-    var shared_right_hashes = ArcPointer(right_hashes^.into_hashes())
+    # Scatter owns its reordered hashes. The input-order hash array and
+    # histograms are dead before bucket tables and duplicate chains grow.
+    _ = right_hashes^
     var shared_order = ArcPointer(order^)
     var shared_hashes = ArcPointer(ordered_hashes^)
     var shared_words = ArcPointer(ordered_words^)
@@ -1681,7 +1684,6 @@ def prepare_hash_index(
     for bucket in range(right_parts.buckets()):
         builders.append(
             _HashBuildJob(
-                shared_right_hashes,
                 shared_order,
                 shared_hashes,
                 shared_words,
