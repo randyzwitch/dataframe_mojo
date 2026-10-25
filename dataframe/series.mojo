@@ -528,10 +528,6 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             whole._name, Column[Int64](values=values^, bits=bits^)
         ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 64))
 
-    def _storage_dtype(self) -> DataType:
-        """The physical DataType of the stored column."""
-        return _storage_dtype_of(self._data)
-
     def with_dtype(self, dtype: DataType) raises -> Self:
         """The same values tagged with another logical type that shares their
         storage (temporal types and INT64, string and binary). Binary cannot

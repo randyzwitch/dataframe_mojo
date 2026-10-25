@@ -99,7 +99,6 @@ from .frame import concat
 from .distinct_statistics import distinct_estimate
 from .frame import _describe_percentiles
 from .expr import null, is_grouping, has_grouping, grouping_value
-from .canonical_labels import label_map, remap_codes
 from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
@@ -162,12 +161,9 @@ from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
 from .binding import AGGREGATE, ROWS, bind
-from .plan_types import PlanEstimate, WindowKey, TextField
-from .key_query import KeyQuery
-from .byte_domain import ByteDomain
+from .plan_types import PlanEstimate
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
-from .producer_origin import ProducerOrigin, RegionProof
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -278,29 +274,7 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # No counter storage is allocated unless profiling/tests attach one.
     var _executions: Optional[ArcPointer[Int]]
     var asof_tolerance: Optional[AnyValue]
-    var window_keys: List[WindowKey]
     var source_failure: String
-    # Private text-code provenance; never inferred from UInt32 storage.
-    var code_domain: Optional[DataType]
-    var text_fields: List[TextField]
-    # Typed proof of an original row expression and its exact input prefix.
-    # Synthetic plans begin without either token; verified copies share it.
-    var producer_origin: Optional[ArcPointer[ProducerOrigin]]
-    var lineage_anchor: Optional[ArcPointer[Int]]
-    var producer_region: Optional[ArcPointer[RegionProof]]
-    # Original grouped key domains survive whole-query code normalization.
-    var grouped_keys: Optional[ArcPointer[KeyQuery]]
-    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
-    # Original partition state/operand proof is outside rewritten row ASTs.
-    # Columns contain schema-only Series; no source values are retained here.
-    var partition_exprs: List[Expr]
-    var partition_columns: List[Series]
-
-    def __deinit__(deinit self):
-        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
-        # documentation trait inference cycles. Owned fields clean up
-        # automatically after this body; no owner is released manually.
-        pass
 
     def _record_execution(self):
         if self._executions:
@@ -323,12 +297,7 @@ def _plan_node(
     how: Int = -1,
     right_keys: List[String] = List[String](),
     coalesce: Bool = True,
-    window_keys: List[WindowKey] = List[WindowKey](),
     source_failure: String = "",
-    code_domain: Optional[DataType] = None,
-    text_fields: List[TextField] = List[TextField](),
-    partition_exprs: List[Expr] = List[Expr](),
-    partition_columns: List[Series] = List[Series](),
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -347,17 +316,7 @@ def _plan_node(
         coalesce,
         Optional[ArcPointer[Int]](),
         Optional[AnyValue](),
-        window_keys.copy(),
         source_failure,
-        code_domain,
-        text_fields.copy(),
-        Optional[ArcPointer[ProducerOrigin]](),
-        Optional[ArcPointer[Int]](),
-        Optional[ArcPointer[RegionProof]](),
-        None,
-        None,
-        partition_exprs.copy(),
-        partition_columns.copy(),
     )
 
 
@@ -1881,26 +1840,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
     var _handoff: Int
 
-    def __deinit__(deinit self):
-        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
-        # documentation trait inference cycles. Owned fields clean up
-        # automatically after this body; no owner is released manually.
-        pass
-
-    def __init__(out self, *, deinit move: Self):
-        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
-        # whose original query is a LazyFrame. This avoids recursive generated
-        # move inference while preserving all eight existing owner fields.
-        self._nodes = move._nodes^
-        self._frames = move._frames^
-        self._schemas = move._schemas^
-        self._report = move._report^
-        self._origin_rows = move._origin_rows^
-        self._accelerator_settings = move._accelerator_settings^
-        self._schema_memo = move._schema_memo^
-        self._prefetched = move._prefetched^
-        self._handoff = move._handoff
-
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
         self._schemas = [Optional[CsvSchema]()]
@@ -1928,53 +1867,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._prefetched = None
         self._handoff = HANDOFF_OFF
 
-    def _by_label(self) raises -> Self:
-        """This plan with each categorical scan column that a group_by names
-        as a key put on the first code of every label, so the
-        device groups equal labels together as the CPU does (#943). Other
-        columns keep their original codes."""
-        var keys = Dict[String, Bool]()
-        for node in self._nodes:
-            if node.kind == AGG:
-                for name in node.names:
-                    keys[name] = True
-        var result = self.copy()
-        if len(keys) == 0:
-            return result^
-        for f in range(len(result._frames)):
-            for c in range(result._frames[f].width()):
-                ref column = result._frames[f]._columns[c]
-                if column.name() not in keys:
-                    continue
-                var coded = column._dictionary_codes()
-                if coded:
-                    # Dictionary-coded text keeps its strings; only the codes
-                    # beside them move to the first code of each label.
-                    var map = label_map(coded.value())
-                    if map:
-                        var moved = remap_codes(coded.value(), map.value())
-                        var text = decode(moved)
-                        var rows = List[UInt32](capacity=len(moved))
-                        ref codes = moved.uint32()
-                        for row in range(len(moved)):
-                            rows.append(codes._get(row))
-                        text._data[StringColumn]._codes = ArcPointer(
-                            StringCodes(ArcPointer(rows^), moved.dtype())
-                        )
-                        text._field_metadata = column._field_metadata
-                        result._frames[f]._columns[c] = text^
-                    continue
-                var map = label_map(column)
-                if map:
-                    result._frames[f]._columns[c] = remap_codes(
-                        column, map.value()
-                    )
-        return result^
-
     def _with_accelerator_settings(
         self, optimize: Bool, streaming: Bool, batch_size: Int
     ) raises -> Self:
-        var configured = self._by_label()
+        var configured = self.copy()
         configured._accelerator_settings = ExecutionSettings(
             optimize, streaming, batch_size
         )
@@ -3253,9 +3149,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Execute with an explicit optional runtime and its placement policy.
 
         Requested execution settings travel with a dispatch copy of the plan.
-        Providers lower supported operators independently; stream batch sizes
-        do not override eager expression batches. Unsupported plans raise
-        before device submission.
+        A provider runs the plan its own way: a discrete device runs whole
+        plans, and a device sharing memory with the CPU runs the plan on the
+        CPU executor with supported nodes handed over (`_with_handoff`).
         """
         _ = _select_backend(engine)
         if batch_size <= 0:
@@ -6434,7 +6330,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         h = _mix_list(h, node.right_keys)
         h = _mix(h, UInt64(1) if node.coalesce else UInt64(0))
         h = _mix_text(h, node.source_failure)
-        h = _mix(h, UInt64(len(node.window_keys)))
         for e in node.exprs:
             h = _mix_expr(h, e)
         h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
@@ -6472,7 +6367,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             or x.coalesce != y.coalesce
             or x.source_failure != y.source_failure
             or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
-            or len(x.window_keys) != len(y.window_keys)
             or len(x.exprs) != len(y.exprs)
         ):
             return False
@@ -6485,16 +6379,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             y.asof_tolerance.value()
         ):
             return False
-        for k in range(len(x.window_keys)):
-            ref u = x.window_keys[k]
-            ref v = y.window_keys[k]
-            if (
-                u.name != v.name
-                or u.dtype.name() != v.dtype.name()
-                or u.string_hash != v.string_hash
-                or u.values[] != v.values[]
-            ):
-                return False
         for k in range(len(x.exprs)):
             if not _same_expr(x.exprs[k], y.exprs[k]):
                 return False
