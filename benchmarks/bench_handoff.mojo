@@ -23,9 +23,13 @@ from dataframe_metal.metal import MetalRuntime
 
 
 def _frame[dtype: DType](rows: Int) raises -> DataFrame:
+    """Values centred on zero. Int32 values stay within -3..3, so even the
+    filtered sum of 200 million rows fits the Int32 result the CPU returns
+    (a wider range would overflow, which both engines report)."""
+    var spread = 7 if dtype == DType.int32 else 2001
     var values = List[Scalar[dtype]](capacity=rows)
     for row in range(rows):
-        values.append(Scalar[dtype]((row * 7919) % 2001 - 1000))
+        values.append(Scalar[dtype]((row * 7919) % spread - spread // 2))
     return DataFrame([Series("x", Column[Scalar[dtype]](values^))])
 
 
