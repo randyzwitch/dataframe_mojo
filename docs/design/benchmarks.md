@@ -141,6 +141,12 @@ historical upstream commits were not recorded and remain explicitly unknown.
 DuckDB's recorded version identifies its `tpch_queries`, `dbgen`,
 `tpcds_queries` and `dsdgen` implementations.
 
+Each timed repetition computes its replacement result, explicitly releases
+the previous result, then moves the replacement into the retained result.
+The previous output remains alive during the query, and its cleanup is
+included in the timing. This avoids unfreed overwritten results observed
+with the pinned compiler's direct assignment in the measurement loop.
+
 Re-rendering older raw JSON preserves its samples and displays a legacy
 metadata note; it does not invent missing historical provenance.
 The coverage table separates distinct suite/query pairs from query/variant

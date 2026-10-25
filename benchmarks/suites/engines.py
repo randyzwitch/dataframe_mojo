@@ -298,6 +298,13 @@ def pdsh_polars(t, q):
             .sort("supp_nation", "cust_nation", "l_year")
         )
     elif q == "q8":
+        volume = disc_price
+        if isinstance(t["lineitem"].schema["l_extendedprice"], pl.Decimal):
+            # SQL multiplies two scale-2 decimals at scale 4; Polars keeps
+            # the larger operand scale, so widen before the multiplication.
+            volume = pl.col("l_extendedprice").cast(
+                pl.Decimal(precision=38, scale=4)
+            ) * (1 - pl.col("l_discount"))
         n1 = nation.select("n_nationkey", "n_regionkey")
         n2 = nation.select(
             pl.col("n_nationkey").alias("s_nationkey"),
@@ -318,16 +325,18 @@ def pdsh_polars(t, q):
             )
             .with_columns(
                 pl.col("o_orderdate").dt.year().alias("o_year"),
-                disc_price.alias("volume"),
+                volume.alias("volume"),
             )
             .group_by("o_year")
             .agg(
+                # SQL division returns DOUBLE; Decimal division retains scale.
                 (
                     pl.when(pl.col("nation") == "BRAZIL")
                     .then(pl.col("volume"))
                     .otherwise(0)
                     .sum()
-                    / pl.col("volume").sum()
+                    .cast(pl.Float64)
+                    / pl.col("volume").sum().cast(pl.Float64)
                 ).alias("mkt_share")
             )
             .sort("o_year")
