@@ -13,6 +13,10 @@
 #   3. a file under dataframe_metal/ imports from tests;
 #   4. providers/cpu/dataframe_provider imports a backend. (The root
 #      dataframe_provider is the Metal provider and may import dataframe_metal.)
+#   5. a test imports dataframe_metal outside the Metal test files listed in
+#      metal_tests. CPU tests check the core through the public API; a backend
+#      is tested in its own files, so removing or replacing it never touches
+#      them.
 #
 # Every allow-list entry below is a deliberate decision. Adding one needs a
 # reason in the comment beside it.
@@ -24,6 +28,18 @@ cd "$(dirname "$0")/.."
 provider_importers=(
   dataframe/lazy.mojo               # execute, describe, select_auto, ...
   dataframe/execution_backend.mojo  # installed(), for engine="accel"
+)
+
+# Test files allowed to import dataframe_metal: the backend's own tests, the
+# provider dispatch tests, and the tooling programs that probe a device.
+metal_tests=(
+  tests/execution_modes/test_backends.mojo  # provider dispatch on a CPU target
+  tests/execution_modes/test_gpu_typed_storage_metadata.mojo
+  tests/execution_modes/test_mojo_gpu_scratch_pool.mojo
+  tests/support/metal_outcomes.mojo         # Metal-vs-CPU result helpers
+  tests/tooling/accelerator_package_consumer.mojo  # packaged provider hooks
+  tests/tooling/metal_available.mojo        # device probe
+  tests/tooling/mojo_gpu_cpu_compile.mojo   # CPU-target build of the backend
 )
 
 failures=0
@@ -89,6 +105,15 @@ while IFS= read -r file; do
     fail "the CPU-only provider imports a backend: $file:${hit%%:*}: ${hit#*:}"
   done < <(grep -nE "$(absolute_import dataframe_metal)" "$file" || true)
 done < <(find providers/cpu -name '*.mojo' | sort)
+
+while IFS= read -r file; do
+  [[ $file == tests/execution_modes/test_metal_* ]] && continue
+  in_list "$file" "${metal_tests[@]}" && continue
+  while IFS= read -r hit; do
+    [[ -z $hit ]] && continue
+    fail "a CPU test imports the backend: $file:${hit%%:*}: ${hit#*:}"
+  done < <(grep -nE "$(absolute_import dataframe_metal)" "$file" || true)
+done < <(find tests -name '*.mojo' | sort)
 
 if ((failures > 0)); then
   echo "Accelerator boundary check failed: $failures violation(s)." >&2

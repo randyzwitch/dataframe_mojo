@@ -1,10 +1,6 @@
-"""CPU-only planning shared by optional accelerator execution providers.
+"""CPU-only pieces shared by the Metal provider.
 
-Importing this package never loads a GPU SDK. Runtime providers implement
-`dataframe.lazy.AcceleratorBackend` and consume the bound plans below.
+Importing this package never loads a GPU SDK.
 """
-from .capabilities import RowCapabilities
-from .rows import RowPlan, RowStep, RowOutput, lower_rows
-from .memory import MemoryEstimate, RowMemory, row_memory
 
 from .cost import PlanEstimate, CalibrationKey, CostDecision, select_auto

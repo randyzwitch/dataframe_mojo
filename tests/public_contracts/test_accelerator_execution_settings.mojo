@@ -5,7 +5,6 @@ from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe.execution_settings import ExecutionSettings
 from dataframe.lazy import AcceleratorBackend, LazyFrame
-from dataframe_metal.metal import MetalRuntime
 
 
 @fieldwise_init
@@ -67,13 +66,6 @@ def test_accelerator_settings_preserve_legacy_provider_dispatch_and_plan_copy() 
     assert_false(Bool(query._accelerator_settings))
     var copied = query._with_accelerator_settings(False, False, 2).copy()
     assert_equal(copied._accelerator_settings.value().batch_size, 2)
-    var original_runtime = MetalRuntime(device_id=999999)
-    var configured_runtime = original_runtime._configured(copied)
-    assert_false(configured_runtime._execution_settings.optimize)
-    assert_false(configured_runtime._execution_settings.streaming)
-    assert_equal(configured_runtime._execution_settings.batch_size, 2)
-    assert_true(original_runtime._execution_settings.optimize)
-    assert_equal(original_runtime._execution_settings.batch_size, 65536)
     # New fields do not require legacy providers to implement new methods.
     assert_true(
         "legacy settings provider" in query.explain(accelerator=backend)

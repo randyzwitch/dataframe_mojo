@@ -42,10 +42,8 @@ echo "== Metal contracts on the device: $groups"
 pixi run --locked test --areas execution public --contracts $groups \
   --capabilities metal mojo_gpu || failed="$failed contracts"
 
-echo "== Mojo GPU contracts and independent oracles"
-for task in test-mojo-gpu test-mojo-gpu-floating test-mojo-gpu-decimal \
-  test-mojo-gpu-integer test-mojo-gpu-grouping test-mojo-gpu-kernels \
-  test-metal-suite-checks; do
+echo "== Metal suite tooling checks"
+for task in test-metal-suite-checks; do
   pixi run --locked -e gpu "$task" || failed="$failed $task"
 done
 if [[ -n "$failed" ]]; then

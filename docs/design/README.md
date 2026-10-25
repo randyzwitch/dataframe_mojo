@@ -13,8 +13,6 @@ were taken at; those are a record of a decision, not current numbers.
 | --- | --- | --- |
 | [accelerator-contract.md](accelerator-contract.md) | What an accelerator backend provides to the core, what the core guarantees, how a backend attaches, and the plan to make it a separate package. | `12980823` (2026-10-22) |
 | [accelerator-backends.md](accelerator-backends.md) | How optional accelerator backends plug into the planner and executor. | `c411a93e` (2026-10-16) |
-| [apple-metal-benchmarks.md](apple-metal-benchmarks.md) | Measurement: Metal development mechanisms compared with the CPU paths. | `51c40c90` (2026-10-20) |
-| [apple-metal-replacement-coverage.md](apple-metal-replacement-coverage.md) | Matrix of which engine operations have a Metal replacement. | `7603528e` (2026-10-20) |
 | [arrow-import.md](arrow-import.md) | Measurement: parallel Arrow import (#276). | `be283d9d` (2026-10-15) |
 | [benchmarks.md](benchmarks.md) | Rules for benchmarking, the external suites, and retired benchmarks. | `d05602cf` (2026-10-21) |
 | [executor-design.md](executor-design.md) | Design of thread-owned pipelines over morsels (#538). | `c54d9d2c` (2026-10-10) |

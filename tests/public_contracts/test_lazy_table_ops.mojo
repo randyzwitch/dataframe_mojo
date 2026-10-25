@@ -11,7 +11,6 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe_metal.metal import MetalRuntime
 from tests.support.reference_model import generated_model, reference_groups
 from tests.support.reference_relations import nonnull_indices
 from tests.support.coverage_generators import frame_from_model, chunk_layout
@@ -212,10 +211,6 @@ def test_lazy_unpivot_literal_values_and_errors() raises:
                     )
         with assert_raises():
             _ = bad.collect_schema()
-    # Accelerators decline the node and leave it to the CPU.
-    var metal = MetalRuntime(device_id=999999)
-    assert_equal(metal.select_auto(plan, True, True, 65536)[0], "cpu")
-    _ = metal.describe(plan)
 
 
 def test_lazy_fill_null_chooses_columns_as_eager() raises:

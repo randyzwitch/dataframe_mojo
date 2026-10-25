@@ -15,10 +15,6 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe_metal.accelerator.capabilities import RowCapabilities
-from dataframe_metal.accelerator.joins import lower_join_dag
-from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
-from dataframe_metal.accelerator.rows import lower_rows
 from tests.support.coverage_compare import assert_frame
 
 # Stands for a null Int64 in literal expectations.
@@ -91,16 +87,6 @@ def check(plan: LazyFrame, expected: DataFrame) raises:
     for field in expected.schema():
         schema.append(field.name + ": " + field.dtype.name())
     assert_equal(plan.collect_schema(), schema)
-    # The accelerator's metadata run, node by node, and its pruning.
-    var metadata = schema_frame(plan, len(plan._nodes) - 1)
-    assert_equal(metadata.columns(), expected.columns())
-    for name in expected.columns():
-        assert_true(
-            metadata.column(name).dtype() == expected.column(name).dtype()
-        )
-    var pruned = plan.copy()
-    prune_projections(pruned)
-    assert_frame(pruned.collect(optimize=False, streaming=False), expected)
 
 
 def check_fails(plan: LazyFrame) raises:
@@ -381,7 +367,7 @@ def test_joins_and_aggregates() raises:
     )
 
 
-def test_explain_and_accelerator_rejection() raises:
+def test_explain() raises:
     var frame = source()
     var plan = (
         frame.lazy()
@@ -395,25 +381,3 @@ def test_explain_and_accelerator_rejection() raises:
     assert_true(text.find("REVERSE [materialize]") >= 0, text)
     assert_true(text.find("SHIFT 2") >= 0, text)
     assert_true(text.find("WITH_ROW_INDEX index from 0") >= 0, text)
-    # The accelerator lowers none of them; each raises its ordinary
-    # unsupported-plan error before any device work.
-    for query in [
-        frame.lazy().tail(2),
-        frame.lazy().reverse(),
-        frame.lazy().shift(1),
-        frame.lazy().with_row_index(),
-        frame.lazy().filter(col("k") > 1).with_row_index().select(["index"]),
-    ]:
-        for joined in [False, True]:
-            var failed = False
-            try:
-                if joined:
-                    _ = lower_join_dag(query, RowCapabilities())
-                else:
-                    _ = lower_rows(query)
-            except error:
-                assert_true(
-                    String(error).find("unsupported") >= 0, String(error)
-                )
-                failed = True
-            assert_true(failed, "row-order operators must not lower")
