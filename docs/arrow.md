@@ -5,6 +5,8 @@
 fill. Polars, DuckDB, pyarrow, nanoarrow, and marrow can exchange data with a
 `DataFrame` this way. No Arrow library or Python is involved at run time.
 
+For Arrow IPC/Feather files and IPC streams, see [IPC I/O](ipc.md).
+
 [cdi]: https://arrow.apache.org/docs/format/CDataInterface.html
 
 ```mojo

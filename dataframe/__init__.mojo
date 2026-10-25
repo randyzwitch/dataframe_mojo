@@ -80,6 +80,13 @@ from .io.parquet import (
     write_parquet,
     write_geoparquet,
 )
+from .io.ipc import (
+    read_ipc,
+    read_ipc_stream,
+    read_ipc_schema,
+    write_ipc,
+    write_ipc_stream,
+)
 
 from .geometry import (
     from_wkb,
