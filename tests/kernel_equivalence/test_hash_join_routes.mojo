@@ -17,6 +17,7 @@ from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 from dataframe.join_fuse import FusedJoin
 from dataframe.frame import (
+    _join_range_possible,
     _join_range_rows,
     _smaller_build_join_rows,
     _bounded_int64_join_rows,
@@ -116,6 +117,107 @@ def test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_nu
             numeric_probes[D]()
 
 
+def test_range_samples_match_literal_rows_for_offsets_empty_chunks_nulls_and_signed_extremes() raises:
+    for n in [0, 1, 127, 257, 100003]:
+        for offset in [0, 3]:
+            var values = List[Int64](length=offset, fill=Int64.MAX)
+            var valid = List[Bool](length=offset, fill=False)
+            for row in range(n):
+                values.append(
+                    Int64.MIN if row % 17
+                    == 0 else Int64.MAX if row % 19
+                    == 0 else Int64(row % 11 - 5)
+                )
+                valid.append(row % 23 != 3)
+            var key = Series(
+                "k", Column[Int64](values.copy(), valid.copy())
+            ).slice(offset, n)
+            var chunks = Series._from_chunks(
+                [
+                    key.slice(0, 0),
+                    key.slice(0, n // 3),
+                    key.slice(n // 3, n - n // 3),
+                    key.slice(n, 0),
+                ]
+            )
+            var bounds: List[Tuple[Int64, Int64]] = [
+                (Int64(-2), Int64(3)),
+                (Int64.MIN, Int64.MIN),
+                (Int64.MAX, Int64.MAX),
+                (Int64.MIN, Int64.MAX),
+            ]
+            for bound in bounds:
+                var expected = 0
+                var samples = min(256, n)
+                for i in range(samples):
+                    var row = offset + i * (n // samples)
+                    expected += Int(
+                        valid[row]
+                        and values[row] >= bound[0]
+                        and values[row] <= bound[1]
+                    )
+                assert_equal(
+                    _join_range_possible(key, bound[0], bound[1]), expected
+                )
+                assert_equal(
+                    _join_range_possible(chunks, bound[0], bound[1]), expected
+                )
+
+
+def compact_numeric_probes[D: DType]() raises:
+    var keys: List[Scalar[D]] = [Scalar[D].MIN, Scalar[D].MAX, 5, 0, 9]
+    var values = List[Scalar[D]]()
+    var valid = List[Bool]()
+    var n = 4099
+    for row in range(n):
+        values.append(keys[row % len(keys)])
+        valid.append(row % 17 != 3)
+    var build = Series("k", Column[Scalar[D]](values.copy(), valid.copy()))
+    var probe_values = keys.copy()
+    probe_values.append(77)
+    probe_values.append(0)
+    var probe_valid = List[Bool](length=len(probe_values), fill=True)
+    probe_valid[len(probe_values) - 1] = False
+    var probe = Series(
+        "k", Column[Scalar[D]](probe_values.copy(), probe_valid.copy())
+    )
+    var index = prepare_hash_index([build^], allow_progression=False)
+    var grouped = 0
+    for bucket in index.indexes[]:
+        grouped += len(bucket.groups)
+    assert_true(grouped > 0, "exercise duplicate-group hash reconstruction")
+    for outer in [False, True]:
+        var expected_left = List[Int]()
+        var expected_right = List[Int]()
+        for i in range(len(probe_values)):
+            var matched = False
+            for j in range(n):
+                if probe_valid[i] and valid[j] and probe_values[i] == values[j]:
+                    expected_left.append(i)
+                    expected_right.append(j)
+                    matched = True
+            if outer and not matched:
+                expected_left.append(i)
+                expected_right.append(-1)
+        var actual = prepared_hash_join_rows([probe.copy()], index, outer)
+        assert_equal(actual[0], expected_left)
+        assert_equal(actual[1], expected_right)
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], index, True),
+        [0, 1, 2, 3, 4],
+    )
+    assert_equal(
+        prepared_hash_semi_anti_rows([probe.copy()], index, False), [5, 6]
+    )
+
+
+def test_integer_duplicate_group_compaction_reconstructs_full_width_hashes_and_preserves_order() raises:
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            compact_numeric_probes[D]()
+
+
 def text_key(
     values: List[String], valid: List[Bool], native: Bool
 ) raises -> Series:
@@ -188,6 +290,10 @@ def test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_co
                         Series("u", Column[UInt64](probe_codes.copy()))
                     )
                 var index = prepare_hash_index(build, allow_progression=False)
+                assert_equal(
+                    len(index.probe(probe).left_hashes[]),
+                    len(left) if compound else 0,
+                )
                 var grouped_rows = 0
                 var slots = 0
                 for bucket in index.indexes[]:

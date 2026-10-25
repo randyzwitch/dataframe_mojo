@@ -18,7 +18,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .huge_pages import huge_capacity, huge_list, huge_uninit
 from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .parallel import Job, partitions, run_jobs, worker_count
-from .partition import Partitioner, _mix
+from .partition import Partitioner, _hash_bytes, _mix, _short_hash
 from .series import Series
 from .string_bytes import _Bytes
 from .string_column import StringColumn
@@ -641,6 +641,39 @@ def _int64_probe_slot(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
 
 
 @always_inline
+def _string_probe_hash(bytes: _Bytes, row: Int) -> UInt64:
+    """The build partitioner's exact string hash, read at the probe row.
+
+    The caller proves validity. Short view keys have eight readable bytes
+    inside their descriptor; offsets keys can load a word only when it
+    stays inside the shared byte buffer. The span fallback handles tails
+    and longer strings with the same hash primitives as `_hash_column`.
+    """
+    if bytes.is_views():
+        var view = Pointer[StringView, ImmutAnyOrigin](
+            unsafe_from_address=bytes.views
+        ).unsafe_offset(row)
+        var length = Int(view[].length)
+        if length <= 8:
+            var inline = view.unsafe_bitcast[UInt8]().unsafe_offset(4)
+            var word = bitcast[DType.uint64, 1](inline.unsafe_load[width=8]())
+            return _mix(_short_hash(word, length))
+    else:
+        var offsets = Pointer[Int64, ImmutAnyOrigin](
+            unsafe_from_address=bytes.offsets
+        )
+        var start = Int(offsets[unsafe_offset=row])
+        var length = Int(offsets[unsafe_offset=row + 1]) - start
+        if length <= 8 and start <= len(bytes.column._bytes[]) - 8:
+            var data = Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=bytes.data
+            ).unsafe_offset(start)
+            var word = bitcast[DType.uint64, 1](data.unsafe_load[width=8]())
+            return _mix(_short_hash(word, length))
+    return _mix(_hash_bytes(bytes.get(row)))
+
+
+@always_inline
 def _string_probe_slot(
     index: _HashBucket,
     hash: UInt64,
@@ -650,12 +683,14 @@ def _string_probe_slot(
 ) -> Int:
     # The caller proves probe validity; null build rows never enter the index.
     # Equal hashes still require exact bytes, including embedded NULs.
-    var at = Int(hash & UInt64(index.mask()))
-    while index.slots[at].row >= 0:
-        ref slot = index.slots[at]
+    var mask = len(index.slots) - 1
+    var slots = index.slots.unsafe_ptr()
+    var at = Int(hash & UInt64(mask))
+    while slots.unsafe_offset(at)[].row >= 0:
+        ref slot = slots.unsafe_offset(at)[]
         if hash == slot.key and probe.equal(row, build, Int(slot.row)):
             return at
-        at = (at + 1) & index.mask()
+        at = (at + 1) & mask
     return -1
 
 
@@ -685,7 +720,6 @@ def _append_duplicate_rows(
 struct _HashBuildJob(Job):
     """Build one hash bucket from stable right-row positions."""
 
-    var hashes: ArcPointer[List[UInt64]]
     var order: ArcPointer[List[Int]]
     # The hashes, and for an integer key without nulls its words, in
     # bucket order: read in sequence instead of at each row (#378).
@@ -700,7 +734,6 @@ struct _HashBuildJob(Job):
 
     def __init__(
         out self,
-        hashes: ArcPointer[List[UInt64]],
         order: ArcPointer[List[Int]],
         ordered_hashes: ArcPointer[List[UInt64]],
         ordered_words: ArcPointer[List[UInt64]],
@@ -710,7 +743,6 @@ struct _HashBuildJob(Job):
         last: Int,
         skip_nulls: Bool,
     ):
-        self.hashes = hashes.copy()
         self.order = order.copy()
         self.ordered_hashes = ordered_hashes.copy()
         self.ordered_words = ordered_words.copy()
@@ -810,7 +842,11 @@ struct _HashBuildJob(Job):
                         count += 1
                         next = Int(entry.next_position)
                     groups[first] = Int32(count)
-                var hash = self.hashes[][Int(old.row)]
+                # Integer slots retain the exact key word; other slots
+                # already retain the complete hash, including compound
+                # keys. Reconstruct only while compacting duplicate groups
+                # instead of retaining every input row's original hash.
+                var hash = _mix(old.key) if self.typed_int else old.key
                 var at = Int(hash & UInt64(compact_size - 1))
                 while compact[at].row >= 0:
                     at = (at + 1) & (compact_size - 1)
@@ -950,7 +986,7 @@ struct _HashProbeJob(MatchJob):
             for i in range(self.start, self.end):
                 var matched = False
                 if all_valid or probe._valid(i):
-                    var hash = self.left_hashes[][i]
+                    var hash = _string_probe_hash(probe_bytes, i)
                     var bucket = Int(hash >> 56) >> self.fold
                     matched = (
                         _string_probe_slot(
@@ -1061,40 +1097,41 @@ struct _HashProbeJob(MatchJob):
             var all_valid = len(left._bits[]) == 0
             var left_bytes = _Bytes(left)
             var right_bytes = _Bytes(right)
+            # Buckets outlive this job, and the fold maps each row's hash to
+            # an existing bucket. Hash on read, as for integer probes, so
+            # preparing a probe needs no row-sized hash array or histogram.
+            var buckets = self.buckets[].unsafe_ptr()
             var generic_start = self.start
             # Emit only right positions while every input row has one output.
             # Missing inner matches or duplicate right keys end this prefix.
             if self.omit_identity:
                 var row = self.start
                 while row < self.end:
-                    if not left._valid(row):
+                    if not (all_valid or left._valid(row)):
                         if self.include_unmatched:
                             self.right_rows.append(-1)
                             row += 1
                             continue
                         break
-                    var hash = self.left_hashes[][row]
+                    var hash = _string_probe_hash(left_bytes, row)
                     var bucket = Int(hash >> 56) >> self.fold
-                    ref index = self.buckets[][bucket]
+                    ref index = buckets.unsafe_offset(bucket)[]
                     # Strings keep the plain walk: their slots hold the full
                     # hash, so a collision is rejected without reading a
                     # string, and H2O join q4 (10M probes, every one
                     # matching its first slot) was 17% slower through the
                     # tags' extra work per probe.
-                    var position = Int(hash & UInt64(index.mask()))
+                    var position = _string_probe_slot(
+                        index, hash, left_bytes, right_bytes, row
+                    )
                     var matched_row = -1
                     var duplicate = False
-                    while index.slots[position].row >= 0:
-                        ref slot = index.slots[position]
-                        var j = Int(slot.row)
-                        if hash == slot.key and (
-                            (all_valid or left._valid(row))
-                            and left_bytes.equal(row, right_bytes, j)
-                        ):
-                            matched_row = j
-                            duplicate = slot.next_position >= 0
-                            break
-                        position = (position + 1) & index.mask()
+                    if position >= 0:
+                        ref slot = index.slots.unsafe_ptr().unsafe_offset(
+                            position
+                        )[]
+                        matched_row = Int(slot.row)
+                        duplicate = slot.next_position >= 0
                     if matched_row >= 0 and not duplicate:
                         self.right_rows.append(matched_row)
                         row += 1
@@ -1113,20 +1150,24 @@ struct _HashProbeJob(MatchJob):
                     self.left_rows.append(previous)
                 generic_start = row
             for i in range(generic_start, self.end):
-                var hash = self.left_hashes[][i]
-                var bucket = Int(hash >> 56) >> self.fold
-                ref index = self.buckets[][bucket]
-                var position = Int(hash & UInt64(index.mask()))
-                var matched = False
-                while index.slots[position].row >= 0:
-                    ref slot = index.slots[position]
-                    var j = Int(slot.row)
-                    if hash == slot.key and (
-                        (all_valid or left._valid(i))
-                        and left_bytes.equal(i, right_bytes, j)
-                    ):
+                if not (all_valid or left._valid(i)):
+                    if self.include_unmatched:
                         self.left_rows.append(i)
-                        self.right_rows.append(j)
+                        self.right_rows.append(-1)
+                    continue
+                var hash = _string_probe_hash(left_bytes, i)
+                var bucket = Int(hash >> 56) >> self.fold
+                ref index = buckets.unsafe_offset(bucket)[]
+                var position = _string_probe_slot(
+                    index, hash, left_bytes, right_bytes, i
+                )
+                if position >= 0:
+                    ref slot = index.slots.unsafe_ptr().unsafe_offset(
+                        position
+                    )[]
+                    self.left_rows.append(i)
+                    self.right_rows.append(Int(slot.row))
+                    if slot.next_position >= 0:
                         _append_duplicate_rows(
                             index,
                             Int(slot.next_position),
@@ -1134,10 +1175,7 @@ struct _HashProbeJob(MatchJob):
                             self.left_rows,
                             self.right_rows,
                         )
-                        matched = True
-                        break
-                    position = (position + 1) & index.mask()
-                if not matched and self.include_unmatched:
+                elif self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
             return
@@ -1271,8 +1309,10 @@ struct PreparedHashIndex(Copyable):
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
         var lanes = workers if workers > 0 else worker_count(len(left[0]))
-        if len(left) == 1 and _is_int_key(left[0]):
-            # Hash fixed-width probe keys as they are read by the workers.
+        if len(left) == 1 and (
+            _is_int_key(left[0]) or left[0]._data.isa[StringColumn]()
+        ):
+            # Hash integer and string probe keys as workers read them.
             # No row-sized hash buffer or separate hashing/histogram pass.
             return _HashIndex(
                 left^,
@@ -1631,7 +1671,9 @@ def prepare_hash_index(
     swap(ordered_hashes, right_parts.hashes)
     var ordered_words = List[UInt64]()
     swap(ordered_words, right_parts.words)
-    var shared_right_hashes = ArcPointer(right_hashes^.into_hashes())
+    # Scatter owns its reordered hashes. The input-order hash array and
+    # histograms are dead before bucket tables and duplicate chains grow.
+    _ = right_hashes^
     var shared_order = ArcPointer(order^)
     var shared_hashes = ArcPointer(ordered_hashes^)
     var shared_words = ArcPointer(ordered_words^)
@@ -1642,7 +1684,6 @@ def prepare_hash_index(
     for bucket in range(right_parts.buckets()):
         builders.append(
             _HashBuildJob(
-                shared_right_hashes,
                 shared_order,
                 shared_hashes,
                 shared_words,
