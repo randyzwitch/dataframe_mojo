@@ -21,8 +21,6 @@ from dataframe import (
     lit,
     concat_str,
 )
-from dataframe_metal.accelerator.dictionaries import lower_dictionary_operations
-from dataframe_metal.accelerator.rows import lower_rows
 from dataframe.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_frame
@@ -834,44 +832,3 @@ def test_text_function_argument_errors() raises:
     assert_true(
         frame.select(col("s").str().find("a.b", literal=True)).item().is_null()
     )
-
-
-def test_accelerator_lowering_rejects_text_functions() raises:
-    # The row lowering knows none of these operations, and the dictionary
-    # lowering's concat tables cannot skip nulls: each raises its ordinary
-    # unsupported error, so the query runs on the CPU.
-    var frame = DataFrame(
-        [
-            Series("s", Column[String](["a b", "c"])),
-            Series("t", Column[String](["x", "y"])),
-        ]
-    )
-    var queries = List[Expr]()
-    for expression in _expressions():
-        queries.append(expression.copy())
-    queries.append(col("s").str().decode("hex", strict=False))
-    queries.append(col("s").str().to_integer(strict=False))
-    queries.append(
-        concat_str([col("s"), col("t")], ignore_nulls=True).alias("c")
-    )
-    for expression in queries:
-        var query = frame.lazy().select(expression.copy())
-        var failed = False
-        try:
-            _ = lower_rows(query)
-        except error:
-            assert_true(String(error).find("unsupported") >= 0, String(error))
-            failed = True
-        assert_true(failed, "text functions must not lower to rows")
-    var categorical = DataFrame(
-        [
-            frame.column("s").cast(DataType.CATEGORICAL),
-            frame.column("t").cast(DataType.CATEGORICAL),
-        ]
-    )
-    with assert_raises(contains="unsupported"):
-        _ = lower_dictionary_operations(
-            categorical.lazy().select(
-                concat_str([col("s"), col("t")], ignore_nulls=True)
-            )
-        )

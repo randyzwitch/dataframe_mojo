@@ -2,8 +2,6 @@
 # contract-group: lazy.time_windows
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
-from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
-from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_compare import assert_frame
 
 comptime HOUR = 3600000
@@ -287,7 +285,7 @@ def test_lazy_time_windows_empty_input_and_errors() raises:
         _ = nulls.rolling("t", "1h").agg(_aggregates()).collect(engine="cpu")
 
 
-def test_lazy_time_windows_accelerator_metadata_and_rejection() raises:
+def test_lazy_time_windows_run_on_the_cpu_under_automatic_placement() raises:
     var source = _source()
     var aggregates: List[Expr] = [col("x").sum().alias("sum")]
     for rolling in [False, True]:
@@ -298,20 +296,6 @@ def test_lazy_time_windows_accelerator_metadata_and_rejection() raises:
             .group_by_dynamic("t", "2h", group_by="g")
             .agg(aggregates)
         ).select(["t", "sum"])
-        # The accelerator's projection pruning keeps the index, the keys
-        # and the aggregated column, and its schema matches the CPU's.
-        var pruned = plan.copy()
-        prune_projections(pruned)
-        assert_equal(pruned._nodes[0].names, ["t", "g", "x"])
-        var schema = schema_frame(pruned, len(pruned._nodes) - 1)
-        assert_equal(schema.height(), 0)
-        assert_frame(schema, plan.collect(engine="cpu").clear())
-        # Metal declines both node kinds before touching a device.
-        var runtime = MetalRuntime(device_id=999999)
         assert_true(
-            "Metal unsupported [plan]: group_by_dynamic and rolling"
-            in runtime.describe(plan)
-        )
-        assert_equal(
-            runtime.select_auto(plan, True, True, 65536)[0], String("cpu")
+            plan.collect(engine="auto").equals(plan.collect(engine="cpu"))
         )

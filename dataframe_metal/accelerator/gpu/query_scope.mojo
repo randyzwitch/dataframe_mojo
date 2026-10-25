@@ -6,14 +6,8 @@ from std.memory import ArcPointer, Pointer
 from std.time import perf_counter_ns
 from .target import METAL_TARGET
 from .scratch_pool import ScratchPool
-from . import fused_int32
 
-# Compiled handles and the context-cell alias live in a focused module so the
-# query scope remains centered on lease, budget, and scratch ownership.
-from .fused_pipeline_cache import (
-    ContextCell,
-    FusedPipelineCache,
-)
+comptime ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
 
 
 def checked_add(a: Int, b: Int) raises -> Int:
@@ -35,8 +29,6 @@ struct _DeviceServiceState(Movable):
     var generation: Atomic[Int64]
     var pool: ScratchPool
     var pool_lock: Atomic[Int64]
-    var pipelines: FusedPipelineCache
-    var pipeline_clears: Int
 
     def __init__(out self, device: Int, idle_bytes: Int, idle_entries: Int):
         self.context = None
@@ -45,14 +37,10 @@ struct _DeviceServiceState(Movable):
         self.generation = Atomic[Int64](0)
         self.pool = ScratchPool(idle_bytes, idle_entries)
         self.pool_lock = Atomic[Int64](0)
-        self.pipelines = FusedPipelineCache()
-        self.pipeline_clears = 0
 
     def __deinit__(deinit self):
         # Buffers keep their context alive; release idle owners before the
         # service's final context handle, without issuing new GPU work.
-        self.pipelines.clear()
-        _ = self.pipelines^
         _ = self.pool^
         _ = self.context^
 
@@ -111,125 +99,6 @@ struct DeviceService(Copyable):
         self._state[].pool_lock.store(0)
         return result
 
-    def pipeline_info(self) -> Tuple[Int, Int, Int, Int]:
-        """Cached fused handles, cumulative hits, misses, and poison clears."""
-        self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
-        var result = (
-            state[].pipelines.entries(),
-            state[].pipelines.hits,
-            state[].pipelines.misses,
-            state[].pipeline_clears,
-        )
-        state[].pool_lock.store(0)
-        return result
-
-    def enqueue_fused_partials[
-        nullable: Bool, filtered: Bool, arithmetic: Bool
-    ](
-        self,
-        context: DeviceContext,
-        values: DeviceBuffer[DType.int32],
-        validity: DeviceBuffer[DType.uint8],
-        validity_offset: UInt32,
-        rows: UInt32,
-        stride: UInt32,
-        threshold: Int32,
-        addend: Int32,
-        factor: Int32,
-        sums: DeviceBuffer[DType.int64],
-        counts: DeviceBuffer[DType.uint32],
-        faults: DeviceBuffer[DType.uint32],
-        partial_count: Int,
-    ) raises:
-        """Cache and enqueue one certified fused partial specialization.
-
-        The active Scope owns the exclusive cached-context lease. This lock
-        also serializes cache metadata with scratch operations; it is released
-        as soon as enqueue returns and is never held across a synchronization.
-        """
-        self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
-        try:
-            if state[].cached_lease.load() != 1:
-                raise Error(
-                    "fused pipeline cache requires the cached context lease"
-                )
-            comptime if METAL_TARGET:
-                if (
-                    not state[].context
-                    or rebind[DeviceContext](state[].context.value()) != context
-                ):
-                    raise Error(
-                        "fused pipeline cache context does not match its lease"
-                    )
-                state[].pipelines.enqueue_partials[
-                    nullable, filtered, arithmetic
-                ](
-                    context,
-                    values,
-                    validity,
-                    validity_offset,
-                    rows,
-                    stride,
-                    threshold,
-                    addend,
-                    factor,
-                    sums,
-                    counts,
-                    faults,
-                    partial_count,
-                )
-            else:
-                raise Error(
-                    "fused pipeline cache requires a compiled Metal target"
-                )
-            state[].pool_lock.store(0)
-        except error:
-            state[].pool_lock.store(0)
-            raise error^
-
-    def enqueue_fused_finish(
-        self,
-        context: DeviceContext,
-        sums: DeviceBuffer[DType.int64],
-        counts: DeviceBuffer[DType.uint32],
-        faults: DeviceBuffer[DType.uint32],
-        partial_count: Int,
-        output: DeviceBuffer[DType.int64],
-    ) raises:
-        self._lock_pool()
-        var state = Pointer(to=self._state[]).unsafe_origin_cast[MutAnyOrigin]()
-        try:
-            if state[].cached_lease.load() != 1:
-                raise Error(
-                    "fused pipeline cache requires the cached context lease"
-                )
-            comptime if METAL_TARGET:
-                if (
-                    not state[].context
-                    or rebind[DeviceContext](state[].context.value()) != context
-                ):
-                    raise Error(
-                        "fused pipeline cache context does not match its lease"
-                    )
-                state[].pipelines.enqueue_finish(
-                    context,
-                    sums,
-                    counts,
-                    faults,
-                    partial_count,
-                    output,
-                )
-            else:
-                raise Error(
-                    "fused pipeline cache requires a compiled Metal target"
-                )
-            state[].pool_lock.store(0)
-        except error:
-            state[].pool_lock.store(0)
-            raise error^
-
     def _scratch[
         dtype: DType
     ](self, context: DeviceContext, length: Int) raises -> DeviceBuffer[dtype]:
@@ -284,9 +153,6 @@ struct DeviceService(Copyable):
                 return (result^, True)
             except error:
                 self._lock_pool()
-                if state[].pipelines.entries() > 0:
-                    state[].pipeline_clears += 1
-                state[].pipelines.clear()
                 state[].pool.clear()
                 state[].pool_lock.store(0)
                 state[].context = None
@@ -305,9 +171,6 @@ struct DeviceService(Copyable):
             # The Scope still owns its context copy until after this method.
             # Never make a context involved in a failed query available again.
             self._lock_pool()
-            if state[].pipelines.entries() > 0:
-                state[].pipeline_clears += 1
-            state[].pipelines.clear()
             state[].pool.clear()
             state[].pool_lock.store(0)
             state[].context = None
@@ -454,92 +317,6 @@ struct Scope(Copyable):
 
     def uses_cached_context(self) -> Bool:
         return self._state[].cached_context_lease
-
-    def enqueue_fused_partials[
-        nullable: Bool, filtered: Bool, arithmetic: Bool
-    ](
-        self,
-        values: DeviceBuffer[DType.int32],
-        validity: DeviceBuffer[DType.uint8],
-        validity_offset: UInt32,
-        rows: UInt32,
-        stride: UInt32,
-        threshold: Int32,
-        addend: Int32,
-        factor: Int32,
-        sums: DeviceBuffer[DType.int64],
-        counts: DeviceBuffer[DType.uint32],
-        faults: DeviceBuffer[DType.uint32],
-        partial_count: Int,
-    ) raises:
-        var context = self.context()
-        if self._state[].cached_context_lease and self._state[].service:
-            self._state[].service.value().enqueue_fused_partials[
-                nullable, filtered, arithmetic
-            ](
-                context,
-                values,
-                validity,
-                validity_offset,
-                rows,
-                stride,
-                threshold,
-                addend,
-                factor,
-                sums,
-                counts,
-                faults,
-                partial_count,
-            )
-        else:
-            context.enqueue_function[
-                fused_int32.partials[nullable, filtered, arithmetic]
-            ](
-                values,
-                validity,
-                validity_offset,
-                rows,
-                stride,
-                threshold,
-                addend,
-                factor,
-                sums,
-                counts,
-                faults,
-                grid_dim=partial_count,
-                block_dim=256,
-            )
-        self.record_launches(1)
-
-    def enqueue_fused_finish(
-        self,
-        sums: DeviceBuffer[DType.int64],
-        counts: DeviceBuffer[DType.uint32],
-        faults: DeviceBuffer[DType.uint32],
-        partial_count: Int,
-        output: DeviceBuffer[DType.int64],
-    ) raises:
-        var context = self.context()
-        if self._state[].cached_context_lease and self._state[].service:
-            self._state[].service.value().enqueue_fused_finish(
-                context,
-                sums,
-                counts,
-                faults,
-                partial_count,
-                output,
-            )
-        else:
-            context.enqueue_function[fused_int32.finish](
-                sums,
-                counts,
-                faults,
-                UInt32(partial_count),
-                output,
-                grid_dim=1,
-                block_dim=256,
-            )
-        self.record_launches(1)
 
     def scratch[dtype: DType](self, length: Int) raises -> DeviceBuffer[dtype]:
         """Obtain private scratch after its caller reserves the exact capacity."""

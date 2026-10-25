@@ -1,8 +1,22 @@
 """Metal returns the CPU's outcome for a query, including the CPU's error."""
+from std.sys import CompilationTarget
 from std.testing import assert_raises, assert_true
 from dataframe import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.metal import MetalRuntime, metal_installed
+
+
+def require_metal() raises -> MetalRuntime:
+    """The default runtime, after checking the `metal` capability holds."""
+    assert_true(CompilationTarget.is_macos(), "metal capability requires macOS")
+    assert_true(
+        metal_installed(), "metal capability requires the Mojo Metal target"
+    )
+    assert_true(
+        MetalRuntime.device_count() > 0,
+        "metal capability requires a working Mojo GPU device",
+    )
+    return MetalRuntime()
 
 
 def same_outcome(query: LazyFrame) raises:

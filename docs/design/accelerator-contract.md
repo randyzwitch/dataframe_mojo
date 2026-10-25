@@ -149,12 +149,14 @@ functions, and drop the replacement step.
 The checks are in `scripts/check_accelerator_boundary.sh`: core may import
 `dataframe_provider` only from `_accel_provider.mojo` and never imports
 `dataframe_metal`; `dataframe_metal` may import `dataframe` but not `tests`;
-the root `dataframe_provider` (Metal) may import `dataframe_metal`; and
-`providers/cpu/dataframe_provider` imports nothing from a backend.
+the root `dataframe_provider` (Metal) may import `dataframe_metal`;
+`providers/cpu/dataframe_provider` imports nothing from a backend; and tests
+import `dataframe_metal` only in the Metal test files the script lists, so
+CPU tests never depend on a backend.
 
 ## Status
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs on Apple silicon through Mojo/MAX kernels. Implements all six provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
+| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | The execution core is being rebuilt as an operator hand-off from the CPU engine ([Apple Metal](../apple-metal.md)); today every query reports unsupported. Implements all six provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Any operator on the device. A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
 | NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |

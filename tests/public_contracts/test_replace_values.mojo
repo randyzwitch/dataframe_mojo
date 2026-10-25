@@ -15,7 +15,6 @@ from dataframe import (
     null,
     when,
 )
-from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
@@ -423,14 +422,12 @@ def test_replace_in_group_by_agg_and_large_inputs() raises:
     assert_equal(_shown(branch.column("b").head(4)), ["X", "-", "-", "-"])
 
 
-def test_replace_falls_back_to_the_cpu_on_an_accelerator() raises:
+def test_replace_runs_on_the_cpu_under_automatic_placement() raises:
     var frame = _ints()
     var query = frame.lazy().select(
         col("a").replace_strict([1, 2, 3], [10, 20, 30]).alias("out")
     )
-    var runtime = MetalRuntime()
-    assert_true("unsupported" in query.explain(accelerator=runtime))
     var cpu = query.collect(engine="cpu")
-    var auto = query.collect(engine="auto", accelerator=runtime)
+    var auto = query.collect(engine="auto")
     assert_true(cpu.equals(auto))
     assert_equal(_shown(auto.column("out")), ["10", "20", "null", "30", "20"])

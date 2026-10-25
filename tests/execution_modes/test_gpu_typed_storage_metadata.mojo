@@ -10,7 +10,7 @@ from dataframe_metal.accelerator.gpu.typed_storage import (
     readback_float32,
     _NativeReservation,
 )
-from tests.execution_modes.test_backend_metal import require_metal
+from tests.support.metal_outcomes import require_metal
 
 
 def test_native_float32_column_capacity_includes_only_present_sidecars() raises:
