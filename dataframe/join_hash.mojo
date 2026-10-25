@@ -650,12 +650,14 @@ def _string_probe_slot(
 ) -> Int:
     # The caller proves probe validity; null build rows never enter the index.
     # Equal hashes still require exact bytes, including embedded NULs.
-    var at = Int(hash & UInt64(index.mask()))
-    while index.slots[at].row >= 0:
-        ref slot = index.slots[at]
+    var mask = len(index.slots) - 1
+    var slots = index.slots.unsafe_ptr()
+    var at = Int(hash & UInt64(mask))
+    while slots.unsafe_offset(at)[].row >= 0:
+        ref slot = slots.unsafe_offset(at)[]
         if hash == slot.key and probe.equal(row, build, Int(slot.row)):
             return at
-        at = (at + 1) & index.mask()
+        at = (at + 1) & mask
     return -1
 
 
@@ -1061,40 +1063,42 @@ struct _HashProbeJob(MatchJob):
             var all_valid = len(left._bits[]) == 0
             var left_bytes = _Bytes(left)
             var right_bytes = _Bytes(right)
+            # The prepared buckets and probe hashes outlive this job, and
+            # the fold maps every hash to an existing bucket. As for integer
+            # probes, take their pointers once instead of checking each row.
+            var hashes = self.left_hashes[].unsafe_ptr()
+            var buckets = self.buckets[].unsafe_ptr()
             var generic_start = self.start
             # Emit only right positions while every input row has one output.
             # Missing inner matches or duplicate right keys end this prefix.
             if self.omit_identity:
                 var row = self.start
                 while row < self.end:
-                    if not left._valid(row):
+                    if not (all_valid or left._valid(row)):
                         if self.include_unmatched:
                             self.right_rows.append(-1)
                             row += 1
                             continue
                         break
-                    var hash = self.left_hashes[][row]
+                    var hash = hashes.unsafe_offset(row)[]
                     var bucket = Int(hash >> 56) >> self.fold
-                    ref index = self.buckets[][bucket]
+                    ref index = buckets.unsafe_offset(bucket)[]
                     # Strings keep the plain walk: their slots hold the full
                     # hash, so a collision is rejected without reading a
                     # string, and H2O join q4 (10M probes, every one
                     # matching its first slot) was 17% slower through the
                     # tags' extra work per probe.
-                    var position = Int(hash & UInt64(index.mask()))
+                    var position = _string_probe_slot(
+                        index, hash, left_bytes, right_bytes, row
+                    )
                     var matched_row = -1
                     var duplicate = False
-                    while index.slots[position].row >= 0:
-                        ref slot = index.slots[position]
-                        var j = Int(slot.row)
-                        if hash == slot.key and (
-                            (all_valid or left._valid(row))
-                            and left_bytes.equal(row, right_bytes, j)
-                        ):
-                            matched_row = j
-                            duplicate = slot.next_position >= 0
-                            break
-                        position = (position + 1) & index.mask()
+                    if position >= 0:
+                        ref slot = index.slots.unsafe_ptr().unsafe_offset(
+                            position
+                        )[]
+                        matched_row = Int(slot.row)
+                        duplicate = slot.next_position >= 0
                     if matched_row >= 0 and not duplicate:
                         self.right_rows.append(matched_row)
                         row += 1
@@ -1113,20 +1117,24 @@ struct _HashProbeJob(MatchJob):
                     self.left_rows.append(previous)
                 generic_start = row
             for i in range(generic_start, self.end):
-                var hash = self.left_hashes[][i]
-                var bucket = Int(hash >> 56) >> self.fold
-                ref index = self.buckets[][bucket]
-                var position = Int(hash & UInt64(index.mask()))
-                var matched = False
-                while index.slots[position].row >= 0:
-                    ref slot = index.slots[position]
-                    var j = Int(slot.row)
-                    if hash == slot.key and (
-                        (all_valid or left._valid(i))
-                        and left_bytes.equal(i, right_bytes, j)
-                    ):
+                if not (all_valid or left._valid(i)):
+                    if self.include_unmatched:
                         self.left_rows.append(i)
-                        self.right_rows.append(j)
+                        self.right_rows.append(-1)
+                    continue
+                var hash = hashes.unsafe_offset(i)[]
+                var bucket = Int(hash >> 56) >> self.fold
+                ref index = buckets.unsafe_offset(bucket)[]
+                var position = _string_probe_slot(
+                    index, hash, left_bytes, right_bytes, i
+                )
+                if position >= 0:
+                    ref slot = index.slots.unsafe_ptr().unsafe_offset(
+                        position
+                    )[]
+                    self.left_rows.append(i)
+                    self.right_rows.append(Int(slot.row))
+                    if slot.next_position >= 0:
                         _append_duplicate_rows(
                             index,
                             Int(slot.next_position),
@@ -1134,10 +1142,7 @@ struct _HashProbeJob(MatchJob):
                             self.left_rows,
                             self.right_rows,
                         )
-                        matched = True
-                        break
-                    position = (position + 1) & index.mask()
-                if not matched and self.include_unmatched:
+                elif self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
             return
