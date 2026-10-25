@@ -465,19 +465,28 @@ def _write(
     for column in frame._columns:
         if "\x00" in column.name():
             raise Error("IPC column names must not contain NUL bytes")
-    var writer = _Writer(frame, path, codec, stream)
+    var source = frame.copy()
+    for k in range(source.width()):
+        var column = source._columns[k].copy()
+        if column.is_chunked() and column.dtype().is_nested():
+            # Valid frames can combine independently encoded nested chunks.
+            # IPC files require one consistent dictionary across all batches.
+            source._columns[k] = Series._from_chunks(
+                _align_children(column.chunks())
+            )
+    var writer = _Writer(source, path, codec, stream)
     var offset = 0
-    if frame.height() == 0:
+    if source.height() == 0:
         # Even an empty categorical batch carries its dictionary values.
-        writer.append(frame)
-    while offset < frame.height():
-        var count = min(size, frame.height() - offset)
-        for column in frame._columns:
+        writer.append(source)
+    while offset < source.height():
+        var count = min(size, source.height() - offset)
+        for column in source._columns:
             if column.is_chunked():
                 var located = column._chunk_at(offset)
                 count = min(count, len(located[0]) - located[1])
         var columns = List[Series]()
-        for column in frame._columns:
+        for column in source._columns:
             columns.append(column.slice(offset, count))
         writer.append(DataFrame(columns^, height=count))
         offset += count

@@ -52,7 +52,8 @@ Both writers accept `compression="uncompressed"`, `"lz4"`, or `"zstd"` and
 a positive `batch_size`. A batch stops at the nearest input column chunk
 boundary or the size limit. Differently chunked columns are aligned without
 rechunking the complete frame. Empty frames retain their schema, and
-zero-column frames retain their row count.
+zero-column frames retain their row count. Nested categorical dictionaries
+are unified across input chunks before writing.
 
 Writing replaces the destination. Invalid compression and batch size are
 rejected before opening it; an I/O or serialization failure can leave a

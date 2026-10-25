@@ -9,6 +9,7 @@ from dataframe import (
     Series,
     StringColumn,
     col,
+    concat,
     ArrowArray,
     ArrowSchema,
     export_arrow_series,
@@ -245,8 +246,23 @@ def test_ipc_nested_dictionary_changes_and_empty_dictionary_schemas_preserve_val
                 labels[row],
             )
     var root = getenv("COVERAGE_TEST_TMP") + "/ipc-written-nested-dictionary"
-    write_ipc(frame, root + ".arrow", batch_size=2)
-    write_ipc_stream(frame, root + ".stream", batch_size=2)
+    # A normal concat can combine nested chunks with independent dictionaries.
+    # The writer must also normalize frames that did not come from one read.
+    var independent = concat(
+        [
+            read_ipc_stream(fixture("nested-dictionary.stream"), n_rows=2),
+            frame.slice(2, 2),
+        ]
+    )
+    # Series.equals also compares categorical dictionary layouts. Check cells
+    # here; the input deliberately has different dictionaries in its chunks.
+    assert_equal(independent.height(), 4)
+    for row in range(4):
+        assert_equal(
+            independent.item(row, "items").list().get(0).string(), labels[row]
+        )
+    write_ipc(independent, root + ".arrow", batch_size=2)
+    write_ipc_stream(independent, root + ".stream", batch_size=2)
     assert_true(read_ipc(root + ".arrow").equals(frame))
     assert_true(read_ipc_stream(root + ".stream").equals(frame))
 
