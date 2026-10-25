@@ -1560,6 +1560,38 @@ Read a local UTF-8 GeoJSON file eagerly.
 def read_geojson(path: String, *, geometry_name: String = "geometry", id_name: String = "feature_id") -> DataFrame
 ```
 
+## `read_ipc`
+
+Read an Arrow IPC file (Feather v2), preserving record-batch chunks.
+
+```mojo
+def read_ipc(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_ipc(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
+```
+
+## `read_ipc_schema`
+
+Read field names/types without reading record-batch bodies.
+
+```mojo
+def read_ipc_schema(path: String, *, stream: Bool = False) -> List[Field]
+```
+
+## `read_ipc_stream`
+
+Read a local IPC stream file, with the same selection rules as read_ipc.
+
+```mojo
+def read_ipc_stream(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
+```
+
+```mojo
+def read_ipc_stream(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
+```
+
 ## `read_parquet`
 
 Read a local Parquet file into a DataFrame.
@@ -1586,6 +1618,14 @@ def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", 
 
 ```mojo
 def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8") -> LazyFrame
+```
+
+## `scan_ipc`
+
+Lazily scan an IPC/Feather v2 file in record batches.
+
+```mojo
+def scan_ipc(path: String, *, memory_map: Bool = True) -> LazyFrame
 ```
 
 ## `scan_parquet`
@@ -1994,6 +2034,22 @@ Write GeoParquet 1.1 WKB with CRS and edge metadata.
 
 ```mojo
 def write_geoparquet(frame: DataFrame, path: String, *, primary_column: String = "", compression: String = "zstd", row_group_size: Int = Int(1000000))
+```
+
+## `write_ipc`
+
+Write an IPC/Feather v2 file with uncompressed, lz4 or zstd buffers.
+
+```mojo
+def write_ipc(frame: DataFrame, path: String, *, compression: String = "uncompressed", batch_size: Int = Int(65536))
+```
+
+## `write_ipc_stream`
+
+Write a local IPC stream file, preserving input chunk boundaries.
+
+```mojo
+def write_ipc_stream(frame: DataFrame, path: String, *, compression: String = "uncompressed", batch_size: Int = Int(65536))
 ```
 
 ## `write_parquet`
