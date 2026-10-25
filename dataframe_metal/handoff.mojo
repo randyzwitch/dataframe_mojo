@@ -34,6 +34,7 @@ from dataframe.expr import (
 )
 from dataframe.frame import DataFrame
 from dataframe.lazy import FILTER, LazyFrame, SCAN_FRAME, SELECT
+from dataframe.placement import load_costs
 from dataframe.series import Series
 from .accelerator.faults import data_fault
 from .accelerator.gpu.filter_sum import (
@@ -213,6 +214,32 @@ def supports(region: LazyFrame) -> Bool:
         return Bool(plan_region(region))
     except:
         return False
+
+
+def operator_key(plan: FilterSum) -> String:
+    """The calibration key of an accepted region (`dataframe.placement`)."""
+    return (
+        "filter_sum:"
+        + plan.dtype.name()
+        + (":filtered" if plan.filtered else ":plain")
+    )
+
+
+def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+    """This region's calibration key and its measured cost on Metal for
+    `rows` input rows, in nanoseconds; -1 when it has no measured cost."""
+    try:
+        var accepted = plan_region(region)
+        if not accepted:
+            return (String(), Float64(-1))
+        var key = operator_key(accepted.value())
+        var costs = load_costs("accel")
+        var cost = costs.get(key)
+        if not cost:
+            return (key^, Float64(-1))
+        return (key^, cost.value().ns(rows))
+    except:
+        return (String(), Float64(-1))
 
 
 struct HandoffTimings(Copyable, Movable):

@@ -1,6 +1,7 @@
 """Regions the CPU executor hands to Metal: which shapes Metal accepts, and
 results equal to the CPU's for the ones it runs."""
 # contract-group: execution.backends
+from std.os import setenv, unsetenv
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
 from dataframe import (
     Column,
@@ -225,3 +226,60 @@ def test_metal_handoff_float32_nan_and_explain_and_profile() raises:
             declined.collect(engine="cpu")
         )
     )
+
+
+def _calibrate(path: String, cpu_row_ns: Float64, accel_row_ns: Float64) raises:
+    """A calibration for the filtered Int32 sum alone; other keys are left
+    unmeasured, so they stay on the CPU."""
+    var text = String(
+        '{"operators": {"filter_sum:int32:filtered": {"cpu": {"fixed_ns":'
+        ' 1000, "row_ns": '
+    )
+    text += String(cpu_row_ns) + '}, "accel": {"fixed_ns": 2000000,'
+    text += ' "row_ns": ' + String(accel_row_ns) + "}}}}"
+    with open(path, "w") as target:
+        target.write(text)
+
+
+# requires: metal
+def test_metal_automatic_placement_follows_measured_costs() raises:
+    _ = require_metal()
+    var path = String("build/test-handoff-calibration.json")
+    var frame = _columns(100_000, False)
+    var plan = frame.lazy().filter(col("i") > 0).select(col("i").sum())
+    var expected = plan.collect(engine="cpu")
+    # Without a calibration, engine="auto" probes nothing.
+    _ = unsetenv("DATAFRAME_HANDOFF_CALIBRATION")
+    assert_false("PLACE" in plan.explain(engine="auto"))
+    _ = setenv("DATAFRAME_HANDOFF_CALIBRATION", path)
+    for accel_cheaper in [True, False]:
+        # Metal at 0.1 ns/row against the CPU's 50 is estimated faster from
+        # about 40,000 rows; at 100 ns/row it never is.
+        _calibrate(path, 50.0, 0.1 if accel_cheaper else 100.0)
+        var shown = plan.explain(engine="auto")
+        assert_true("PLACE" in shown)
+        assert_true(
+            ("accel from" in shown) == accel_cheaper,
+            shown,
+        )
+        var profiled = plan.profile(engine="auto")
+        assert_true(profiled[0].equals(expected))
+        var report = profiled[1].copy()
+        var placed = String()
+        for row in range(report.height()):
+            var algorithm = report.item(row, "algorithm").string()
+            if algorithm.startswith("handoff") or algorithm.startswith(
+                "placed cpu"
+            ):
+                placed = algorithm
+        assert_true(
+            placed.startswith(
+                "handoff (accel"
+            ) if accel_cheaper else placed.startswith("placed cpu (accel"),
+            placed,
+        )
+        assert_true(plan.collect(engine="auto").equals(expected))
+    # An operator the calibration does not cover runs on the CPU.
+    var plain = frame.lazy().select(col("i").sum())
+    assert_true("no measured cost" in plain.explain(engine="auto"))
+    _ = unsetenv("DATAFRAME_HANDOFF_CALIBRATION")

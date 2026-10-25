@@ -67,12 +67,13 @@ def metal_installed() -> Bool:
 
 
 def _unsupported(query: LazyFrame) -> String:
-    """Why automatic placement cannot choose Metal for `query` yet."""
+    """Why automatic placement does not hand Metal the whole `query`."""
     _ = query
     return (
         UNSUPPORTED
-        + "automatic placement needs measured Metal costs; Metal runs"
-        ' supported nodes only with engine="accel"'
+        + "Metal never runs a whole plan; the CPU executor places each node"
+        " Metal supports by measured cost when DATAFRAME_HANDOFF_CALIBRATION"
+        ' names a calibration, and engine="accel" hands every one over'
     )
 
 

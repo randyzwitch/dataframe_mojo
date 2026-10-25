@@ -11,15 +11,17 @@ the column visible to the GPU (`wrap_ms`: wrapped in place, as the hand-off
 does; `copy_ms`: copied, for comparison), the kernel with readback of the
 per-block partials, and the host finish.
 `handed` says whether `explain` shows the node handed to Metal, so a plan
-the optimizer reshapes cannot pass CPU time off as Metal's. One TSV line
+the optimizer reshapes cannot pass CPU time off as Metal's; `wrap_ok` and
+`copy_ok` say whether Metal's answer, read in place and copied, equals the
+CPU's (Float32 within a relative 1e-5), so a fast wrong answer shows. One TSV line
 per case on stdout:
 
-    case dtype rows handed cpu_ms metal_ms metal/cpu context_ms wrap_ms copy_ms kernel_ms finish_ms
+    case dtype rows handed wrap_ok copy_ok cpu_ms metal_ms metal/cpu context_ms wrap_ms copy_ms kernel_ms finish_ms
 """
 from std.sys import argv
 from std.time import perf_counter_ns
 
-from dataframe import Column, DataFrame, LazyFrame, Series, col
+from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col
 from dataframe_metal.handoff import execute_timed
 from dataframe_metal.metal import MetalRuntime
 
@@ -33,6 +35,19 @@ def _frame[dtype: DType](rows: Int) raises -> DataFrame:
     for row in range(rows):
         values.append(Scalar[dtype]((row * 7919) % spread - spread // 2))
     return DataFrame([Series("x", Column[Scalar[dtype]](values^))])
+
+
+def _same(actual: DataFrame, expected: DataFrame) raises -> Bool:
+    var name = expected.columns()[0]
+    var a = actual.item(0, name)
+    var e = expected.item(0, name)
+    if a.is_null() or e.is_null():
+        return a.is_null() == e.is_null()
+    if e.dtype() == DataType.FLOAT32:
+        var x = Float64(a.float32())
+        var y = Float64(e.float32())
+        return abs(x - y) <= 1e-6 + 1e-5 * abs(y)
+    return actual.equals(expected)
 
 
 def _best_ms(plan: LazyFrame, reps: Int, metal: Bool) raises -> Float64:
@@ -62,14 +77,21 @@ def _case[dtype: DType](name: String, rows: Int, reps: Int) raises:
         _ = plan.collect(accelerator=MetalRuntime())
         var cpu = _best_ms(plan, reps, False)
         var metal = _best_ms(plan, reps, True)
-        var timed = execute_timed(plan)[1].copy()
-        var copied = execute_timed(plan, zero_copy=False)[1].copy()
+        var expected = plan.collect(engine="cpu")
+        var wrapped_run = execute_timed(plan)
+        var copied_run = execute_timed(plan, zero_copy=False)
+        var timed = wrapped_run[1].copy()
+        var copied = copied_run[1].copy()
+        var wrap_ok = _same(wrapped_run[0], expected)
+        var copy_ok = _same(copied_run[0], expected)
         var handed = "HANDOFF metal" in plan.explain(accelerator=MetalRuntime())
         print(
             labels[p],
             name,
             rows,
             handed,
+            wrap_ok,
+            copy_ok,
             round(cpu, 3),
             round(metal, 3),
             round(metal / cpu, 3),
@@ -87,7 +109,7 @@ def main() raises:
     var reps = Int(String(args[1])) if len(args) > 1 else 5
     var largest = Int(String(args[2])) if len(args) > 2 else 200_000_000
     print(
-        "case\tdtype\trows\thanded\tcpu_ms\tmetal_ms\tmetal/cpu"
+        "case\tdtype\trows\thanded\twrap_ok\tcopy_ok\tcpu_ms\tmetal_ms\tmetal/cpu"
         "\tcontext_ms\twrap_ms\tcopy_ms\tkernel_ms\tfinish_ms"
     )
     var sizes: List[Int] = [
