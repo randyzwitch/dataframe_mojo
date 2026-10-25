@@ -16,6 +16,7 @@ from .lazy import (
     LazyTimeGroupBy,
     scan_csv,
     scan_parquet,
+    scan_ipc,
 )
 
 from .expr import (
@@ -79,6 +80,13 @@ from .io.parquet import (
     read_parquet,
     write_parquet,
     write_geoparquet,
+)
+from .io.ipc import (
+    read_ipc,
+    read_ipc_stream,
+    read_ipc_schema,
+    write_ipc,
+    write_ipc_stream,
 )
 
 from .geometry import (

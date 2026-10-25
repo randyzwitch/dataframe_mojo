@@ -72,6 +72,11 @@ def main() raises:
         "spatial-written-empty.parquet",
         "tests/support/spatial_oracle.py",
     )
+    var ipc_count = _consume_outputs(
+        String(args[1]),
+        "ipc-written-empty.arrow",
+        "tests/support/ipc_oracle.py",
+    )
     run_command(["python3", "tests/support/arrow_oracle.py", "--check"])
     var library = getenv("DATAFRAME_PARQUET_LIBRARY")
     if not library:
@@ -80,10 +85,20 @@ def main() raises:
         else:
             library = "build/dfparquet/libdfparquet.so"
     run_command(["python3", "tests/support/native_stream_oracle.py", library])
+    run_command(
+        [
+            "python3",
+            "tests/support/ipc_oracle.py",
+            "--check-scan-library",
+            library,
+        ]
+    )
     print(
         "Independent PyArrow consumers passed for",
         parquet_count,
         "Parquet and",
         spatial_count,
-        "spatial contract run directories",
+        "spatial and",
+        ipc_count,
+        "IPC contract run directories",
     )

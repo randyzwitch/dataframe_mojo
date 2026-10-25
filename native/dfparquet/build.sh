@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build libdfparquet.so / .dylib: a minimal static Arrow C++ (Parquet reader,
+# Build libdfparquet.so / .dylib: static Arrow C++ (Parquet and IPC I/O,
 # bundled codecs, mimalloc) behind a small C ABI and the system runtimes.
 #
 #   ARROW_VERSION=24.0.0 bash native/dfparquet/build.sh [OUT_DIR]
@@ -38,7 +38,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DBOOST_LOCALE_ENABLE_ICU=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Java=ON \
   -DARROW_MIMALLOC=ON -DARROW_JEMALLOC=OFF \
   -DARROW_FILESYSTEM=OFF -DARROW_S3=OFF -DARROW_GCS=OFF -DARROW_AZURE=OFF -DARROW_HDFS=OFF \
-  -DARROW_JSON=OFF -DARROW_CSV=OFF -DARROW_IPC=OFF -DARROW_DATASET=OFF -DARROW_ACERO=OFF \
+  -DARROW_JSON=OFF -DARROW_CSV=OFF -DARROW_IPC=ON -DARROW_DATASET=OFF -DARROW_ACERO=OFF \
   -DARROW_FLIGHT=OFF -DARROW_GANDIVA=OFF -DARROW_SUBSTRAIT=OFF -DARROW_ORC=OFF \
   -DARROW_WITH_OPENTELEMETRY=OFF -DARROW_WITH_RE2=OFF -DARROW_WITH_UTF8PROC=OFF \
   -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF -DARROW_BUILD_INTEGRATION=OFF \
@@ -69,7 +69,8 @@ case "$(uname -s)" in
   *) echo "Unsupported platform: $(uname -s)" >&2; exit 1;;
 esac
 ${CXX:-c++} -O2 -std=c++20 -fPIC "${LINK_FLAGS[@]}" \
-  -I"$SRC/src" -I"$BUILD/src" "$HERE/dfparquet.cc" -o "$LIB" \
+  -I"$SRC/src" -I"$BUILD/src" -I"$SRC/thirdparty/flatbuffers/include" \
+  "$HERE/dfparquet.cc" "$HERE/dfipc.cc" -o "$LIB" \
   -L"$BUILD/release" "${ARCHIVES[@]}" "${SYSTEM_LIBS[@]}"
 strip "${STRIP_FLAGS[@]}" "$LIB"
 ls -la "$LIB"
