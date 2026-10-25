@@ -65,6 +65,21 @@ comptime _MAX_BUCKET_BITS = 12
 comptime _MIN_PARALLEL_ROWS = 1 << 14
 
 
+def selection_workers(n: Int, threads: Int = 0) -> Int:
+    """Workers for ordering or selecting `n` rows, capped by `threads` when
+    it is positive (a caller already on a worker passes 1)."""
+    var workers = configured_workers() if n >= _MIN_PARALLEL_ROWS else 1
+    if threads > 0:
+        workers = min(workers, threads)
+    return workers
+
+
+def selection_ranges(n: Int, threads: Int = 0) -> Int:
+    """Contiguous row ranges to split `n` rows into for selection: one per
+    worker, each at least 8,192 rows."""
+    return max(1, min(selection_workers(n, threads), n // 8192))
+
+
 @always_inline
 def _bit_length(x: UInt64) -> Int:
     if x == 0:
@@ -1153,10 +1168,8 @@ def _packed_order(
                 supported = True
         if not supported and not column.is_chunked():
             return None
-    var workers = configured_workers() if n >= _MIN_PARALLEL_ROWS else 1
-    if threads > 0:
-        workers = min(workers, threads)
-    var ranges = max(1, min(workers, n // 8192))
+    var workers = selection_workers(n, threads)
+    var ranges = selection_ranges(n, threads)
     var bounds = List[Int](capacity=ranges + 1)
     for r in range(ranges + 1):
         bounds.append(n * r // ranges)
