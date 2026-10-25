@@ -747,10 +747,11 @@ def _helper_entry[J: Job](address: Int) abi("C") -> Int:
 # jobs inside a stream's batch (TPC-DS q96: 363 calls, 737 jobs in a 6 ms
 # query), so starting threads was a large share of short queries. A crew is
 # a set of threads started once for an operation -- `LazyFrame.collect` --
-# that every `run_jobs` call inside it posts its jobs to instead. As with
-# `Pool`, it is joined when the operation ends (see the module docstring:
-# threads must not outlive the operation). Calls made while no crew is
-# running, or when every posting slot is taken, start threads as before.
+# that every `run_jobs` call inside it posts its jobs to instead. When the
+# operation ends it is parked for the next one (`Crew.release`). A call
+# made while no crew is
+# running borrows the parked crew for itself (an eager operation); one made
+# when every posting slot is taken starts threads as before.
 # A `Pool` made inside the operation sends its rounds to the crew as well,
 # so the same threads run every stage and none goes cold between them.
 
@@ -1159,6 +1160,20 @@ def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
     """`run_jobs` on at most `limit` threads, the caller included."""
     if len(jobs) == 0:
         return
+    if len(jobs) > 1 and limit > 1 and _current_crew().load() == 0:
+        # An eager call outside any operation borrows the parked crew for
+        # this call, as Polars' eager operations run on its global rayon
+        # pool: starting and joining seven threads each call cost an 18-row
+        # by 600K-row join 0.85 ms against 0.23 ms on a crew (#378).
+        var crew = Crew.start()
+        if crew.address != 0:
+            try:
+                _run_jobs(jobs, limit)
+            except e:
+                crew.release()
+                raise e^
+            crew.release()
+            return
     var slots = List[_Slot[J]](capacity=len(jobs))
     while len(jobs) > 0:
         slots.append(_Slot[J](jobs.pop(0)))
