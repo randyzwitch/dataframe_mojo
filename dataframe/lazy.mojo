@@ -15,9 +15,10 @@ the plan before execution:
   only its keys;
   row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
-  (CSV and Parquet scans decode only those fields); a join passes each input
+  (CSV, Parquet and IPC scans decode only those fields); a join passes each input
   only its keys and the columns read above it from that side;
-- slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`;
+- slice pushdown: a head directly over CSV becomes `n_rows`; IPC also skips
+  whole record batches for nonnegative offset slices using only metadata;
 - join order, when the plan runs: in a chain of inner joins, inputs that
   filters narrow run first, a selective join moves into the input holding
   its keys, and the most selective joins run first (`_order_joins`);
@@ -37,6 +38,7 @@ from std.memory import ArcPointer, bitcast
 from .io.csv_reader import _CsvBatches, _DecodeJob
 from .io.csv_types import _map_file
 from .io.parquet import _ParquetBatches
+from .io.ipc import _IpcBatches, _read_scan, _schema_frame as _ipc_schema_frame
 from .pipeline import (
     _BOUND_NONE,
     _TopBound,
@@ -195,6 +197,9 @@ comptime SLICE = 8
 comptime UNIQUE = 9
 comptime DROP = 10
 comptime SCAN_PARQUET = 11
+# File IPC scan: offset remains the input slot; names2[0] is the row offset,
+# length is the row limit; flags hold mapped input and explicit projection.
+comptime SCAN_IPC = 44
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
@@ -4874,6 +4879,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         ref source = self._nodes[cursor]
         var csv = List[_CsvBatches]()
         var parquet = List[_ParquetBatches]()
+        var ipc = List[_IpcBatches]()
         var input = DataFrame(List[Series](), height=0)
         if source.kind == SCAN_CSV:
             var mapping = _map_file(source.text)
@@ -4898,6 +4904,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 )
             parquet.append(
                 _ParquetBatches(source.text, source.names, groups, batch_size)
+            )
+        elif source.kind == SCAN_IPC:
+            source._record_execution()
+            ipc.append(
+                _IpcBatches(
+                    source.text,
+                    source.names,
+                    source.flags[1],
+                    source.flags[0],
+                    Int(source.names2[0]),
+                    source.length,
+                    batch_size,
+                )
             )
         elif source.kind == SCAN_FRAME:
             source._record_execution()
@@ -5077,7 +5096,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # ungrouped reduce sink run as a thread-owned pipeline (#538): each
         # worker takes morsels from a shared cursor and runs every step on
         # them; nothing is held, judged or merged on the main thread.
-        if piped and len(csv) == 0 and len(parquet) == 0:
+        if piped and len(csv) == 0 and len(parquet) == 0 and len(ipc) == 0:
             var began = Int(perf_counter_ns())
             var piped_counts = List[Int]()
             # A top-k's TOP_K node was appended to the operations for the
@@ -5222,7 +5241,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # those keep one a worker, as does a top-k (ClickBench q26 lost its
         # bound for a first round four times as long).
         var per_round = workers
-        if len(csv) == 0 and len(parquet) == 0 and top < 0:
+        if len(csv) == 0 and len(parquet) == 0 and len(ipc) == 0 and top < 0:
             # Not for a top-k, whose bound tightens between rounds.
             per_round = 4 * workers
         # Batches held while undecided, to reduce in the next round once
@@ -5255,6 +5274,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     decode.append(next.take())
                 elif len(parquet):
                     var next = parquet[0].next()
+                    if not next:
+                        ended = True
+                        break
+                    frame = next.take()
+                elif len(ipc):
+                    var next = ipc[0].next()
                     if not next:
                         ended = True
                         break
@@ -5754,6 +5779,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 ignore_errors=scan.ignore_errors,
                 truncate_ragged_lines=scan.truncate_ragged_lines,
                 encoding=scan.encoding,
+            )
+        if node.kind == SCAN_IPC:
+            if empty:
+                var schema = _ipc_schema_frame(node.text)
+                return schema.select(node.names) if node.flags[1] else schema^
+            node._record_execution()
+            return _read_scan(
+                node.text,
+                node.names,
+                node.flags[1],
+                node.flags[0],
+                Int(node.names2[0]),
+                node.length,
             )
         if node.kind == SCAN_PARQUET:
             if empty:
@@ -6371,7 +6409,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     ):
                         return True
                 seen.append(node.offset)
-            elif node.kind == SCAN_CSV or node.kind == SCAN_PARQUET:
+            elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC]:
                 if node.text in files:
                     return True
                 files.append(node.text)
@@ -8759,15 +8797,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     order.append(top)
         return order^
 
-    def _push_slices(mut self):
+    def _push_slices(mut self) raises:
         """Move leading slices below row-local projections; a leading slice
-        directly over a CSV scan also becomes the reader's n_rows."""
+        over CSV becomes n_rows; IPC also pushes nonnegative row offsets."""
         var changed = True
         while changed:
             changed = False
             for i in range(len(self._nodes)):
                 ref node = self._nodes[i]
-                if node.kind != SLICE or node.offset != 0 or node.length < 0:
+                if node.kind != SLICE or node.offset < 0 or node.length < -1:
+                    continue
+                if (
+                    node.offset != 0 or node.length < 0
+                ) and not self._slice_over_ipc(node.left):
                     continue
                 ref below = self._nodes[node.left]
                 var preserves_rows = _row_local(below.exprs)
@@ -8788,15 +8830,51 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     self._swap_down(i, node.left, False)
                     changed = True
                     break
+        var pushed = False
         for i in range(len(self._nodes)):
             ref node = self._nodes[i]
-            if node.kind != SLICE or node.offset != 0 or node.length < 0:
+            if node.kind != SLICE or node.offset < 0 or node.length < -1:
                 continue
             ref scan = self._nodes[node.left]
-            if scan.kind == SCAN_CSV and (
-                scan.length < 0 or scan.length > node.length
+            if scan.kind == SCAN_IPC:
+                var replacement = scan.copy()
+                var start = Int(scan.names2[0])
+                var advance = (
+                    min(node.offset, scan.length) if scan.length
+                    >= 0 else node.offset
+                )
+                var remaining = (
+                    max(0, scan.length - advance) if scan.length >= 0 else -1
+                )
+                if node.length >= 0:
+                    remaining = (
+                        min(remaining, node.length) if remaining
+                        >= 0 else node.length
+                    )
+                # An offset beyond Int.MAX is necessarily beyond every file.
+                if start > Int.MAX - advance:
+                    replacement.names2 = ["0"]
+                    replacement.length = 0
+                else:
+                    replacement.names2 = [String(start + advance)]
+                    replacement.length = remaining
+                self._nodes[i] = replacement^
+                pushed = True
+            elif (
+                scan.kind == SCAN_CSV
+                and node.offset == 0
+                and node.length >= 0
+                and (scan.length < 0 or scan.length > node.length)
             ):
                 self._nodes[node.left].length = node.length
+        if pushed:
+            self._reorder()
+
+    def _slice_over_ipc(self, index: Int) -> Bool:
+        var cursor = index
+        while self._nodes[cursor].kind in [SELECT, WITH_COLUMNS, SLICE]:
+            cursor = self._nodes[cursor].left
+        return self._nodes[cursor].kind == SCAN_IPC
 
     def _fuse_top_k(mut self):
         """A slice directly above a sort needs only the sort's first
@@ -8872,8 +8950,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                             if want == c:
                                 keep.append(c)
                                 break
-                    if len(keep) > 0 and len(keep) < len(columns):
+                    if (len(keep) > 0 or node.kind == SCAN_IPC) and len(
+                        keep
+                    ) < len(columns):
                         self._nodes[i].names = keep^
+                        if node.kind == SCAN_IPC:
+                            self._nodes[i].flags[1] = True
                         # Only this scan's schema changes among the nodes
                         # still to visit: they come before it, and none
                         # reads it (children precede their parents).
@@ -9195,6 +9277,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SCAN CSV " + node.text
         elif node.kind == SCAN_PARQUET:
             label = "SCAN PARQUET " + node.text
+        elif node.kind == SCAN_IPC:
+            label = "SCAN IPC " + node.text
         elif node.kind == HCONCAT:
             label = "HCONCAT"
         elif node.kind == GATHER:
@@ -9323,6 +9407,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if _is_scan(node.kind):
             if len(node.names) > 0:
                 label += " [project " + _joined(node.names) + "]"
+            elif node.kind == SCAN_IPC and node.flags[1]:
+                label += " [project <none>]"
+            if node.kind == SCAN_IPC:
+                if node.names2[0] != "0":
+                    label += " [offset " + node.names2[0] + "]"
+                if node.length >= 0:
+                    label += " [n_rows " + String(node.length) + "]"
             if node.kind == SCAN_CSV and node.length >= 0:
                 label += " [n_rows " + String(node.length) + "]"
         if streaming:
@@ -9754,7 +9845,7 @@ def _merge_copy_needs(
 
 
 def _is_scan(kind: Int) -> Bool:
-    return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
+    return kind in [SCAN_FRAME, SCAN_CSV, SCAN_PARQUET, SCAN_IPC]
 
 
 def _set_members(node: PlanNode) -> List[List[String]]:
@@ -10518,6 +10609,29 @@ def _scan_options(node: PlanNode) raises -> _CsvScanOptions:
     options.try_parse_dates = node.flags[3]
     options.null_values = node.right_keys.copy()
     return options^
+
+
+def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:
+    """Lazily scan an IPC/Feather v2 file in record batches.
+
+    Projection and nonnegative slices push into the reader. Skipped batches
+    need only metadata; schema queries read no record-batch bodies. Mapped
+    input still copies into owned Mojo buffers. Files are opened on collect
+    or schema discovery, so a plan can be collected repeatedly.
+    """
+    return LazyFrame(
+        [
+            _plan_node(
+                SCAN_IPC,
+                text=path,
+                offset=0,
+                names2=["0"],
+                flags=[memory_map, False],
+            )
+        ],
+        [DataFrame([])],
+        [Optional[CsvSchema]()],
+    )
 
 
 def scan_parquet(path: String) raises -> LazyFrame:

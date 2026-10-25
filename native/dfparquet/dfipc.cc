@@ -4,7 +4,10 @@
 #include <arrow/compute/cast.h>
 #include <arrow/io/file.h>
 #include <arrow/ipc/api.h>
+#include <arrow/ipc/metadata_internal.h>
+#include <arrow/util/endian.h>
 #include <arrow/util/compression.h>
+#include "generated/File_generated.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -79,6 +82,8 @@ struct Source {
   std::shared_ptr<arrow::io::RandomAccessFile> file;
   std::shared_ptr<arrow::ipc::RecordBatchFileReader> indexed;
   std::shared_ptr<arrow::RecordBatchReader> sequential;
+  std::shared_ptr<arrow::Buffer> footer;
+  int64_t footer_start = 0;
   int next = 0;
 
   std::shared_ptr<arrow::Schema> schema() const {
@@ -105,6 +110,62 @@ struct Source {
     }
     return sequential->Next();
   }
+
+  // Inspect only the verified footer and encapsulated record-batch metadata.
+  // In particular, a skipped compressed body is never fetched or decoded.
+  arrow::Result<int64_t> BatchRows(int index) {
+    if (!footer) {
+      ARROW_ASSIGN_OR_RAISE(auto size, file->GetSize());
+      if (size < 10) return arrow::Status::Invalid("truncated IPC footer");
+      ARROW_ASSIGN_OR_RAISE(auto tail, file->ReadAt(size - 10, 10));
+      if (tail->size() != 10) return arrow::Status::IOError("truncated IPC footer");
+      int32_t length;
+      std::memcpy(&length, tail->data(), sizeof(length));
+      length = arrow::bit_util::FromLittleEndian(length);
+      if (length <= 0 || length > size - 10) {
+        return arrow::Status::Invalid("invalid IPC footer length");
+      }
+      footer_start = size - 10 - length;
+      ARROW_ASSIGN_OR_RAISE(footer, file->ReadAt(footer_start, length));
+      if (!arrow::ipc::internal::VerifyFlatbuffers<arrow::flatbuf::Footer>(
+              footer->data(), footer->size())) {
+        return arrow::Status::Invalid("invalid IPC footer metadata");
+      }
+    }
+    auto blocks = arrow::flatbuf::GetFooter(footer->data())->recordBatches();
+    if (!blocks || index < 0 || index >= static_cast<int>(blocks->size())) {
+      return arrow::Status::Invalid("invalid IPC record-batch index");
+    }
+    auto block = blocks->Get(index);
+    if (block->offset() < 0 || block->offset() > footer_start ||
+        block->metaDataLength() <= 0 || block->bodyLength() < 0 ||
+        block->metaDataLength() > footer_start - block->offset() ||
+        block->bodyLength() > footer_start - block->offset() - block->metaDataLength()) {
+      return arrow::Status::Invalid("invalid IPC record-batch metadata range");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto metadata,
+                          file->ReadAt(block->offset(), block->metaDataLength()));
+    ARROW_ASSIGN_OR_RAISE(auto message, arrow::ipc::ReadMessage(metadata, nullptr));
+    if (message->type() != arrow::ipc::MessageType::RECORD_BATCH) {
+      return arrow::Status::Invalid("IPC block is not a record batch");
+    }
+    if (message->body_length() != block->bodyLength()) {
+      return arrow::Status::Invalid("IPC record-batch body length differs from footer");
+    }
+    auto rows = static_cast<const arrow::flatbuf::RecordBatch*>(message->header())->length();
+    if (rows < 0) return arrow::Status::Invalid("negative IPC record-batch length");
+    return rows;
+  }
+
+  arrow::Status SkipBatches(int64_t* rows) {
+    while (*rows > 0 && next < indexed->num_record_batches()) {
+      ARROW_ASSIGN_OR_RAISE(auto count, BatchRows(next));
+      if (*rows < count) break;
+      *rows -= count;
+      ++next;
+    }
+    return arrow::Status::OK();
+  }
 };
 
 arrow::Result<std::shared_ptr<Source>> Open(const char* path, bool stream,
@@ -123,15 +184,26 @@ arrow::Result<std::shared_ptr<Source>> Open(const char* path, bool stream,
 class Reader final : public arrow::RecordBatchReader {
  public:
   Reader(std::shared_ptr<Source> source, std::vector<int> fields,
-         std::shared_ptr<arrow::Schema> schema, int64_t remaining)
+         std::shared_ptr<arrow::Schema> schema, int64_t remaining, int64_t skip)
       : source_(std::move(source)), fields_(std::move(fields)),
-        schema_(std::move(schema)), remaining_(remaining) {}
+        schema_(std::move(schema)), remaining_(remaining), skip_(skip) {}
   std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override {
     *out = nullptr;
     std::shared_ptr<arrow::RecordBatch> batch;
     if (remaining_ != 0) {
-      ARROW_ASSIGN_OR_RAISE(batch, source_->Next());
+      if (skip_ > 0) ARROW_RETURN_NOT_OK(source_->SkipBatches(&skip_));
+      if (fields_.empty() && source_->indexed &&
+          source_->next < source_->indexed->num_record_batches()) {
+        ARROW_ASSIGN_OR_RAISE(auto rows, source_->BatchRows(source_->next++));
+        batch = arrow::RecordBatch::Make(schema_, rows, arrow::ArrayVector{});
+      } else {
+        ARROW_ASSIGN_OR_RAISE(batch, source_->Next());
+      }
+      if (batch && skip_ > 0) {
+        batch = batch->Slice(skip_);
+        skip_ = 0;
+      }
     }
     if (!batch) {
       if (!emitted_) {
@@ -158,6 +230,7 @@ class Reader final : public arrow::RecordBatchReader {
   std::vector<int> fields_;
   std::shared_ptr<arrow::Schema> schema_;
   int64_t remaining_;
+  int64_t skip_;
   bool emitted_ = false;
 };
 
@@ -170,11 +243,12 @@ struct Writer {
 extern "C" {
 // n_columns=-1 selects all, zero selects no fields while retaining row count.
 // n_rows=-1 has no limit. The exported stream owns the native reader/file.
-int dfq_read_ipc(const char* path, int stream, int mmap, const char** columns,
-                 int n_columns, int64_t n_rows, ArrowArrayStream* out, char** error) {
+static int ReadIpc(const char* path, int stream, int mmap, const char** columns,
+                  int n_columns, int64_t n_rows, int64_t offset,
+                  ArrowArrayStream* out, char** error) {
   *error = nullptr;
   out->release = nullptr;
-  if (n_columns < -1 || n_rows < -1) {
+  if (n_columns < -1 || n_rows < -1 || offset < 0) {
     return Fail(arrow::Status::Invalid("invalid IPC selection or row limit"), error);
   }
   auto opened = Open(path, stream != 0, mmap != 0);
@@ -214,9 +288,20 @@ int dfq_read_ipc(const char* path, int stream, int mmap, const char** columns,
     positions.push_back(source->schema()->GetFieldIndex(original->field(field)->name()));
   }
   auto schema = arrow::schema(fields, original->metadata());
-  auto reader = std::make_shared<Reader>(source, positions, schema, n_rows);
+  auto reader = std::make_shared<Reader>(source, positions, schema, n_rows, offset);
   auto status = arrow::ExportRecordBatchReader(reader, out);
   return status.ok() ? 0 : Fail(status, error);
+}
+
+int dfq_read_ipc(const char* path, int stream, int mmap, const char** columns,
+                 int n_columns, int64_t n_rows, ArrowArrayStream* out, char** error) {
+  return ReadIpc(path, stream, mmap, columns, n_columns, n_rows, 0, out, error);
+}
+
+// File-only lazy source; preserve the step-1 reader ABI for existing callers.
+int dfq_scan_ipc(const char* path, int mmap, const char** columns, int n_columns,
+                 int64_t offset, int64_t n_rows, ArrowArrayStream* out, char** error) {
+  return ReadIpc(path, 0, mmap, columns, n_columns, n_rows, offset, out, error);
 }
 
 // Reads only the schema/header/footer, never a record-batch body.

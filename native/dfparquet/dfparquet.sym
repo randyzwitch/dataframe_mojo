@@ -5,6 +5,7 @@ _dfq_read_parquet_stream
 _dfq_write_parquet
 _dfq_read_parquet_stream_dict
 _dfq_read_ipc
+_dfq_scan_ipc
 _dfq_read_ipc_schema
 _dfq_ipc_writer_open
 _dfq_ipc_writer_write

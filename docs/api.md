@@ -1620,6 +1620,14 @@ def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", 
 def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8") -> LazyFrame
 ```
 
+## `scan_ipc`
+
+Lazily scan an IPC/Feather v2 file in record batches.
+
+```mojo
+def scan_ipc(path: String, *, memory_map: Bool = True) -> LazyFrame
+```
+
 ## `scan_parquet`
 
 Lazily read a Parquet file. Nothing is read until collect; projection is pushed into the reader, and a filter directly above the scan decodes only the row groups whose footer statistics can hold a match.
