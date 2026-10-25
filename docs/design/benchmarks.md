@@ -141,6 +141,12 @@ historical upstream commits were not recorded and remain explicitly unknown.
 DuckDB's recorded version identifies its `tpch_queries`, `dbgen`,
 `tpcds_queries` and `dsdgen` implementations.
 
+Each timed repetition computes its replacement result, explicitly releases
+the previous result, then moves the replacement into the retained result.
+The previous output remains alive during the query, and its cleanup is
+included in the timing. This avoids unfreed overwritten results observed
+with the pinned compiler's direct assignment in the measurement loop.
+
 Re-rendering older raw JSON preserves its samples and displays a legacy
 metadata note; it does not invent missing historical provenance.
 The coverage table separates distinct suite/query pairs from query/variant
@@ -254,6 +260,40 @@ single cells, and confirm a single-query change on the full tier.
 
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
 this size), `dev` (1M rows, scale factor 0.1), `default` (10M) or `large` (100M).
+
+### Requested allocation counters (Linux)
+
+The optional `benchmarks/tools/compiler_alloc_probe.cpp` interposes the
+compiler runtime's exported allocation/free ABI in one child process. It
+reports live and peak requested bytes, cumulative allocation/release bytes,
+call counts, and unmatched frees or duplicate allocation addresses at exit.
+Calibrate it against the installed runtime before interpreting results:
+
+```bash
+mkdir -p build/allocator-probe
+c++ -std=c++17 -shared -fPIC -O2 -pthread \
+  benchmarks/tools/compiler_alloc_probe.cpp -ldl \
+  -o build/allocator-probe/probe.so
+pixi run mojo build -O3 \
+  benchmarks/tools/compiler_alloc_probe_calibration.mojo \
+  -o build/allocator-probe/calibration
+LD_PRELOAD="$PWD/build/allocator-probe/probe.so" \
+  build/allocator-probe/calibration
+```
+
+The calibration requests 224 bytes across three allocations, peaks at 160
+live bytes, and releases everything. Expect three allocation/free calls,
+zero outstanding allocations, and zero unknown frees or duplicates.
+Apply the same preload to a built Mojo worker, preserving its usual
+arguments and environment, and retain stdout and stderr separately.
+
+These are requested bytes through `KGEN_CompilerRT_AlignedAlloc/Free`;
+allocator rounding/metadata, native C++ Parquet allocations, and other
+allocator APIs are outside the count. The peak covers the whole worker,
+including input loading and answer checks. Interposition serializes counter
+updates and changes allocation scheduling, so use a separate uninstrumented
+run for elapsed time. Any unmatched free or duplicate address makes coverage
+incomplete. Keep these diagnostics alongside the raw samples under `build/`.
 
 ## Checkpoint reports
 
