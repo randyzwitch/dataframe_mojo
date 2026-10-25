@@ -1,6 +1,8 @@
 """Filtered column sums as per-block partials.
 
-Each thread walks rows with a grid stride, keeps the values whose row is
+`value_offset` is the first row's index in `values`: a column wrapped in
+place starts inside its first page. Each thread walks rows with a grid
+stride, keeps the values whose row is
 valid and inside the filter's range, and adds them locally; MAX's
 `block.sum` combines a block, and one partial per block goes to device
 memory. The host adds the partials. Metal has no atomic add wider than 32
@@ -46,6 +48,7 @@ def integer_partials[
     dtype: DType, nullable: Bool, filtered: Bool
 ](
     values: Pointer[Scalar[dtype], UntrackedOrigin[mut=False]],
+    value_offset: UInt32,
     validity: Pointer[UInt8, UntrackedOrigin[mut=False]],
     validity_offset: UInt32,
     rows: UInt32,
@@ -67,7 +70,9 @@ def integer_partials[
         comptime if nullable:
             keep = _valid(validity, validity_offset, row)
         if keep:
-            var value = values[unsafe_offset=row].cast[DType.int64]()
+            var value = values[unsafe_offset=Int(value_offset) + row].cast[
+                DType.int64
+            ]()
             comptime if filtered:
                 keep = value >= low_bound and value <= high_bound
             if keep:
@@ -91,6 +96,7 @@ def float32_partials[
     nullable: Bool, filtered: Bool
 ](
     values: Pointer[Float32, UntrackedOrigin[mut=False]],
+    value_offset: UInt32,
     validity: Pointer[UInt8, UntrackedOrigin[mut=False]],
     validity_offset: UInt32,
     rows: UInt32,
@@ -114,7 +120,7 @@ def float32_partials[
         comptime if nullable:
             keep = _valid(validity, validity_offset, row)
         if keep:
-            var value = values[unsafe_offset=row]
+            var value = values[unsafe_offset=Int(value_offset) + row]
             comptime if filtered:
                 var above = (
                     value >= low_bound if inclusive & 1 else value > low_bound

@@ -6,13 +6,15 @@
 For each dtype and row count, `filter(x > t).select(x.sum())` (about half
 the rows kept) and the unfiltered sum run warm `REPS` times on the CPU
 executor and with the Metal hand-off. Each line reports the best time of
-each, their ratio, and where the Metal time went: device context, upload,
-kernel with readback of the per-block partials, and the host finish.
+each, their ratio, and where the Metal time went: device context, making
+the column visible to the GPU (`wrap_ms`: wrapped in place, as the hand-off
+does; `copy_ms`: copied, for comparison), the kernel with readback of the
+per-block partials, and the host finish.
 `handed` says whether `explain` shows the node handed to Metal, so a plan
 the optimizer reshapes cannot pass CPU time off as Metal's. One TSV line
 per case on stdout:
 
-    case dtype rows handed cpu_ms metal_ms metal/cpu context_ms upload_ms kernel_ms finish_ms
+    case dtype rows handed cpu_ms metal_ms metal/cpu context_ms wrap_ms copy_ms kernel_ms finish_ms
 """
 from std.sys import argv
 from std.time import perf_counter_ns
@@ -61,6 +63,7 @@ def _case[dtype: DType](name: String, rows: Int, reps: Int) raises:
         var cpu = _best_ms(plan, reps, False)
         var metal = _best_ms(plan, reps, True)
         var timed = execute_timed(plan)[1].copy()
+        var copied = execute_timed(plan, zero_copy=False)[1].copy()
         var handed = "HANDOFF metal" in plan.explain(accelerator=MetalRuntime())
         print(
             labels[p],
@@ -72,6 +75,7 @@ def _case[dtype: DType](name: String, rows: Int, reps: Int) raises:
             round(metal / cpu, 3),
             round(Float64(timed.context_ns) / 1e6, 3),
             round(Float64(timed.upload_ns) / 1e6, 3),
+            round(Float64(copied.upload_ns) / 1e6, 3),
             round(Float64(timed.kernel_ns) / 1e6, 3),
             round(Float64(timed.finish_ns) / 1e6, 3),
             sep="\t",
@@ -84,7 +88,7 @@ def main() raises:
     var largest = Int(String(args[2])) if len(args) > 2 else 200_000_000
     print(
         "case\tdtype\trows\thanded\tcpu_ms\tmetal_ms\tmetal/cpu"
-        "\tcontext_ms\tupload_ms\tkernel_ms\tfinish_ms"
+        "\tcontext_ms\twrap_ms\tcopy_ms\tkernel_ms\tfinish_ms"
     )
     var sizes: List[Int] = [
         10_000,

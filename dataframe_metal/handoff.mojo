@@ -8,7 +8,8 @@ on the CPU in the same query.
 
 Accepted today: `select(col(c).sum())` over filters that compare `c` with
 untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined by `&`), where
-`c` is Int32, Int64 or Float32. Float64 and wider work stays on the CPU:
+`c` is Int32, Int64 or Float32. A one-chunk column is read in place (`wrap_native`): Apple silicon shares
+memory, so nothing is copied. Float64 and wider work stays on the CPU:
 Apple GPUs have no 64-bit floating point, and emulating it would be slower
 than the CPU.
 """
@@ -43,7 +44,11 @@ from .accelerator.gpu.filter_sum import (
 )
 from .accelerator.gpu.query_scope import Scope
 from .accelerator.gpu.target import METAL_TARGET
-from .accelerator.gpu.typed_storage import NativeColumn, upload_native
+from .accelerator.gpu.typed_storage import (
+    NativeColumn,
+    upload_native,
+    wrap_native,
+)
 
 # Blocks per launch; a grid stride covers longer columns.
 comptime MAX_PARTIALS = 1024
@@ -225,6 +230,18 @@ struct HandoffTimings(Copyable, Movable):
         self.finish_ns = 0
 
 
+def _place[
+    dtype: DType
+](scope: Scope, series: Series, zero_copy: Bool) raises -> NativeColumn[dtype]:
+    """The column on the device: its own memory wrapped in place when
+    `zero_copy` and the column is one chunk, else a copy."""
+    if zero_copy:
+        var wrapped = wrap_native[dtype](scope, series)
+        if wrapped:
+            return wrapped.take()
+    return upload_native[dtype](scope, series)
+
+
 def _partials(rows: Int) -> Int:
     """Blocks to launch for `rows` rows: one per BLOCK_SIZE rows, capped
     at MAX_PARTIALS, with a grid stride covering the rest."""
@@ -255,6 +272,7 @@ def _integer_launch[
         )
         ctx.enqueue_function[integer_partials[dtype, nullable, filtered]](
             values,
+            UInt32(column.value_offset),
             bits,
             UInt32(column.validity_bit_offset),
             UInt32(column.length),
@@ -268,23 +286,30 @@ def _integer_launch[
             block_dim=BLOCK_SIZE,
         )
         scope.record_launches(1)
-        return (
-            scope.read_control(high),
-            scope.read_control(low),
-            scope.read_control(counts),
-        )
+        var high_parts = List[Int64](length=partials, fill=0)
+        var low_parts = List[UInt64](length=partials, fill=0)
+        var count_parts = List[UInt32](length=partials, fill=0)
+        ctx.enqueue_copy(high_parts.unsafe_ptr(), high)
+        ctx.enqueue_copy(low_parts.unsafe_ptr(), low)
+        ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
+        scope.synchronize()
+        return (high_parts^, low_parts^, count_parts^)
 
 
 def _integer_sum[
     dtype: DType
 ](
-    plan: FilterSum, series: Series, scope: Scope, mut timings: HandoffTimings
+    plan: FilterSum,
+    series: Series,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
 ) raises -> Tuple[Int128, Int]:
     """The exact total of the kept values and how many were kept."""
     if len(series) == 0:
         return (Int128(0), 0)
     var started = Int(perf_counter_ns())
-    var column = upload_native[dtype](scope, series)
+    var column = _place[dtype](scope, series, zero_copy)
     timings.upload_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
     var partials = _partials(column.length)
@@ -347,6 +372,7 @@ def _float32_launch[
         )
         ctx.enqueue_function[float32_partials[nullable, filtered]](
             values,
+            UInt32(column.value_offset),
             bits,
             UInt32(column.validity_bit_offset),
             UInt32(column.length),
@@ -361,21 +387,28 @@ def _float32_launch[
             block_dim=BLOCK_SIZE,
         )
         scope.record_launches(1)
-        return (
-            scope.read_control(sums),
-            scope.read_control(compensations),
-            scope.read_control(counts),
-        )
+        var sum_parts = List[Float32](length=partials, fill=0)
+        var compensation_parts = List[Float32](length=partials, fill=0)
+        var count_parts = List[UInt32](length=partials, fill=0)
+        ctx.enqueue_copy(sum_parts.unsafe_ptr(), sums)
+        ctx.enqueue_copy(compensation_parts.unsafe_ptr(), compensations)
+        ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
+        scope.synchronize()
+        return (sum_parts^, compensation_parts^, count_parts^)
 
 
 def _float32_sum(
-    plan: FilterSum, series: Series, scope: Scope, mut timings: HandoffTimings
+    plan: FilterSum,
+    series: Series,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
 ) raises -> Tuple[Float64, Int]:
     """The compensated total of the kept values and how many were kept."""
     if len(series) == 0:
         return (Float64(0), 0)
     var started = Int(perf_counter_ns())
-    var column = upload_native[DType.float32](scope, series)
+    var column = _place[DType.float32](scope, series, zero_copy)
     timings.upload_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
     var partials = _partials(column.length)
@@ -405,17 +438,19 @@ def _float32_sum(
 
 
 def execute_timed(
-    region: LazyFrame,
+    region: LazyFrame, zero_copy: Bool = True
 ) raises -> Tuple[DataFrame, HandoffTimings]:
-    """Run an accepted region on Metal and report where the time went."""
+    """Run an accepted region on Metal and report where the time went.
+    With `zero_copy` (the default) the GPU reads a one-chunk column in
+    place; without it the column is copied, for comparison."""
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        return _execute_on_device(region)
+        return _execute_on_device(region, zero_copy)
 
 
 def _execute_on_device(
-    region: LazyFrame,
+    region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     var accepted = plan_region(region)
     if not accepted:
@@ -432,7 +467,7 @@ def _execute_on_device(
     timings.context_ns = Int(perf_counter_ns()) - started
     var output: Series
     if plan.dtype == DataType.FLOAT32:
-        var result = _float32_sum(plan, series, scope, timings)
+        var result = _float32_sum(plan, series, scope, zero_copy, timings)
         var valid = result[1] >= plan.min_count
         output = Series(
             plan.output,
@@ -441,9 +476,13 @@ def _execute_on_device(
     else:
         var result: Tuple[Int128, Int]
         if plan.dtype == DataType.INT32:
-            result = _integer_sum[DType.int32](plan, series, scope, timings)
+            result = _integer_sum[DType.int32](
+                plan, series, scope, zero_copy, timings
+            )
         else:
-            result = _integer_sum[DType.int64](plan, series, scope, timings)
+            result = _integer_sum[DType.int64](
+                plan, series, scope, zero_copy, timings
+            )
         var total = result[0]
         var valid = result[1] >= plan.min_count
         if plan.dtype == DataType.INT32:

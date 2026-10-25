@@ -2,7 +2,16 @@
 results equal to the CPU's for the ones it runs."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
-from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    LazyFrame,
+    Series,
+    col,
+    concat,
+    lit,
+)
 from dataframe_metal.handoff import plan_region
 from dataframe_metal.metal import MetalRuntime
 from tests.support.metal_outcomes import require_metal
@@ -132,6 +141,27 @@ def test_metal_handoff_sums_equal_cpu_results() raises:
                         plan.collect(accelerator=runtime),
                         plan.collect(engine="cpu"),
                     )
+
+
+# requires: metal
+def test_metal_handoff_reads_sliced_and_chunked_columns() raises:
+    # A slice starts inside a page, so the in-place view keeps an offset;
+    # a chunked column is copied instead of wrapped.
+    var runtime = require_metal()
+    var whole = _columns(300_001, True)
+    var parts: List[DataFrame] = [
+        whole.slice(5, 200_000),
+        whole.slice(1, 7),
+        concat([whole.slice(0, 1000), whole.slice(5000, 100_000)]),
+    ]
+    for frame in parts:
+        for name in ["i", "l", "f"]:
+            var plan = (
+                frame.lazy().filter(col(name) >= -500).select(col(name).sum())
+            )
+            _close(
+                plan.collect(accelerator=runtime), plan.collect(engine="cpu")
+            )
 
 
 # requires: metal
