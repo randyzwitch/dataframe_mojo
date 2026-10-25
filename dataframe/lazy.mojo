@@ -60,6 +60,8 @@ from ._accel_provider import (
     describe as _describe_accel,
     select_auto as _select_auto_accel,
     execute_auto as _execute_auto_accel,
+    handoff_supports as _handoff_supports,
+    handoff_execute as _handoff_execute,
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
@@ -1859,6 +1861,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+    # Set on the plan an accelerator provider runs through this executor:
+    # `_execute` offers each node it reaches to the provider, which may run
+    # it on the columns the CPU computed below it (`_handoff_region`).
+    var _handoff: Bool
 
     def __deinit__(deinit self):
         # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
@@ -1878,6 +1884,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = move._accelerator_settings^
         self._schema_memo = move._schema_memo^
         self._prefetched = move._prefetched^
+        self._handoff = move._handoff
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1888,6 +1895,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._handoff = False
 
     def __init__(
         out self,
@@ -1903,6 +1911,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._handoff = False
 
     def _by_label(self) raises -> Self:
         """This plan with each categorical scan column that a group_by names
@@ -1955,6 +1964,88 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             optimize, streaming, batch_size
         )
         return configured^
+
+    def _with_handoff(self) -> Self:
+        """This plan, run by the CPU executor with each node offered to the
+        registered accelerator provider (`_handoff_region`). A provider whose
+        device shares memory with the CPU runs its `execute` this way."""
+        var plan = self.copy()
+        plan._handoff = True
+        return plan^
+
+    def _handoff_input(self, index: Int) -> Tuple[Int, List[Int]]:
+        """The input below node `index` and its filters: the node offered
+        with the filters directly beneath it, outermost first."""
+        var filters = List[Int]()
+        var input = self._nodes[index].left
+        while input >= 0 and self._nodes[input].kind == FILTER:
+            filters.append(input)
+            input = self._nodes[input].left
+        return (input, filters^)
+
+    def _handoff_plan(
+        self, index: Int, filters: List[Int], columns: DataFrame
+    ) -> Self:
+        """Node `index` and its filters as a plan over `columns`, the
+        input's result: what a provider receives, columns in."""
+        var region = Self(columns)
+        for f in reversed(range(len(filters))):
+            region = region._push(self._nodes[filters[f]].copy())
+        return region._push(self._nodes[index].copy())
+
+    def _handoff_region(
+        self, index: Int, streaming: Bool, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Node `index`'s result from the accelerator provider, or None when
+        the provider declines it.
+
+        A projection or aggregation is offered with the filters directly
+        below it. The provider decides from the input's schema alone, before
+        any input runs; on acceptance the CPU computes the input and the
+        provider runs the region on those columns."""
+        var kind = self._nodes[index].kind
+        if kind != SELECT and kind != AGG:
+            return None
+        var found = self._handoff_input(index)
+        var input = found[0]
+        if input < 0:
+            return None
+        var schema = self._execute(input, True, streaming, batch_size)
+        if not _handoff_supports(self._handoff_plan(index, found[1], schema)):
+            return None
+        var columns = self._execute(input, False, streaming, batch_size)
+        var rows = columns.height()
+        var began = Int(perf_counter_ns())
+        var result = _handoff_execute(
+            self._handoff_plan(index, found[1], columns)
+        )
+        self._record(
+            index,
+            "accel",
+            rows,
+            result.height(),
+            algorithm="handoff",
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        return result^
+
+    def _handoff_nodes(self) raises -> List[String]:
+        """The nodes of the optimized plan the provider would run, as
+        `explain` labels them: each projection or aggregation it accepts
+        from its input's schema."""
+        var plan = self._optimized()
+        var labels = List[String]()
+        for index in range(len(plan._nodes)):
+            var kind = plan._nodes[index].kind
+            if kind != SELECT and kind != AGG:
+                continue
+            var found = plan._handoff_input(index)
+            if found[0] < 0:
+                continue
+            var schema = plan._execute(found[0], True)
+            if _handoff_supports(plan._handoff_plan(index, found[1], schema)):
+                labels.append(plan._label(index))
+        return labels^
 
     def _record(
         self,
@@ -5545,6 +5636,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var ahead = self._prefetched.value()
             if index in ahead[]:
                 return ahead[].pop(index)
+        if self._handoff and not empty:
+            var handed = self._handoff_region(index, streaming, batch_size)
+            if handed:
+                return handed.take()
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:

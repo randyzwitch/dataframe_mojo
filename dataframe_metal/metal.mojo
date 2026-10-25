@@ -1,9 +1,11 @@
 """Apple Metal execution through Mojo kernels inside the dataframe library.
 
-The execution core is being rebuilt on typed column buffers and compiled,
-parallel kernels (docs/apple-metal.md). Until a query shape runs on the new
-core, `engine="metal"` raises an unsupported error naming it; nothing falls
-back to the CPU silently. Construction, import and explanation do not
+Apple silicon shares memory between the CPU and the GPU, so Metal runs
+inside the CPU executor: `execute` runs the plan on the CPU with each node
+offered to Metal (`LazyFrame._with_handoff`), and Metal runs the regions it
+supports (`handoff.mojo`) on the columns the CPU computed below them. The
+rest of the query stays on the CPU; `describe` and profiles say which nodes
+Metal ran (docs/apple-metal.md). Construction, import and explanation do not
 initialize a device.
 """
 from std.os import getenv
@@ -65,12 +67,12 @@ def metal_installed() -> Bool:
 
 
 def _unsupported(query: LazyFrame) -> String:
-    """Why the new core cannot run `query` yet."""
+    """Why automatic placement cannot choose Metal for `query` yet."""
     _ = query
     return (
         UNSUPPORTED
-        + "the Metal execution core is being rebuilt and runs no query"
-        ' shapes yet; collect with engine="cpu"'
+        + "automatic placement needs measured Metal costs; Metal runs"
+        ' supported nodes only with engine="accel"'
     )
 
 
@@ -128,7 +130,20 @@ struct MetalRuntime(AcceleratorBackend):
         return self._execute(query, True)
 
     def describe(self, query: LazyFrame) -> String:
-        return "ENGINE accel: " + _unsupported(query) + "\n"
+        """Which nodes Metal runs; the CPU runs the rest."""
+        try:
+            var nodes = query._handoff_nodes()
+            if len(nodes) == 0:
+                return (
+                    "ENGINE accel: CPU executor; Metal supports no node of"
+                    " this plan (unsupported)\n"
+                )
+            var text = "ENGINE accel: CPU executor; Metal runs:\n"
+            for label in nodes:
+                text += "  HANDOFF metal: " + label + "\n"
+            return text^
+        except error:
+            return "ENGINE accel: " + String(error) + "\n"
 
     def _execute(
         self, query: LazyFrame, profiling: Bool
@@ -152,8 +167,24 @@ struct MetalRuntime(AcceleratorBackend):
     def _run(
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
-        _ = profiling
-        raise Error(_unsupported(query))
+        """Run `query` on the CPU executor, handing Metal the nodes it
+        supports."""
+        var settings = self._execution_settings.copy()
+        var plan = query._with_handoff()
+        if profiling:
+            return plan.profile(
+                engine="cpu",
+                optimize=settings.optimize,
+                streaming=settings.streaming,
+                batch_size=settings.batch_size,
+            )
+        var result = plan.collect(
+            engine="cpu",
+            optimize=settings.optimize,
+            streaming=settings.streaming,
+            batch_size=settings.batch_size,
+        )
+        return (result^, DataFrame(List[Series]()))
 
     def _adjudicate(
         self, query: LazyFrame, profiling: Bool, fault: String

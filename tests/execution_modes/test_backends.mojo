@@ -361,12 +361,21 @@ def test_native_provider_configuration_and_unsupported_types_reject_before_drive
     var unsupported = frame.lazy().select(
         col("x").implode().list().len().alias("x")
     )
-    var message = String()
-    try:
-        _ = unsupported.collect(accelerator=runtime)
-    except error:
-        message = String(error)
-    assert_true("unsupported" in message)
+    comptime if compiled_for_metal():
+        # Metal supports no node of this plan, so the CPU executor runs all
+        # of it.
+        assert_true(
+            unsupported.collect(accelerator=runtime).equals(
+                unsupported.collect(engine="cpu")
+            )
+        )
+    else:
+        var message = String()
+        try:
+            _ = unsupported.collect(accelerator=runtime)
+        except error:
+            message = String(error)
+        assert_true("unsupported" in message)
     assert_true("unsupported" in unsupported.explain(accelerator=runtime))
 
 

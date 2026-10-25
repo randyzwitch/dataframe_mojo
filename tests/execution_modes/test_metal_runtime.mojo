@@ -1,9 +1,9 @@
-"""The Metal runtime while its execution core is rebuilt: settings forwarding,
-an explicit unsupported answer for every plan, and CPU placement."""
+"""The Metal runtime: settings forwarding, and CPU placement under
+`engine="auto"` until Metal has measured costs."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col
-from dataframe_metal.metal import MetalRuntime, UNSUPPORTED
+from dataframe_metal.metal import MetalRuntime
 
 
 def test_metal_runtime_forwards_query_execution_settings() raises:
@@ -19,7 +19,7 @@ def test_metal_runtime_forwards_query_execution_settings() raises:
     assert_equal(original_runtime._execution_settings.batch_size, 65536)
 
 
-def test_metal_runtime_reports_every_plan_unsupported_and_places_on_cpu() raises:
+def test_metal_runtime_places_every_plan_on_the_cpu_automatically() raises:
     var frame = DataFrame(
         [
             Series("k", Column[Int64]([1, 2, 1])),
@@ -33,7 +33,7 @@ def test_metal_runtime_reports_every_plan_unsupported_and_places_on_cpu() raises
     ]
     var runtime = MetalRuntime(device_id=999999)
     for plan in plans:
-        assert_true(UNSUPPORTED in runtime.describe(plan))
+        assert_true("ENGINE accel: CPU executor" in runtime.describe(plan))
         assert_equal(runtime.select_auto(plan, True, True, 65536)[0], "cpu")
         with assert_raises(contains="unsupported"):
             _ = runtime.estimate_auto(plan)
