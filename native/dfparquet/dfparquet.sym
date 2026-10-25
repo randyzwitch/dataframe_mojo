@@ -4,3 +4,9 @@ _dfq_arrow_version
 _dfq_read_parquet_stream
 _dfq_write_parquet
 _dfq_read_parquet_stream_dict
+_dfq_read_ipc
+_dfq_read_ipc_schema
+_dfq_ipc_writer_open
+_dfq_ipc_writer_write
+_dfq_ipc_writer_close
+_dfq_ipc_writer_abort
