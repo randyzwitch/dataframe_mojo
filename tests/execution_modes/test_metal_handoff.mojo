@@ -141,9 +141,9 @@ def test_metal_handoff_overflow_raises_the_cpu_error() raises:
         [Series("i", Column[Int32](List[Int32](length=3, fill=Int32.MAX)))]
     )
     var plan = frame.lazy().select(col("i").sum())
-    with assert_raises(contains="Int32 expression sum overflow"):
+    with assert_raises(contains="int32 expression sum overflow"):
         _ = plan.collect(engine="cpu")
-    with assert_raises(contains="Int32 expression sum overflow"):
+    with assert_raises(contains="int32 expression sum overflow"):
         _ = plan.collect(accelerator=runtime)
     var extremes = DataFrame(
         [Series("l", Column[Int64]([Int64.MAX, Int64.MIN, Int64.MAX, -1]))]

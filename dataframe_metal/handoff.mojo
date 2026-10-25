@@ -448,14 +448,14 @@ def _execute_on_device(
         var valid = result[1] >= plan.min_count
         if plan.dtype == DataType.INT32:
             if total > Int128(Int32.MAX) or total < Int128(Int32.MIN):
-                raise data_fault("Int32 expression sum overflow")
+                raise data_fault("int32 expression sum overflow")
             output = Series(
                 plan.output,
                 Column[Int32]([total.cast[DType.int32]()], [valid]),
             )
         else:
             if total > Int128(Int64.MAX) or total < Int128(Int64.MIN):
-                raise data_fault("Int64 expression sum overflow")
+                raise data_fault("int64 expression sum overflow")
             output = Series(
                 plan.output,
                 Column[Int64]([total.cast[DType.int64]()], [valid]),
