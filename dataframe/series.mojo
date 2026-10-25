@@ -1590,45 +1590,6 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self._data[StringColumn]._value_bytes()
         return 0
 
-    def _compact_input(self) raises -> Self:
-        """Own only this window's physical buffers for source staging.
-
-        Logical dtype and Arrow field metadata remain unchanged. String
-        view blocks and auxiliary dictionary-code caches are replaced by
-        private large_utf8 buffers, so a small slice cannot retain a whole
-        decoded source through an invisible backing owner.
-        """
-        if self._dtype.is_nested():
-            raise Error(
-                "Metal unsupported [source]: nested source columns cannot"
-                " be staged: " + self._name
-            )
-        var source = self.rechunk()
-        comptime for i in range(len(FixedElements.Ts)):
-            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
-            if source._data.isa[Column[E]]():
-                return Self(
-                    self._name,
-                    Storage(source._data[Column[E]]._compact()),
-                    self._dtype,
-                    self._field_metadata,
-                )
-        if source._data.isa[BoolColumn]():
-            return Self(
-                self._name,
-                Storage(source._data[BoolColumn]._compact()),
-                self._dtype,
-                self._field_metadata,
-            )
-        if source._data.isa[StringColumn]():
-            return Self(
-                self._name,
-                Storage(source._data[StringColumn]._compact()),
-                self._dtype,
-                self._field_metadata,
-            )
-        raise Error("Metal unsupported [source]: unknown physical storage")
-
     def _reserve_rows(mut self, rows: Int, text_bytes: Int) raises:
         """Size this column for a known final height before appending."""
         if self.is_chunked():

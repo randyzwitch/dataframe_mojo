@@ -15,7 +15,6 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe_metal.accelerator.metadata import prune_projections, schema_frame
 from tests.support.coverage_compare import assert_frame
 
 
@@ -67,11 +66,6 @@ def check(plan: LazyFrame, expected: DataFrame) raises:
     for field in expected.schema():
         schema.append(field.name + ": " + field.dtype.name())
     assert_equal(plan.collect_schema(), schema)
-    var metadata = schema_frame(plan, len(plan._nodes) - 1)
-    assert_equal(metadata.columns(), expected.columns())
-    var pruned = plan.copy()
-    prune_projections(pruned)
-    assert_frame(pruned.collect(optimize=False, streaming=False), expected)
 
 
 def check_fails(plan: LazyFrame) raises:

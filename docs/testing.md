@@ -47,8 +47,8 @@ no GPU code is compiled; the Linux CI areas use it. `--capabilities metal` (or
 Native Metal contracts run on a local Apple silicon Mac through
 `scripts/test_metal_local.sh`; hosted macOS runners expose no usable Metal
 device, so CI reports those contracts as capability skips. Extreme
-Date calendar fields are checked against an independent Int128 Gregorian model
-on CPU and Metal, including the complete signed day-storage endpoints.
+Date calendar fields are checked against an independent Int128 Gregorian model,
+including the complete signed day-storage endpoints.
 Capability skips do not establish GPU parity. Multiworker positional global
 FIRST/LAST and ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
 observed, so their deterministic assertions currently use one worker. No flaky

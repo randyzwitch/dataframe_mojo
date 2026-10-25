@@ -24,7 +24,6 @@ from dataframe import (
     null,
     sum_horizontal,
 )
-from dataframe_metal.metal import MetalRuntime
 from tests.support.coverage_generators import chunk_layout
 
 
@@ -547,7 +546,7 @@ def test_with_columns_lazy_and_grouped_contexts() raises:
     assert_equal(scalar.item(0, "x").float64(), 21.5)
 
 
-def test_accelerators_leave_horizontal_reductions_to_the_cpu() raises:
+def test_automatic_placement_leaves_horizontal_reductions_to_the_cpu() raises:
     var frame = DataFrame(
         [
             Series("a", Column[Float64]([1.5, 2.5], [True, False])),
@@ -557,8 +556,6 @@ def test_accelerators_leave_horizontal_reductions_to_the_cpu() raises:
     var query = frame.lazy().select(
         max_horizontal([col("a"), col("b")]).alias("m")
     )
-    var runtime = MetalRuntime()
-    assert_true("unsupported" in query.explain(accelerator=runtime))
-    var out = query.collect(accelerator=runtime, engine="auto")
+    var out = query.collect(engine="auto")
     assert_equal(out.item(0, "m").float64(), 4)
     assert_equal(out.item(1, "m").float64(), 1)

@@ -3,11 +3,8 @@
 # contract-group: public.apple_parity
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_false
-from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
+from dataframe import Column, DataFrame, Series, col
 from dataframe.lazy import LazyFrame
-from dataframe_metal.accelerator.capabilities import RowCapabilities
-from dataframe_metal.accelerator.rows import lower_rows
-from dataframe_metal.accelerator.metadata import schema_frame
 
 
 def field_source() raises -> DataFrame:
@@ -92,47 +89,6 @@ def field_group_query(frame: DataFrame) raises -> LazyFrame:
     )
 
 
-def field_text_source(categorical: Bool) raises -> DataFrame:
-    var text = Series(
-        "label",
-        StringColumn(["z", "poison", "a", "z"], [True, False, True, True]),
-    )
-    if categorical:
-        text = text.cast(DataType.CATEGORICAL)
-    var text_metadata: List[UInt8] = [
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        107,
-        1,
-        0,
-        0,
-        0,
-        115,
-    ]
-    text._field_metadata = ArcPointer(text_metadata^)
-    return field_source().with_column(text^)
-
-
-def _metadata_capabilities(reuse: Bool) -> RowCapabilities:
-    return RowCapabilities(
-        "metadata",
-        mixed_types=True,
-        grouped=True,
-        order=True,
-        slices=True,
-        extrema=True,
-        extra_reductions=True,
-        reuse_column_slots=reuse,
-        deferred_integer_errors=True,
-    )
-
-
 def test_accelerator_field_metadata_bare_alias_movement_and_computed_contract() raises:
     var original = field_source()
     for empty in [False, True]:
@@ -148,22 +104,6 @@ def test_accelerator_field_metadata_bare_alias_movement_and_computed_contract() 
                 expected.column("alias").int64().to_list(),
                 [Int64(30), Int64(40)],
             )
-        for reuse in [False, True]:
-            var plan = lower_rows(query, _metadata_capabilities(reuse))
-            assert_equal(len(plan.outputs), 3)
-            assert_equal(
-                plan.outputs[0].field_metadata.value()[],
-                original.column("x")._field_metadata.value()[],
-            )
-            assert_true(
-                plan.outputs[0].field_metadata.value().ptr()
-                == original.column("x")._field_metadata.value().ptr()
-            )
-            assert_false(Bool(plan.outputs[1].field_metadata))
-            assert_true(
-                plan.outputs[2].field_metadata.value().ptr()
-                == original.column("k")._field_metadata.value().ptr()
-            )
 
 
 def test_accelerator_field_metadata_group_keys_and_reductions_follow_cpu() raises:
@@ -175,55 +115,9 @@ def test_accelerator_field_metadata_group_keys_and_reductions_follow_cpu() raise
         assert_field_owner(expected.column("k"), original.column("k"))
         for name in ["total", "first", "last", "low"]:
             assert_false(Bool(expected.column(name)._field_metadata))
-        var plan = lower_rows(query, _metadata_capabilities(True))
-        assert_true(
-            plan.outputs[0].field_metadata.value().ptr()
-            == original.column("k")._field_metadata.value().ptr()
-        )
-        for output in range(1, len(plan.outputs)):
-            assert_false(Bool(plan.outputs[output].field_metadata))
         var scalar = frame.lazy().select_exprs(
             [col("x").sum().alias("total"), col("x").first().alias("first")]
         )
         expected = scalar.collect(engine="cpu", streaming=False)
-        plan = lower_rows(scalar, _metadata_capabilities(True))
-        for output in range(len(plan.outputs)):
+        for output in range(expected.width()):
             assert_false(Bool(expected._columns[output]._field_metadata))
-            assert_false(Bool(plan.outputs[output].field_metadata))
-
-
-def test_accelerator_field_metadata_dictionary_transport_and_computed_schema() raises:
-    from dataframe_metal.accelerator.dictionaries import (
-        DictionaryCodes,
-        encode_query,
-        restore_frame,
-    )
-
-    for categorical in [False, True]:
-        var original = field_text_source(categorical)
-        for empty in [False, True]:
-            var source = original.clear() if empty else original.copy()
-            var query = source.lazy().select_exprs(
-                [
-                    col("label").alias("alias"),
-                    col("label").str().to_uppercase().alias("computed"),
-                ]
-            )
-            var schema = schema_frame(query, len(query._nodes) - 1)
-            assert_field_owner(schema.column("alias"), original.column("label"))
-            assert_false(Bool(schema.column("computed")._field_metadata))
-            var dictionary = DictionaryCodes(query)
-            # Test the bare field transport independently of lookup lowering.
-            var bare = source.lazy().select(col("label").alias("alias"))
-            var encoded = encode_query(bare, dictionary)
-            assert_field_owner(
-                encoded._frames[0].column("label"), original.column("label")
-            )
-            var codes = encoded.collect(engine="cpu", streaming=False)
-            assert_field_owner(codes.column("alias"), original.column("label"))
-            var restored = restore_frame(
-                codes, schema_frame(bare, len(bare._nodes) - 1), dictionary
-            )
-            assert_field_owner(
-                restored.column("alias"), original.column("label")
-            )
