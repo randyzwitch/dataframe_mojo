@@ -520,8 +520,11 @@ containers use compact JSON spelling. A first match of JSON null ends the
 search and returns null. Unsupported syntax, including regular-expression
 filters, raises before rows are evaluated. Zero or negative slice steps
 raise. A reusable shared parser validates the whole input row, even when
-only one field is requested; schemas and paths compile once per column
-operation, and output builders write directly into typed buffers.
+only one field is requested. Each kernel call compiles its schema or path
+once, and output builders write directly into typed buffers. Nested result
+batches are concatenated once per child level, avoiding repeated copies of
+earlier batches. Categorical children share one dictionary mapping for the
+whole concatenation.
 Wildcard paths inside predicates are also supported; Polars 2.0 can panic
 for this combination, so those contracts use an independent Python JSON
 selection reference. JSONPath uses Polars' serde-style floating-point

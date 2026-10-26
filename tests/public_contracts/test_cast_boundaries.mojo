@@ -480,12 +480,6 @@ def test_dataframe_cast_replaces_named_columns_in_schema_order_and_keeps_other_v
                 _ = frame.clear().cast(invalid, strict=False)
 
 
-# expected-failure: Explicit target dictionary includes unused member and
-# expected-failure: reordered codes. Own assertion: expression categorical
-# expected-failure: cast must retain supplied target dictionary. Verified
-# expected-failure: first dtype assertion; later code assertions await repair.
-# expected-diagnostic: expression categorical cast must retain supplied target
-# expected-diagnostic: dictionary
 def test_expression_categorical_cast_retains_explicit_target_dictionary() raises:
     var target = _dictionary(["unused", "a", "z"])
     var source = Series("x", Column[String](["z", "a", "z"]))

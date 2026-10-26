@@ -392,7 +392,13 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return merged^
 
     def _merge_storage(self, parts: List[Self]) raises -> Self:
+        from .nested_merge import concatenate_nested
+
         var result = parts[0].copy()
+        if self.dtype().is_nested():
+            var merged = concatenate_nested(parts)
+            merged._field_metadata = self._field_metadata
+            return merged^
         # Fixed-width numbers merge on every worker: each copies the rows
         # of its share of the output, values and validity bits.
         if worker_count(len(self)) > 1:

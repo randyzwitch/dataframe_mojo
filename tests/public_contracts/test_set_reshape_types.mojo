@@ -550,11 +550,6 @@ def test_categorical_concat_empty_inputs_preserve_logical_type_during_dictionary
     )
 
 
-# expected-failure: Missing categorical columns become String null columns;
-# expected-failure: exact underlying diagnostic concat vertical: frame 1
-# expected-failure: column 0 is x:string, expected x:categorical.
-# expected-diagnostic: diagonal missing categorical columns must keep logical
-# expected-diagnostic: dtype
 def test_diagonal_concat_missing_categorical_columns_preserve_dictionary_and_null_padding() raises:
     var rejected = 0
     for n in [0, 1, 9, 65]:
