@@ -32,11 +32,18 @@ struct _BufferFacts(Movable):
     # one before by the same positive step, for 64-bit integer columns: 0
     # not yet known, 1 a progression, 2 not (`join_hash.int64_progression`).
     var progression: Int
+    # Only this range belongs to a foreign array. Prefix/suffix slots in
+    # its backing allocation may be undefined even when its rows are valid.
+    # last == -1 uses the complete owned buffer.
+    var first: Int
+    var last: Int
 
     def __init__(out self):
         self.order = 0
         self.zones = List[Int64]()
         self.progression = 0
+        self.first = 0
+        self.last = -1
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
@@ -106,6 +113,8 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         result._bits = bits.copy()
         result._offset = offset
         result._length = length
+        result._facts[].first = offset
+        result._facts[].last = offset + length
         return result^
 
     def __len__(self) -> Int:

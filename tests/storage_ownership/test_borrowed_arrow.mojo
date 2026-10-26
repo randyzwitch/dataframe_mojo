@@ -520,3 +520,34 @@ def test_borrowed_arrow_struct_parent_and_child_offsets_compose_without_copying(
     for i in range(len(foreign.nodes)):
         assert_equal(foreign.nodes[i].array_releases, 1)
         assert_equal(foreign.nodes[i].schema_releases, 1)
+
+
+def exercise_declared_window_facts(mut foreign: ForeignArrow) raises:
+    from dataframe.sorted_range import _ascending_cached
+    from dataframe.pipeline import _fill_zones
+
+    var series = import_arrow_series(
+        foreign.nodes[0].array, foreign.nodes[0].schema, copy=False
+    )
+    ref column = series._data[Column[Int64]]
+    assert_true(column._data.is_borrowed())
+    assert_equal(column._facts[].first, 2)
+    assert_equal(column._facts[].last, 5)
+    assert_true(_ascending_cached[DType.int64](column))
+    assert_equal(column._facts[].order, 1)
+    _fill_zones(column)
+    assert_equal(column._facts[].zones, List[Int64]([Int64(10), Int64(30)]))
+    assert_true(_ascending_cached[DType.int64](column.slice(1, 2)))
+    _ = series^
+
+
+def test_borrowed_arrow_cached_order_and_zone_bounds_ignore_undeclared_prefix_slots() raises:
+    var foreign = ForeignArrow(1)
+    foreign.nodes[0].describe("l", "x", 3, 2)
+    foreign.nodes[0].buffer(List[UInt8]())
+    foreign.nodes[0].buffer(
+        integers([Int128(Int64.MAX), Int128(Int64.MIN), 10, 20, 30], 8)
+    )
+    foreign.seal()
+    exercise_declared_window_facts(foreign)
+    assert_equal(foreign.nodes[0].array_releases, 1)

@@ -50,3 +50,8 @@ imports, and serial/parallel error paths. They check cleanup after scoped
 helpers return, so temporary typed views are also gone before final release
 counts are asserted. Native IPC tests require the IPC-enabled shared library
 from the preceding I/O changes.
+
+Fixed-width buffer facts retain the array's declared row interval. Shared
+ascending-order and zone-map caches scan that interval, excluding unused
+prefix/suffix slots whose values are not specified by a foreign producer.
+Column views share these facts only within the original declared interval.
