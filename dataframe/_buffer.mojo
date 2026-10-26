@@ -44,11 +44,13 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = owner
 
     def __len__(self) -> Int:
-        return self.length if self.owner else len(self.values)
+        # Owned storage has address=0. Nonempty foreign views have a real
+        # address; empty foreign views can use the empty owned list too.
+        return self.length if self.address != 0 else len(self.values)
 
     def unsafe_ptr(self) -> Pointer[Self.T, MutAnyOrigin]:
         """A read-only pointer; the buffer/producer must remain alive."""
-        if self.owner:
+        if self.address != 0:
             return Pointer[Self.T, MutAnyOrigin](
                 unsafe_from_address=self.address
             )
