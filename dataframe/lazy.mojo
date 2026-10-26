@@ -58,12 +58,17 @@ from .pipeline import (
 from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .execution_backend import _select_backend, _BackendDecision
 from ._accel_provider import (
+    installed as _accel_installed,
     execute as _execute_accel,
     execute_profiled as _profile_accel,
     describe as _describe_accel,
     select_auto as _select_auto_accel,
     execute_auto as _execute_auto_accel,
+    handoff_supports as _handoff_supports,
+    handoff_execute as _handoff_execute,
+    handoff_estimate as _handoff_estimate,
 )
+from .placement import LinearCost, calibration_path, crossover_rows, load_costs
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     HORIZONTAL_ARGS,
@@ -248,6 +253,11 @@ comptime GATHER = 41
 # group by null. It reads its input once: the stream sinks every morsel
 # into a table per set, as DuckDB's one sink feeds every set's table.
 comptime GROUPING_SETS = 43
+
+# How the executor offers nodes to an accelerator provider (`_handoff`).
+comptime HANDOFF_OFF = 0
+comptime HANDOFF_FORCED = 1
+comptime HANDOFF_AUTO = 2
 
 
 @fieldwise_init
@@ -1748,6 +1758,35 @@ def _apply_operation(
         )
 
 
+def _placement(
+    region: LazyFrame, rows: Int, cpu_costs: Dict[String, LinearCost]
+) -> Tuple[Bool, String]:
+    """Whether the accelerator is estimated faster for `region` at `rows`
+    input rows, and both estimates as text for profiles. False, keeping the
+    CPU, when either side has no measured cost."""
+    var estimate = _handoff_estimate(region, rows)
+    var cpu = cpu_costs.get(estimate[0])
+    if estimate[1] < 0 or not cpu:
+        return (False, String(" (no measured cost)"))
+    var cpu_ns = cpu.value().ns(rows)
+    var costs = (
+        " (accel "
+        + String(round(estimate[1] / 1e6, 3))
+        + " ms, cpu "
+        + String(round(cpu_ns / 1e6, 3))
+        + " ms, "
+        + String(rows)
+        + " rows)"
+    )
+    return (estimate[1] < cpu_ns, costs^)
+
+
+def _automatic_handoff() -> Bool:
+    """Whether `engine="auto"` places handed-off nodes by measured cost:
+    a provider is installed and a calibration is configured."""
+    return _accel_installed() and Bool(calibration_path())
+
+
 def _automatic_decision(
     selected: Tuple[String, String]
 ) raises -> _BackendDecision:
@@ -1865,6 +1904,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+    # How `_execute` offers nodes to the accelerator provider, which may run
+    # them on the columns the CPU computed below (`_handoff_region`):
+    # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
+    # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
+    var _handoff: Int
 
     def __deinit__(deinit self):
         # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
@@ -1884,6 +1928,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = move._accelerator_settings^
         self._schema_memo = move._schema_memo^
         self._prefetched = move._prefetched^
+        self._handoff = move._handoff
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1894,6 +1939,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._handoff = HANDOFF_OFF
 
     def __init__(
         out self,
@@ -1909,6 +1955,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._handoff = HANDOFF_OFF
 
     def _by_label(self) raises -> Self:
         """This plan with each categorical scan column that a group_by names
@@ -1961,6 +2008,179 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             optimize, streaming, batch_size
         )
         return configured^
+
+    def _with_handoff(self, mode: Int = HANDOFF_FORCED) -> Self:
+        """This plan, run by the CPU executor with each node offered to the
+        registered accelerator provider (`_handoff_region`). A provider whose
+        device shares memory with the CPU runs its `execute` this way, with
+        HANDOFF_FORCED; `engine="auto"` uses HANDOFF_AUTO."""
+        var plan = self.copy()
+        plan._handoff = mode
+        return plan^
+
+    def _handoff_input(self, index: Int) -> Tuple[Int, List[Int]]:
+        """The input below node `index` and its filters: the node offered
+        with the filters directly beneath it, outermost first."""
+        var filters = List[Int]()
+        var input = self._nodes[index].left
+        while input >= 0 and self._nodes[input].kind == FILTER:
+            filters.append(input)
+            input = self._nodes[input].left
+        return (input, filters^)
+
+    def _handoff_plan(
+        self, index: Int, filters: List[Int], columns: DataFrame
+    ) -> Self:
+        """Node `index` and its filters as a plan over `columns`, the
+        input's result: what a provider receives, columns in."""
+        var region = Self(columns)
+        for f in reversed(range(len(filters))):
+            region = region._push(self._nodes[filters[f]].copy())
+        return region._push(self._nodes[index].copy())
+
+    def _handoff_region(
+        self, index: Int, streaming: Bool, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Node `index`'s result when it is handed to the provider; None to
+        execute it as usual.
+
+        A projection or aggregation is offered with the filters directly
+        below it. The provider decides from the input's schema alone, before
+        any input runs. HANDOFF_FORCED hands every accepted node over.
+        HANDOFF_AUTO compares the provider's estimate with the CPU's
+        measured cost for the same operator (`placement.mojo`) at the
+        input's rows: estimated from the plan when `_estimated_rows` can,
+        before anything runs, so a node the CPU keeps executes exactly as
+        it would have; otherwise counted once the input has run, and the CPU
+        then runs the node on those columns, so nothing runs twice."""
+        var kind = self._nodes[index].kind
+        if kind != SELECT and kind != AGG:
+            return None
+        var cpu_costs = Dict[String, LinearCost]()
+        if self._handoff == HANDOFF_AUTO:
+            cpu_costs = load_costs("cpu")
+            if len(cpu_costs) == 0:
+                return None
+        var found = self._handoff_input(index)
+        var input = found[0]
+        if input < 0:
+            return None
+        var schema = self._execute(input, True, streaming, batch_size)
+        var offered = self._handoff_plan(index, found[1], schema)
+        if not _handoff_supports(offered):
+            return None
+        var algorithm = String("handoff")
+        var decided = False
+        if self._handoff == HANDOFF_AUTO:
+            var estimated = self._estimated_rows(input)
+            if estimated >= 0:
+                var verdict = _placement(offered, estimated, cpu_costs)
+                if not verdict[0]:
+                    self._record(
+                        index,
+                        "placement",
+                        estimated,
+                        -1,
+                        algorithm="placed cpu" + verdict[1],
+                    )
+                    return None
+                algorithm += verdict[1]
+                decided = True
+        var columns = self._execute(input, False, streaming, batch_size)
+        var rows = columns.height()
+        var region = self._handoff_plan(index, found[1], columns)
+        if self._handoff == HANDOFF_AUTO and not decided:
+            var verdict = _placement(region, rows, cpu_costs)
+            if not verdict[0]:
+                var began = Int(perf_counter_ns())
+                var placed = region._execute(
+                    len(region._nodes) - 1, False, streaming, batch_size
+                )
+                self._record(
+                    index,
+                    "eager",
+                    rows,
+                    placed.height(),
+                    algorithm="placed cpu" + verdict[1],
+                    wall_ns=Int(perf_counter_ns()) - began,
+                )
+                return placed^
+            algorithm += verdict[1]
+        var began = Int(perf_counter_ns())
+        var result = _handoff_execute(region)
+        self._record(
+            index,
+            "accel",
+            rows,
+            result.height(),
+            algorithm=algorithm,
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        return result^
+
+    def _placement_lines(self) raises -> String:
+        """One `PLACE` line per node the provider supports: both measured
+        cost models and the row count from which the accelerator is
+        estimated faster, since rows are known only when the node runs."""
+        var cpu_costs = load_costs("cpu")
+        var out = String()
+        for index in range(len(self._nodes)):
+            var kind = self._nodes[index].kind
+            if kind != SELECT and kind != AGG:
+                continue
+            var found = self._handoff_input(index)
+            if found[0] < 0:
+                continue
+            var schema = self._execute(found[0], True)
+            var region = self._handoff_plan(index, found[1], schema)
+            if not _handoff_supports(region):
+                continue
+            var at_zero = _handoff_estimate(region, 0)
+            var at_million = _handoff_estimate(region, 1_000_000)
+            var cpu = cpu_costs.get(at_zero[0])
+            out += "PLACE " + self._label(index) + ": " + at_zero[0] + ": "
+            if at_zero[1] < 0 or not cpu:
+                out += "no measured cost; cpu\n"
+                continue
+            var accel = LinearCost(
+                at_zero[1], (at_million[1] - at_zero[1]) / 1e6
+            )
+            var from_rows = crossover_rows(cpu.value(), accel)
+            out += (
+                "cpu "
+                + String(round(cpu.value().fixed_ns / 1e3, 1))
+                + " us + "
+                + String(round(cpu.value().row_ns, 3))
+                + " ns/row, accel "
+                + String(round(accel.fixed_ns / 1e3, 1))
+                + " us + "
+                + String(round(accel.row_ns, 3))
+                + " ns/row; "
+                + (
+                    "accel from " + String(from_rows) + " rows" if from_rows
+                    >= 0 else "cpu at every size"
+                )
+                + "\n"
+            )
+        return out^
+
+    def _handoff_nodes(self) raises -> List[String]:
+        """The nodes of the optimized plan the provider would run, as
+        `explain` labels them: each projection or aggregation it accepts
+        from its input's schema."""
+        var plan = self._optimized()
+        var labels = List[String]()
+        for index in range(len(plan._nodes)):
+            var kind = plan._nodes[index].kind
+            if kind != SELECT and kind != AGG:
+                continue
+            var found = plan._handoff_input(index)
+            if found[0] < 0:
+                continue
+            var schema = plan._execute(found[0], True)
+            if _handoff_supports(plan._handoff_plan(index, found[1], schema)):
+                labels.append(plan._label(index))
+        return labels^
 
     def _record(
         self,
@@ -3036,9 +3256,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )[0].copy()
         var crew = Crew.start()
         try:
-            var result = self._collect(
-                optimize=optimize, streaming=streaming, batch_size=batch_size
-            )
+            var result: DataFrame
+            if engine == "auto" and _automatic_handoff():
+                result = self._with_handoff(HANDOFF_AUTO)._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
+            else:
+                result = self._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
             crew.release()
             return result^
         except e:
@@ -3301,6 +3531,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._report = Optional(ArcPointer(ExecutionReport()))
+        if engine == "auto" and _automatic_handoff():
+            plan._handoff = HANDOFF_AUTO
         var result = plan._execute(
             len(plan._nodes) - 1, False, streaming, batch_size
         )
@@ -3355,6 +3587,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var out = String()
         if engine != "cpu":
             out = backend.describe()
+        if engine == "auto" and _automatic_handoff():
+            out += plan._placement_lines()
         plan._describe(len(plan._nodes) - 1, 0, out, streaming)
         return out^
 
@@ -5571,6 +5805,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var ahead = self._prefetched.value()
             if index in ahead[]:
                 return ahead[].pop(index)
+        if self._handoff != HANDOFF_OFF and not empty:
+            var handed = self._handoff_region(index, streaming, batch_size)
+            if handed:
+                return handed.take()
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
