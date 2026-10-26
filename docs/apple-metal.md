@@ -39,20 +39,27 @@ estimated faster. Profiles record each decision with both estimates.
 
 ### Measured on an M1 Mac mini
 
-`bench_handoff`, best of 5 warm runs, against the CPU executor on 8 threads,
-with every Metal answer checked against the CPU's. Metal's fixed cost is
-about 1 ms per hand-off; the column is read in place.
+`bench_handoff`, best of 5 warm runs from 10 thousand to 200 million rows,
+against the CPU executor on 8 threads, with every Metal answer checked
+against the CPU's. Each engine's times are fitted to a fixed cost plus a cost
+per row; the table gives where the fits cross and what they give at 50
+million rows (single runs at that size vary by a few milliseconds on this
+machine). Metal's fixed cost is about 0.8 ms per hand-off; the column is read
+in place.
 
 | Operator | Metal estimated faster from | At 50 million rows (CPU / Metal) |
 | --- | --- | --- |
-| Float32 sum | about 1.9 million rows | 30.5 ms / 7.9 ms |
-| Float32 filtered sum | about 2.6 million rows | 24.6 ms / 9.3 ms |
-| Int32 filtered sum | about 4.4 million rows | 17.2 ms / 8.0 ms |
-| Int32 sum | never: the CPU runs near memory bandwidth | 3.5 ms / 7.5 ms |
-| Int64 sums | never: 64-bit integer work is slow on the GPU | 7.0-11.8 ms / 14.5-18.4 ms |
+| Int32 filtered sum | about 2.8 million rows | 23.2 ms / 9.4 ms |
+| Float32 filtered sum | about 7.9 million rows | 14.0 ms / 9.7 ms |
+| Int64 filtered sum | about 28 million rows | 17.1 ms / 16.5 ms |
+| Float32 sum | never: the CPU runs near memory bandwidth | 4.5 ms / 9.4 ms |
+| Int32 sum | never: the CPU runs near memory bandwidth | 4.6 ms / 9.8 ms |
+| Int64 sum | never: 64-bit integer work is slow on the GPU | 8.1 ms / 17.9 ms |
 
 The crossovers come from the fitted calibration; `engine="auto"` with it
-keeps the Int32 and Int64 sums on the CPU at every size.
+keeps the plain sums on the CPU at every size. Until #1023, the CPU summed
+Float32 one row at a time, and Metal looked faster from about 1.9 million
+rows; that margin was the CPU's slow loop, not the GPU.
 
 An earlier Metal core ran whole plans and was 30 to 250 times slower than
 the CPU per row, at every data size measured. It stored every value as a 21-byte generic cell, ran
