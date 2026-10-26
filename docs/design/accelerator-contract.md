@@ -17,8 +17,9 @@ The boundary is checked in CI by `scripts/check_accelerator_boundary.sh`.
 
 `dataframe/_accel_provider.mojo` is the only module the core calls to reach a
 backend. Only `dataframe/lazy.mojo` and `dataframe/execution_backend.mojo`
-import it. A provider is a module with these six functions. Their signatures mention only
-core types: `LazyFrame`, `DataFrame`, `String`, `Bool` and `Int`.
+import it. A provider is a module with these nine functions: six for whole
+plans and three for hand-off. Their signatures mention only core types:
+`LazyFrame`, `DataFrame`, `String`, `Bool`, `Int` and `Float64`.
 
 | Function | Signature | What the core expects |
 | --- | --- | --- |
@@ -28,8 +29,12 @@ core types: `LazyFrame`, `DataFrame`, `String`, `Bool` and `Int`.
 | `execute_profiled` | `(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]` | Same as `execute`, with measured data in the report. May return `execute`'s report unchanged. Called by `profile`. |
 | `select_auto` | `(plan, optimize, streaming, batch_size) -> Tuple[String, String]` | Used only for `engine="auto"`. Returns `(engine, reason)` with engine `"cpu"`, `"accel"` or `"mixed"`; anything else is an error. Does not raise: a rejection becomes `("cpu", reason)`. Must not execute the plan. |
 | `execute_auto` | `(plan, optimize, streaming, batch_size, profiling: Bool) raises -> Tuple[DataFrame, DataFrame]` | Run a region `select_auto` chose. Errors propagate; the core does not retry on CPU (one exception, below). |
+| `handoff_supports` | `(region: LazyFrame) -> Bool` | Whether the provider runs `region`: a node the CPU executor offers with the filters directly below it, as a plan over the input's schema. Decided before any input runs; does not raise. A provider for a discrete device returns False. |
+| `handoff_execute` | `(region: LazyFrame) raises -> DataFrame` | Run an accepted region on its input columns and return the node's columns. |
+| `handoff_estimate` | `(region: LazyFrame, rows: Int) -> Tuple[String, Float64]` | The region's calibration key and the provider's estimated nanoseconds for `rows` input rows, data movement included; -1 when it has no measured cost. Used for `engine="auto"` placement ([Apple Metal](../apple-metal.md)). |
 
-The core calls all six during collection.
+The core calls the whole-plan functions during collection, and the hand-off
+functions from the CPU executor when a provider runs a plan through it.
 
 Three functions that earlier versions of the provider also carried are not part
 of the contract: `calibration_runtime`, `calibration_key` and `estimate_auto`.
@@ -119,17 +124,17 @@ Mojo has no conditional imports and no import-time side effects, so a backend
 cannot register itself by being imported. The backend is chosen at build time,
 by import path.
 
-- `dataframe/_accel_provider.mojo` only re-exports the six provider functions
+- `dataframe/_accel_provider.mojo` only re-exports the nine provider functions
   from `dataframe_provider`.
 - `dataframe_provider/` in the repository root is the default provider, Metal:
-  it re-exports the six functions from `dataframe_metal.provider`. Where Metal
+  it re-exports the nine functions from `dataframe_metal.provider`. Where Metal
   cannot run (Linux), `installed()` is false and collection stays on the CPU.
 - `providers/cpu/dataframe_provider/` is the CPU-only provider: `installed()`
   is false, `execute` raises "Accelerator provider is not installed",
   `select_auto` returns `cpu`. `-I providers/cpu -I .` puts it first and
   compiles no GPU code.
 - Another backend ships its own `dataframe_provider/` package that re-exports
-  the six functions from its implementation package, and puts it first on the
+  the nine functions from its implementation package, and puts it first on the
   import path. Two backends in one build are not supported; the first
   `dataframe_provider` on the path wins.
 - Packaging: `scripts/build_package.py` picks the artifact by platform. macOS
@@ -143,7 +148,7 @@ boundaries (`dataframe.lazy` imports `_accel_provider`, which imports
 package before.
 
 The NVIDIA package still replaces `_accel_provider.mojo` in a staged tree. It
-can instead ship a `dataframe_provider/` package that re-exports its six
+can instead ship a `dataframe_provider/` package that re-exports its nine
 functions, and drop the replacement step.
 
 The checks are in `scripts/check_accelerator_boundary.sh`: core may import
@@ -158,5 +163,5 @@ CPU tests never depend on a backend.
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | The execution core is being rebuilt as an operator hand-off from the CPU engine ([Apple Metal](../apple-metal.md)); today every query reports unsupported. Implements all six provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Any operator on the device. A trait-checked registry: the six functions are checked where the core imports them, not in the backend package. |
+| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs inside the CPU executor through hand-off ([Apple Metal](../apple-metal.md)); accepts filtered sums of Int32, Int64 and Float32 columns. Implements all nine provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Operators beyond the filtered sum; pipeline-level hand-off. A trait-checked registry: the functions are checked where the core imports them, not in the backend package. |
 | NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |

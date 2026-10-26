@@ -12,6 +12,7 @@ were taken at; those are a record of a decision, not current numbers.
 | Note | Purpose | Describes the tree at |
 | --- | --- | --- |
 | [accelerator-contract.md](accelerator-contract.md) | What an accelerator backend provides to the core, what the core guarantees, how a backend attaches, and the plan to make it a separate package. | `12980823` (2026-10-22) |
+| [accelerator-handoff.md](accelerator-handoff.md) | How the CPU executor hands operators to a shared-memory accelerator, cost-based placement, and pipeline-level hand-off next. | `cce4799f` (2026-10-25) |
 | [accelerator-backends.md](accelerator-backends.md) | How optional accelerator backends plug into the planner and executor. | `c411a93e` (2026-10-16) |
 | [arrow-import.md](arrow-import.md) | Measurement: parallel Arrow import (#276). | `be283d9d` (2026-10-15) |
 | [benchmarks.md](benchmarks.md) | Rules for benchmarking, the external suites, and retired benchmarks. | `d05602cf` (2026-10-21) |

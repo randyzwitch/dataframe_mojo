@@ -6,6 +6,7 @@ UInt32 code per retained row. This module depends only on query_scope, so it
 can be used by kernels and materializers without a residency cycle.
 """
 from max.gpu.host import DeviceBuffer
+from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from std.utils import Variant
@@ -739,6 +740,65 @@ def allocate_native_column[
         validity^,
         errors^,
         reservation=Optional[_NativeReservation](reservation^),
+    )
+
+
+def wrap_native[
+    dtype: DType
+](scope: Scope, series: Series) raises -> Optional[NativeColumn[dtype]]:
+    """The column's own memory made visible to the device, without a copy.
+
+    On unified memory the GPU can read the CPU's buffer in place. Metal maps
+    only whole pages, so this wraps the pages that hold the values and keeps
+    the first value's offset in the view (`value_offset`); those pages are
+    mapped because the values live in them. The validity bitmap, a
+    thirty-second of the values at most, is copied. None for a chunked or
+    empty column, which `upload_native` copies instead. Keep `series` alive
+    until the device work that reads the view is synchronized.
+    """
+    var logical = series.dtype()
+    if series.is_chunked() or len(series) == 0:
+        return None
+    if not _native_logical_dtype_matches[dtype](logical):
+        return None
+    if not series._data.isa[Column[Scalar[dtype]]]():
+        return None
+    ref column = series._data[Column[Scalar[dtype]]]
+    var rows = len(column)
+    var element = size_of[Scalar[dtype]]()
+    var page = Int(external_call["getpagesize", Int32]())
+    var address = Int(column.unsafe_values())
+    var base = address - address % page
+    var end = checked_add(address, checked_mul(rows, element))
+    var length = checked_add(end - base, page - 1) // page * page
+    if (address - base) % element or length % element:
+        return None
+    var ctx = scope.context()
+    var values = ctx.wrap_host_memory[dtype](
+        Pointer[Scalar[dtype], MutAnyOrigin](unsafe_from_address=base),
+        length // element,
+    )
+    var validity = Optional[DeviceBuffer[DType.uint8]]()
+    var bit_offset = 0
+    if column.null_count() > 0:
+        bit_offset = column.validity_offset() % 8
+        var validity_bytes = (bit_offset + rows + 7) // 8
+        validity = Optional[DeviceBuffer[DType.uint8]](
+            ctx.enqueue_create_buffer[DType.uint8](validity_bytes)
+        )
+        ctx.enqueue_copy(
+            validity.value(),
+            column.unsafe_validity().unsafe_offset(
+                column.validity_offset() // 8
+            ),
+        )
+        scope.record_upload(validity_bytes)
+        scope.synchronize()
+    var owner = ArcPointer(
+        _NativeColumnOwner[dtype](scope, values^, validity^, None, None)
+    )
+    return NativeColumn[dtype](
+        owner, logical, rows, (address - base) // element, bit_offset
     )
 
 

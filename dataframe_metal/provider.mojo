@@ -1,16 +1,17 @@
-"""The Metal provider: the six provider functions over the Metal runtime.
+"""The Metal provider: the nine provider functions over the Metal runtime.
 
 The root `dataframe_provider` package re-exports this module, so a plain
 `-I .` build uses it. `-I providers/cpu -I .` replaces it with the CPU-only
 provider.
 
-The provider surface is six functions whose signatures mention only core
+The provider surface is nine functions whose signatures mention only core
 types. Calibration is backend-specific and is imported from the backend.
 Presence checks do not open a driver. CPU collection never initializes Metal.
 """
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from .metal import MetalRuntime, default_runtime, metal_installed
+from . import handoff
 
 
 def installed() -> Bool:
@@ -75,3 +76,24 @@ def execute_auto(
         .execute_profiled(plan) if profiling else _runtime()
         .execute(plan)
     )
+
+
+def handoff_supports(region: LazyFrame) -> Bool:
+    """Whether Metal runs `region`, a node the CPU executor offers with its
+    input already computed; decided from the region's plan and types."""
+    if not installed():
+        return False
+    return handoff.supports(region)
+
+
+def handoff_execute(region: LazyFrame) raises -> DataFrame:
+    """Run an accepted region on Metal."""
+    return handoff.execute(region)
+
+
+def handoff_estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+    """The region's calibration key and Metal's measured cost for `rows`
+    input rows, in nanoseconds; -1 when there is none."""
+    if not installed():
+        return (String(), Float64(-1))
+    return handoff.estimate(region, rows)
