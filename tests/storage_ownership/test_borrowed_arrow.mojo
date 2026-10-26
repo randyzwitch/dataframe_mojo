@@ -517,6 +517,6 @@ def test_borrowed_arrow_struct_parent_and_child_offsets_compose_without_copying(
     foreign.nodes[2].buffer(text_bytes("abcdef"))
     foreign.seal()
     exercise_foreign_struct_offset(foreign)
-    for node in foreign.nodes:
-        assert_equal(node.array_releases, 1)
-        assert_equal(node.schema_releases, 1)
+    for i in range(len(foreign.nodes)):
+        assert_equal(foreign.nodes[i].array_releases, 1)
+        assert_equal(foreign.nodes[i].schema_releases, 1)
