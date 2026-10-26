@@ -40,9 +40,11 @@ until export release. Numeric rechunking and other operations that explicitly
 require contiguous output also allocate.
 
 The IPC bridge preserves `vu`/`vz` buffers rather than casting them to large
-strings/binary. Enabling borrowing in eager and lazy IPC readers remains a
-separate integration stage. Decompression necessarily creates decoded Arrow
-buffers; those buffers can then be retained without a second payload copy.
+strings/binary. Eager and lazy IPC readers borrow compatible buffers and
+retain their parent array independently from the reader stream. Decompression
+necessarily creates decoded Arrow buffers; those buffers are then retained
+without a second payload copy. Explicit C Data imports still default to
+copying, and layout conversions retain their documented allocation paths.
 
 The storage contracts exercise actual exporter callbacks, a native mapped
 IPC stream, retained views, mutation isolation, ordinary copy-by-default
@@ -50,6 +52,16 @@ imports, and serial/parallel error paths. They check cleanup after scoped
 helpers return, so temporary typed views are also gone before final release
 counts are asserted. Native IPC tests require the IPC-enabled shared library
 from the preceding I/O changes.
+
+Mapped projections use Arrow's cached range reader after prebuffering only
+the requested batch's metadata. In the pinned Arrow 24 library, the ordinary
+synchronous selective path assembles a copied body even for mapped input.
+The cached path retains mapped buffer ranges and still skips decoding
+excluded fields. The bridge separately validates the message/footer body
+length, which the cached Arrow path does not compare. It never prebuffers
+later record-batch bodies, preserving early stops and skipped corrupt-body
+behavior. Native-address tests observe upstream buffers before import, close
+the reader, and verify actual unmapping after the final column view dies.
 
 Fixed-width buffer facts retain the array's declared row interval. Shared
 ascending-order and zone-map caches scan that interval, excluding unused

@@ -36,8 +36,9 @@ UInt32, unsupported temporal units scale, and unaligned typed values are
 byte-copied to aligned storage. Unsafe null view descriptors are sanitized
 into owned descriptors. These fallbacks retain other compatible buffers.
 
-IPC readers retain their current copying policy until the borrowing
-integration is enabled separately.
+IPC eager reads and lazy scans use borrowing internally. Compressed input
+retains decoded Arrow buffers; compatible uncompressed mapped input retains
+the mapping. Explicit C Data imports continue to default to `copy=True`.
 
 `export_arrow_series` and `import_arrow_series` do the same for one column.
 Each function also has an overload taking the structs' raw addresses (`Int`),

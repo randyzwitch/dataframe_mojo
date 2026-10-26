@@ -1,9 +1,9 @@
 """Arrow IPC/Feather v2 files and IPC streams through libdfparquet.
 
-Readers import one record batch at a time and retain batches as column
-chunks. Import currently copies foreign buffers, including when memory_map
-selects a mapped native input. Lazy file scans use the incremental batch
-reader; foreign-buffer ownership remains separate. Writers export aligned
+Readers retain compatible record-batch buffers as read-only column chunks.
+Uncompressed mapped input shares mapped buffers; compressed input shares
+decoded Arrow buffers. Lazy file scans use the same retained owners through
+incremental batches and slices. Layout conversions still allocate. Writers export aligned
 chunk windows instead of flattening the complete frame. No Python dependency
 is required at runtime.
 """
@@ -162,7 +162,9 @@ struct _IpcBatches(Movable):
                     )
                 )
                 self.pool_ready = True
-            self.pending = _import_arrow_with_pool(array, schema, self.pool)
+            self.pending = _import_arrow_with_pool(
+                array, schema, self.pool, copy=False
+            )
             var batch = self.pending.value().slice(0, self.size)
             self.offset = batch.height()
             return batch^
@@ -278,7 +280,9 @@ def _collect(mut stream: _ArrowArrayStream) raises -> DataFrame:
                         )
                     )
                     initialized = True
-                frames.append(_import_arrow_with_pool(array, schema, pool))
+                frames.append(
+                    _import_arrow_with_pool(array, schema, pool, copy=False)
+                )
             except error:
                 _release_imported(array, schema)
                 raise error^
@@ -383,7 +387,8 @@ def read_ipc(
 
     None selects all columns; an empty column list retains only row count.
     Selection follows caller order. n_rows=0 reads an empty typed result.
-    memory_map chooses native mapped input; imported payloads still copy.
+    memory_map shares compatible uncompressed file buffers. Compressed input
+    retains decoded Arrow buffers. Conversion paths may allocate.
     Requires libdfparquet built with IPC support.
     """
     return _read(path, columns, n_rows, memory_map, False)
