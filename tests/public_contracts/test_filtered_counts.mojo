@@ -23,7 +23,7 @@ def _frame(n: Int) raises -> DataFrame:
         [
             Series("k", Column[Int32](keys^)),
             Series("x", Column[Int64](ints^)),
-            Series("y", Column[Float64](floats^, floats_valid^)),
+            Series("y", Column[Float64](floats^, floats_valid)),
             Series("s", Column[String](texts^)),
         ]
     )
@@ -55,15 +55,12 @@ def test_filtered_counts_match_the_kept_rows() raises:
                 var kept = Int64(0)
                 var kept_valid = Int64(0)
                 var total = Int64(0)
-                var below = Int64(0)
                 for row in range(n):
                     if Int((row * 37) % 100) < limit:
                         kept += 1
                         total += Int64(row % 1000)
                         if row % 3 != 1:
                             kept_valid += 1
-                    if row % 1000 < 500:
-                        below += 1
                 var exprs: List[Expr] = [
                     col("x").count().alias("x"),
                     col("y").count().alias("y"),
@@ -82,5 +79,9 @@ def test_filtered_counts_match_the_kept_rows() raises:
                 ]
                 _expect(filtered.select_exprs(both), [total, kept])
             # The predicate reads the counted column itself.
+            var below = Int64(0)
+            for row in range(n):
+                if row % 1000 < 500:
+                    below += 1
             var own = source.lazy().filter(col("x") < 500)
             _expect(own.select_exprs([col("x").count()]), [below])
