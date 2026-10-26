@@ -87,6 +87,6 @@ def test_shared_json_reader_rejects_invalid_tokens_and_unicode() raises:
     with assert_raises(contains="nesting"):
         _ = JsonValue(deep)
     var malformed_bytes: List[UInt8] = [34, 192, 128, 34]
-    var malformed = String(unsafe_from_utf8=malformed_bytes^)
+    var malformed = String(unsafe_from_utf8=malformed_bytes)
     with assert_raises(contains="UTF-8"):
         _ = JsonValue(malformed)

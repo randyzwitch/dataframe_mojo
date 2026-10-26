@@ -140,6 +140,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 from std.math import isnan
+from std.utils.numerics import inf
 from std.sys import size_of
 
 
@@ -246,17 +247,19 @@ def _empty_output(
         return parent.list_column().child().slice(0, 0).renamed("")
     if node.op == STRUCT_FIELD:
         var parent = _empty_output(bound, columns, node.left)
-        return parent.struct_column().field(node.text).renamed("")
+        var field = parent.struct_column().field(node.text).renamed("")
+        return decode(field) if field.dtype().is_categorical() else field^
     if node.op == STRUCT_PACK:
         var names = struct_pack_names(node)
         var children = node_children(node)
         var fields = List[Series](capacity=len(children))
         for field in range(len(children)):
-            fields.append(
-                _empty_output(bound, columns, children[field]).renamed(
-                    names[field]
+            var value = _empty_output(bound, columns, children[field])
+            if bound.dtypes[children[field]].is_categorical():
+                value = cast_series(
+                    value, bound.dtypes[children[field]], True, 0, List[Bool]()
                 )
-            )
+            fields.append(value.renamed(names[field]))
         return Series("", StructColumn(fields^))
     return _empty(bound.dtypes[index])
 
@@ -511,9 +514,10 @@ def _eval[
     if is_text_function(node.op):
         return text_function(node, left, bound._regex(index))
     if is_nested_op(node.op):
-        return nested_op(
+        var value = nested_op(
             node, left, bound.dtypes[node.left], bound._regex(index)
         )
+        return decode(value) if value.dtype().is_categorical() else value^
     if node.right < 0:
         if is_math(node.op):
             return math_unary[width](
@@ -665,7 +669,12 @@ def _pack_struct[
             value = value._broadcast(size)
         # Kernel outputs carry physical tags; restore the bound logical type.
         if value.dtype() != bound.dtypes[children[k]]:
-            value = value.with_dtype(bound.dtypes[children[k]])
+            if bound.dtypes[children[k]].is_categorical():
+                value = cast_series(
+                    value, bound.dtypes[children[k]], True, 0, List[Bool]()
+                )
+            else:
+                value = value.with_dtype(bound.dtypes[children[k]])
         fields.append(value.renamed(names[k]))
     return Series("", StructColumn(fields^))
 
@@ -1298,6 +1307,8 @@ struct _RowsJob[width: Int](Job):
         return self.result^
 
     def run(mut self) raises:
+        var nested = self.bound.dtypes[self.root].is_nested()
+        var parts = List[Series]()
         for offset in range(self.start, self.end, self.batch_size):
             var chunk = _batch[Self.width](
                 self.bound,
@@ -1308,13 +1319,12 @@ struct _RowsJob[width: Int](Job):
                 min(self.batch_size, self.end - offset),
                 self.grouped,
             )
-            if (
-                self.bound.dtypes[self.root].is_struct()
-                and len(self.result) == 0
-            ):
-                self.result = chunk^
+            if nested:
+                parts.append(chunk^)
             else:
                 self.result._append_series(chunk)
+        if len(parts) != 0:
+            self.result = Series._from_chunks(parts).rechunk()
 
 
 def _direct_grouped_count_part(
@@ -1861,6 +1871,104 @@ def _direct_int_sum[
     reducer.int_sums[0].count += Int64(count)
 
 
+def _direct_float_extreme[
+    D: DType, is_max: Bool
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Float min or max of rows [start, end), a vector of lanes at a time.
+
+    NaN and nulls never win: their lanes hold the identity (-inf for max,
+    +inf for min). Whether any value was compared and whether a NaN was
+    seen are kept in lane masks rather than read off the result, so a
+    column of infinities still records its extreme and an all-NaN interval
+    records only `nan_seen`, as the per-row path does. A tie between
+    `-0.0` and `0.0` goes to the earlier row, the one arg_min and arg_max
+    report; vector min and max may order the zeros (ARM does).
+    """
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
+    if count == 0:
+        return
+    var all_valid = count == end - start
+    var identity = -inf[D]() if is_max else inf[D]()
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    comptime width = 64 // size_of[Scalar[D]]()
+    var best_lanes = SIMD[D, width](identity)
+    var compared = SIMD[DType.bool, width](fill=False)
+    var nans = SIMD[DType.bool, width](fill=False)
+    var i = start
+    if all_valid:
+        while i + width <= end:
+            var v = values.unsafe_load[width=width](i)
+            var number = v.eq(v)
+            compared |= number
+            nans |= ~number
+            comptime if is_max:
+                best_lanes = max(best_lanes, number.select(v, best_lanes))
+            else:
+                best_lanes = min(best_lanes, number.select(v, best_lanes))
+            i += width
+    else:
+        # Nulls: eight rows at a time, their validity bits as a lane mask.
+        var lanes = SIMD[D, 8](identity)
+        var counted = SIMD[DType.bool, 8](fill=False)
+        var missing = SIMD[DType.bool, 8](fill=False)
+        while i + 8 <= end:
+            var v = values.unsafe_load[width=8](i)
+            var valid = _valid_lanes(bits, column._offset + i)
+            var number = valid & v.eq(v)
+            counted |= number
+            missing |= valid & ~v.eq(v)
+            comptime if is_max:
+                lanes = max(lanes, number.select(v, lanes))
+            else:
+                lanes = min(lanes, number.select(v, lanes))
+            i += 8
+        comptime if is_max:
+            best_lanes = max(best_lanes, SIMD[D, width](lanes.reduce_max()))
+        else:
+            best_lanes = min(best_lanes, SIMD[D, width](lanes.reduce_min()))
+        compared |= SIMD[DType.bool, width](fill=counted.reduce_or())
+        nans |= SIMD[DType.bool, width](fill=missing.reduce_or())
+    var best: Scalar[D]
+    comptime if is_max:
+        best = best_lanes.reduce_max()
+    else:
+        best = best_lanes.reduce_min()
+    var any_value = compared.reduce_or()
+    var any_nan = nans.reduce_or()
+    while i < end:
+        if all_valid or column._valid(i):
+            var value = column._get(i)
+            if value != value:
+                any_nan = True
+            else:
+                any_value = True
+                comptime if is_max:
+                    best = max(best, value)
+                else:
+                    best = min(best, value)
+        i += 1
+    if any_nan:
+        reducer.nan_seen[0] = True
+    if not any_value:
+        return
+    if best == 0:
+        for row in range(start, end):
+            if (all_valid or column._valid(row)) and column._get(row) == 0:
+                best = column._get(row)
+                break
+    var floating = best.cast[DType.float64]()
+    if (
+        not reducer.seen[0]
+        or (is_max and floating > reducer.floats[0])
+        or (not is_max and floating < reducer.floats[0])
+    ):
+        reducer.floats[0] = floating
+        reducer.seen[0] = True
+
+
 def _direct_int_extreme[
     D: DType, is_max: Bool
 ](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
@@ -1962,6 +2070,12 @@ def _direct_numeric_column[
             # The same eight-wide masked sum a plain column takes; a
             # masked conditional branch arrives here with its validity.
             _direct_float_column_sum[D](reducer, column, start, end)
+            return True
+        if op == MAX:
+            _direct_float_extreme[D, True](reducer, column, start, end)
+            return True
+        if op == MIN:
+            _direct_float_extreme[D, False](reducer, column, start, end)
             return True
     for i in range(start, end):
         if not column._valid(i):
@@ -2598,6 +2712,8 @@ def _full[
     if whole:
         return whole.take()
     var result = _output_seed(bound, columns, states, index)
+    var nested = bound.dtypes[index].is_nested()
+    var parts = List[Series]()
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
             bound,
@@ -2610,10 +2726,12 @@ def _full[
         )
         if len(chunk) == 1 and min(batch_size, height - offset) != 1:
             chunk = chunk._broadcast(min(batch_size, height - offset))
-        if bound.dtypes[index].is_struct() and len(result) == 0:
-            result = chunk^
+        if nested:
+            parts.append(chunk^)
         else:
             result._append_series(chunk)
+    if len(parts) != 0:
+        return Series._from_chunks(parts).rechunk()
     return result^
 
 
@@ -3175,7 +3293,7 @@ def evaluate[
         workers,
     )
     if bound.dtypes[root].is_categorical():
-        result = encode(result)
+        result = cast_series(result, bound.dtypes[root], True, 0, List[Bool]())
     result._name = bound.expr._name
     return result^
 
@@ -3197,6 +3315,8 @@ def _rows[
     when more than one."""
     var result = _output_seed(bound, columns, states, index)
     if workers <= 1:
+        var nested = bound.dtypes[index].is_nested()
+        var parts = List[Series]()
         result._reserve_rows(size, 0)
         for offset in range(0, size, batch_size):
             var chunk = _batch[width](
@@ -3208,10 +3328,12 @@ def _rows[
                 min(batch_size, size - offset),
                 grouped,
             )
-            if bound.dtypes[index].is_struct() and len(result) == 0:
-                result = chunk^
+            if nested:
+                parts.append(chunk^)
             else:
                 result._append_series(chunk)
+        if len(parts) != 0:
+            return Series._from_chunks(parts).rechunk()
         return result^
     # Row-parallel evaluation (#5): each worker evaluates the batches of
     # one contiguous partition into a private series; pieces are joined

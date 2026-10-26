@@ -158,6 +158,8 @@ from .expr import (
     STR_TO_INTEGER,
     STR_SPLIT_FIELDS,
     STR_NORMALIZE,
+    STR_JSON_DECODE,
+    STR_JSON_PATH,
     is_nested_op,
     IMPLODE,
     STRUCT_PACK,
@@ -254,7 +256,15 @@ struct BoundExpr(Copyable):
         return self.shapes[len(self.shapes) - 1]
 
 
+from .json_decode import validate_json_dtype
+from .json_path import JsonPath
+
+
 def _text_function_name(op: Int) -> String:
+    if op == STR_JSON_PATH:
+        return "str.json_path_match"
+    if op == STR_JSON_DECODE:
+        return "str.json_decode"
     if op == STR_NORMALIZE:
         return "str.normalize"
     if op == STR_TITLECASE:
@@ -1090,6 +1100,15 @@ def _text_function_dtype(node: Node) raises -> DataType:
     """The result dtype of a text_functions.mojo operation, after checking
     its arguments."""
     var op = node.op
+    if op == STR_JSON_PATH:
+        _ = JsonPath(node.text)
+        return DataType.STRING
+    if op == STR_JSON_DECODE:
+        if len(node.dtypes) != 1 or not node.dtypes[0]:
+            raise Error("str.json_decode requires an output dtype")
+        var target = node.dtypes[0].value()
+        validate_json_dtype(target)
+        return target
     if op == STR_NORMALIZE:
         if node.text not in ["NFC", "NFD", "NFKC", "NFKD"]:
             raise Error("str.normalize form must be NFC, NFD, NFKC or NFKD")
