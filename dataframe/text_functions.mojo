@@ -28,6 +28,7 @@ from .expr import (
     STR_DECODE,
     STR_TO_INTEGER,
     STR_SPLIT_FIELDS,
+    STR_NORMALIZE,
 )
 from .dtype import DataType
 from .nested_column import StructColumn
@@ -38,6 +39,7 @@ from .string_bytes import _Bytes, _find_bytes, _same_bytes
 from .string_column import StringColumn, StringBuilder
 from .string_predicates import decode_values
 from .string_view import StringView, StringViewStorage
+from .unicode_normalization import normalize_series
 from .unicode_alphabetic import alphabetic_ranges, is_alphabetic
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
@@ -47,6 +49,8 @@ def text_function(
     node: Node, input: Series, compiled: Optional[Regex] = None
 ) raises -> Series:
     """Evaluate one text_functions operation on a String series."""
+    if node.op == STR_NORMALIZE:
+        return normalize_series(input, node.text)
     if input.is_chunked():
         return text_function(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]

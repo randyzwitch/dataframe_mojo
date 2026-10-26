@@ -1913,6 +1913,8 @@ is searched as a substring.
   The UTF-8 bytes as "hex" (lowercase) or "base64" text.
 - `def decode(self, encoding: String, strict: Bool = True) -> Expr`
   Decode "hex" or "base64" text into Binary. Invalid text raises when strict, or is null otherwise.
+- `def normalize(self, form: String = "NFC") -> Expr`
+  Unicode 17 NFC, NFD, NFKC or NFKD normalization. Nulls propagate; already-normalized chunks retain their existing storage.
 - `def to_integer(self, base: Int = Int(10), strict: Bool = True) -> Expr`
   Parse an optionally signed integer in base 2 to 36 as Int64. Unparseable or overflowing text raises when strict, or is null otherwise.
 - `def join(self, delimiter: String = "", ignore_nulls: Bool = True) -> Expr`
