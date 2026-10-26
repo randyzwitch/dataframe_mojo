@@ -244,7 +244,6 @@ def _calibrate(path: String, cpu_row_ns: Float64, accel_row_ns: Float64) raises:
 # requires: metal
 def test_metal_automatic_placement_follows_measured_costs() raises:
     _ = require_metal()
-    var path = String("build/test-handoff-calibration.json")
     var frame = _columns(100_000, False)
     var plan = frame.lazy().filter(col("i") > 0).select(col("i").sum())
     var expected = plan.collect(engine="cpu")
@@ -252,17 +251,20 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
     var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
     assert_false("PLACE" in plan.explain(engine="auto"))
     _ = unset^
-    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
     for accel_cheaper in [True, False]:
         # Metal at 0.1 ns/row against the CPU's 50 is estimated faster from
-        # about 40,000 rows; at 100 ns/row it never is.
+        # about 40,000 rows; at 100 ns/row it never is. A process reads a
+        # calibration once per path, so each costing has its own file.
+        var path = String("build/test-handoff-calibration-") + (
+            "cheap.json" if accel_cheaper else "dear.json"
+        )
         _calibrate(path, 50.0, 0.1 if accel_cheaper else 100.0)
+        var calibrated = ScopedEnvironment(
+            "DATAFRAME_HANDOFF_CALIBRATION", path
+        )
         var shown = plan.explain(engine="auto")
         assert_true("PLACE" in shown)
-        assert_true(
-            ("accel from" in shown) == accel_cheaper,
-            shown,
-        )
+        assert_true(("accel from" in shown) == accel_cheaper, shown)
         var profiled = plan.profile(engine="auto")
         assert_true(profiled[0].equals(expected))
         var report = profiled[1].copy()
@@ -280,7 +282,7 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
             placed,
         )
         assert_true(plan.collect(engine="auto").equals(expected))
-    # An operator the calibration does not cover runs on the CPU.
-    var plain = frame.lazy().select(col("i").sum())
-    assert_true("no measured cost" in plain.explain(engine="auto"))
-    _ = calibrated^
+        # An operator the calibration does not cover runs on the CPU.
+        var plain = frame.lazy().select(col("i").sum())
+        assert_true("no measured cost" in plain.explain(engine="auto"))
+        _ = calibrated^
