@@ -250,6 +250,7 @@ struct _CountJob(Job):
     var grouped: Bool
     var distinct: Int
     var new_groups: List[Int]
+    var ignore_nulls: Bool
 
     def __init__(
         out self,
@@ -261,6 +262,7 @@ struct _CountJob(Job):
         strings: Int,
         bases: Int,
         grouped: Bool,
+        ignore_nulls: Bool,
     ):
         self.keys = keys
         self.hashes = hashes
@@ -272,6 +274,7 @@ struct _CountJob(Job):
         self.grouped = grouped
         self.distinct = 0
         self.new_groups = List[Int]()
+        self.ignore_nulls = ignore_nulls
 
     def _bytes(
         self, chunks: List[_Bytes], row: Int
@@ -316,6 +319,8 @@ struct _CountJob(Job):
             var slots = table.unsafe_ptr()
             for j in range(size):
                 var key = keys[unsafe_offset=start + j]
+                if self.ignore_nulls and (key & _NULL_FLAG) != 0:
+                    continue
                 var hash = hashes[unsafe_offset=start + j]
                 var at = Int(hash) & mask
                 while True:
@@ -345,11 +350,16 @@ struct _CountJob(Job):
 
 
 def distinct_counts(
-    values: Series, groups: List[Int], group_count: Int, grouped: Bool
+    values: Series,
+    groups: List[Int],
+    group_count: Int,
+    grouped: Bool,
+    ignore_nulls: Bool = False,
 ) raises -> Optional[List[Int64]]:
-    """Distinct values of `values` (nulls counting as one), overall or per
+    """Distinct values of `values`, overall or per
     group of `groups`; None for dtypes this does not handle (nested and
-    decimal values), which keep the reducer's sets."""
+    decimal values), which keep the reducer's sets. Nulls count as one
+    unless ignore_nulls is set."""
     var dtype = values.dtype()
     if dtype.is_nested() or dtype.is_decimal():
         return None
@@ -433,6 +443,7 @@ def distinct_counts(
                 Int(Pointer(to=chunks)) if strings else 0,
                 Int(Pointer(to=bases)),
                 grouped,
+                ignore_nulls,
             )
         )
     pool.run(counters, claim=True)

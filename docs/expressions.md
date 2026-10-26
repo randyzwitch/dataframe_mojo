@@ -695,7 +695,7 @@ columns outside grouping.
 | `mean()` | numeric or Bool | Float64; for Bool the share of true values | null | yes (sum + count) |
 | `product()` | numeric or Bool | Int64 for Bool and integers up to 32 bits; UInt64, Int64 and floats keep theirs; decimals Float64 | 1 | yes (128-bit exact for integers; raises on leaving the result type) |
 | `first()`, `last()` | any | same | null | needs partition order |
-| `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
+| `n_unique(ignore_nulls=False)` | any | Int64 | 0, or 1 for all-null (0 when ignoring nulls) | yes (distinct set) |
 | `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
 | `median()`, `quantile(q, interpolation)` | numeric | Float64 | null | no: keeps every valid value |
 | `any()`, `all()` | Bool | Bool | false / true | yes |
@@ -720,7 +720,12 @@ product silently, this one raises, as `cum_sum` does. A decimal's product is
 Float64, as DuckDB's `product` is (Polars keeps the scale of a single factor).
 `first` and `last` return the first or last row's value even when it is null.
 `n_unique` counts null as one value, treats every NaN as one value, and treats
-`-0.0` as equal to `0.0`. `var` and `std` convert Int64 to Float64; infinities
+`-0.0` as equal to `0.0`. Use `n_unique(ignore_nulls=True)` for SQL
+`COUNT(DISTINCT x)`, which excludes nulls and returns 0 for empty or all-null
+inputs. This is equivalent to Polars' `drop_nulls().n_unique()`; Polars does
+not expose an `ignore_nulls` parameter. Both modes use the same distinct
+counting paths, including grouped, streaming and categorical inputs.
+`var` and `std` convert Int64 to Float64; infinities
 produce NaN. `median` is `quantile(0.5, "linear")`. For `quantile`, `q` must be
 in [0, 1] and the position is `q * (n - 1)` over sorted valid values (NaN last);
 `linear` interpolates, `lower`/`higher` take the neighbouring value, `midpoint`

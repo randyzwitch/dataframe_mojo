@@ -990,8 +990,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   The first row's value, which may be null. Order-dependent.
 - `def last(self) -> Self`
   The last row's value, which may be null. Order-dependent.
-- `def n_unique(self) -> Self`
-  Distinct values, counting null once. NaNs are one value and -0.0 equals 0.0.
+- `def n_unique(self, *, ignore_nulls: Bool = False) -> Self`
+  Distinct values, counting null once unless ignore_nulls=True.
 - `def std(self, ddof: Int = Int(1)) -> Self`
   Standard deviation; null when fewer than ddof + 1 values.
 - `def var(self, ddof: Int = Int(1)) -> Self`
@@ -1756,7 +1756,8 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def std(self, ddof: Int = Int(1)) -> AnyValue`
 - `def var(self, ddof: Int = Int(1)) -> AnyValue`
 - `def count(self) -> Int`
-- `def n_unique(self) -> Int`
+- `def n_unique(self, *, ignore_nulls: Bool = False) -> Int`
+  Distinct values; ignore_nulls=True gives SQL COUNT(DISTINCT).
 - `def first(self) -> AnyValue`
 - `def last(self) -> AnyValue`
 - `def any(self, ignore_nulls: Bool = True) -> AnyValue`

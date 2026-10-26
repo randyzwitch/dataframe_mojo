@@ -121,7 +121,12 @@ def reduce_indexed(
             comptime D = NUMERIC_DTYPES[t]
             if source._data.isa[Column[Scalar[D]]]():
                 return _distinct_counts[D](
-                    source._data[Column[Scalar[D]]], rows, g, n, group_count
+                    source._data[Column[Scalar[D]]],
+                    rows,
+                    g,
+                    n,
+                    group_count,
+                    node.integer != 0,
                 )
     if op == MEDIAN or op == QUANTILE:
         comptime for t in range(len(NUMERIC_DTYPES)):
@@ -163,6 +168,7 @@ def _distinct_counts[
     g: Pointer[Int, _],
     n: Int,
     group_count: Int,
+    ignore_nulls: Bool,
 ) raises -> Series:
     """Distinct values per group: the bucket's values are laid out by group
     (a counting sort on the group number), then each group's segment is
@@ -170,7 +176,7 @@ def _distinct_counts[
     held 2n slots, so most of its probes missed the cache (PDS-H q21 counts
     suppliers for 1.5M orders); segments are short and stay in cache, and
     when a group's rows are adjacent the layout is written in sequence.
-    A null counts once per group, as `n_unique` counts it."""
+    A null counts once per group unless ignore_nulls is set."""
     var values = column._ptr()
     var nulls = column.null_count() > 0
     var counts = List[Int64](length=group_count, fill=0)
@@ -261,7 +267,7 @@ def _distinct_counts[
                     at = (at + 1) & mask
         tally[unsafe_offset=group] = Int64(distinct)
     for group in range(group_count):
-        if saw_null[group]:
+        if not ignore_nulls and saw_null[group]:
             counts[group] += 1
     return Series("", Column[Int64](counts^))
 

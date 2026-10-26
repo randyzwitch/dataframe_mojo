@@ -11,6 +11,7 @@ from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .bool_column import BoolColumn, true_count
 from .column import Column, _validity_at
+from .column import _count_valid as _valid_count
 from .string_column import StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import check_limit, decimal_mean, precision_limit
@@ -53,6 +54,79 @@ from .reductions import (
 )
 from .nested_column import ListColumn, StructColumn
 from .parallel import Job, Pool, configured_workers
+
+
+# Values per variance block, as in Polars' `moment.rs`: a block's mean and
+# squared deviations take two passes over values still in cache, and Chan's
+# update merges the block into the running moments.
+comptime _VARIANCE_BLOCK = 128
+
+
+def _block_moments[
+    D: DType
+](values: Pointer[Scalar[D], MutAnyOrigin], count: Int) -> VarState:
+    """Moments of `count` values: their mean, then the squared deviations
+    from it (Polars' `VarState::new`)."""
+    var lanes = SIMD[DType.float64, 8](0)
+    var i = 0
+    while i + 8 <= count:
+        lanes += values.unsafe_load[width=8](i).cast[DType.float64]()
+        i += 8
+    var total = lanes.reduce_add()
+    for j in range(i, count):
+        total += values.unsafe_load(j).cast[DType.float64]()
+    var state = VarState()
+    state.count = Int64(count)
+    state.mean = total / Float64(count)
+    var centre = SIMD[DType.float64, 8](state.mean)
+    lanes = SIMD[DType.float64, 8](0)
+    i = 0
+    while i + 8 <= count:
+        var delta = (
+            values.unsafe_load[width=8](i).cast[DType.float64]() - centre
+        )
+        lanes += delta * delta
+        i += 8
+    state.m2 = lanes.reduce_add()
+    for j in range(i, count):
+        var delta = values.unsafe_load(j).cast[DType.float64]() - state.mean
+        state.m2 += delta * delta
+    return state^
+
+
+def _variance_blocks[
+    D: DType
+](mut state: VarState, column: Column[Scalar[D]], start: Int, end: Int):
+    """Accumulate the valid values of [start, end) into `state` a block at a
+    time (Polars' `var`): an all-valid interval is read in place, and a
+    nullable one gathers its valid values into a block first. Every ungrouped
+    variance takes this path, so each route over the same rows adds them in
+    the same order."""
+    var values = column.unsafe_values()
+    if (
+        _valid_count(column._bits[], column._offset + start, end - start)
+        == end - start
+    ):
+        var i = start
+        while i < end:
+            var count = min(_VARIANCE_BLOCK, end - i)
+            state.merge(_block_moments[D](values.unsafe_offset(i), count))
+            i += count
+        return
+    var buffer = List[Scalar[D]](length=_VARIANCE_BLOCK, fill=0)
+    var block = buffer.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var count = 0
+    for i in range(start, end):
+        if not column._valid(i):
+            continue
+        block.unsafe_store(count, values.unsafe_load(i))
+        count += 1
+        if count == _VARIANCE_BLOCK:
+            state.merge(_block_moments[D](block, count))
+            count = 0
+    if count > 0:
+        state.merge(_block_moments[D](block, count))
+    _ = buffer^
 
 
 def _group(grouped: Bool, groups: List[Int], row: Int) -> Int:
@@ -1161,6 +1235,10 @@ struct Reducer(Movable):
             # Ordering uses biased Int64 keys for UInt64, but converting
             # those keys to Float64 destroys variance among small values.
             var floats = _float_values(chunk)
+            if not grouped:
+                var values = Column[Float64](floats[0].copy(), floats[1].copy())
+                _variance_blocks(self.moments[0], values, 0, len(values))
+                return
             for i in range(len(floats[0])):
                 if floats[1][i]:
                     self.moments[_group(grouped, groups, offset + i)].add(
@@ -1401,6 +1479,15 @@ struct Reducer(Movable):
             for i in range(len(column)):
                 self.logic[_group(grouped, groups, offset + i)].add(
                     column._valid(i), column._get(i)
+                )
+        elif (op == STD or op == VAR) and not grouped:
+            if chunk._data.isa[Column[Int64]]():
+                _variance_blocks(
+                    self.moments[0], chunk._data[Column[Int64]], 0, len(chunk)
+                )
+            else:
+                _variance_blocks(
+                    self.moments[0], chunk._data[Column[Float64]], 0, len(chunk)
                 )
         elif op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
             for i in range(len(chunk)):
@@ -2504,6 +2591,7 @@ struct Reducer(Movable):
             return Series("", Column[Float64](output^, valid))
         if op == N_UNIQUE:
             var output = List[Int64](length=n, fill=0)
+            var include_nulls = self.integer == 0
             for g in range(n):
                 var count: Int
                 if (
@@ -2511,7 +2599,7 @@ struct Reducer(Movable):
                     or self.dtype == DataType.FLOAT64
                 ):
                     var state = self.distinct_state[g]
-                    count = Int(self.picked_valid[g]) + (
+                    count = Int(include_nulls and self.picked_valid[g]) + (
                         Int(state) if state
                         < 2 else (
                             len(self.int_sets[g]) if self.dtype
@@ -2523,10 +2611,12 @@ struct Reducer(Movable):
                     count = (
                         Int(state.saw_true)
                         + Int(state.saw_false)
-                        + Int(state.saw_null)
+                        + Int(include_nulls and state.saw_null)
                     )
                 else:
-                    count = len(self.string_sets[g]) + Int(self.picked_valid[g])
+                    count = len(self.string_sets[g]) + Int(
+                        include_nulls and self.picked_valid[g]
+                    )
                 output[g] = Int64(count)
             return Series("", Column[Int64](output^))
         if op == MIN or op == MAX or op == FIRST or op == LAST:

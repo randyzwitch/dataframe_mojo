@@ -181,7 +181,7 @@ comptime STR_ESCAPE_REGEX = 242
 comptime REPLACE = 252
 comptime REPLACE_STRICT = 253
 
-# Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
+# Reductions occupy 80..99; ANY/ALL and N_UNIQUE keep ignore_nulls in `integer`.
 comptime MIN = 80
 comptime MAX = 81
 comptime MEAN = 82
@@ -1806,10 +1806,13 @@ struct Expr(Copyable):
         """The last row's value, which may be null. Order-dependent."""
         return self._unary(LAST)
 
-    def n_unique(self) -> Self:
-        """Distinct values, counting null once. NaNs are one value and
-        -0.0 equals 0.0."""
-        return self._unary(N_UNIQUE)
+    def n_unique(self, *, ignore_nulls: Bool = False) -> Self:
+        """Distinct values, counting null once unless ignore_nulls=True.
+
+        Ignoring nulls gives SQL COUNT(DISTINCT) semantics. NaNs are one
+        value and -0.0 equals 0.0 in either mode.
+        """
+        return self._unary(N_UNIQUE, Int64(ignore_nulls))
 
     def std(self, ddof: Int = 1) -> Self:
         """Standard deviation; null when fewer than ddof + 1 values."""
