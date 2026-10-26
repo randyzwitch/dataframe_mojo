@@ -22,7 +22,11 @@ measures and names its own operators.
 Without it, nothing is handed off automatically and `engine="auto"` runs
 on the CPU as it always has.
 """
+from std.atomic import Atomic
 from std.collections import Dict
+from std.ffi import _get_global
+from std.memory import Pointer
+from std.memory.alloc import Layout, alloc
 from std.os import getenv
 
 from .json_value import JsonValue
@@ -50,13 +54,65 @@ def _number(value: JsonValue) raises -> Float64:
     return Float64(value.canonical())
 
 
+struct _CostCache(Movable):
+    """The calibration last read, by path, so a query reads the file once
+    however many nodes it offers."""
+
+    var lock: Atomic[Int64]
+    var path: String
+    var costs: Dict[String, Dict[String, LinearCost]]
+
+    def __init__(out self):
+        self.lock = Atomic[Int64](0)
+        self.path = String()
+        self.costs = Dict[String, Dict[String, LinearCost]]()
+
+
+def _cache_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    # Leaked on purpose: the cache lives for the whole process.
+    var slot = alloc(Layout[_CostCache].single()).unsafe_leak()
+    slot.unsafe_write(_CostCache())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(slot))
+
+
+def _cache_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
 def load_costs(engine: String) raises -> Dict[String, LinearCost]:
     """Each operator's measured cost on `engine` ("cpu" or "accel"); empty
-    when no calibration is configured."""
-    var costs = Dict[String, LinearCost]()
+    when no calibration is configured. The file is read once per path;
+    nodes offered at once, on several workers, share it under a lock."""
     var path = calibration_path()
     if not path:
-        return costs^
+        return Dict[String, LinearCost]()
+    var address = _get_global[
+        "DATAFRAME_HANDOFF_COSTS", _cache_init, _cache_keep
+    ]()
+    ref cache = Pointer[_CostCache, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+    var unlocked = Int64(0)
+    while not cache.lock.compare_exchange(unlocked, 1):
+        unlocked = 0
+    try:
+        if cache.path != path:
+            cache.costs = Dict[String, Dict[String, LinearCost]]()
+            cache.costs["cpu"] = _read_costs(path, "cpu")
+            cache.costs["accel"] = _read_costs(path, "accel")
+            cache.path = path
+        var found = cache.costs.get(engine)
+        cache.lock.store(0)
+        return found.value().copy() if found else Dict[String, LinearCost]()
+    except error:
+        cache.lock.store(0)
+        raise error^
+
+
+def _read_costs(
+    path: String, engine: String
+) raises -> Dict[String, LinearCost]:
+    var costs = Dict[String, LinearCost]()
     var text: String
     with open(path, "r") as source:
         text = source.read()

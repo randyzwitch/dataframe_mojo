@@ -1716,6 +1716,29 @@ def _apply_operation(
         )
 
 
+def _placement(
+    region: LazyFrame, rows: Int, cpu_costs: Dict[String, LinearCost]
+) -> Tuple[Bool, String]:
+    """Whether the accelerator is estimated faster for `region` at `rows`
+    input rows, and both estimates as text for profiles. False, keeping the
+    CPU, when either side has no measured cost."""
+    var estimate = _handoff_estimate(region, rows)
+    var cpu = cpu_costs.get(estimate[0])
+    if estimate[1] < 0 or not cpu:
+        return (False, String(" (no measured cost)"))
+    var cpu_ns = cpu.value().ns(rows)
+    var costs = (
+        " (accel "
+        + String(round(estimate[1] / 1e6, 3))
+        + " ms, cpu "
+        + String(round(cpu_ns / 1e6, 3))
+        + " ms, "
+        + String(rows)
+        + " rows)"
+    )
+    return (estimate[1] < cpu_ns, costs^)
+
+
 def _automatic_handoff() -> Bool:
     """Whether `engine="auto"` places handed-off nodes by measured cost:
     a provider is installed and a calibration is configured."""
@@ -1913,17 +1936,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _handoff_region(
         self, index: Int, streaming: Bool, batch_size: Int
     ) raises -> Optional[DataFrame]:
-        """Node `index`'s result when it is handed to the provider or placed
-        by measured cost; None to execute it as usual.
+        """Node `index`'s result when it is handed to the provider; None to
+        execute it as usual.
 
         A projection or aggregation is offered with the filters directly
         below it. The provider decides from the input's schema alone, before
-        any input runs. Then the CPU computes the input, which either engine
-        needs. HANDOFF_FORCED hands every accepted node over. HANDOFF_AUTO
-        compares the provider's estimate for the input's rows with the CPU's
-        measured cost for the same operator (`placement.mojo`) and runs the
-        node where it is lower; the CPU then runs it on the columns already
-        computed, so nothing is executed twice."""
+        any input runs. HANDOFF_FORCED hands every accepted node over.
+        HANDOFF_AUTO compares the provider's estimate with the CPU's
+        measured cost for the same operator (`placement.mojo`) at the
+        input's rows: estimated from the plan when `_estimated_rows` can,
+        before anything runs, so a node the CPU keeps executes exactly as
+        it would have; otherwise counted once the input has run, and the CPU
+        then runs the node on those columns, so nothing runs twice."""
         var kind = self._nodes[index].kind
         if kind != SELECT and kind != AGG:
             return None
@@ -1937,26 +1961,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if input < 0:
             return None
         var schema = self._execute(input, True, streaming, batch_size)
-        if not _handoff_supports(self._handoff_plan(index, found[1], schema)):
+        var offered = self._handoff_plan(index, found[1], schema)
+        if not _handoff_supports(offered):
             return None
+        var algorithm = String("handoff")
+        var decided = False
+        if self._handoff == HANDOFF_AUTO:
+            var estimated = self._estimated_rows(input)
+            if estimated >= 0:
+                var verdict = _placement(offered, estimated, cpu_costs)
+                if not verdict[0]:
+                    self._record(
+                        index,
+                        "placement",
+                        estimated,
+                        -1,
+                        algorithm="placed cpu" + verdict[1],
+                    )
+                    return None
+                algorithm += verdict[1]
+                decided = True
         var columns = self._execute(input, False, streaming, batch_size)
         var rows = columns.height()
         var region = self._handoff_plan(index, found[1], columns)
-        var algorithm = String("handoff")
-        if self._handoff == HANDOFF_AUTO:
-            var estimate = _handoff_estimate(region, rows)
-            var cpu = cpu_costs.get(estimate[0])
-            if estimate[1] < 0 or not cpu:
-                return None
-            var cpu_ns = cpu.value().ns(rows)
-            var costs = (
-                " (accel "
-                + String(round(estimate[1] / 1e6, 3))
-                + " ms, cpu "
-                + String(round(cpu_ns / 1e6, 3))
-                + " ms)"
-            )
-            if estimate[1] >= cpu_ns:
+        if self._handoff == HANDOFF_AUTO and not decided:
+            var verdict = _placement(region, rows, cpu_costs)
+            if not verdict[0]:
                 var began = Int(perf_counter_ns())
                 var placed = region._execute(
                     len(region._nodes) - 1, False, streaming, batch_size
@@ -1966,11 +1996,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     "eager",
                     rows,
                     placed.height(),
-                    algorithm="placed cpu" + costs,
+                    algorithm="placed cpu" + verdict[1],
                     wall_ns=Int(perf_counter_ns()) - began,
                 )
                 return placed^
-            algorithm += costs
+            algorithm += verdict[1]
         var began = Int(perf_counter_ns())
         var result = _handoff_execute(region)
         self._record(

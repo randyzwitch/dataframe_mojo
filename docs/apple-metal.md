@@ -37,6 +37,23 @@ export DATAFRAME_HANDOFF_CALIBRATION=$PWD/handoff.json
 the CPU's and Metal's cost models and the row count from which Metal is
 estimated faster. Profiles record each decision with both estimates.
 
+### Measured on an M1 Mac mini
+
+`bench_handoff`, best of 5 warm runs, against the CPU executor on 8 threads,
+with every Metal answer checked against the CPU's. Metal's fixed cost is
+about 1 ms per hand-off; the column is read in place.
+
+| Operator | Metal estimated faster from | At 50 million rows (CPU / Metal) |
+| --- | --- | --- |
+| Float32 sum | about 1.9 million rows | 30.5 ms / 7.9 ms |
+| Float32 filtered sum | about 2.6 million rows | 24.6 ms / 9.3 ms |
+| Int32 filtered sum | about 4.4 million rows | 17.2 ms / 8.0 ms |
+| Int32 sum | never: the CPU runs near memory bandwidth | 3.5 ms / 7.5 ms |
+| Int64 sums | never: 64-bit integer work is slow on the GPU | 7.0-11.8 ms / 14.5-18.4 ms |
+
+The crossovers come from the fitted calibration; `engine="auto"` with it
+keeps the Int32 and Int64 sums on the CPU at every size.
+
 An earlier Metal core ran whole plans and was 30 to 250 times slower than
 the CPU per row, at every data size measured. It stored every value as a 21-byte generic cell, ran
 expressions through a per-row interpreter, emulated floating point in
