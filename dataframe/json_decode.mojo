@@ -15,6 +15,8 @@ from .parse import parse_integer, parse_float64
 from .temporal import parse_in, zone_of, has_offset
 from .timezone import TimeZone
 from .decimal import check_precision, pow10
+from .byte_encoding import decode_bytes as _decode_row
+from .io.json_wire import parse_duration
 
 from .json_number import (
     validate_json_numbers,
@@ -37,15 +39,17 @@ comptime _Numbers = Variant[
 ]
 
 
-def validate_json_dtype(dtype: DataType, depth: Int = 0) raises:
+def validate_json_dtype(
+    dtype: DataType, depth: Int = 0, *, io: Bool = False
+) raises:
     if depth > 64:
         raise Error("JSON output schema nesting exceeds 64")
     if dtype.is_datetime():
         var zone = dtype.time_zone()
-        if zone.byte_length() != 0 and zone != "UTC":
+        if not io and zone.byte_length() != 0 and zone != "UTC":
             raise Error("JSON datetime requires a naive or UTC output dtype")
     if dtype.is_list():
-        validate_json_dtype(dtype.inner(), depth + 1)
+        validate_json_dtype(dtype.inner(), depth + 1, io=io)
     elif dtype.is_struct():
         var names = dtype.field_names()
         var seen = Dict[String, Bool]()
@@ -54,7 +58,7 @@ def validate_json_dtype(dtype: DataType, depth: Int = 0) raises:
                 raise Error("JSON struct field names must be unique")
             seen[name] = True
         for field in dtype.field_dtypes():
-            validate_json_dtype(field, depth + 1)
+            validate_json_dtype(field, depth + 1, io=io)
     elif not (
         dtype.is_numeric()
         or dtype.is_temporal()
@@ -62,6 +66,7 @@ def validate_json_dtype(dtype: DataType, depth: Int = 0) raises:
         or dtype == DataType.BOOL
         or dtype == DataType.NULL
         or dtype.is_categorical()
+        or (io and dtype._is_bytes())
     ):
         raise Error("JSON decoding does not support " + dtype.name())
 
@@ -120,7 +125,7 @@ struct _Builder(Movable):
     var dtype: DataType
     var name: String
     # 0 numeric,1 bool,2 text,3 list,4 struct,5 date,6 datetime,7 duration,
-    # 8 time,9 decimal,10 categorical,11 null.
+    # 8 time,9 decimal,10 categorical,11 null,12 opaque bytes.
     var kind: Int
     var children: List[Int]
     var fields: Dict[UInt64, Int]
@@ -132,8 +137,15 @@ struct _Builder(Movable):
     var numbers: _Numbers
     var strings: StringBuilder
     var zone: Optional[TimeZone]
+    var selected: Bool
 
-    def __init__(out self, dtype: DataType, name: String, capacity: Int) raises:
+    def __init__(
+        out self,
+        dtype: DataType,
+        name: String,
+        capacity: Int,
+        selected: Bool = True,
+    ) raises:
         self.dtype = dtype
         self.name = name
         self.kind = 0
@@ -147,6 +159,7 @@ struct _Builder(Movable):
         self.numbers = _Numbers(List[Int64]())
         self.strings = StringBuilder(0)
         self.zone = None
+        self.selected = selected
         if dtype.is_list():
             self.kind = 3
             self.offsets.append(0)
@@ -157,8 +170,14 @@ struct _Builder(Movable):
             self.numbers = _Numbers(List[Int8](capacity=capacity))
         elif dtype == DataType.BOOL:
             self.kind = 1
-        elif dtype == DataType.STRING or dtype.is_categorical():
-            self.kind = 10 if dtype.is_categorical() else 2
+        elif (
+            dtype == DataType.STRING
+            or dtype.is_categorical()
+            or dtype._is_bytes()
+        ):
+            self.kind = 12 if dtype._is_bytes() else (
+                10 if dtype.is_categorical() else 2
+            )
             self.strings = StringBuilder(capacity, capacity * 8)
         elif dtype.is_decimal():
             self.kind = 9
@@ -170,35 +189,51 @@ struct _Builder(Movable):
                     self.numbers = _Numbers(List[Scalar[D]](capacity=capacity))
             if dtype.is_date():
                 self.kind = 5
-                self.zone = zone_of(dtype)
+                if selected:
+                    self.zone = zone_of(dtype)
             elif dtype.is_datetime():
                 self.kind = 6
-                self.zone = zone_of(dtype)
+                if selected:
+                    self.zone = zone_of(dtype)
             elif dtype.is_duration():
                 self.kind = 7
             elif dtype.is_time():
                 self.kind = 8
-                self.zone = zone_of(dtype)
+                if selected:
+                    self.zone = zone_of(dtype)
 
     def mark(mut self, valid: Bool):
-        if self.kind != 2 and self.kind != 10:
+        if self.kind != 2 and self.kind != 10 and self.kind != 12:
             _valid(self.bits, self.length, valid)
         self.length += 1
 
 
 def _compile(
-    mut nodes: List[_Builder], dtype: DataType, name: String, capacity: Int
+    mut nodes: List[_Builder],
+    dtype: DataType,
+    name: String,
+    capacity: Int,
+    columns: List[String] = List[String](),
+    selected: Bool = True,
+    depth: Int = 0,
 ) raises -> Int:
     var index = len(nodes)
-    nodes.append(_Builder(dtype, name, capacity))
+    nodes.append(_Builder(dtype, name, capacity if selected else 0, selected))
     if dtype.is_list():
-        var child = _compile(nodes, dtype.inner(), "item", capacity)
+        var child = _compile(
+            nodes, dtype.inner(), "item", capacity, columns, selected, depth + 1
+        )
         nodes[index].children.append(child)
     elif dtype.is_struct():
         var names = dtype.field_names()
         var types = dtype.field_dtypes()
         for i in range(len(names)):
-            var child = _compile(nodes, types[i], names[i], capacity)
+            var keep = selected and (
+                depth != 0 or len(columns) == 0 or names[i] in columns
+            )
+            var child = _compile(
+                nodes, types[i], names[i], capacity, columns, keep, depth + 1
+            )
             nodes[index].children.append(child)
             var hash = _hash(names[i].as_bytes())
             if hash in nodes[index].fields:
@@ -376,8 +411,10 @@ def _decimal_value(
 
 
 def _append_null(mut nodes: List[_Builder], index: Int) raises:
+    if not nodes[index].selected:
+        return
     var kind = nodes[index].kind
-    if kind == 2 or kind == 10:
+    if kind == 2 or kind == 10 or kind == 12:
         nodes[index].strings.append_null()
     elif kind == 3:
         nodes[index].offsets.append(
@@ -396,12 +433,66 @@ def _append_null(mut nodes: List[_Builder], index: Int) raises:
     nodes[index].mark(False)
 
 
+struct JsonDecodeOptions(ImplicitlyCopyable, Movable):
+    var io: Bool
+    var ignore_errors: Bool
+    var reject_unknown_fields: Bool
+
+    def __init__(
+        out self,
+        io: Bool = False,
+        ignore_errors: Bool = False,
+        reject_unknown_fields: Bool = False,
+    ):
+        self.io = io
+        self.ignore_errors = ignore_errors
+        self.reject_unknown_fields = reject_unknown_fields
+
+
 def _append(
-    mut nodes: List[_Builder], index: Int, reader: JsonReader, value: Int
+    mut nodes: List[_Builder],
+    index: Int,
+    reader: JsonReader,
+    value: Int,
+    options: JsonDecodeOptions,
 ) raises:
+    if not nodes[index].selected:
+        return
     if value < 0 or reader.nodes[value].kind == 110:
         _append_null(nodes, index)
         return
+    var kind = nodes[index].kind
+    var source = reader.nodes[value].kind
+    if (kind == 4 and source != 123) or (
+        options.io and kind == 3 and source != 91
+    ):
+        if options.ignore_errors:
+            _append_null(nodes, index)
+            return
+        raise Error(
+            "JSON value is not a struct object" if kind
+            == 4 else "JSON value is not a list"
+        )
+    if kind == 3 or kind == 4:
+        # Descendant conversions handle their own errors. A container is
+        # never replaced after some of its child buffers have been written.
+        _append_value(nodes, index, reader, value, options)
+        return
+    try:
+        _append_value(nodes, index, reader, value, options)
+    except e:
+        if not options.ignore_errors:
+            raise e^
+        _append_null(nodes, index)
+
+
+def _append_value(
+    mut nodes: List[_Builder],
+    index: Int,
+    reader: JsonReader,
+    value: Int,
+    options: JsonDecodeOptions,
+) raises:
     var kind = nodes[index].kind
     var source = reader.nodes[value].kind
     if kind == 11:
@@ -412,29 +503,56 @@ def _append(
         var child = value + 1
         while child < reader.nodes[value].after:
             var hash = _key_hash(reader, child)
+            var found = False
             if hash in nodes[index].fields:
                 var field = nodes[index].fields[hash]
                 while field >= 0:
                     if _key_matches(reader, child, nodes[field].name):
+                        found = True
                         if nodes[field].length == nodes[index].length:
-                            _append(nodes, field, reader, child)
+                            _append(nodes, field, reader, child, options)
                         break
                     field = nodes[field].next_collision
+            if (
+                not found
+                and options.reject_unknown_fields
+                and not options.ignore_errors
+            ):
+                raise Error(
+                    "JSON field is outside the sampled or explicit schema: "
+                    + reader.string_at(reader.nodes[child].key_start)
+                )
             child = reader.nodes[child].after
         for k in range(len(nodes[index].children)):
             var field = nodes[index].children[k]
-            if nodes[field].length == nodes[index].length:
+            if (
+                nodes[field].selected
+                and nodes[field].length == nodes[index].length
+            ):
                 _append_null(nodes, field)
     elif kind == 3:
         var field = nodes[index].children[0]
         if source == 91:
             var child = value + 1
             while child < reader.nodes[value].after:
-                _append(nodes, field, reader, child)
+                _append(nodes, field, reader, child, options)
                 child = reader.nodes[child].after
         else:
-            _append(nodes, field, reader, value)
+            _append(nodes, field, reader, value, options)
         nodes[index].offsets.append(Int64(nodes[field].length))
+    elif kind == 12:
+        if source != 34:
+            raise Error("JSON binary value must be a base64 string")
+        var text = reader.string_at(reader.nodes[value].start)
+        var start = len(nodes[index].strings._bytes)
+        if not _decode_row(text.as_bytes(), False, nodes[index].strings._bytes):
+            # The shared base64 decoder may have appended a valid prefix.
+            nodes[index].strings._bytes.resize(start, fill=0)
+            raise Error("Invalid base64 JSON binary value")
+        nodes[index].strings._offsets.append(
+            Int64(len(nodes[index].strings._bytes))
+        )
+        nodes[index].strings._push_bit(True)
     elif kind == 2 or kind == 10:
         if source == 34:
             reader.append_string(
@@ -467,7 +585,10 @@ def _append(
     elif kind >= 5 and kind <= 8:
         var result = Int64(0)
         var valid = True
-        if source == 34 and kind != 7:
+        if options.io and kind == 7 and source == 34:
+            var text = reader.string_at(reader.nodes[value].start)
+            result = parse_duration(text, nodes[index].dtype)
+        elif source == 34 and kind != 7:
             var text = reader.string_at(reader.nodes[value].start)
             try:
                 if kind == 6 and (
@@ -523,14 +644,27 @@ def _append(
         else:
             raise Error("JSON value has incompatible temporal type")
         if not valid:
+            if options.io:
+                raise Error(
+                    "JSON value is outside the temporal dtype or format"
+                )
             _append_null(nodes, index)
             return
         nodes[index].numbers[List[Int64]].append(result)
     else:
+        if options.io and (
+            not _numeric(source)
+            or (
+                nodes[index].dtype.is_integer() and _fraction(reader.raw(value))
+            )
+        ):
+            raise Error("JSON value has incompatible numeric type")
         var valid = False
         comptime for D in SCALAR_DTYPES:
             if nodes[index].numbers.isa[List[Scalar[D]]]():
                 var number = _number[D](reader, value)
+                if options.io and not number[1]:
+                    raise Error("JSON number is outside the output dtype")
                 nodes[index].numbers[List[Scalar[D]]].append(number[0])
                 valid = number[1]
         nodes[index].mark(valid)
@@ -541,10 +675,12 @@ def _append(
 def _finish(mut nodes: List[_Builder], index: Int) raises -> Series:
     var kind = nodes[index].kind
     var dtype = nodes[index].dtype
-    if kind == 2 or kind == 10:
+    if kind == 2 or kind == 10 or kind == 12:
         var text = StringBuilder(0)
         swap(text, nodes[index].strings)
         var result = Series("", text^.finish())
+        if kind == 12:
+            return result.with_dtype(dtype)
         return result.cast(dtype) if kind == 10 else result^
     if kind == 3:
         var child = _finish(nodes, nodes[index].children[0])
@@ -558,7 +694,8 @@ def _finish(mut nodes: List[_Builder], index: Int) raises -> Series:
         var fields = List[Series]()
         for k in range(len(nodes[index].children)):
             var child = nodes[index].children[k]
-            fields.append(_finish(nodes, child).renamed(nodes[child].name))
+            if nodes[child].selected:
+                fields.append(_finish(nodes, child).renamed(nodes[child].name))
         return Series(
             "",
             StructColumn(
@@ -607,10 +744,102 @@ def _finish(mut nodes: List[_Builder], index: Int) raises -> Series:
     raise Error("Invalid JSON output builder")
 
 
+struct JsonDecoder(Movable):
+    """A compiled schema and reusable builders for independently parsed rows.
+
+    Finishing transfers the batch buffers to the result. The next append
+    prepares fresh buffers while retaining field lookup tables and zones.
+    """
+
+    var builders: List[_Builder]
+    var options: JsonDecodeOptions
+    var capacity: Int
+    var finished: Bool
+
+    def __init__(
+        out self,
+        dtype: DataType,
+        capacity: Int,
+        options: JsonDecodeOptions = JsonDecodeOptions(),
+        columns: List[String] = List[String](),
+    ) raises:
+        validate_json_dtype(dtype, io=options.io)
+        if capacity < 0:
+            raise Error("JSON decoder capacity must be nonnegative")
+        if len(columns):
+            if not dtype.is_struct():
+                raise Error("JSON column projection requires an object schema")
+            var names = dtype.field_names()
+            for name in columns:
+                if name not in names:
+                    raise Error("JSON column not found: " + name)
+        self.builders = List[_Builder]()
+        _ = _compile(self.builders, dtype, "", capacity, columns)
+        self.options = options
+        self.capacity = capacity
+        self.finished = False
+
+    def _restart(mut self) raises:
+        for i in range(len(self.builders)):
+            self.builders[i].length = 0
+            self.builders[i].bits.clear()
+            self.builders[i].bools.clear()
+            self.builders[i].offsets.clear()
+            var kind = self.builders[i].kind
+            var size = self.capacity if self.builders[i].selected else 0
+            if kind == 3:
+                self.builders[i].offsets.append(0)
+            elif kind == 2 or kind == 10 or kind == 12:
+                self.builders[i].strings = StringBuilder(size, size * 8)
+            elif kind == 0 or (kind >= 5 and kind <= 9) or kind == 11:
+                comptime for D in SCALAR_DTYPES:
+                    if self.builders[i].numbers.isa[List[Scalar[D]]]():
+                        self.builders[i].numbers[List[Scalar[D]]].clear()
+                        self.builders[i].numbers[List[Scalar[D]]].reserve(size)
+        self.finished = False
+
+    def rows(self) -> Int:
+        return 0 if self.finished else self.builders[0].length
+
+    def output_dtype(self) raises -> DataType:
+        var dtype = self.builders[0].dtype
+        if not dtype.is_struct():
+            return dtype
+        var names = List[String]()
+        var types = List[DataType]()
+        for child in self.builders[0].children:
+            if self.builders[child].selected:
+                names.append(self.builders[child].name.copy())
+                types.append(self.builders[child].dtype)
+        return DataType.struct(names, types)
+
+    def append(mut self, reader: JsonReader, index: Int = 0) raises:
+        if self.finished:
+            self._restart()
+        var options = self.options
+        if (
+            options.io
+            and self.builders[0].dtype.is_struct()
+            and reader.nodes[index].kind != 123
+        ):
+            raise Error("JSON rows must contain objects")
+        _append(self.builders, 0, reader, index, options)
+
+    def append_null(mut self) raises:
+        if self.finished:
+            self._restart()
+        _append_null(self.builders, 0)
+
+    def finish(mut self) raises -> Series:
+        if self.finished:
+            self._restart()
+        var result = _finish(self.builders, 0)
+        self.finished = True
+        return result^
+
+
 def decode_json(input: Series, dtype: DataType) raises -> Series:
-    validate_json_dtype(dtype)
-    var builders = List[_Builder]()
-    _ = _compile(builders, dtype, "", len(input))
+    var decoder = JsonDecoder(dtype, len(input))
     # The scanner only borrows each source row until that row's values have
     # been appended. Output buffers own their data; no source substring DOM.
     var empty = String("")
@@ -627,12 +856,12 @@ def decode_json(input: Series, dtype: DataType) raises -> Series:
         var nulls = column.null_count() != 0
         for row in range(len(column)):
             if nulls and not column._valid(row):
-                _append_null(builders, 0)
+                decoder.append_null()
                 continue
             try:
                 reader.parse(rows.get(row))
                 validate_json_numbers(reader)
-                _append(builders, 0, reader, 0)
+                decoder.append(reader)
             except e:
                 raise Error(
                     "str.json_decode at row "
@@ -642,4 +871,4 @@ def decode_json(input: Series, dtype: DataType) raises -> Series:
                 )
         base += len(column)
         _ = rows^
-    return _finish(builders, 0)
+    return decoder.finish()

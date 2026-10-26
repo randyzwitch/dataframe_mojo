@@ -4,7 +4,7 @@ from std.collections import Optional
 from std.memory import Pointer
 from .csv_bits import _mask64
 from .csv_types import _Mapping, _map_file
-from ..json_reader import JsonBytes
+from ..json_reader import JsonBytes, JsonReader
 
 
 struct JsonInput(Movable):
@@ -25,6 +25,15 @@ struct JsonInput(Movable):
                 self.owned = file.read_bytes()
             self.address = Int(self.owned.unsafe_ptr())
             self.size = len(self.owned)
+        var bytes = self.span()
+        if (
+            self.size >= 3
+            and bytes[0] == 239
+            and bytes[1] == 187
+            and bytes[2] == 191
+        ):
+            self.address += 3
+            self.size -= 3
 
     def span(self) -> JsonBytes:
         return JsonBytes(
@@ -100,3 +109,52 @@ struct JsonLines(Movable):
             self.rows += 1
             return JsonRecord(start, end, line, row)
         return None
+
+
+struct JsonArrayRows(Movable):
+    """Reuse the shared parser's tape for one array object at a time."""
+
+    var reader: JsonReader
+    var rows: Int
+    var ended: Bool
+
+    def __init__(out self, bytes: JsonBytes) raises:
+        self.reader = JsonReader(bytes, max_depth=1024)
+        self.rows = 0
+        self.ended = False
+        self.reader.space()
+        if (
+            self.reader.pos >= self.reader.size
+            or self.reader.byte(self.reader.pos) != 91
+        ):
+            raise Error("JSON table input must be an array of objects")
+        self.reader.pos += 1
+
+    def next(mut self) raises -> Bool:
+        if self.ended:
+            return False
+        self.reader.nodes.clear()
+        self.reader.space()
+        if (
+            self.reader.pos < self.reader.size
+            and self.reader.byte(self.reader.pos) == 93
+        ):
+            self.reader.pos += 1
+            self.reader.space()
+            if self.reader.pos != self.reader.size:
+                raise Error("Unexpected content after JSON array")
+            self.ended = True
+            return False
+        if self.rows > 0:
+            if (
+                self.reader.pos >= self.reader.size
+                or self.reader.byte(self.reader.pos) != 44
+            ):
+                raise Error("Expected JSON array comma or closing bracket")
+            self.reader.pos += 1
+            self.reader.space()
+        _ = self.reader.scan(store=True, unique_keys=False)
+        if self.reader.nodes[0].kind != 123:
+            raise Error("JSON table rows must contain objects")
+        self.rows += 1
+        return True
