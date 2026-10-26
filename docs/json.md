@@ -99,6 +99,9 @@ struct schema when reading: it restores numeric widths, temporal units and
 time zones, decimal precision/scale, categorical dictionaries and opaque-byte
 metadata. Without a schema, quoted logical values infer String. Nonfinite
 floating-point values lose their distinction from null when written.
+Expanded ISO years retain full Date and Datetime storage bounds; positive
+years beyond four digits carry a leading `+`. This I/O parsing extension
+keeps the existing string expression parser's year policy unchanged.
 
 Time, Duration and Binary wire forms extend the pinned Polars reader, which
 does not round-trip those types. Duration parsing accepts fixed days, hours,

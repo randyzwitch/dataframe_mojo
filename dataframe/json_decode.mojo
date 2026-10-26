@@ -629,7 +629,13 @@ def _append_value(
                     (text.find("T") < 0 and text.find(" ") < 0)
                     or (
                         nodes[index].dtype.time_zone().byte_length() != 0
-                        and not has_offset(text)
+                        and not has_offset(
+                            text,
+                            unit=nodes[
+                                index
+                            ].dtype.unit() if options.io else "us",
+                            year_digits=18 if options.io else 6,
+                        )
                     )
                 ):
                     valid = False
@@ -658,6 +664,7 @@ def _append_value(
                         nodes[index].dtype,
                         "",
                         nodes[index].zone.value(),
+                        year_digits=18 if options.io else 6,
                     )
             except:
                 valid = False

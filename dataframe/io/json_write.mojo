@@ -278,6 +278,13 @@ def _emit(mut nodes: List[_Node], index: Int, row: Int, mut out: List[UInt8]):
                 nodes[index].format,
                 nodes[index].zone,
             )
+            if (
+                kind == 5
+                and not nodes[index].dtype.is_time()
+                and text.as_bytes()[0] != 45
+                and text.find("-") > 4
+            ):
+                text = "+" + text
         _quote(text.as_bytes(), out)
 
 
