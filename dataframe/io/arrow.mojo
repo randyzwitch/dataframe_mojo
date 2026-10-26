@@ -388,6 +388,8 @@ def _dictionary_values(dtype: DataType) raises -> Series:
 
 
 def _format(dtype: DataType) raises -> String:
+    if dtype == DataType.NULL:
+        return "n"
     if dtype.is_categorical():
         # Arrow dictionary encoding: the format names the index type; the
         # values ride in the schema's and array's `dictionary` (#106).
@@ -504,7 +506,10 @@ def _fill_array(
     array.children = 0
     array.dictionary = 0
     var dtype = series.dtype()
-    if kept._data.isa[StringColumn]():
+    if dtype == DataType.NULL:
+        # Arrow Null has no buffers: nullness is implicit in the type.
+        array.offset = 0
+    elif kept._data.isa[StringColumn]():
         ref column = kept._data[StringColumn]
         array.offset = Int64(column._offset)
         state.buffers.append(
@@ -611,7 +616,7 @@ def _fill_array(
         state.dictionary = values
         array.dictionary = values
     array.n_buffers = Int64(len(state.buffers))
-    array.buffers = Int(state.buffers.unsafe_ptr())
+    array.buffers = Int(state.buffers.unsafe_ptr()) if len(state.buffers) else 0
     array.private_data = _leak(state^)
     array.release = _array_release_address()
 
@@ -931,6 +936,8 @@ def _import_storage(
         return _import_dictionary(array, schema, name, owner)
     if array.dictionary != 0 or schema.dictionary != 0:
         raise Error("Arrow dictionary array without its dictionary")
+    if format == "n":
+        return Series.full_null(name, DataType.NULL, length)
     # A validity buffer on an array with no nulls (Arrow says 0; -1 is
     # unknown) is dropped: no bitmap is how a column says every row is
     # valid, and the kernels' fast paths take it (Parquet readers attach

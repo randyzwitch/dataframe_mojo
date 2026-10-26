@@ -537,6 +537,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """The same values tagged with another logical type that shares their
         storage (temporal types and INT64, string and binary). Binary cannot
         be retagged as string: cast it, so its bytes are checked as UTF-8."""
+        if dtype == DataType.NULL and self.null_count() != len(self):
+            raise Error("Null dtype requires every value to be null")
         if self._dtype._is_bytes() and dtype == DataType.STRING:
             raise Error("binary cannot be tagged as string; cast it instead")
         if dtype.physical() != self._dtype.physical():
@@ -1527,6 +1529,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         var name: String, dtype: DataType, length: Int
     ) raises -> Self:
         """A column of `length` nulls with the requested dtype."""
+        if dtype == DataType.NULL:
+            return Self(name^, Column[Int8]._nulls(length, 0)).with_dtype(dtype)
         if dtype.is_categorical():
             var target = dtype.copy()
             if not target.has_dictionary():

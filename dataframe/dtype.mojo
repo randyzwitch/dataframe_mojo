@@ -21,6 +21,7 @@ from .json_value import JsonValue, json_quote
 
 # Every numeric type shares one code; its DType tells them apart.
 comptime _NUMERIC = 0
+comptime _NULL = 1
 comptime _BOOL = 2
 comptime _STRING = 3
 comptime _DATE = 4
@@ -182,7 +183,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     """A logical column type.
 
     Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
-    FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
+    FLOAT32, FLOAT64. Also NULL (all values null), BOOL, STRING, DATE (days since 1970-01-01), TIME
     (nanoseconds since midnight), and datetime(unit, time_zone) /
     duration(unit) with unit "ns", "us", or "ms". A datetime with a time zone
     holds UTC ticks, like an Arrow timestamp whose zone is set. Temporal types are stored as Int64. Nested:
@@ -204,7 +205,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self._code = code
         self._unit = unit
         self._storage = (
-            _decimal_storage(unit) if code
+            DType.int8 if code
+            == _NULL else _decimal_storage(unit) if code
             == _DECIMAL else DType.int64 if code
             >= _DATE
             and code
@@ -410,6 +412,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """The dictionary of a categorical that has one (check first)."""
         return self._dictionary.value()
 
+    comptime NULL = DataType(_NULL, 0)
     comptime DATE = DataType(_DATE, 0)
     comptime TIME = DataType(_TIME, 0)
     comptime INT8 = DataType(DType.int8)
@@ -520,6 +523,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.INT64
         if name == "float64":
             return DataType.FLOAT64
+        if name == "null":
+            return DataType.NULL
         if name == "bool":
             return DataType.BOOL
         if name == "string":
@@ -632,6 +637,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """The canonical name, as accepted by parse."""
         if self._code == _NUMERIC:
             return String(self._storage)
+        if self._code == _NULL:
+            return "null"
         if self._code == _BOOL:
             return "bool"
         if self.is_geometry():
@@ -756,6 +763,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     def physical(self) -> DataType:
         """The storage type: INT64 for temporal types, STRING for binary
         (the same offsets-and-bytes layout), otherwise self."""
+        if self._code == _NULL:
+            return DataType.INT8
         if self.is_temporal():
             return DataType.INT64
         if self._is_bytes():
@@ -784,6 +793,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
 
     def bit_width(self) -> Int:
         """Bits per value for fixed-width types; 0 for variable-width."""
+        if self._code == _NULL:
+            return 0
         if self._code == _BOOL:
             return 1
         if self.is_decimal():

@@ -60,6 +60,7 @@ def validate_json_dtype(dtype: DataType, depth: Int = 0) raises:
         or dtype.is_temporal()
         or dtype == DataType.STRING
         or dtype == DataType.BOOL
+        or dtype == DataType.NULL
         or dtype.is_categorical()
     ):
         raise Error("JSON decoding does not support " + dtype.name())
@@ -119,7 +120,7 @@ struct _Builder(Movable):
     var dtype: DataType
     var name: String
     # 0 numeric,1 bool,2 text,3 list,4 struct,5 date,6 datetime,7 duration,
-    # 8 time,9 decimal,10 categorical.
+    # 8 time,9 decimal,10 categorical,11 null.
     var kind: Int
     var children: List[Int]
     var fields: Dict[UInt64, Int]
@@ -151,6 +152,9 @@ struct _Builder(Movable):
             self.offsets.append(0)
         elif dtype.is_struct():
             self.kind = 4
+        elif dtype == DataType.NULL:
+            self.kind = 11
+            self.numbers = _Numbers(List[Int8](capacity=capacity))
         elif dtype == DataType.BOOL:
             self.kind = 1
         elif dtype == DataType.STRING or dtype.is_categorical():
@@ -400,6 +404,8 @@ def _append(
         return
     var kind = nodes[index].kind
     var source = reader.nodes[value].kind
+    if kind == 11:
+        raise Error("JSON value is not null")
     if kind == 4:
         if source != 123:
             raise Error("JSON value is not a struct object")
