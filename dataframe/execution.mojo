@@ -138,6 +138,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 from std.math import isnan
+from std.utils.numerics import inf
 from std.sys import size_of
 
 
@@ -1868,6 +1869,104 @@ def _direct_int_sum[
     reducer.int_sums[0].count += Int64(count)
 
 
+def _direct_float_extreme[
+    D: DType, is_max: Bool
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Float min or max of rows [start, end), a vector of lanes at a time.
+
+    NaN and nulls never win: their lanes hold the identity (-inf for max,
+    +inf for min). Whether any value was compared and whether a NaN was
+    seen are kept in lane masks rather than read off the result, so a
+    column of infinities still records its extreme and an all-NaN interval
+    records only `nan_seen`, as the per-row path does. A tie between
+    `-0.0` and `0.0` goes to the earlier row, the one arg_min and arg_max
+    report; vector min and max may order the zeros (ARM does).
+    """
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
+    if count == 0:
+        return
+    var all_valid = count == end - start
+    var identity = -inf[D]() if is_max else inf[D]()
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    comptime width = 64 // size_of[Scalar[D]]()
+    var best_lanes = SIMD[D, width](identity)
+    var compared = SIMD[DType.bool, width](fill=False)
+    var nans = SIMD[DType.bool, width](fill=False)
+    var i = start
+    if all_valid:
+        while i + width <= end:
+            var v = values.unsafe_load[width=width](i)
+            var number = v.eq(v)
+            compared |= number
+            nans |= ~number
+            comptime if is_max:
+                best_lanes = max(best_lanes, number.select(v, best_lanes))
+            else:
+                best_lanes = min(best_lanes, number.select(v, best_lanes))
+            i += width
+    else:
+        # Nulls: eight rows at a time, their validity bits as a lane mask.
+        var lanes = SIMD[D, 8](identity)
+        var counted = SIMD[DType.bool, 8](fill=False)
+        var missing = SIMD[DType.bool, 8](fill=False)
+        while i + 8 <= end:
+            var v = values.unsafe_load[width=8](i)
+            var valid = _valid_lanes(bits, column._offset + i)
+            var number = valid & v.eq(v)
+            counted |= number
+            missing |= valid & ~v.eq(v)
+            comptime if is_max:
+                lanes = max(lanes, number.select(v, lanes))
+            else:
+                lanes = min(lanes, number.select(v, lanes))
+            i += 8
+        comptime if is_max:
+            best_lanes = max(best_lanes, SIMD[D, width](lanes.reduce_max()))
+        else:
+            best_lanes = min(best_lanes, SIMD[D, width](lanes.reduce_min()))
+        compared |= SIMD[DType.bool, width](fill=counted.reduce_or())
+        nans |= SIMD[DType.bool, width](fill=missing.reduce_or())
+    var best: Scalar[D]
+    comptime if is_max:
+        best = best_lanes.reduce_max()
+    else:
+        best = best_lanes.reduce_min()
+    var any_value = compared.reduce_or()
+    var any_nan = nans.reduce_or()
+    while i < end:
+        if all_valid or column._valid(i):
+            var value = column._get(i)
+            if value != value:
+                any_nan = True
+            else:
+                any_value = True
+                comptime if is_max:
+                    best = max(best, value)
+                else:
+                    best = min(best, value)
+        i += 1
+    if any_nan:
+        reducer.nan_seen[0] = True
+    if not any_value:
+        return
+    if best == 0:
+        for row in range(start, end):
+            if (all_valid or column._valid(row)) and column._get(row) == 0:
+                best = column._get(row)
+                break
+    var floating = best.cast[DType.float64]()
+    if (
+        not reducer.seen[0]
+        or (is_max and floating > reducer.floats[0])
+        or (not is_max and floating < reducer.floats[0])
+    ):
+        reducer.floats[0] = floating
+        reducer.seen[0] = True
+
+
 def _direct_int_extreme[
     D: DType, is_max: Bool
 ](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
@@ -1966,6 +2065,12 @@ def _direct_numeric_column[
             # The same eight-wide masked sum a plain column takes; a
             # masked conditional branch arrives here with its validity.
             _direct_float_column_sum[D](reducer, column, start, end)
+            return True
+        if op == MAX:
+            _direct_float_extreme[D, True](reducer, column, start, end)
+            return True
+        if op == MIN:
+            _direct_float_extreme[D, False](reducer, column, start, end)
             return True
     for i in range(start, end):
         if not column._valid(i):
