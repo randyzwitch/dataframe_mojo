@@ -49,6 +49,12 @@ file contents unchanged while these views exist. With `memory_map=False`,
 columns retain native read buffers instead. Compressed buffers must decode;
 the importer then retains decoded buffers without another payload copy.
 
+Borrowing retains each complete Arrow buffer. In particular, compressed
+string/binary views can retain large decoded byte blocks even when a batch
+references only a small part of each block. Such files can use more resident
+memory than converting their logical values into compact owned strings.
+Avoid assuming that fewer payload copies always means lower peak RSS.
+
 Numeric values, validity and Boolean bitmaps, string/binary bytes and views,
 large offsets, nested children, and compatible categorical codes share their
 buffers. Int32 offsets widen, incompatible dictionary indices and temporal
@@ -123,5 +129,4 @@ checks actual Mojo writer outputs using independent PyArrow consumers. The
 consumer checks complete cells, physical types, field metadata, and record
 batch boundaries. Run these checks on Linux and macOS.
 
-Retaining mapped buffers as foreign column storage remains follow-up work
-for #795. Lazy output sinks depend on #796.
+Lazy output sinks depend on #796.
