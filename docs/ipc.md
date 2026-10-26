@@ -31,7 +31,7 @@ Each record batch becomes a column chunk. Categorical dictionaries changing
 between batches are unified and codes remapped to preserve their values.
 Integer and float widths, decimal precision/scale/storage widths, temporal
 units and timestamp zones follow the Arrow interchange contracts. UTF-8 and
-binary views are normalized to supported string/binary layouts. Arbitrary
+binary views retain their native descriptors and byte blocks. Arbitrary
 field metadata is retained. Unsupported Arrow types raise rather than
 silently dropping fields.
 
@@ -42,10 +42,19 @@ Dictionary labels live in data messages, so schema-only categorical entries
 have an empty dictionary.
 
 `memory_map=True` selects a memory-mapped native input (the default for files;
-streams default to false). The Arrow importer currently copies foreign buffers
-into owned Mojo storage. This option therefore does **not** promise zero-copy
-columns or a mapping that remains attached to the returned frame. Compression
-and representation conversions may also allocate.
+streams default to false). Compatible uncompressed buffers are shared with
+columns, slices and chunks. The mapping stays alive after the reader closes
+and is released after the final dependent view or Arrow export. Keep mapped
+file contents unchanged while these views exist. With `memory_map=False`,
+columns retain native read buffers instead. Compressed buffers must decode;
+the importer then retains decoded buffers without another payload copy.
+
+Numeric values, validity and Boolean bitmaps, string/binary bytes and views,
+large offsets, nested children, and compatible categorical codes share their
+buffers. Int32 offsets widen, incompatible dictionary indices and temporal
+units convert, and unaligned typed storage uses aligned copies. Rechunking or
+requesting a canonical contiguous Arrow export can also allocate. Mutating an
+alias detaches its storage first. See [Arrow ownership](arrow.md).
 
 ## Lazy file scans
 
@@ -63,7 +72,7 @@ var result = query.collect(engine="cpu", batch_size=65536)
 
 Constructing a scan does not open the file. `collect_schema` reads only
 schema metadata, and each collection opens a fresh reader. The optional
-`memory_map` argument has the same copying semantics as `read_ipc`.
+`memory_map` argument has the same buffer-sharing semantics as `read_ipc`.
 
 Projection includes the columns needed by filters, join keys and aggregates,
 even when those columns are omitted from the final result. Nonnegative slices

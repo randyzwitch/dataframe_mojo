@@ -83,12 +83,14 @@ struct Source {
   std::shared_ptr<arrow::Buffer> footer;
   int64_t footer_start = 0;
   int next = 0;
+  bool selected_fields = false;
 
   std::shared_ptr<arrow::Schema> schema() const {
     return indexed ? indexed->schema() : sequential->schema();
   }
   arrow::Status OpenReader(bool stream, const arrow::ipc::IpcReadOptions& options) {
     next = 0;
+    selected_fields = !options.included_fields.empty();
     indexed.reset();
     sequential.reset();
     ARROW_RETURN_NOT_OK(file->Seek(0));
@@ -104,6 +106,17 @@ struct Source {
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> Next() {
     if (indexed) {
       if (next == indexed->num_record_batches()) return nullptr;
+      // Arrow 24's synchronous selective reader assembles a copied body.
+      // Prebuffering just this batch's metadata selects its cached range
+      // reader instead: mapped ranges stay shared, and excluded fields are
+      // still skipped during decoding. Do not prefetch later batch bodies.
+      if (selected_fields && file->supports_zero_copy()) {
+        // The cached reader validates buffer ranges but omits the ordinary
+        // reader's message/footer body-length comparison. Preserve it here.
+        ARROW_ASSIGN_OR_RAISE(auto rows, BatchRows(next));
+        (void)rows;
+        ARROW_RETURN_NOT_OK(indexed->PreBufferMetadata({next}));
+      }
       return indexed->ReadRecordBatch(next++);
     }
     return sequential->Next();
