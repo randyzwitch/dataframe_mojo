@@ -11,6 +11,7 @@ written. The combined bitmap is the selection for the next pipeline step.
 Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
 floats, so a NaN compares false except with `!=`.
 """
+from ._buffer import _BufferData
 from std.memory import pack_bits
 
 from .expr import node_children
@@ -199,7 +200,7 @@ def _block[
 
 @always_inline
 def _and_valid(
-    valid: List[UInt8],
+    valid: _BufferData[UInt8],
     offset: Int,
     rows: Int,
     bits: Pointer[UInt8, MutAnyOrigin],

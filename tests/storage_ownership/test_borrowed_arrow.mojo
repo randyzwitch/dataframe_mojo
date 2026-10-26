@@ -1,9 +1,14 @@
 """Foreign fixed-width payload ownership, alias isolation and Arrow release."""
 # contract-group: storage.borrowed_arrow
+from std.ffi import external_call
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 from std.testing import assert_equal, assert_true
 from dataframe import (
+    BoolColumn,
+    StringColumn,
+    ListColumn,
+    StructColumn,
     Column,
     DataFrame,
     DataType,
@@ -18,6 +23,7 @@ from dataframe import (
 )
 from dataframe.io.arrow import (
     _at,
+    _read_c_string,
     _buffer,
     _export_frame,
     _export_series,
@@ -29,7 +35,16 @@ from dataframe.io.ipc import _open_scan
 from dataframe.io.parquet import _stream_next, _stream_schema, _release_stream
 from dataframe.parallel import Pool
 from tests.support.lifecycle_jobs import WorkerSetting
-from tests.support.arrow_foreign import integers
+from tests.support.arrow_foreign import integers, ForeignArrow, text_bytes
+
+from tests.support.typed_storage_reference import (
+    ForeignPages,
+    make_foreign_pages,
+    assert_foreign_unmapped,
+    assert_storage_series,
+    positional_rows,
+)
+from tests.support.selection_types_reference import selection_column
 
 
 def imported_after_producer_scope(counter: Int) raises -> Series:
@@ -199,3 +214,340 @@ def test_borrowed_arrow_unaligned_payload_uses_owned_copy_without_mutating_produ
     assert_equal(counter[], 1)
     assert_equal(raw[1], UInt8(249))
     _ = raw^
+
+
+def paged_bitmap_after_source_scope(
+    mut foreign: ForeignPages, kind: Int, n: Int, offset: Int, mode: Int
+) raises -> Series:
+    var source = selection_column(kind, n, offset, mode)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(source, array, schema)
+    make_foreign_pages(array, schema, foreign)
+    for i in range(len(foreign.pages)):
+        assert_equal(
+            external_call["mprotect", Int32](
+                foreign.pages[i], foreign.lengths[i], Int32(1)
+            ),
+            Int32(0),
+        )
+    var values = _buffer(array, 1)
+    var validity = _buffer(array, 0)
+    var has_validity = validity != 0 and (
+        array.null_count != 0 or offset % 8 != 0
+    )
+    var result = import_arrow_series(array, schema, copy=False)
+    assert_equal(foreign.calls, 0)
+    if kind == 10:
+        var column = result.bool()
+        assert_equal(Int(column.unsafe_values()), values + offset // 8)
+        assert_equal(column.validity_offset(), offset % 8)
+        if has_validity:
+            assert_equal(Int(column.unsafe_validity()), validity + offset // 8)
+            assert_true(column._bits.is_borrowed())
+    else:
+        var column = result.int64()
+        assert_equal(Int(column.unsafe_values()), values + offset * 8)
+        assert_equal(column.validity_offset(), offset % 8)
+        if has_validity:
+            assert_equal(Int(column.unsafe_validity()), validity + offset // 8)
+            assert_true(column._bits.is_borrowed())
+    assert_storage_series(result, kind, positional_rows(n, offset), mode)
+    return result.slice(0, n)
+
+
+def exercise_paged_bitmap(
+    mut foreign: ForeignPages, kind: Int, n: Int, offset: Int, mode: Int
+) raises:
+    var view = paged_bitmap_after_source_scope(foreign, kind, n, offset, mode)
+    assert_equal(foreign.calls, 0)
+    assert_storage_series(view, kind, positional_rows(n, offset), mode)
+    if kind == 10:
+        var changed = view.bool()
+        changed._reserve_rows(n + 2, 0)
+        changed._append_column(BoolColumn([True, False], [False, True]))
+        assert_equal(len(changed), n + 2)
+        assert_true(changed.is_null(n))
+        assert_equal(changed.value(n + 1), False)
+    else:
+        var changed = view.int64()
+        changed._reserve_rows(n + 2, 0)
+        changed._append_column(Column[Int64]([123, 456], [False, True]))
+        assert_equal(len(changed), n + 2)
+        assert_true(changed.is_null(n))
+        assert_equal(changed.value(n + 1), Int64(456))
+    assert_storage_series(view, kind, positional_rows(n, offset), mode)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(view, array, schema)
+    var copy = import_arrow_series(array, schema)
+    assert_storage_series(copy, kind, positional_rows(n, offset), mode)
+    assert_equal(foreign.calls, 0)
+    _ = view^
+
+
+def test_borrowed_arrow_bitmaps_and_booleans_share_readonly_pages_through_views_and_copy_on_write() raises:
+    for kind in [3, 10]:
+        for n in [1, 9, 65]:
+            for offset in [0, 1, 7, 9, 17]:
+                for mode in range(3):
+                    var foreign = ForeignPages()
+                    exercise_paged_bitmap(foreign, kind, n, offset, mode)
+                    assert_foreign_unmapped(foreign)
+
+
+def paged_layout_after_source_scope(
+    mut foreign: ForeignPages, kind: Int, n: Int, offset: Int, mode: Int
+) raises -> Series:
+    var source = selection_column(kind, n, offset, mode)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(source, array, schema)
+    make_foreign_pages(array, schema, foreign)
+    for i in range(len(foreign.pages)):
+        assert_equal(
+            external_call["mprotect", Int32](
+                foreign.pages[i], foreign.lengths[i], Int32(1)
+            ),
+            Int32(0),
+        )
+    var offsets = _buffer(array, 1)
+    var bytes = _buffer(array, 2) if kind == 11 or kind == 12 else 0
+    var result = import_arrow_series(array, schema, copy=False)
+    assert_equal(foreign.calls, 0)
+    if kind == 11 or kind == 12:
+        ref column = result._data[StringColumn]
+        assert_true(not column._is_view_storage())
+        assert_equal(
+            Int(column._offsets[].unsafe_ptr()),
+            offsets + 8 * (offset - offset % 8),
+        )
+        if len(column._bytes[]) > 0:
+            assert_equal(Int(column._bytes[].unsafe_ptr()), bytes)
+            assert_true(column._bytes.is_borrowed())
+    elif kind == 26:
+        ref column = result._data[ListColumn]
+        assert_equal(
+            Int(column._offsets[].unsafe_ptr()),
+            offsets + 8 * (offset - offset % 8),
+        )
+        assert_true(column._offsets.is_borrowed())
+        var child = column.child()
+        var child_array = _at[ArrowArray](_at[Int](array.children)[])
+        if len(child) > 0:
+            assert_equal(
+                Int(child.int64().unsafe_values()),
+                _buffer(child_array[], 1) + Int(child_array[].offset) * 8,
+            )
+    elif kind == 27:
+        var child_array = _at[ArrowArray](_at[Int](array.children)[])
+        var child = result._data[StructColumn].field(0)
+        assert_equal(
+            Int(child.int64().unsafe_values()),
+            _buffer(child_array[], 1)
+            + (Int(child_array[].offset) + Int(array.offset)) * 8,
+        )
+    else:
+        ref column = result._data[Column[UInt32]]
+        assert_equal(Int(column.unsafe_values()), offsets + offset * 4)
+        assert_true(column._data.is_borrowed())
+        var dictionary_array = _at[ArrowArray](array.dictionary)
+        var dictionary = result.dtype().dictionary()
+        assert_equal(
+            Int(dictionary[].bytes.unsafe_ptr()), _buffer(dictionary_array[], 2)
+        )
+        assert_equal(
+            Int(dictionary[].offsets.unsafe_ptr()),
+            _buffer(dictionary_array[], 1),
+        )
+    assert_storage_series(result, kind, positional_rows(n, offset), mode)
+    return result.slice(0, n)
+
+
+def exercise_paged_layout(
+    mut foreign: ForeignPages, kind: Int, n: Int, offset: Int, mode: Int
+) raises:
+    var view = paged_layout_after_source_scope(foreign, kind, n, offset, mode)
+    assert_equal(foreign.calls, 0)
+    assert_storage_series(view, kind, positional_rows(n, offset), mode)
+    var grown = view.copy()
+    grown._append_series(selection_column(kind, 9, 101, mode))
+    var expected = positional_rows(n, offset)
+    expected.extend(positional_rows(9, 101))
+    assert_storage_series(grown, kind, expected, mode)
+    assert_storage_series(view, kind, positional_rows(n, offset), mode)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(view, array, schema)
+    var copied = import_arrow_series(array, schema)
+    assert_storage_series(copied, kind, positional_rows(n, offset), mode)
+    assert_equal(foreign.calls, 0)
+    _ = view^
+
+
+def test_borrowed_arrow_strings_binary_and_nested_buffers_share_readonly_pages_and_retain_children() raises:
+    for kind in [11, 12, 13, 26, 27]:
+        for n in [1, 9, 65]:
+            for offset in [0, 1, 7, 9, 17]:
+                for mode in range(3):
+                    var foreign = ForeignPages()
+                    exercise_paged_layout(foreign, kind, n, offset, mode)
+                    assert_foreign_unmapped(foreign)
+
+
+def exercise_small_offsets(mut foreign: ForeignArrow) raises:
+    ref node = foreign.nodes[0]
+    var bytes = _buffer(node.array, 2)
+    var offsets = _buffer(node.array, 1)
+    var imported = import_arrow_series(node.array, node.schema, copy=False)
+    assert_equal(imported.get(0).string(), "bcd")
+    assert_equal(imported.get(1).string(), "ef")
+    ref column = imported._data[StringColumn]
+    assert_equal(Int(column._bytes[].unsafe_ptr()), bytes)
+    assert_true(column._bytes.is_borrowed())
+    assert_true(not column._offsets.is_borrowed())
+    assert_true(Int(column._offsets[].unsafe_ptr()) != offsets)
+    assert_equal(foreign.nodes[0].array_releases, 0)
+    _ = imported^
+
+
+def test_borrowed_arrow_small_offsets_widen_without_copying_string_payloads() raises:
+    var foreign = ForeignArrow(1)
+    foreign.nodes[0].describe("u", "s", 2, 1)
+    foreign.nodes[0].buffer(List[UInt8]())
+    foreign.nodes[0].buffer(integers([0, 1, 4, 6], 4))
+    foreign.nodes[0].buffer(text_bytes("abcdef"))
+    foreign.seal()
+    exercise_small_offsets(foreign)
+    assert_equal(foreign.nodes[0].array_releases, 1)
+    assert_equal(foreign.nodes[0].schema_releases, 1)
+
+
+def test_borrowed_arrow_native_view_descriptors_and_external_bytes_outlive_ipc_reader() raises:
+    for copy in [False, True]:
+        var stream = _open_scan(
+            "tests/fixtures/ipc/views.arrow", List[String](), False, True, 0, -1
+        )
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        assert_equal(_stream_next(stream, array), Int32(0))
+        assert_equal(_stream_schema(stream, schema), Int32(0))
+        ref text_array = _at[ArrowArray](_at[Int](array.children)[])[]
+        ref text_schema = _at[ArrowSchema](_at[Int](schema.children)[])[]
+        assert_equal(_read_c_string(text_schema.format), "vu")
+        var descriptors = _buffer(text_array, 1)
+        var bytes = _buffer(text_array, 2)
+        var frame = import_arrow(array, schema, copy=copy)
+        _release_stream(stream)
+        ref column = frame["text"]._data[StringColumn]
+        assert_true(column._is_view_storage())
+        var storage = column._view_storage_unchecked()
+        assert_equal(
+            Int(storage._views[].unsafe_ptr()) == descriptors, not copy
+        )
+        assert_equal(
+            Int(storage._buffers[][0][].unsafe_ptr()) == bytes, not copy
+        )
+        assert_equal(frame.item(0, "text").string(), "long external string")
+        assert_equal(frame.item(2, "text").string(), "é")
+        assert_true(frame.item(1, "text").is_null())
+        var expected: List[UInt8] = [255, 0]
+        assert_equal(frame.item(0, "binary").bytes(), expected)
+        assert_true(frame.item(1, "binary").is_null())
+        var exported = ArrowArray()
+        var exported_schema = ArrowSchema()
+        export_arrow(frame, exported, exported_schema)
+        var roundtrip = import_arrow(exported, exported_schema)
+        assert_true(roundtrip.equals(frame))
+
+
+def exercise_undefined_null_view(mut foreign: ForeignArrow) raises:
+    ref node = foreign.nodes[0]
+    var original = _buffer(node.array, 1)
+    var result = import_arrow_series(node.array, node.schema, copy=False)
+    assert_equal(result.get(0).string(), "a")
+    assert_true(result.get(1).is_null())
+    var storage = result._data[StringColumn]._view_storage_unchecked()
+    assert_true(Int(storage._views[].unsafe_ptr()) != original)
+    assert_equal(storage._view_unchecked(1).length, UInt32(0))
+
+
+def test_borrowed_arrow_undefined_null_view_descriptor_is_sanitized_without_reading_invalid_bytes() raises:
+    var foreign = ForeignArrow(1)
+    foreign.nodes[0].describe("vu", "s", 2, 0, 1)
+    foreign.nodes[0].buffer(List[UInt8]([UInt8(1)]))
+    var descriptors = integers([1, 97, 0, 0], 4)
+    descriptors.extend(integers([-1, -1, -1, -1], 4))
+    foreign.nodes[0].buffer(descriptors^)
+    foreign.nodes[0].buffer(List[UInt8]())
+    foreign.seal()
+    exercise_undefined_null_view(foreign)
+    assert_equal(foreign.nodes[0].array_releases, 1)
+
+
+def exercise_foreign_struct_offset(mut foreign: ForeignArrow) raises:
+    var result = import_arrow_series(
+        foreign.nodes[0].array, foreign.nodes[0].schema, copy=False
+    )
+    assert_equal(len(result), 2)
+    assert_true(not result.get(0).is_null())
+    assert_true(result.get(1).is_null())
+    ref column = result._data[StructColumn]
+    assert_equal(column._offset, 2)
+    assert_true(column._bits.is_borrowed())
+    assert_equal(column.field(0).get(0).int64(), Int64(5))
+    assert_equal(column.field(0).get(1).int64(), Int64(6))
+    assert_equal(column.field(1).get(0).string(), "d")
+    assert_equal(column.field(1).get(1).string(), "e")
+    assert_equal(foreign.nodes[0].array_releases, 0)
+    _ = result^
+
+
+def test_borrowed_arrow_struct_parent_and_child_offsets_compose_without_copying() raises:
+    var foreign = ForeignArrow(3)
+    foreign.nodes[0].describe("+s", "record", 2, 2, 1)
+    foreign.nodes[0].buffer(List[UInt8]([UInt8(4)]))
+    foreign.nodes[0].children = [1, 2]
+    foreign.nodes[1].describe("l", "number", 5, 3)
+    foreign.nodes[1].buffer(List[UInt8]())
+    foreign.nodes[1].buffer(integers([0, 1, 2, 3, 4, 5, 6, 7], 8))
+    foreign.nodes[2].describe("u", "label", 5, 1)
+    foreign.nodes[2].buffer(List[UInt8]())
+    foreign.nodes[2].buffer(integers([0, 1, 2, 3, 4, 5, 6], 4))
+    foreign.nodes[2].buffer(text_bytes("abcdef"))
+    foreign.seal()
+    exercise_foreign_struct_offset(foreign)
+    for i in range(len(foreign.nodes)):
+        assert_equal(foreign.nodes[i].array_releases, 1)
+        assert_equal(foreign.nodes[i].schema_releases, 1)
+
+
+def exercise_declared_window_facts(mut foreign: ForeignArrow) raises:
+    from dataframe.sorted_range import _ascending_cached
+    from dataframe.pipeline import _fill_zones
+
+    var series = import_arrow_series(
+        foreign.nodes[0].array, foreign.nodes[0].schema, copy=False
+    )
+    ref column = series._data[Column[Int64]]
+    assert_true(column._data.is_borrowed())
+    assert_equal(column._facts[].first, 2)
+    assert_equal(column._facts[].last, 5)
+    assert_true(_ascending_cached[DType.int64](column))
+    assert_equal(column._facts[].order, 1)
+    _fill_zones(column)
+    assert_equal(column._facts[].zones, List[Int64]([Int64(10), Int64(30)]))
+    assert_true(_ascending_cached[DType.int64](column.slice(1, 2)))
+    _ = series^
+
+
+def test_borrowed_arrow_cached_order_and_zone_bounds_ignore_undeclared_prefix_slots() raises:
+    var foreign = ForeignArrow(1)
+    foreign.nodes[0].describe("l", "x", 3, 2)
+    foreign.nodes[0].buffer(List[UInt8]())
+    foreign.nodes[0].buffer(
+        integers([Int128(Int64.MAX), Int128(Int64.MIN), 10, 20, 30], 8)
+    )
+    foreign.seal()
+    exercise_declared_window_facts(foreign)
+    assert_equal(foreign.nodes[0].array_releases, 1)

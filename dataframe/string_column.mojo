@@ -89,9 +89,9 @@ struct StringCodes(Copyable):
 struct StringColumn(Copyable, Sized):
     """A window onto shared UTF-8 bytes, Int64 offsets, and validity."""
 
-    var _bytes: ArcPointer[List[UInt8]]
-    var _offsets: ArcPointer[List[Int64]]
-    var _bits: ArcPointer[List[UInt8]]
+    var _bytes: _Buffer[UInt8]
+    var _offsets: _Buffer[Int64]
+    var _bits: _Buffer[UInt8]
     var _offset: Int
     var _length: Int
     # `None` is Arrow large_utf8; native CSV views retain descriptors/blocks.
@@ -111,7 +111,7 @@ struct StringColumn(Copyable, Sized):
         if len(values) != len(valid):
             raise Error("Column values and validity must have equal lengths")
         self = Self(values)
-        self._bits = ArcPointer(_pack_bits(valid))
+        self._bits = _Buffer(_pack_bits(valid))
 
     @staticmethod
     def from_bytes(
@@ -158,9 +158,9 @@ struct StringColumn(Copyable, Sized):
         length: Int,
     ):
         """Adopt finished buffers; offsets must have length + 1 entries."""
-        self._bytes = ArcPointer(bytes^)
-        self._offsets = ArcPointer(offsets^)
-        self._bits = ArcPointer(bits^)
+        self._bytes = _Buffer(bytes^)
+        self._offsets = _Buffer(offsets^)
+        self._bits = _Buffer(bits^)
         self._offset = 0
         self._length = length
         self._view_storage = None
@@ -168,13 +168,34 @@ struct StringColumn(Copyable, Sized):
 
     def __init__(out self, var storage: StringViewStorage):
         """Adopt finished Arrow Utf8View descriptors and their Arc blocks."""
-        self._bytes = ArcPointer(List[UInt8]())
-        self._offsets = ArcPointer(List[Int64](length=1, fill=0))
+        self._bytes = _Buffer(List[UInt8]())
+        self._offsets = _Buffer(List[Int64](length=1, fill=0))
         self._bits = storage.validity_arc()
         self._offset = 0
         self._length = len(storage)
         self._view_storage = storage^
         self._codes = None
+
+    @staticmethod
+    def _from_buffers(
+        bytes: _Buffer[UInt8],
+        offsets: _Buffer[Int64],
+        bits: _Buffer[UInt8],
+        offset: Int,
+        length: Int,
+    ) -> Self:
+        var result = Self(
+            bytes=List[UInt8](),
+            offsets=List[Int64](),
+            bits=List[UInt8](),
+            length=0,
+        )
+        result._bytes = bytes.copy()
+        result._offsets = offsets.copy()
+        result._bits = bits.copy()
+        result._offset = offset
+        result._length = length
+        return result^
 
     def __len__(self) -> Int:
         return self._length
@@ -631,7 +652,7 @@ struct StringColumn(Copyable, Sized):
                     source_bits, self._offset + row - base
                 ):
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
-        var buffers = List[ArcPointer[List[UInt8]]]()
+        var buffers = List[_Buffer[UInt8]]()
         buffers.append(self._bytes.copy())
         var result = Self(
             StringViewStorage(views^, buffers^, bits^, n, len(self._bytes[]))
@@ -680,8 +701,11 @@ struct StringColumn(Copyable, Sized):
             return False
         return (
             self._bytes.count() == 1
+            and not self._bytes.is_borrowed()
             and self._offsets.count() == 1
+            and not self._offsets.is_borrowed()
             and self._bits.count() == 1
+            and not self._bits.is_borrowed()
             and self._offset == 0
             and len(self._offsets[]) == self._length + 1
             and Int(self._offsets[][self._length]) == len(self._bytes[])
@@ -718,10 +742,10 @@ struct StringColumn(Copyable, Sized):
         """
         if not self._owned():
             self = self._compact()
-        self._offsets[].reserve(rows + 1)
-        self._bytes[].reserve(text_bytes)
+        self._offsets.writable().reserve(rows + 1)
+        self._bytes.writable().reserve(text_bytes)
         if len(self._bits[]) != 0:
-            self._bits[].reserve((rows + 7) // 8)
+            self._bits.writable().reserve((rows + 7) // 8)
 
     def _as_views(self) raises -> Self:
         """This column as Arrow views onto its own bytes (descriptors only;
@@ -774,11 +798,15 @@ struct StringColumn(Copyable, Sized):
         if count == 0:
             return
         _append_validity(
-            self._bits[], self._length, other._bits[], other._offset, count
+            self._bits.writable(),
+            self._length,
+            other._bits[],
+            other._offset,
+            count,
         )
         var first = other._start(0)
         var total = other._value_bytes()
-        ref bytes = self._bytes[]
+        ref bytes = self._bytes.writable()
         if bytes.capacity() < len(bytes) + total:
             bytes.reserve(max(len(bytes) + total, 2 * bytes.capacity()))
         var shift = Int64(len(bytes) - first)
@@ -787,7 +815,7 @@ struct StringColumn(Copyable, Sized):
                 unsafe_ptr=other._base().unsafe_offset(first), length=total
             )
         )
-        ref offsets = self._offsets[]
+        ref offsets = self._offsets.writable()
         if offsets.capacity() < len(offsets) + count:
             offsets.reserve(max(len(offsets) + count, 2 * offsets.capacity()))
         ref incoming = other._offsets[]

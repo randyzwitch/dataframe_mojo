@@ -6,6 +6,7 @@ over every row those checks cost more than the comparison itself. `_Bytes`
 reads offsets and bytes (or view storage) directly, and `_same_bytes` and
 `_order_bytes` compare eight bytes at a time.
 """
+from ._buffer import _Buffer
 from std.bit import byte_swap
 
 from std.memory import ArcPointer, Pointer
@@ -88,7 +89,7 @@ struct _Bytes(Copyable, Movable):
                 at = Int(view) + 4
             else:
                 at = Int(
-                    Pointer[ArcPointer[List[UInt8]], ImmutAnyOrigin](
+                    Pointer[_Buffer[UInt8], ImmutAnyOrigin](
                         unsafe_from_address=self.buffers
                     )[unsafe_offset=Int(view[].buffer_index)][].unsafe_ptr()
                 ) + Int(view[].offset)

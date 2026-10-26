@@ -4,6 +4,7 @@ Reductions are separate passes, not per-row callbacks or per-group dataframes.
 The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
+from ._buffer import _Buffer, _BufferData
 from .dtype import DataType, NUMERIC_DTYPES
 from .identity_metadata import identity_column_source
 from .expr import INT_IS_IN, is_replace
@@ -951,13 +952,13 @@ def _masked_branch[
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():
             var masked = then._data[Column[Scalar[D]]].copy()
-            masked._bits = ArcPointer(
+            masked._bits = _Buffer(
                 _and_validity(flags, masked._bits[], masked._offset, size)
             )
             return Series("", masked^).with_dtype(then.dtype())
     if then._data.isa[Column[Int128]]():
         var masked = then._data[Column[Int128]].copy()
-        masked._bits = ArcPointer(
+        masked._bits = _Buffer(
             _and_validity(flags, masked._bits[], masked._offset, size)
         )
         return Series("", masked^).with_dtype(then.dtype())
@@ -970,7 +971,7 @@ def _masked_branch[
 
 
 def _and_validity(
-    flags: BoolColumn, bits: List[UInt8], base: Int, size: Int
+    flags: BoolColumn, bits: _BufferData[UInt8], base: Int, size: Int
 ) -> List[UInt8]:
     """A validity bitmap over rows [base, base + size) of a column: the
     column's own validity (`bits`, empty for none) and the predicate's
@@ -3282,12 +3283,12 @@ def _whole_masked_branch[
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():
             var masked = then._data[Column[Scalar[D]]].copy()
-            masked._bits = ArcPointer(
+            masked._bits = _Buffer(
                 _and_validity(flags, masked._bits[], masked._offset, height)
             )
             return Series("", masked^).with_dtype(then.dtype())
     var masked = then._data[Column[Int128]].copy()
-    masked._bits = ArcPointer(
+    masked._bits = _Buffer(
         _and_validity(flags, masked._bits[], masked._offset, height)
     )
     return Series("", masked^).with_dtype(then.dtype())

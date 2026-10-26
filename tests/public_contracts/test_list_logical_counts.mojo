@@ -93,7 +93,8 @@ def test_list_physical_backing_take_concat_slice_preserves_logical_counts() rais
     var taken = xs.take(List[Int]([2, 0, 1]))
     var lists = taken.list_column()
     assert_equal(
-        lists._offsets[], List[Int64]([Int64(0), Int64(2), Int64(4), Int64(4)])
+        lists._offsets[].copy(),
+        List[Int64]([Int64(0), Int64(2), Int64(4), Int64(4)]),
     )
     assert_equal(lists.lengths(), List[Int64]([Int64(2), Int64(0), Int64(0)]))
     assert_equal(lists.child().int64().value(2), Int64(7))
@@ -106,7 +107,7 @@ def test_list_physical_backing_take_concat_slice_preserves_logical_counts() rais
     var joined = xs.slice(0, 2).append(xs.slice(2, 2))
     assert_true(joined.equals(xs))
     assert_equal(
-        joined.list_column()._offsets[],
+        joined.list_column()._offsets[].copy(),
         List[Int64]([Int64(0), Int64(2), Int64(2), Int64(4), Int64(4)]),
     )
     assert_equal(len(joined.list_column().child()), 4)

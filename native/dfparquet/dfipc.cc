@@ -24,13 +24,11 @@ int Fail(const arrow::Status& status, char** error) {
   return 1;
 }
 
-// Preserve logical metadata and decimal widths. Only unsupported physical
-// string/binary views and float16 need normalization for the Mojo importer.
+// Preserve logical metadata, decimal widths and view buffers. Float16
+// needs normalization to the Mojo importer's supported Float32 storage.
 std::shared_ptr<arrow::DataType> ImportType(
     const std::shared_ptr<arrow::DataType>& type) {
   switch (type->id()) {
-    case arrow::Type::STRING_VIEW: return arrow::large_utf8();
-    case arrow::Type::BINARY_VIEW: return arrow::large_binary();
     case arrow::Type::HALF_FLOAT: return arrow::float32();
     case arrow::Type::LIST:
     case arrow::Type::LARGE_LIST: {

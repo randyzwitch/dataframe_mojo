@@ -9,6 +9,7 @@ A morsel is a frame and a selection. A filter narrows the selection
 without copying data. When a step reads a column, that column is gathered
 through the selection once and replaces its shared version.
 """
+from ._buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
@@ -476,16 +477,18 @@ def _ensure_zones(series: Series):
 def _fill_zones[D: DType](column: Column[Scalar[D]]):
     if len(column._facts[].zones) > 0:
         return
-    var whole = column.copy()
-    whole._offset = 0
-    whole._length = len(column._data[])
-    var blocks = (whole._length + _ZONE_ROWS - 1) // _ZONE_ROWS
+    var first_row = column._facts[].first
+    var last_row = column._facts[].last
+    if last_row < 0:
+        last_row = len(column._data[])
+    var blocks = (last_row + _ZONE_ROWS - 1) // _ZONE_ROWS
     var zones = List[Int64](capacity=2 * blocks)
     for b in range(blocks):
-        var first = b * _ZONE_ROWS
-        var block = whole.copy()
+        var first = max(b * _ZONE_ROWS, first_row)
+        var last = min((b + 1) * _ZONE_ROWS, last_row)
+        var block = column.copy()
         block._offset = first
-        block._length = min(_ZONE_ROWS, whole._length - first)
+        block._length = max(0, last - first)
         var found = _column_bounds(block)
         if found[0]:
             zones.append(found[1])
@@ -1063,8 +1066,8 @@ struct Morsel(Movable):
             bytes.unsafe_ptr()[unsafe_offset=k] = source[unsafe_offset=k]
         _ = out^
         var mask = BoolColumn(List[Bool]())
-        mask._data = ArcPointer(bytes^)
-        mask._bits = ArcPointer(List[UInt8](length=(height + 7) // 8, fill=255))
+        mask._data = _Buffer(bytes^)
+        mask._bits = _Buffer(List[UInt8](length=(height + 7) // 8, fill=255))
         mask._length = height
         mask._offset = 0
         if not self.selected:

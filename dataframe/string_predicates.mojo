@@ -10,6 +10,7 @@ writes the result bitmap; validity is the input's, copied once. Equality
 checks the length before any byte; `is_in` with more than eight values
 probes a small open-addressing table of their hashes.
 """
+from ._buffer import _Buffer
 from .bool_column import BoolColumn
 from .column import _copy_validity
 from .expr import EQ, GE, GT, LE, LT, NE
@@ -423,7 +424,7 @@ def slice_strings(
         raise Error("slice source too large for views")
     var views = List[StringView](unsafe_uninit_length=n)
     var words = views.unsafe_ptr().unsafe_bitcast[UInt64]()
-    var buffers = List[ArcPointer[List[UInt8]]]()
+    var buffers = List[_Buffer[UInt8]]()
     var views_at = 0
     if views_storage:
         var storage = column._view_storage_unchecked()

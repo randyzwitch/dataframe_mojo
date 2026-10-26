@@ -10,6 +10,7 @@ The block policy uses: 8 KiB initial growth and a
 16 MiB exponential-growth ceiling.  Validity stays absent until the first
 null, as in validity bitmaps.
 """
+from ._buffer import _Buffer, _BufferData
 from std.sys.intrinsics import prefetch
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from .huge_pages import huge_uninit
@@ -84,36 +85,51 @@ struct StringViewStorage(Copyable, Sized):
     is retained after construction.
     """
 
-    var _views: ArcPointer[List[StringView]]
-    var _buffers: ArcPointer[List[ArcPointer[List[UInt8]]]]
-    var _bits: ArcPointer[List[UInt8]]
+    var _views: _Buffer[StringView]
+    var _buffers: ArcPointer[List[_Buffer[UInt8]]]
+    var _bits: _Buffer[UInt8]
     var _length: Int
     var _total_buffer_bytes: Int
 
     def __init__(
         out self,
         var views: List[StringView],
-        var buffers: List[ArcPointer[List[UInt8]]],
+        var buffers: List[_Buffer[UInt8]],
         var bits: List[UInt8],
         length: Int,
         total_buffer_bytes: Int,
     ):
-        self._views = ArcPointer(views^)
+        self._views = _Buffer(views^)
         self._buffers = ArcPointer(buffers^)
-        self._bits = ArcPointer(bits^)
+        self._bits = _Buffer(bits^)
+        self._length = length
+        self._total_buffer_bytes = total_buffer_bytes
+
+    def __init__(
+        out self,
+        *,
+        views: _Buffer[StringView],
+        var buffers: List[_Buffer[UInt8]],
+        bits: _Buffer[UInt8],
+        length: Int,
+        total_buffer_bytes: Int,
+    ):
+        self._views = views.copy()
+        self._buffers = ArcPointer(buffers^)
+        self._bits = bits.copy()
         self._length = length
         self._total_buffer_bytes = total_buffer_bytes
 
     def __len__(self) -> Int:
         return self._length
 
-    def views_arc(self) -> ArcPointer[List[StringView]]:
+    def views_arc(self) -> _Buffer[StringView]:
         return self._views.copy()
 
-    def buffers_arc(self) -> ArcPointer[List[ArcPointer[List[UInt8]]]]:
+    def buffers_arc(self) -> ArcPointer[List[_Buffer[UInt8]]]:
         return self._buffers.copy()
 
-    def validity_arc(self) -> ArcPointer[List[UInt8]]:
+    def validity_arc(self) -> _Buffer[UInt8]:
         return self._bits.copy()
 
     def total_buffer_bytes(self) -> Int:
@@ -190,7 +206,7 @@ struct StringViewStorage(Copyable, Sized):
     @staticmethod
     def _sharing(
         var views: List[StringView],
-        buffers: ArcPointer[List[ArcPointer[List[UInt8]]]],
+        buffers: ArcPointer[List[_Buffer[UInt8]]],
         var bits: List[UInt8],
         length: Int,
         total_buffer_bytes: Int,
@@ -198,7 +214,7 @@ struct StringViewStorage(Copyable, Sized):
         """Storage over `views` that shares an existing buffer list."""
         var result = Self(
             views^,
-            List[ArcPointer[List[UInt8]]](),
+            List[_Buffer[UInt8]](),
             bits^,
             length,
             total_buffer_bytes,
@@ -293,7 +309,7 @@ struct StringViewStorage(Copyable, Sized):
     ) -> Self:
         """Concatenate metadata and retain both arrays' Arc byte blocks."""
         var views = List[StringView](capacity=self_length + other_length)
-        var buffers = List[ArcPointer[List[UInt8]]](
+        var buffers = List[_Buffer[UInt8]](
             capacity=len(self._buffers[]) + len(other._buffers[])
         )
         for buffer in self._buffers[]:
@@ -370,7 +386,7 @@ struct StringViewStorage(Copyable, Sized):
         # with each merge (#395).
         var views = List[StringView](unsafe_uninit_length=rows)
         var out = views.unsafe_ptr()
-        var buffers = List[ArcPointer[List[UInt8]]]()
+        var buffers = List[_Buffer[UInt8]]()
         var position = Dict[Int, Int]()
         var any_nulls = False
         for p in range(len(parts)):
@@ -431,14 +447,14 @@ struct StringViewBuilder(Movable):
     """Port of ``MutableBinaryViewArray::push_value_into_buffer``."""
 
     var _views: List[StringView]
-    var _completed_buffers: List[ArcPointer[List[UInt8]]]
+    var _completed_buffers: List[_Buffer[UInt8]]
     var _in_progress: List[UInt8]
     var _bits: List[UInt8]
     var _total_buffer_bytes: Int
 
     def __init__(out self, capacity: Int = 0):
         self._views = List[StringView](capacity=max(0, capacity))
-        self._completed_buffers = List[ArcPointer[List[UInt8]]]()
+        self._completed_buffers = List[_Buffer[UInt8]]()
         self._in_progress = List[UInt8]()
         self._bits = List[UInt8]()
         self._total_buffer_bytes = 0
@@ -448,7 +464,7 @@ struct StringViewBuilder(Movable):
 
     def _flush_in_progress(mut self):
         if len(self._in_progress) != 0:
-            self._completed_buffers.append(ArcPointer(self._in_progress^))
+            self._completed_buffers.append(_Buffer(self._in_progress^))
         self._in_progress = List[UInt8]()
 
     def _new_buffer(mut self, bytes: Int):

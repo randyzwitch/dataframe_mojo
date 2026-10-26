@@ -15,6 +15,7 @@ Inputs are shared read-only (reference-counted buffers); outputs are only
 published after every worker succeeds, so a failure never exposes a
 partially built column.
 """
+from ._buffer import _Buffer, _BufferData
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn, _bits64
@@ -850,7 +851,7 @@ def take_parallel(
         for i in range(m):
             if shared[][i] >= 0:
                 common_bits[i // 8] |= UInt8(1) << UInt8(i % 8)
-    var shared_bits = ArcPointer(common_bits^)
+    var shared_bits = _Buffer(common_bits^)
     var bounds = partitions(m, active_workers, 8)
     # Preallocate each fixed-width output; strings are assembled from pieces.
     var outputs = List[Series](capacity=len(columns))
@@ -947,16 +948,16 @@ def _payload_address(series: Series) -> Int:
 
 def _set_bits(mut series: Series, var bits: List[UInt8]):
     if series._data.isa[BoolColumn]():
-        series._data[BoolColumn]._bits = ArcPointer(bits^)
+        series._data[BoolColumn]._bits = _Buffer(bits^)
         return
     comptime for d in range(len(GATHER_DTYPES)):
         comptime D = GATHER_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
-            series._data[Column[Scalar[D]]]._bits = ArcPointer(bits^)
+            series._data[Column[Scalar[D]]]._bits = _Buffer(bits^)
             return
 
 
-def _set_shared_bits(mut series: Series, bits: ArcPointer[List[UInt8]]):
+def _set_shared_bits(mut series: Series, bits: _Buffer[UInt8]):
     if series._data.isa[BoolColumn]():
         series._data[BoolColumn]._bits = bits.copy()
         return

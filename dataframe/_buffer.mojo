@@ -76,7 +76,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         return result^
 
 
-struct _Buffer[T: Copyable & Deinitable](Copyable):
+struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
     """Shared immutable storage; writable() detaches shared/foreign buffers."""
 
     var _state: ArcPointer[_BufferData[Self.T]]
@@ -104,16 +104,45 @@ struct _Buffer[T: Copyable & Deinitable](Copyable):
             )
         )
 
+    def __init__(out self, var state: _BufferData[Self.T]):
+        self._state = ArcPointer(state^)
+
     @staticmethod
     def borrowed(
         address: Int, length: Int, owner: ArcPointer[_ForeignOwner]
     ) -> Self:
-        var result = Self(List[Self.T]())
-        result._state = ArcPointer(_BufferData[Self.T](address, length, owner))
-        return result^
+        return Self(_BufferData[Self.T](address, length, owner))
 
     def __getitem__(self) -> ref[ImmutAnyOrigin] _BufferData[Self.T]:
         return self._state[]
+
+    def __len__(self) -> Int:
+        return len(self._state[])
+
+    def __getitem__(self, index: Int) -> ref[ImmutAnyOrigin] Self.T:
+        return self._state[][index]
+
+    def unsafe_ptr(self) -> Pointer[Self.T, MutAnyOrigin]:
+        return self._state[].unsafe_ptr()
+
+    def _window(self, offset: Int, length: Int) raises -> Self:
+        if offset < 0 or length < 0 or offset > len(self) - length:
+            raise Error("Invalid buffer window")
+        if offset == 0 and length == len(self):
+            return self.copy()
+        var pointer = alloc(
+            Layout[ArcPointer[_BufferData[Self.T]]](length=1)
+        ).unsafe_leak()
+        pointer.unsafe_write(self._state.copy())
+        var callback: _ReleaseForeign = _release_shared_buffer[Self.T]
+        var owner = ArcPointer(
+            _ForeignOwner(
+                Int(pointer), Pointer(to=callback).unsafe_bitcast[Int]()[]
+            )
+        )
+        return Self.borrowed(
+            Int(self.unsafe_ptr().unsafe_offset(offset)), length, owner
+        )
 
     def is_borrowed(self) -> Bool:
         return Bool(self._state[].owner)
@@ -143,6 +172,20 @@ def _release_shared_list[T: Copyable & Deinitable](context: Int) abi("C"):
         Allocation[ArcPointer[List[T]]](
             unsafe_owned_ptr=pointer,
             layout=Layout[ArcPointer[List[T]]](length=1),
+        )
+    )
+    _ = held^
+
+
+def _release_shared_buffer[T: Copyable & Deinitable](context: Int) abi("C"):
+    var pointer = Pointer[ArcPointer[_BufferData[T]], MutUntrackedOrigin](
+        unsafe_from_address=context
+    )
+    var held = pointer.unsafe_take_pointee()
+    dealloc(
+        Allocation[ArcPointer[_BufferData[T]]](
+            unsafe_owned_ptr=pointer,
+            layout=Layout[ArcPointer[_BufferData[T]]](length=1),
         )
     )
     _ = held^
