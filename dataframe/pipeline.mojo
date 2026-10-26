@@ -170,6 +170,48 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
     return Optional(names^)
 
 
+def _row_counted(
+    morsel: Morsel, expressions: List[Expr]
+) raises -> Tuple[List[Expr], List[String], List[String]]:
+    """`expressions` with each count of a column that holds no null in the
+    morsel's source turned into a row count, the columns they still read
+    values of, and the columns read only by row counts. DuckDB's rule (its
+    count statistics callback): a count of a column without nulls is
+    count(*), so over a selection it is the kept-row count, and the column
+    is never gathered through the selection."""
+    var rewritten = List[Expr](capacity=len(expressions))
+    var valued = List[String]()
+    var counted = List[String]()
+    for e in expressions:
+        var nodes = e._nodes.copy()
+        var under_len = List[Bool](length=len(nodes), fill=False)
+        for k in range(len(nodes)):
+            var child = nodes[k].left
+            if child < 0 or nodes[child].op != COL:
+                continue
+            if nodes[k].op == COUNT:
+                var at = morsel._index(nodes[child].text)
+                if morsel.frame._columns[at].null_count() == 0:
+                    nodes[k].op = LEN
+            if nodes[k].op == LEN:
+                under_len[child] = True
+        for k in range(len(nodes)):
+            if nodes[k].op != COL:
+                continue
+            ref name = nodes[k].text
+            if under_len[k]:
+                if name not in counted:
+                    counted.append(name)
+            elif name not in valued:
+                valued.append(name)
+        rewritten.append(Expr(nodes^, e._name))
+    var only_counted = List[String]()
+    for name in counted:
+        if name not in valued:
+            only_counted.append(name)
+    return (rewritten^, valued^, only_counted^)
+
+
 comptime _BOUND_NONE = 0
 comptime _BOUND_INT = 1
 comptime _BOUND_FLOAT = 2
@@ -2848,8 +2890,20 @@ struct _PipelineJob(Job):
             return
         if len(self.expressions) > 0:
             var reads = _reads(self.expressions)
+            var expressions = self.expressions.copy()
             var input: DataFrame
-            if reads:
+            if reads and morsel.selected and len(self.keys) == 0:
+                var counts = _row_counted(morsel, self.expressions)
+                expressions = counts[0].copy()
+                input = morsel._compact_frame(counts[1])
+                for name in counts[2]:
+                    # Only row counts read it: a window of the kept-row
+                    # height stands in, and its values are never read.
+                    var at = morsel._index(name)
+                    input = input.with_column(
+                        morsel.frame._columns[at].slice(0, morsel.count)
+                    )
+            elif reads:
                 var names = reads.take()
                 for key in self.keys:
                     if key not in names:
@@ -2881,7 +2935,7 @@ struct _PipelineJob(Job):
                 self.grouped = List[_GroupedSink]()
             # Group first rows are the frame's rows, so first-occurrence
             # order survives morsels taken out of order.
-            var state = _StreamReduction(input, self.expressions, self.keys)
+            var state = _StreamReduction(input, expressions, self.keys)
             state.shift_firsts(offset)
             self.rows += state.rows
             if len(self.keys) == 0:
