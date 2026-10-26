@@ -18,6 +18,21 @@ export_arrow(frame, array, schema)       # frame -> Arrow struct array ("+s")
 var copy = import_arrow(array, schema)   # Arrow struct array -> frame
 ```
 
+`import_arrow(..., copy=False)` and `import_arrow_series(..., copy=False)`
+can retain compatible fixed-width value buffers instead of copying them.
+The input structs are consumed, and their array release callback runs after
+the last borrowing column, slice, or exported view is destroyed. Schemas and
+field metadata are copied before their schema callbacks run. The producer
+must leave borrowed buffers unchanged until release; use the default
+`copy=True` for an independent snapshot.
+
+The buffer ownership foundation currently borrows matching numeric, decimal,
+nanosecond time, and supported timestamp/duration payloads. Unaligned values
+and layout conversions use owned copies. Validity, Boolean, string/binary,
+and nested offset buffers still use the existing copy paths while the
+remaining borrowing layouts are integrated. IPC readers retain their current
+copying policy until that integration is complete.
+
 `export_arrow_series` and `import_arrow_series` do the same for one column.
 Each function also has an overload taking the structs' raw addresses (`Int`),
 for structs owned by C or Python. From Mojo code, prefer the `mut` struct
@@ -69,10 +84,12 @@ top-level struct, and struct arrays with null rows.
   frame is destroyed first. The consumer may move child arrays out (as pyarrow
   does) and release the parent early. Each child keeps its own buffers alive
   until its own `release`.
-- **Import.** Import copies values into new buffers and then calls the
-  producer's `release` on both structs, so no foreign memory is retained. The
-  structs are released even when import fails. Importing an already released
-  struct (`release == NULL`) raises.
+- **Import.** By default, import copies values into new buffers and releases
+  both producer structs. With `copy=False`, compatible payload buffers share
+  one retained parent-array owner. Each buffer keeps that owner alive, and
+  its callback runs exactly once after the last view is gone. Error paths
+  release any partial result and every consumed export. Importing an already
+  released struct (`release == NULL`) raises.
 - Exported buffers must not be modified by the consumer. The same buffers may
   back other columns and frames.
 
