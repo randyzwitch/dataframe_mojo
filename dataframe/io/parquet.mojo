@@ -42,6 +42,7 @@ library's `OwnedDLHandle` closes on destruction, so the library is opened
 with `dlopen` directly and its handle is never closed; repeat opens only
 bump the loader's reference count.
 """
+from .._buffer import _Buffer
 from std.collections import Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
@@ -673,12 +674,12 @@ struct _CodedStringsJob(Job):
             self.chunk.copy()
         )
         ref coded = chunk._data[Column[UInt32]]
-        var shared = coded._data
+        var shared = coded._data.copy()
         if coded._offset != 0 or len(coded._data[]) != len(coded):
             var copied = List[UInt32](capacity=len(coded))
             for i in range(len(coded)):
                 copied.append(coded._get(i))
-            shared = ArcPointer(copied^)
+            shared = _Buffer(copied^)
         var strings = decode_contiguous(chunk.with_dtype(self.final))
         if strings.is_chunked():
             strings = strings.rechunk()

@@ -1146,26 +1146,26 @@ A pending `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`; finish
 
 ## `import_arrow`
 
-Copy an exported Arrow record batch, then release both exports.
+Import an exported Arrow record batch, copying by default.
 
 ```mojo
-def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema) -> DataFrame
+def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def import_arrow(array_address: Int, schema_address: Int) -> DataFrame
+def import_arrow(array_address: Int, schema_address: Int, *, copy: Bool = True) -> DataFrame
 ```
 
 ## `import_arrow_series`
 
-Copy an exported Arrow array into a Series, then release it.
+Import an exported Arrow array, copying payloads by default.
 
 ```mojo
-def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema) -> Series
+def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> Series
 ```
 
 ```mojo
-def import_arrow_series(array_address: Int, schema_address: Int) -> Series
+def import_arrow_series(array_address: Int, schema_address: Int, *, copy: Bool = True) -> Series
 ```
 
 ## `last`

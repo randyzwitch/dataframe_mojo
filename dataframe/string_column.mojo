@@ -11,6 +11,7 @@ mutated while shared.
 Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
+from ._buffer import _Buffer
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from .string_view import (
     StringView,
@@ -42,7 +43,7 @@ struct StringCodes(Copyable):
     (`StringColumn._write_codes`). Operations that compute new strings
     build a column without codes."""
 
-    var codes: ArcPointer[List[UInt32]]
+    var codes: _Buffer[UInt32]
     var dtype: DataType
     # The gather's row list, shared with every column it gathered; a row of
     # -1 is a missing row (null). None when `codes` is read directly.
@@ -50,12 +51,29 @@ struct StringCodes(Copyable):
     var first: Int
     var shift: Int
 
-    def __init__(out self, codes: ArcPointer[List[UInt32]], dtype: DataType):
-        self.codes = codes
+    def __init__(out self, codes: _Buffer[UInt32], dtype: DataType):
+        self.codes = codes.copy()
         self.dtype = dtype
         self.rows = None
         self.first = 0
         self.shift = 0
+
+    def __init__(
+        out self,
+        codes: _Buffer[UInt32],
+        dtype: DataType,
+        rows: ArcPointer[List[Int]],
+        first: Int,
+        shift: Int,
+    ):
+        self.codes = codes.copy()
+        self.dtype = dtype
+        self.rows = Optional(rows)
+        self.first = first
+        self.shift = shift
+
+    def __init__(out self, codes: ArcPointer[List[UInt32]], dtype: DataType):
+        self = Self(_Buffer(codes), dtype)
 
     def __init__(
         out self,
@@ -65,11 +83,7 @@ struct StringCodes(Copyable):
         first: Int,
         shift: Int,
     ):
-        self.codes = codes
-        self.dtype = dtype
-        self.rows = Optional(rows)
-        self.first = first
-        self.shift = shift
+        self = Self(_Buffer(codes), dtype, rows, first, shift)
 
 
 struct StringColumn(Copyable, Sized):
@@ -419,7 +433,7 @@ struct StringColumn(Copyable, Sized):
                     if from_row != -1:
                         code = source.unsafe_offset(from_row + held.shift)[]
                 out.unsafe_offset(k)[] = code
-        result._codes = ArcPointer(StringCodes(ArcPointer(codes^), held.dtype))
+        result._codes = ArcPointer(StringCodes(_Buffer(codes^), held.dtype))
 
     def take(self, indices: List[Int]) raises -> Self:
         if self._is_view_storage():

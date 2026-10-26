@@ -8,6 +8,7 @@ values. Buffers are never mutated while shared: the only mutating operation,
 batch reassembly in `_append_column`, first takes a private copy unless the
 column already owns its buffers outright.
 """
+from ._buffer import _Buffer, _ForeignOwner
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, pack_bits, unsafe_memcpy
 from std.sys import Endian
@@ -45,7 +46,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     no mutable buffers or implicit negative indexing are exposed.
     """
 
-    var _data: ArcPointer[List[Self.T]]
+    var _data: _Buffer[Self.T]
     var _bits: ArcPointer[List[UInt8]]
     var _offset: Int
     var _length: Int
@@ -63,7 +64,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._length = len(values)
         self._offset = 0
         self._bits = ArcPointer(List[UInt8]())
-        self._data = ArcPointer(values^)
+        self._data = _Buffer(values^)
         self._facts = ArcPointer(_BufferFacts())
 
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
@@ -73,16 +74,28 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._length = len(values)
         self._offset = 0
         self._bits = ArcPointer(bits^)
-        self._data = ArcPointer(values^)
+        self._data = _Buffer(values^)
         self._facts = ArcPointer(_BufferFacts())
 
     def __init__(out self, *, var values: List[Self.T], var bits: List[UInt8]):
         """Adopt typed values and a prepacked validity bitmap without copying."""
         self._length = len(values)
         self._offset = 0
-        self._data = ArcPointer(values^)
+        self._data = _Buffer(values^)
         self._bits = ArcPointer(bits^)
         self._facts = ArcPointer(_BufferFacts())
+
+    @staticmethod
+    def _borrowed(
+        address: Int,
+        length: Int,
+        var bits: List[UInt8],
+        owner: ArcPointer[_ForeignOwner],
+    ) -> Self:
+        var result = Self(values=List[Self.T](), bits=bits^)
+        result._data = _Buffer[Self.T].borrowed(address, length, owner)
+        result._length = length
+        return result^
 
     def __len__(self) -> Int:
         return self._length
@@ -111,7 +124,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         # here, and an element-wise copy of a million-row window showed in
         # group-by profiles.
         values.extend(
-            Span(self._data[])[self._offset : self._offset + self._length]
+            self._data[].span()[self._offset : self._offset + self._length]
         )
         return values^
 
@@ -238,6 +251,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         """Whether the buffers are unshared and exactly this window."""
         return (
             self._data.count() == 1
+            and not self._data.is_borrowed()
             and self._bits.count() == 1
             and self._offset == 0
             and len(self._data[]) == self._length
@@ -260,7 +274,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         if not self._owned():
             self = self._compact()
         self._facts = ArcPointer(_BufferFacts())
-        self._data[].reserve(rows)
+        self._data.writable().reserve(rows)
         if len(self._bits[]) != 0:
             self._bits[].reserve((rows + 7) // 8)
 
@@ -277,7 +291,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         _append_validity(
             self._bits[], start, other._bits[], other._offset, count
         )
-        ref values = self._data[]
+        ref values = self._data.writable()
         # Grow geometrically: batch reassembly appends many small chunks, and
         # an exact reservation would copy the whole column on every append.
         if values.capacity() < start + count:
@@ -287,7 +301,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         # output, so this is on the path of concat, vstack, batch reassembly
         # and the parallel CSV reader.
         values.extend(
-            Span(other._data[])[other._offset : other._offset + count]
+            other._data[].span()[other._offset : other._offset + count]
         )
         self._length = start + count
         self._facts = ArcPointer(_BufferFacts())
