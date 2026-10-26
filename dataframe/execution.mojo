@@ -2533,8 +2533,9 @@ def _n_unique_partitioned[
     groups: List[Int],
     group_count: Int,
 ) raises -> Series:
-    """Distinct values of the input, overall or per group; nulls are one
-    value, every NaN is one value and -0.0 equals 0.0."""
+    """Distinct values of the input, overall or per group; the node's
+    integer flag excludes nulls, every NaN is one value and -0.0 equals 0.0.
+    """
     var values: Series
     if bound.expr._nodes[node.left].op == COL:
         values = columns[bound.sources[node.left]].copy()
@@ -2542,7 +2543,9 @@ def _n_unique_partitioned[
         values = _full[width](
             bound, columns, states, node.left, height, batch_size, False
         )
-    var counts = distinct_counts(values, groups, group_count, grouped)
+    var counts = distinct_counts(
+        values, groups, group_count, grouped, node.integer != 0
+    )
     return Series("", Column[Int64](counts.take()))
 
 
@@ -3082,7 +3085,13 @@ def evaluate[
         and columns[bound.sources[0]].dtype().is_categorical()
     ):
         var codes = columns[bound.sources[0]].with_dtype(DataType.UINT32)
-        var counts = distinct_counts(codes, groups, group_count, grouped)
+        var counts = distinct_counts(
+            codes,
+            groups,
+            group_count,
+            grouped,
+            bound.expr._nodes[root].integer != 0,
+        )
         var result = Series(bound.expr._name, Column[Int64](counts.take()))
         return result^
     if not grouped:

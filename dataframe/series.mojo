@@ -1003,8 +1003,13 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def count(self) raises -> Int:
         return Int(self._scalar(col(self._name).count()).int64())
 
-    def n_unique(self) raises -> Int:
-        return Int(self._scalar(col(self._name).n_unique()).int64())
+    def n_unique(self, *, ignore_nulls: Bool = False) raises -> Int:
+        """Distinct values; ignore_nulls=True gives SQL COUNT(DISTINCT)."""
+        return Int(
+            self._scalar(
+                col(self._name).n_unique(ignore_nulls=ignore_nulls)
+            ).int64()
+        )
 
     def first(self) raises -> AnyValue:
         return self._scalar(col(self._name).first())
