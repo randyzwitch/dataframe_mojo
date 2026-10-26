@@ -37,8 +37,8 @@ Incompatible container/scalar mixtures raise. Entirely null fields retain
 `DataType.NULL`; empty or entirely null arrays infer List(Null).
 
 A field outside the sampled or explicit schema raises by default, including
-inside selected nested objects. `ignore_errors=True` drops unknown fields
-and turns incompatible cells into nulls. A bad list element becomes a null
+inside nested objects whose root columns were omitted by projection.
+`ignore_errors=True` drops unknown fields and turns incompatible cells into nulls. A bad list element becomes a null
 element, while a scalar where a list is required becomes a null list. Syntax
 errors, invalid Unicode escapes, invalid numbers and nonobject rows always
 raise. NDJSON errors identify the physical line, including blank lines.

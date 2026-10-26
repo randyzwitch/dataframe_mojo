@@ -104,6 +104,45 @@ def _key_matches(reader: JsonReader, value: Int, key: String) raises -> Bool:
     return True
 
 
+def _field(
+    nodes: List[_Builder], index: Int, reader: JsonReader, value: Int
+) raises -> Int:
+    var hash = _key_hash(reader, value)
+    if hash in nodes[index].fields:
+        var field = nodes[index].fields[hash]
+        while field >= 0:
+            if _key_matches(reader, value, nodes[field].name):
+                return field
+            field = nodes[field].next_collision
+    return -1
+
+
+def _unknown_field(reader: JsonReader, value: Int) raises:
+    raise Error(
+        "JSON field is outside the sampled or explicit schema: "
+        + reader.string_at(reader.nodes[value].key_start)
+    )
+
+
+def _check_fields(
+    nodes: List[_Builder], index: Int, reader: JsonReader, value: Int
+) raises:
+    """Validate known container shapes without converting projected leaves."""
+    var kind = nodes[index].kind
+    var source = reader.nodes[value].kind
+    if (kind != 4 or source != 123) and (kind != 3 or source != 91):
+        return
+    var child = value + 1
+    while child < reader.nodes[value].after:
+        var field = nodes[index].children[0] if kind == 3 else _field(
+            nodes, index, reader, child
+        )
+        if field < 0:
+            _unknown_field(reader, child)
+        _check_fields(nodes, field, reader, child)
+        child = reader.nodes[child].after
+
+
 @always_inline
 def _valid(mut bits: List[UInt8], length: Int, valid: Bool):
     if not valid and len(bits) == 0:
@@ -457,6 +496,12 @@ def _append(
     options: JsonDecodeOptions,
 ) raises:
     if not nodes[index].selected:
+        if (
+            value >= 0
+            and options.reject_unknown_fields
+            and not options.ignore_errors
+        ):
+            _check_fields(nodes, index, reader, value)
         return
     if value < 0 or reader.nodes[value].kind == 110:
         _append_null(nodes, index)
@@ -502,26 +547,15 @@ def _append_value(
             raise Error("JSON value is not a struct object")
         var child = value + 1
         while child < reader.nodes[value].after:
-            var hash = _key_hash(reader, child)
-            var found = False
-            if hash in nodes[index].fields:
-                var field = nodes[index].fields[hash]
-                while field >= 0:
-                    if _key_matches(reader, child, nodes[field].name):
-                        found = True
-                        if nodes[field].length == nodes[index].length:
-                            _append(nodes, field, reader, child, options)
-                        break
-                    field = nodes[field].next_collision
-            if (
-                not found
-                and options.reject_unknown_fields
-                and not options.ignore_errors
-            ):
-                raise Error(
-                    "JSON field is outside the sampled or explicit schema: "
-                    + reader.string_at(reader.nodes[child].key_start)
-                )
+            var field = _field(nodes, index, reader, child)
+            if field >= 0:
+                if (
+                    not nodes[field].selected
+                    or nodes[field].length == nodes[index].length
+                ):
+                    _append(nodes, field, reader, child, options)
+            elif options.reject_unknown_fields and not options.ignore_errors:
+                _unknown_field(reader, child)
             child = reader.nodes[child].after
         for k in range(len(nodes[index].children)):
             var field = nodes[index].children[k]
