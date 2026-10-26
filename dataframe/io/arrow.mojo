@@ -22,9 +22,9 @@ array keeps them alive (via reference counts) until the consumer calls
 | Bool         | `b`      | packs values to bits (n / 8 bytes) |
 | Date         | `tdD`    | narrows days to Int32 |
 
-Validity bitmaps are always shared; a column window's offset becomes the
-ArrowArray `offset`. Import copies into our own buffers (so foreign memory
-is never retained), then calls the producer's `release` exactly once.
+Compatible value/offset buffers and validity can be shared. Import copies
+by default; copy=False retains read-only foreign buffers and releases their
+producer after the last dependent view. Layout conversions still allocate.
 
 Pointers in the C structs are held as `Int` addresses: C pointer fields are
 nullable and Mojo `Pointer`s are not.
@@ -39,8 +39,8 @@ from std.memory import (
     unsafe_memcpy,
 )
 from ..bool_column import BoolColumn
-from .._buffer import _ForeignOwner, _ReleaseForeign
-from ..column import Column, _copy_bits, _copy_validity
+from .._buffer import _Buffer, _ForeignOwner, _ReleaseForeign
+from ..column import Column, _copy_bits, _copy_validity, _validity_bit
 from ..categorical import encode
 from ..geometry import from_wkb
 from ..field_metadata import _append_metadata, _has_extension_name
@@ -53,6 +53,7 @@ from std.sys import CompilationTarget
 from ..nested_column import ListColumn, StructColumn
 from ..series import Series
 from ..string_column import StringBuilder, StringColumn
+from ..string_view import StringView, StringViewStorage
 
 
 struct ArrowSchema(Movable):
@@ -376,11 +377,12 @@ def _dictionary_values(dtype: DataType) raises -> Series:
     var n = len(dictionary[])
     return Series(
         "",
-        StringColumn(
-            bytes=dictionary[].bytes.copy(),
-            offsets=dictionary[].offsets.copy(),
-            bits=List[UInt8](),
-            length=n,
+        StringColumn._from_buffers(
+            dictionary[].bytes,
+            dictionary[].offsets,
+            _Buffer(List[UInt8]()),
+            0,
+            n,
         ),
     )
 
@@ -824,8 +826,9 @@ def _import_dictionary(
     var flat_indices = indices.rechunk() if indices.is_chunked() else (
         indices.copy()
     )
-    var codes = List[UInt32](capacity=len(indices))
-    var valid = List[Bool](capacity=len(indices))
+    var compatible = Bool(owner) and flat_indices._data.isa[Column[UInt32]]()
+    var codes = List[UInt32](capacity=0 if compatible else len(indices))
+    var valid = List[Bool](capacity=0 if compatible else len(indices))
     var in_range = True
     # Indices are read at their own integer type: a cast to Int64 first was
     # most of a dictionary column's import.
@@ -839,15 +842,17 @@ def _import_dictionary(
             var nulls = index_column.null_count() > 0
             for i in range(len(index_column)):
                 if nulls and not index_column._valid(i):
-                    codes.append(0)
-                    valid.append(False)
+                    if not compatible:
+                        codes.append(0)
+                        valid.append(False)
                     continue
                 var index = Int(data[unsafe_offset=i])
                 if index < 0 or index >= count:
                     in_range = False
                     break
-                codes.append(UInt32(index))
-                valid.append(True)
+                if not compatible:
+                    codes.append(UInt32(index))
+                    valid.append(True)
     if not typed:
         raise Error("Arrow dictionary indices must be integers")
     var distinct = in_range and values.null_count() == 0
@@ -862,18 +867,28 @@ def _import_dictionary(
     if not in_range:
         raise Error("Arrow dictionary index out of range")
     if not distinct:
-        var strings = StringBuilder(len(codes))
-        for i in range(len(codes)):
-            if valid[i]:
-                strings.append(values.get(Int(codes[i])).string())
+        var strings = StringBuilder(len(indices))
+        for i in range(len(indices)):
+            var present = not flat_indices.get(
+                i
+            ).is_null() if compatible else valid[i]
+            if present:
+                var code = flat_indices._data[Column[UInt32]]._get(
+                    i
+                ) if compatible else codes[i]
+                strings.append(values.get(Int(code)).string())
             else:
                 strings.append_null()
         return encode(Series(name, strings^.finish()))
-    var dictionary = CategoricalDictionary()
     var flat = values.rechunk()
-    ref column = flat._data[StringColumn]
-    for i in range(count):
-        dictionary.append(column._get(i))
+    var column = flat._data[StringColumn].to_large_utf8()
+    var dictionary = CategoricalDictionary(
+        column._bytes, column._offsets._window(column._offset, len(column) + 1)
+    )
+    if compatible:
+        return indices.with_dtype(
+            DataType.categorical(dictionary^, distinct=True)
+        )
     var any_null = False
     for v in valid:
         any_null = any_null or not v
@@ -881,7 +896,9 @@ def _import_dictionary(
     var coded = Column[UInt32](codes^, valid) if any_null else Column[UInt32](
         codes^
     )
-    return Series(name, coded^).with_dtype(DataType.categorical(dictionary^))
+    return Series(name, coded^).with_dtype(
+        DataType.categorical(dictionary^, distinct=True)
+    )
 
 
 def _import_child(
@@ -907,6 +924,9 @@ def _import_storage(
     var name = _read_c_string(schema.name)
     var length = Int(array.length)
     var offset = Int(array.offset)
+    if length < 0 or offset < 0 or offset > Int.MAX - length - 7:
+        raise Error("Arrow array length and offset are invalid")
+
     if array.dictionary != 0 and schema.dictionary != 0:
         return _import_dictionary(array, schema, name, owner)
     if array.dictionary != 0 or schema.dictionary != 0:
@@ -917,7 +937,9 @@ def _import_storage(
     # one to every column, and a TPC-DS join key's checked per-row reads
     # of it cost q84 8 ms).
     var bits = List[UInt8]() if (
-        _buffer(array, 0) == 0 or array.null_count == 0
+        _buffer(array, 0) == 0
+        or array.null_count == 0
+        or (owner and _borrow_buffer_format(format))
     ) else _import_bits(_buffer(array, 0), offset, length)
     if format.startswith("d:"):
         # "d:precision,scale" is decimal128; a third field names the width.
@@ -950,6 +972,24 @@ def _import_storage(
             )
             return Series(name, column^)
     if format == "b":
+        if owner:
+            var prefix = offset % 8
+            var data = _foreign_values[UInt8](
+                _buffer(array, 1),
+                offset // 8,
+                (prefix + length + 7) // 8,
+                owner.value(),
+            )
+            return Series(
+                name,
+                BoolColumn._from_buffers(
+                    data,
+                    _foreign_validity(array, owner.value()),
+                    prefix,
+                    length,
+                ),
+            )
+
         return Series(
             name,
             BoolColumn(
@@ -958,6 +998,8 @@ def _import_storage(
                 length=length,
             ),
         )
+    if format == "vu" or format == "vz":
+        return _import_views(array, name, format == "vz", owner)
     if format == "U" or format == "u" or format == "Z" or format == "z":
         # large_utf8/utf8 and large_binary/binary share one layout; binary
         # is tagged so its bytes are never read as text.
@@ -970,6 +1012,29 @@ def _import_storage(
                 return Int(_read[Int64](offsets_address, i))
             return Int(_read[Int32](offsets_address, i))
 
+        if owner:
+            var prefix = offset % 8
+            var offsets = _foreign_offsets(array, large, owner.value())
+            var previous = offsets[][prefix]
+            if previous < 0:
+                raise Error("Arrow string offsets must not be negative")
+            for i in range(prefix + 1, prefix + length + 1):
+                if offsets[][i] < previous:
+                    raise Error("Arrow string offsets must not decrease")
+                previous = offsets[][i]
+            var text = _foreign_values[UInt8](
+                data, 0, Int(previous), owner.value()
+            )
+            var strings = StringColumn._from_buffers(
+                text,
+                offsets,
+                _foreign_validity(array, owner.value()),
+                prefix,
+                length,
+            )
+            if format == "Z" or format == "z":
+                return Series(name, strings^).with_dtype(DataType.BINARY)
+            return Series(name, strings^)
         var first = text_offset(offset)
         var total = text_offset(offset + length) - first
         var text = List[UInt8](capacity=total)
@@ -1060,6 +1125,17 @@ def _import_storage(
         var child_array = _at[ArrowArray](_at[Int](array.children)[])
         var child_schema = _at[ArrowSchema](_at[Int](schema.children)[])
         var child = _import_child(child_array[], child_schema[], owner)
+        if owner:
+            return Series(
+                name,
+                ListColumn._from_buffers(
+                    _foreign_offsets(array, large, owner.value()),
+                    child^,
+                    _foreign_validity(array, owner.value()),
+                    offset % 8,
+                    length,
+                ),
+            )
         var first = list_offset(offset)
         var last = list_offset(offset + length)
         var offsets = List[Int64](capacity=length + 1)
@@ -1081,7 +1157,15 @@ def _import_storage(
                 _at[Int](schema.children + 8 * k)[]
             )
             var child = _import_child(child_array[], child_schema[], owner)
-            fields.append(child.slice(offset, length))
+            var prefix = offset % 8 if owner else 0
+            fields.append(child.slice(offset - prefix, length + prefix))
+        if owner:
+            var prefix = offset % 8
+            var column = StructColumn(fields^, length=length + prefix)
+            column._bits = _foreign_validity(array, owner.value())
+            column._offset = prefix
+            column._length = length
+            return Series(name, column^)
         return Series(name, StructColumn(fields^, bits^, length=length))
     raise Error("Unsupported Arrow format '" + format + "' for column " + name)
 
@@ -1155,6 +1239,200 @@ def _retain_array(mut array: ArrowArray) -> ArcPointer[_ForeignOwner]:
     )
 
 
+def _foreign_values[
+    T: TrivialRegisterPassable
+](
+    base: Int, offset: Int, length: Int, owner: ArcPointer[_ForeignOwner]
+) raises -> _Buffer[T]:
+    if offset < 0 or length < 0:
+        raise Error("Arrow buffer range must be nonnegative")
+    if length == 0:
+        return _Buffer(List[T]())
+    if base == 0:
+        raise Error("Arrow array has no values buffer")
+    var stride = Int(_at[T](base).unsafe_offset(1)) - base
+    if offset > Int.MAX // stride - length:
+        raise Error("Arrow buffer range overflows")
+    var address = base + offset * stride
+    if address % stride == 0:
+        return _Buffer[T].borrowed(address, length, owner)
+    # Aligned typed storage is necessary for kernels. Copy raw bytes when
+    # the foreign producer does not meet that alignment contract.
+    var values = List[T](unsafe_uninit_length=length)
+    unsafe_memcpy(
+        dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
+        src=_at[UInt8](address),
+        count=length * stride,
+    )
+    return _Buffer(values^)
+
+
+def _import_views(
+    array: ArrowArray,
+    name: String,
+    binary: Bool,
+    owner: Optional[ArcPointer[_ForeignOwner]],
+) raises -> Series:
+    if array.n_buffers < 3:
+        raise Error("Arrow view array must have at least three buffers")
+    var length = Int(array.length)
+    var offset = Int(array.offset)
+    var prefix = offset % 8
+    var count = prefix + length
+    var address = _buffer(array, 1)
+    var descriptors: _Buffer[StringView]
+    if count == 0:
+        descriptors = _Buffer(List[StringView]())
+    else:
+        if address == 0:
+            raise Error("Arrow view array has no descriptors")
+        if offset > Int.MAX // 16 - length:
+            raise Error("Arrow view descriptor range overflows")
+        address += (offset - prefix) * 16
+        if owner and address % 4 == 0:
+            descriptors = _Buffer[StringView].borrowed(
+                address, count, owner.value()
+            )
+        else:
+            var views = List[StringView](unsafe_uninit_length=count)
+            unsafe_memcpy(
+                dest=views.unsafe_ptr().unsafe_bitcast[UInt8](),
+                src=_at[UInt8](address),
+                count=count * 16,
+            )
+            descriptors = _Buffer(views^)
+    var buffers = List[_Buffer[UInt8]]()
+    var total = 0
+    var sizes = _buffer(array, Int(array.n_buffers) - 1)
+    if array.n_buffers > 3 and sizes == 0:
+        raise Error("Arrow view array has no variadic buffer sizes")
+    for k in range(Int(array.n_buffers) - 3):
+        var size = Int(_read[Int64](sizes, k))
+        if size < 0 or size > Int.MAX - total:
+            raise Error("Arrow view buffer sizes are invalid")
+        var buffer_address = _buffer(array, k + 2)
+        if owner:
+            buffers.append(
+                _foreign_values[UInt8](buffer_address, 0, size, owner.value())
+            )
+        else:
+            if size > 0 and buffer_address == 0:
+                raise Error("Arrow view array has no variadic buffer")
+            var bytes = List[UInt8](capacity=size)
+            if size > 0:
+                bytes.extend(_span[UInt8](buffer_address, 0, size))
+            buffers.append(_Buffer(bytes^))
+        total += size
+    var bits = _foreign_validity(array, owner.value()) if owner else _Buffer(
+        _import_bits(_buffer(array, 0), offset - prefix, count)
+    )
+    for i in range(prefix, count):
+        var view = descriptors[][i].copy()
+        if len(bits[]) > 0 and not _validity_bit(bits[], i):
+            # Arrow leaves null descriptors unspecified. Internal string
+            # kernels may inspect their lengths, so sanitize unsafe null
+            # descriptors while retaining all compatible byte blocks.
+            if not view.is_inline():
+                var index = Int(view.buffer_index)
+                var invalid = view.length > UInt32(Int32.MAX) or index >= len(
+                    buffers
+                )
+                if not invalid:
+                    invalid = Int(view.offset) > len(buffers[index][]) - Int(
+                        view.length
+                    )
+                if invalid:
+                    descriptors.writable()[i] = StringView(0, 0, 0, 0)
+            continue
+        if view.length > UInt32(Int32.MAX):
+            raise Error("Arrow view length exceeds Int32")
+        if view.is_inline():
+            continue
+        var index = Int(view.buffer_index)
+        if index >= len(buffers):
+            raise Error("Arrow view buffer index out of range")
+        var first = Int(view.offset)
+        var size = Int(view.length)
+        if first > len(buffers[index][]) - size:
+            raise Error("Arrow view byte range is out of bounds")
+        var bytes = buffers[index][].unsafe_ptr().unsafe_offset(first)
+        var expected = UInt32(0)
+        for k in range(4):
+            expected |= UInt32(bytes[unsafe_offset=k]) << UInt32(8 * k)
+        if view.prefix != expected:
+            raise Error("Arrow view prefix does not match its bytes")
+    var storage = StringViewStorage(
+        views=descriptors,
+        buffers=buffers^,
+        bits=bits,
+        length=count,
+        total_buffer_bytes=total,
+    )
+    var strings = StringColumn(storage^).slice(prefix, length)
+    return Series(name, strings^).with_dtype(
+        DataType.BINARY
+    ) if binary else Series(name, strings^)
+
+
+def _foreign_offsets(
+    array: ArrowArray, large: Bool, owner: ArcPointer[_ForeignOwner]
+) raises -> _Buffer[Int64]:
+    var prefix = Int(array.offset) % 8
+    var start = Int(array.offset) - prefix
+    var count = prefix + Int(array.length) + 1
+    var address = _buffer(array, 1)
+    if address == 0 and array.length == 0:
+        return _Buffer(List[Int64](length=count, fill=0))
+    if large:
+        return _foreign_values[Int64](address, start, count, owner)
+    var input = _foreign_values[Int32](address, start, count, owner)
+    var offsets = List[Int64](unsafe_uninit_length=count)
+    for i in range(count):
+        offsets[i] = Int64(input[][i])
+    return _Buffer(offsets^)
+
+
+def _foreign_validity(
+    array: ArrowArray, owner: ArcPointer[_ForeignOwner]
+) raises -> _Buffer[UInt8]:
+    var address = _buffer(array, 0)
+    if address == 0 or (array.null_count == 0 and array.offset % 8 == 0):
+        return _Buffer(List[UInt8]())
+    return _foreign_values[UInt8](
+        address,
+        Int(array.offset) // 8,
+        (Int(array.offset) % 8 + Int(array.length) + 7) // 8,
+        owner,
+    )
+
+
+def _borrow_buffer_format(format: String) -> Bool:
+    if (
+        format == "b"
+        or format == "ttn"
+        or format.startswith("d:")
+        or format == "U"
+        or format == "u"
+        or format == "Z"
+        or format == "z"
+        or format == "+L"
+        or format == "+l"
+        or format == "+s"
+        or format == "vu"
+        or format == "vz"
+    ):
+        return True
+    if (
+        format.startswith("ts") or format.startswith("tD")
+    ) and format.byte_length() >= 3:
+        return format[byte=2] != "s"
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if format == _numeric_format(D):
+            return True
+    return False
+
+
 def _fixed_column[
     T: TrivialRegisterPassable
 ](
@@ -1166,26 +1444,15 @@ def _fixed_column[
 ) raises -> Column[T]:
     if length < 0 or offset < 0:
         raise Error("Arrow array length and offset must be nonnegative")
-    if owner and length > 0:
+    if owner:
+        var prefix = offset % 8
+        var start = offset - prefix
+        var count = prefix + length
         var base = _buffer(array, 1)
-        if base == 0:
-            raise Error("Arrow fixed-width array has no values buffer")
-        var stride = Int(_at[T](base).unsafe_offset(1)) - base
-        if offset > Int.MAX // stride - length:
-            raise Error("Arrow fixed-width array range overflows")
-        var address = base + offset * stride
-        if address % stride == 0:
-            return Column[T]._borrowed(address, length, bits^, owner.value())
-        # Foreign producers can provide unaligned storage. Copy bytes rather
-        # than issuing typed loads whose alignment contract would be false.
-        var values = List[T](unsafe_uninit_length=length)
-
-        unsafe_memcpy(
-            dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
-            src=_at[UInt8](address),
-            count=length * stride,
+        var values = _foreign_values[T](base, start, count, owner.value())
+        return Column[T]._from_buffers(
+            values, _foreign_validity(array, owner.value()), prefix, length
         )
-        return Column[T](values=values^, bits=bits^)
     return Column[T](values=_import_fixed[T](array, length, offset), bits=bits^)
 
 
@@ -1197,7 +1464,7 @@ def import_arrow_series(
 ) raises -> Series:
     """Import an exported Arrow array, copying payloads by default.
 
-    copy=False retains compatible fixed-width payloads without copying.
+    copy=False retains compatible value, offset and validity buffers.
     Layout conversions still allocate. The input structs are consumed even
     on errors; borrowed buffers release the producer after their last view.
     """
@@ -1282,7 +1549,7 @@ def import_arrow(
 ) raises -> DataFrame:
     """Import an exported Arrow record batch, copying by default.
 
-    copy=False shares compatible fixed-width payloads and retains their
+    copy=False shares compatible buffers and retains their
     producer until the last view is destroyed. Layout conversions allocate.
     Workers share the root owner; input structs are consumed even on errors.
     """

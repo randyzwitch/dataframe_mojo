@@ -14,6 +14,7 @@ live on the heap behind `_Held`: a shared cell holding only an address and
 which kind of value to free. Method signatures may still name `Series`;
 fields may not. `_Box` is the typed form for holders outside the cycle.
 """
+from ._buffer import _Buffer, _BufferData
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
 
 from .column import _bit, _count_valid, _pack_bits
@@ -93,8 +94,8 @@ def _check_bits(bits: List[UInt8], length: Int) raises:
 struct ListColumn(Copyable, Deinitable, Movable, Sized):
     """A window onto shared list offsets, validity, and one child series."""
 
-    var _offsets: ArcPointer[List[Int64]]
-    var _bits: ArcPointer[List[UInt8]]
+    var _offsets: _Buffer[Int64]
+    var _bits: _Buffer[UInt8]
     var _offset: Int
     var _length: Int
     var _child: ArcPointer[_Held]
@@ -121,11 +122,39 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
             raise Error("List offsets run past the child series")
         var length = len(offsets) - 1
         _check_bits(bits, length)
-        self._offsets = ArcPointer(offsets^)
-        self._bits = ArcPointer(bits^)
+        self._offsets = _Buffer(offsets^)
+        self._bits = _Buffer(bits^)
         self._offset = 0
         self._length = length
         self._child = _hold(child^)
+
+    @staticmethod
+    def _from_buffers(
+        offsets: _Buffer[Int64],
+        var child: Series,
+        bits: _Buffer[UInt8],
+        offset: Int,
+        length: Int,
+    ) raises -> Self:
+        if offset < 0 or length < 0 or offset > len(offsets[]) - 1 - length:
+            raise Error("Invalid Arrow list offset range")
+        var previous = offsets[][offset]
+        if previous < 0:
+            raise Error("List offsets must not be negative")
+        for i in range(offset + 1, offset + length + 1):
+            if offsets[][i] < previous:
+                raise Error("List offsets must not decrease")
+            previous = offsets[][i]
+        if Int(previous) > len(child):
+            raise Error("List offsets run past the child series")
+        if len(bits[]) != 0 and len(bits[]) < (offset + length + 7) // 8:
+            raise Error("Validity bitmap is shorter than the column")
+        var result = Self(List[Int64]([Int64(0)]), child^)
+        result._offsets = offsets.copy()
+        result._bits = bits.copy()
+        result._offset = offset
+        result._length = length
+        return result^
 
     @staticmethod
     def from_lists(
@@ -338,7 +367,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
     """A window onto named child series of equal length and a validity."""
 
     var _fields: ArcPointer[_Held]
-    var _bits: ArcPointer[List[UInt8]]
+    var _bits: _Buffer[UInt8]
     var _offset: Int
     var _length: Int
 
@@ -364,7 +393,7 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
                     )
         _check_bits(bits, rows)
         self._fields = _hold_many(fields^)
-        self._bits = ArcPointer(bits^)
+        self._bits = _Buffer(bits^)
         self._offset = 0
         self._length = rows
 

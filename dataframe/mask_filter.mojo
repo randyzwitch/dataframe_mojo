@@ -18,6 +18,7 @@ set bits of the rest:
 String and nested columns still go through a row list (`take`); #375 makes
 string gathers produce views.
 """
+from ._buffer import _Buffer, _BufferData
 from std.bit import count_leading_zeros, count_trailing_zeros, pop_count
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 
@@ -434,7 +435,11 @@ def filter_columns(
                 comptime D = GATHER_DTYPES[d]
                 if typed[j]._data.isa[Column[Scalar[D]]]():
                     address = Int(
-                        Pointer(to=typed[j]._data[Column[Scalar[D]]]._data.writable())
+                        Pointer(
+                            to=typed[j]
+                            ._data[Column[Scalar[D]]]
+                            ._data.writable()
+                        )
                     )
             value_lists_fixed.append(address)
         valid_lists.append(
@@ -489,7 +494,7 @@ def filter_columns(
         comptime for d in range(len(GATHER_DTYPES)):
             comptime D = GATHER_DTYPES[d]
             if result._data.isa[Column[Scalar[D]]]():
-                result._data[Column[Scalar[D]]]._bits = ArcPointer(
+                result._data[Column[Scalar[D]]]._bits = _Buffer(
                     bitmaps[j].copy()
                 )
         outputs.append(result^)

@@ -9,6 +9,7 @@ A morsel is a frame and a selection. A filter narrows the selection
 without copying data. When a step reads a column, that column is gathered
 through the selection once and replaces its shared version.
 """
+from ._buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
@@ -1063,8 +1064,8 @@ struct Morsel(Movable):
             bytes.unsafe_ptr()[unsafe_offset=k] = source[unsafe_offset=k]
         _ = out^
         var mask = BoolColumn(List[Bool]())
-        mask._data = ArcPointer(bytes^)
-        mask._bits = ArcPointer(List[UInt8](length=(height + 7) // 8, fill=255))
+        mask._data = _Buffer(bytes^)
+        mask._bits = _Buffer(List[UInt8](length=(height + 7) // 8, fill=255))
         mask._length = height
         mask._offset = 0
         if not self.selected:

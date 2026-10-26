@@ -247,21 +247,19 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if not strings._codes:
             return None
         ref codes = strings._codes.value()[]
-        var column = Column[UInt32](List[UInt32]())
         if codes.rows:
             # A gathered column gathers its codes here, on first use.
             var own = List[UInt32](unsafe_uninit_length=len(strings))
             strings._write_codes(Int(own.unsafe_ptr()))
-            column._data = _Buffer(own^)
-            column._bits = ArcPointer(
-                _copy_validity(strings._bits[], strings._offset, len(strings))
+            var bits = _copy_validity(
+                strings._bits[], strings._offset, len(strings)
             )
-            column._offset = 0
-        else:
-            column._data = codes.codes.copy()
-            column._bits = strings._bits
-            column._offset = strings._offset
-        column._length = strings._length
+            return Series(
+                self.name(), Column[UInt32](values=own^, bits=bits^)
+            ).with_dtype(codes.dtype)
+        var column = Column[UInt32]._from_buffers(
+            codes.codes, strings._bits, strings._offset, strings._length
+        )
         return Series(self.name(), column^).with_dtype(codes.dtype)
 
     def is_chunked(self) -> Bool:

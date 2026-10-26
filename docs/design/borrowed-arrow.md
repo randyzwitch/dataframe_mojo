@@ -22,11 +22,27 @@ the final dependent buffer dies, including when only a slice or another
 Arrow export remains. Import errors join all jobs before dropping their
 partial columns and the parent owner.
 
-Compatible fixed-width values can retain their original address. Alignment
-and conversion requirements still apply: unaligned payloads are byte-copied
-to aligned owned storage; date/time scaling or storage-width changes retain
-the existing conversion path. This foundation leaves other buffer layouts on
-the copy path until their borrowing support is integrated.
+The buffer abstraction covers fixed-width values, validity and Boolean
+bitmaps, string/binary bytes and Int64 offsets, native view descriptors and
+blocks, list offsets and recursively imported children, and compatible
+categorical codes and labels. Foreign windows align buffer bases to a bitmap
+byte and keep at most seven prefix rows. This preserves the same row offset
+for payload and validity without copying or rotating a bitmap. A dictionary
+label window can retain a buffer state through another opaque owner.
+
+Unaligned typed data is byte-copied to aligned storage. Int32 offsets widen
+without copying byte payloads or children. Non-UInt32 categorical indices and
+unsupported temporal storage units convert as before. Null Arrow view slots
+may contain undefined descriptors; unsafe null descriptors are replaced in
+owned descriptor storage, while byte blocks remain shared. Canonical Arrow
+`U`/`Z` exports of view storage materialize a contiguous adapter and retain it
+until export release. Numeric rechunking and other operations that explicitly
+require contiguous output also allocate.
+
+The IPC bridge preserves `vu`/`vz` buffers rather than casting them to large
+strings/binary. Enabling borrowing in eager and lazy IPC readers remains a
+separate integration stage. Decompression necessarily creates decoded Arrow
+buffers; those buffers can then be retained without a second payload copy.
 
 The storage contracts exercise actual exporter callbacks, a native mapped
 IPC stream, retained views, mutation isolation, ordinary copy-by-default

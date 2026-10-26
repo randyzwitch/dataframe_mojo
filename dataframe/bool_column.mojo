@@ -8,6 +8,7 @@ buffers that are never mutated while shared.
 Both buffers use the bitmap helpers in `column.mojo`, so windows at any
 offset append, slice, and compact correctly.
 """
+from ._buffer import _Buffer, _BufferData
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, bitcast
 from .column import (
@@ -27,16 +28,16 @@ from .column import (
 struct BoolColumn(Copyable, Sized):
     """A window onto shared, bit-packed values and validity."""
 
-    var _data: ArcPointer[List[UInt8]]
-    var _bits: ArcPointer[List[UInt8]]
+    var _data: _Buffer[UInt8]
+    var _bits: _Buffer[UInt8]
     var _offset: Int
     var _length: Int
 
     def __init__(out self, values: List[Bool]):
         self._length = len(values)
         self._offset = 0
-        self._data = ArcPointer(_pack_bits(values))
-        self._bits = ArcPointer(
+        self._data = _Buffer(_pack_bits(values))
+        self._bits = _Buffer(
             List[UInt8](length=(len(values) + 7) // 8, fill=255)
         )
 
@@ -44,7 +45,7 @@ struct BoolColumn(Copyable, Sized):
         if len(values) != len(valid):
             raise Error("Column values and validity must have equal lengths")
         self = Self(values)
-        self._bits = ArcPointer(_pack_bits(valid))
+        self._bits = _Buffer(_pack_bits(valid))
 
     def __init__(out self, column: Column[Bool]) raises:
         """Pack a byte-per-value Boolean column."""
@@ -63,10 +64,21 @@ struct BoolColumn(Copyable, Sized):
         length: Int,
     ):
         """Adopt finished value and validity bitmaps."""
-        self._data = ArcPointer(values^)
-        self._bits = ArcPointer(bits^)
+        self._data = _Buffer(values^)
+        self._bits = _Buffer(bits^)
         self._offset = 0
         self._length = length
+
+    @staticmethod
+    def _from_buffers(
+        data: _Buffer[UInt8], bits: _Buffer[UInt8], offset: Int, length: Int
+    ) -> Self:
+        var result = Self(values=List[UInt8](), bits=List[UInt8](), length=0)
+        result._data = data.copy()
+        result._bits = bits.copy()
+        result._offset = offset
+        result._length = length
+        return result^
 
     def __len__(self) -> Int:
         return self._length
@@ -198,7 +210,9 @@ struct BoolColumn(Copyable, Sized):
     def _owned(self) -> Bool:
         return (
             self._data.count() == 1
+            and not self._data.is_borrowed()
             and self._bits.count() == 1
+            and not self._bits.is_borrowed()
             and self._offset == 0
             and len(self._data[]) == (self._length + 7) // 8
         )
@@ -214,9 +228,9 @@ struct BoolColumn(Copyable, Sized):
         """Size the bit-packed buffers for `rows` rows before appending."""
         if not self._owned():
             self = self._compact()
-        self._data[].reserve((rows + 7) // 8)
+        self._data.writable().reserve((rows + 7) // 8)
         if len(self._bits[]) != 0:
-            self._bits[].reserve((rows + 7) // 8)
+            self._bits.writable().reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
         """Append values and validity bitwise, copying first unless this
@@ -227,10 +241,18 @@ struct BoolColumn(Copyable, Sized):
         if count == 0:
             return
         _append_bits(
-            self._data[], self._length, other._data[], other._offset, count
+            self._data.writable(),
+            self._length,
+            other._data[],
+            other._offset,
+            count,
         )
         _append_validity(
-            self._bits[], self._length, other._bits[], other._offset, count
+            self._bits.writable(),
+            self._length,
+            other._bits[],
+            other._offset,
+            count,
         )
         self._length += count
 
@@ -263,7 +285,7 @@ comptime _FULL = UInt64(0xFFFFFFFFFFFFFFFF)
 
 
 @always_inline
-def _bits64(bits: List[UInt8], bit: Int, length: Int) -> UInt64:
+def _bits64(bits: Span[UInt8, _], bit: Int, length: Int) -> UInt64:
     """64 bits of an LSB-first bitmap starting at bit `bit`; bits past
     `length` (the bitmap's last valid bit, exclusive) read as 0. An empty
     bitmap is all ones (Arrow's absent validity)."""
@@ -378,3 +400,7 @@ def both_true(a: BoolColumn, b: BoolColumn) -> BoolColumn:
             values[byte + k] = UInt8((word >> UInt64(8 * k)) & 0xFF)
         row += 64
     return BoolColumn(values=values^, bits=List[UInt8](), length=n)
+
+
+def _bits64(bits: _BufferData[UInt8], bit: Int, length: Int) -> UInt64:
+    return _bits64(bits.span(), bit, length)

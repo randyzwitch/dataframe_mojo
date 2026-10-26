@@ -11,6 +11,7 @@ are copied, as `slice_strings` does; other string results are appended to one
 each code point past ASCII). `contains_any` and `replace_many` match every
 pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
+from ._buffer import _Buffer
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
 from .column import Column, _copy_validity
@@ -146,7 +147,7 @@ struct _ViewParts(_Parts):
     into the source buffer that holds its row (`buffer`, row start `base`)."""
 
     var views: List[StringView]
-    var buffers: List[ArcPointer[List[UInt8]]]
+    var buffers: List[_Buffer[UInt8]]
     var bits: List[UInt8]
     var n: Int
     var k: Int
@@ -155,7 +156,7 @@ struct _ViewParts(_Parts):
     def __init__(out self, column: StringColumn, var bits: List[UInt8]):
         self.n = len(column)
         self.views = List[StringView](unsafe_uninit_length=self.n)
-        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.buffers = List[_Buffer[UInt8]]()
         if column._is_view_storage():
             for buffer in column._view_storage_unchecked()._buffers[]:
                 self.buffers.append(buffer.copy())

@@ -19,19 +19,25 @@ var copy = import_arrow(array, schema)   # Arrow struct array -> frame
 ```
 
 `import_arrow(..., copy=False)` and `import_arrow_series(..., copy=False)`
-can retain compatible fixed-width value buffers instead of copying them.
+can retain compatible value, offset and validity buffers instead of copying them.
 The input structs are consumed, and their array release callback runs after
 the last borrowing column, slice, or exported view is destroyed. Schemas and
 field metadata are copied before their schema callbacks run. The producer
 must leave borrowed buffers unchanged until release; use the default
 `copy=True` for an independent snapshot.
 
-The buffer ownership foundation currently borrows matching numeric, decimal,
-nanosecond time, and supported timestamp/duration payloads. Unaligned values
-and layout conversions use owned copies. Validity, Boolean, string/binary,
-and nested offset buffers still use the existing copy paths while the
-remaining borrowing layouts are integrated. IPC readers retain their current
-copying policy until that integration is complete.
+Borrowing covers fixed-width numeric/decimal/temporal values, Boolean and
+validity bitmaps, string/binary bytes and large offsets, Arrow `vu`/`vz` view
+descriptors and byte blocks, list offsets/children, struct fields, and
+compatible UInt32 categorical codes and dictionary labels. Mutation first
+detaches borrowed or shared buffers into owned storage. Conversions still
+allocate: 32-bit offsets widen to Int64, other dictionary index widths become
+UInt32, unsupported temporal units scale, and unaligned typed values are
+byte-copied to aligned storage. Unsafe null view descriptors are sanitized
+into owned descriptors. These fallbacks retain other compatible buffers.
+
+IPC readers retain their current copying policy until the borrowing
+integration is enabled separately.
 
 `export_arrow_series` and `import_arrow_series` do the same for one column.
 Each function also has an overload taking the structs' raw addresses (`Int`),
@@ -49,18 +55,20 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 | Int8–Int64 | `c` `s` `i` `l` | zero-copy | |
 | UInt8–UInt64 | `C` `S` `I` `L` | zero-copy | |
 | Float32, Float64 | `f` `g` | zero-copy | |
-| String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
-| Binary | `Z` large_binary | zero-copy | `z` binary (offsets widened) |
-| Categorical | `I` indices, `U` dictionary | codes zero-copy, dictionary copied | any integer indices; `u` or `U` values |
+| String | `U` large_utf8 | shares conventional buffers; views materialize | `u` utf8 (offsets widened), `vu` utf8_view |
+| Binary | `Z` large_binary | shares conventional buffers; views materialize | `z` binary (offsets widened), `vz` binary_view |
+| Categorical | `I` indices, `U` dictionary | codes and dictionary share buffers | any integer indices; supported string values |
 | Bool | `b` bool | zero-copy | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
 | Datetime(unit, time_zone) | `ts{m,u,n}:<zone>` timestamp | zero-copy | `tss:<zone>` (as ms) |
 | Duration(unit) | `tD{m,u,n}` duration | zero-copy | `tDs` (as ms) |
 | Time | `ttn` time64[ns] | zero-copy | `ttu`, `ttm`, `tts` |
 
-Validity bitmaps are always shared. A sliced column exports its window offset
-as the ArrowArray `offset` instead of copying. Only Date builds a new value
-buffer (Int64 days narrowed to Arrow's Int32).
+List and struct children import recursively. Large-list offsets can be
+shared; ordinary list offsets widen to Int64. Struct validity remains
+independent from child validity. Export shares validity where the window
+layout agrees; struct exports rebase parent validity and export sliced
+fields. Date export narrows Int64 days to Int32.
 
 A zone-aware datetime exports its zone after the colon (`tsu:Europe/Paris`,
 `tsu:+05:30`) and holds UTC values, as Arrow requires; import reads the zone
@@ -73,8 +81,8 @@ non-null and every index is in range, so a dictionary array round-trips
 unchanged; otherwise the values are decoded and encoded again. A Parquet file
 written from a categorical reads back as String.
 
-Import rejects, with an error naming the format: nested types other than the
-top-level struct, and struct arrays with null rows.
+Unsupported formats raise an error naming the format. Lists and structs,
+including null parent rows and dictionaries in nested children, are supported.
 
 ## Lifetimes and ownership
 
@@ -102,7 +110,8 @@ At 1,000,000 rows (Threadripper 3970X):
 | Int64 / Float64 / String / Bool | 0.18 ms | 0.7 / 0.7 / 1.7 / 0.2 ms |
 
 Zero-copy export only fills the structs and counts nulls with a popcount.
-Import is a bulk memory copy.
+The historical import timings above use copying imports. They do not measure
+`copy=False` or mapped IPC borrowing.
 
 ## Testing
 

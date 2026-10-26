@@ -6,6 +6,7 @@ continue to the next slot. Exact column equality resolves hash collisions.
 Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
+from ._buffer import _Buffer
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
@@ -396,7 +397,7 @@ struct _StringBytes:
         var length = Int(view[].length)
         if length <= 12:
             return (Int(view) + 4, length)
-        var buffers = Pointer[ArcPointer[List[UInt8]], MutAnyOrigin](
+        var buffers = Pointer[_Buffer[UInt8], MutAnyOrigin](
             unsafe_from_address=self.buffers
         )
         return (

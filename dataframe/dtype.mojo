@@ -11,6 +11,7 @@ spec behind a shared pointer and decode them on demand. A DataType cannot
 hold a `List[DataType]`, even indirectly: Mojo rejects that cycle in an
 imported module.
 """
+from ._buffer import _Buffer
 from std.collections import Optional
 from std.memory import ArcPointer
 from std.sys import size_of
@@ -70,21 +71,26 @@ struct CategoricalDictionary(Movable, Sized):
     bytes and Int64 offsets (the large_utf8 layout). Kept to plain lists so
     a DataType can hold one without importing StringColumn."""
 
-    var bytes: List[UInt8]
-    var offsets: List[Int64]
+    var bytes: _Buffer[UInt8]
+    var offsets: _Buffer[Int64]
     # For each code, the first code holding the same label; empty when no
     # label repeats, which is every dictionary this library builds itself.
     # Set once by `DataType.categorical` (#943).
     var canonical: List[UInt32]
 
     def __init__(out self):
-        self.bytes = List[UInt8]()
-        self.offsets = [0]
+        self.bytes = _Buffer(List[UInt8]())
+        self.offsets = _Buffer(List[Int64]([Int64(0)]))
         self.canonical = List[UInt32]()
 
     def __init__(out self, var bytes: List[UInt8], var offsets: List[Int64]):
-        self.bytes = bytes^
-        self.offsets = offsets^
+        self.bytes = _Buffer(bytes^)
+        self.offsets = _Buffer(offsets^)
+        self.canonical = List[UInt32]()
+
+    def __init__(out self, bytes: _Buffer[UInt8], offsets: _Buffer[Int64]):
+        self.bytes = bytes.copy()
+        self.offsets = offsets.copy()
         self.canonical = List[UInt32]()
 
     def find_repeated_labels(mut self):
@@ -139,8 +145,8 @@ struct CategoricalDictionary(Movable, Sized):
         )
 
     def append(mut self, value: StringSlice):
-        self.bytes.extend(value.as_bytes())
-        self.offsets.append(Int64(len(self.bytes)))
+        self.bytes.writable().extend(value.as_bytes())
+        self.offsets.writable().append(Int64(len(self.bytes)))
 
     def copy_values(self) -> Self:
         return Self(self.bytes.copy(), self.offsets.copy())
@@ -148,11 +154,8 @@ struct CategoricalDictionary(Movable, Sized):
     def same_values(self, other: Self) -> Bool:
         if len(self) != len(other):
             return False
-        for i in range(len(self.offsets)):
-            if self.offsets[i] != other.offsets[i]:
-                return False
-        for i in range(len(self.bytes)):
-            if self.bytes[i] != other.bytes[i]:
+        for i in range(len(self)):
+            if self.get(i) != other.get(i):
                 return False
         return True
 

@@ -49,6 +49,7 @@ A string longer than twelve bytes is compared through the address of its
 bytes in the input, which outlives the aggregation; the input is never
 copied.
 """
+from ._buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.collections import Optional
@@ -449,7 +450,7 @@ def _words_at(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
 
 @always_inline
 def _batch_nulls(
-    bits: List[UInt8], offset: Int, start: Int, count: Int
+    bits: _BufferData[UInt8], offset: Int, start: Int, count: Int
 ) -> Bool:
     """Whether rows [start, start + count) contain a null, using the
     column's validity bits (`bits`, row 0 at bit `offset`)."""
@@ -3137,14 +3138,14 @@ struct _HeldBuffers(Movable):
     without copying key bytes. A group's long key words hold the address
     of its bytes, found here by binary search."""
 
-    var buffers: List[ArcPointer[List[UInt8]]]
+    var buffers: List[_Buffer[UInt8]]
     # Buffer ranges in address order: start, end and buffer.
     var starts: List[Int]
     var ends: List[Int]
     var index: List[Int]
 
     def __init__(out self, sinks: List[AggregateSink]):
-        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.buffers = List[_Buffer[UInt8]]()
         self.starts = List[Int]()
         self.ends = List[Int]()
         self.index = List[Int]()
@@ -3171,9 +3172,7 @@ struct _HeldBuffers(Movable):
             self.ends.append(start + len(self.buffers[b][]))
             self.index.append(b)
 
-    def _add(
-        mut self, buffer: ArcPointer[List[UInt8]], mut keyed: List[UInt128]
-    ):
+    def _add(mut self, buffer: _Buffer[UInt8], mut keyed: List[UInt128]):
         if len(buffer[]) == 0:
             return
         var start = UInt64(Int(buffer[].unsafe_ptr()))
@@ -3230,7 +3229,7 @@ struct _KeyColumn(Movable):
     var nulls: Bool
     var bools: List[Bool]
     var views: List[StringView]
-    var buffers: List[ArcPointer[List[UInt8]]]
+    var buffers: List[_Buffer[UInt8]]
     # Each held buffer's place among this column's, once it is used.
     var local: List[Int]
     var spill: List[UInt8]
@@ -3254,7 +3253,7 @@ struct _KeyColumn(Movable):
         self.nulls = False
         self.bools = List[Bool]()
         self.views = List[StringView]()
-        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.buffers = List[_Buffer[UInt8]]()
         self.local = List[Int]()
         self.spill = List[UInt8]()
         self.spill_at = -1
@@ -3381,11 +3380,11 @@ struct _KeyColumn(Movable):
                 ):
                     var full = List[UInt8]()
                     swap(full, self.spill)
-                    self.buffers[self.spill_at] = ArcPointer(full^)
+                    self.buffers[self.spill_at] = _Buffer(full^)
                     self.spill_at = -1
                 if self.spill_at < 0:
                     self.spill_at = len(self.buffers)
-                    self.buffers.append(ArcPointer(List[UInt8]()))
+                    self.buffers.append(_Buffer(List[UInt8]()))
                 b = self.spill_at
                 offset = len(self.spill)
                 self.spill.extend(
@@ -3408,7 +3407,7 @@ struct _KeyColumn(Movable):
         var bits = _pack_bits(self.valid) if self.nulls else List[UInt8]()
         if self.kind == _KEY_STRING:
             if self.spill_at >= 0:
-                self.buffers[self.spill_at] = ArcPointer(self.spill^)
+                self.buffers[self.spill_at] = _Buffer(self.spill^)
             return Series(
                 self.name,
                 StringColumn(
@@ -3425,9 +3424,9 @@ struct _KeyColumn(Movable):
             return Series(self.name, BoolColumn(self.bools, self.valid))
         var series = self.series^
         if self.nulls:
-            var shared = ArcPointer(bits^)
+            var shared = _Buffer(bits^)
             if self.kind == _KEY_WIDE:
-                series._data[Column[Int128]]._bits = shared
+                series._data[Column[Int128]]._bits = shared.copy()
             else:
                 comptime for d in range(len(NUMERIC_DTYPES)):
                     comptime D = NUMERIC_DTYPES[d]

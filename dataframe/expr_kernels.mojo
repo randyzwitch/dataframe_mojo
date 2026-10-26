@@ -1,4 +1,5 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
+from ._buffer import _Buffer, _BufferData
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.ffi import external_call
 from std.sys import size_of
@@ -1661,7 +1662,7 @@ def _arctan2[
 # offset, so no per-row validity branch runs and nothing is packed twice.
 
 
-def _window_byte(bits: List[UInt8], bit: Int, empty: UInt8) -> UInt8:
+def _window_byte(bits: Span[UInt8, _], bit: Int, empty: UInt8) -> UInt8:
     """Eight bits of a bitmap starting at bit `bit`, LSB first; `empty`
     when the bitmap is empty (no nulls). Bits past the end read as zero."""
     if len(bits) == 0:
@@ -1676,7 +1677,7 @@ def _window_byte(bits: List[UInt8], bit: Int, empty: UInt8) -> UInt8:
 
 
 def _window_bytes(
-    bits: List[UInt8], offset: Int, length: Int, n: Int, empty: UInt8
+    bits: Span[UInt8, _], offset: Int, length: Int, n: Int, empty: UInt8
 ) -> List[UInt8]:
     """The bitmap of an n-row result aligned to row 0: a window of `length`
     rows starting at bit `offset`, or one row broadcast when length is 1."""
@@ -2318,3 +2319,13 @@ def integer_is_in(input: Series, text: String) raises -> Series:
                     BoolColumn(values=packed^, bits=bits^, length=n),
                 )
     raise Error("is_in over integers requires an integer column")
+
+
+def _window_byte(bits: _BufferData[UInt8], bit: Int, empty: UInt8) -> UInt8:
+    return _window_byte(bits.span(), bit, empty)
+
+
+def _window_bytes(
+    bits: _BufferData[UInt8], offset: Int, length: Int, n: Int, empty: UInt8
+) -> List[UInt8]:
+    return _window_bytes(bits.span(), offset, length, n, empty)

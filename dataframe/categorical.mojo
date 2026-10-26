@@ -15,6 +15,7 @@ Joining or concatenating columns with different dictionaries first moves
 them onto the union of both (`unify`), in which the first dictionary's codes
 are unchanged.
 """
+from ._buffer import _Buffer
 from std.collections import Dict
 from std.memory import ArcPointer
 
@@ -75,7 +76,7 @@ def decode(values: Series) raises -> Series:
     var dictionary = values.dtype().dictionary()
     if len(dictionary[].bytes) >= Int(UInt32.MAX):
         return _decode_copying(values.name(), column, dictionary)
-    var buffer = ArcPointer(dictionary[].bytes.copy())
+    var buffer = dictionary[].bytes.copy()
     var entries = len(dictionary[])
     var table = List[StringView](capacity=entries)
     for code in range(entries):

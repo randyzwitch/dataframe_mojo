@@ -8,7 +8,7 @@ values. Buffers are never mutated while shared: the only mutating operation,
 batch reassembly in `_append_column`, first takes a private copy unless the
 column already owns its buffers outright.
 """
-from ._buffer import _Buffer, _ForeignOwner
+from ._buffer import _Buffer, _BufferData, _ForeignOwner
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, pack_bits, unsafe_memcpy
 from std.sys import Endian
@@ -47,7 +47,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     """
 
     var _data: _Buffer[Self.T]
-    var _bits: ArcPointer[List[UInt8]]
+    var _bits: _Buffer[UInt8]
     var _offset: Int
     var _length: Int
     # Facts about the whole value buffer, found once and shared by every
@@ -63,7 +63,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         ), "dataframe requires little-endian"
         self._length = len(values)
         self._offset = 0
-        self._bits = ArcPointer(List[UInt8]())
+        self._bits = _Buffer(List[UInt8]())
         self._data = _Buffer(values^)
         self._facts = ArcPointer(_BufferFacts())
 
@@ -73,7 +73,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         var bits = _pack_bits(valid)
         self._length = len(values)
         self._offset = 0
-        self._bits = ArcPointer(bits^)
+        self._bits = _Buffer(bits^)
         self._data = _Buffer(values^)
         self._facts = ArcPointer(_BufferFacts())
 
@@ -82,7 +82,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._length = len(values)
         self._offset = 0
         self._data = _Buffer(values^)
-        self._bits = ArcPointer(bits^)
+        self._bits = _Buffer(bits^)
         self._facts = ArcPointer(_BufferFacts())
 
     @staticmethod
@@ -94,6 +94,17 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     ) -> Self:
         var result = Self(values=List[Self.T](), bits=bits^)
         result._data = _Buffer[Self.T].borrowed(address, length, owner)
+        result._length = length
+        return result^
+
+    @staticmethod
+    def _from_buffers(
+        data: _Buffer[Self.T], bits: _Buffer[UInt8], offset: Int, length: Int
+    ) -> Self:
+        var result = Self(List[Self.T]())
+        result._data = data.copy()
+        result._bits = bits.copy()
+        result._offset = offset
         result._length = length
         return result^
 
@@ -230,7 +241,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             if _validity_bit(bits, row):
                 out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
         var result = Self(values^)
-        result._bits = ArcPointer(out_bits^)
+        result._bits = _Buffer(out_bits^)
         return result^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
@@ -253,6 +264,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             self._data.count() == 1
             and not self._data.is_borrowed()
             and self._bits.count() == 1
+            and not self._bits.is_borrowed()
             and self._offset == 0
             and len(self._data[]) == self._length
         )
@@ -276,7 +288,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._facts = ArcPointer(_BufferFacts())
         self._data.writable().reserve(rows)
         if len(self._bits[]) != 0:
-            self._bits[].reserve((rows + 7) // 8)
+            self._bits.writable().reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
         """Append payloads and validity bytewise, shifting when unaligned.
@@ -289,7 +301,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         var start = self._length
         var count = other._length
         _append_validity(
-            self._bits[], start, other._bits[], other._offset, count
+            self._bits.writable(), start, other._bits[], other._offset, count
         )
         ref values = self._data.writable()
         # Grow geometrically: batch reassembly appends many small chunks, and
@@ -309,7 +321,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     @staticmethod
     def _nulls(length: Int, fill: Self.T) -> Self:
         var result = Self(List[Self.T](length=length, fill=fill.copy()))
-        result._bits = ArcPointer(List[UInt8](length=(length + 7) // 8, fill=0))
+        result._bits = _Buffer(List[UInt8](length=(length + 7) // 8, fill=0))
         return result^
 
     def _broadcast(self, length: Int) raises -> Self:
@@ -324,11 +336,11 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 # column's length are unspecified; readers never look at them.
 
 
-def _bit(bits: List[UInt8], i: Int) -> Bool:
+def _bit(bits: Span[UInt8, _], i: Int) -> Bool:
     return (bits[i // 8] >> UInt8(i % 8)) & 1 == 1
 
 
-def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
+def _count_set(bits: Span[UInt8, _], offset: Int, length: Int) -> Int:
     """Set bits in [offset, offset + length): popcount over whole bytes."""
     var count = 0
     var i = 0
@@ -385,7 +397,7 @@ def _pack_bits(valid: List[Bool]) -> List[UInt8]:
     return bits^
 
 
-def _copy_bits(bits: List[UInt8], offset: Int, length: Int) -> List[UInt8]:
+def _copy_bits(bits: Span[UInt8, _], offset: Int, length: Int) -> List[UInt8]:
     """Bits [offset, offset + length) rebased to bit 0."""
     var out = List[UInt8](capacity=(length + 7) // 8)
     _append_bits(out, 0, bits, offset, length)
@@ -395,7 +407,7 @@ def _copy_bits(bits: List[UInt8], offset: Int, length: Int) -> List[UInt8]:
 def _append_bits(
     mut bits: List[UInt8],
     length: Int,
-    incoming: List[UInt8],
+    incoming: Span[UInt8, _],
     offset: Int,
     count: Int,
 ):
@@ -424,7 +436,7 @@ def _append_bits(
     var tail_bits = count % 8
     if shift == 0:
         if full_bytes > 0:
-            bits.extend(Span(incoming)[first_byte : first_byte + full_bytes])
+            bits.extend(incoming[first_byte : first_byte + full_bytes])
         if tail_bits > 0:
             var mask = (UInt8(1) << UInt8(tail_bits)) - 1
             bits.append(incoming[first_byte + full_bytes] & mask)
@@ -480,15 +492,17 @@ def _validity_at(bits: Pointer[UInt8, _], index: Int) -> Bool:
 
 # Arrow/Polars validity is absent until the first null. An empty validity
 # list represents that absence; payload bitmaps always use the raw helpers.
-def _validity_bit(bits: List[UInt8], index: Int) -> Bool:
+def _validity_bit(bits: Span[UInt8, _], index: Int) -> Bool:
     return len(bits) == 0 or _bit(bits, index)
 
 
-def _count_valid(bits: List[UInt8], offset: Int, length: Int) -> Int:
+def _count_valid(bits: Span[UInt8, _], offset: Int, length: Int) -> Int:
     return length if len(bits) == 0 else _count_set(bits, offset, length)
 
 
-def _copy_validity(bits: List[UInt8], offset: Int, length: Int) -> List[UInt8]:
+def _copy_validity(
+    bits: Span[UInt8, _], offset: Int, length: Int
+) -> List[UInt8]:
     if len(bits) == 0:
         return List[UInt8]()
     return _copy_bits(bits, offset, length)
@@ -517,7 +531,7 @@ def _append_validity_bit(
 def _append_validity(
     mut bits: List[UInt8],
     length: Int,
-    incoming: List[UInt8],
+    incoming: Span[UInt8, _],
     offset: Int,
     count: Int,
 ):
@@ -614,3 +628,52 @@ def gather_scalars[
             if _validity_bit(source_bits, column._offset + row):
                 bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
     return Column[Scalar[D]](values=values^, bits=bits^)
+
+
+# Borrowed and owned bitmap buffers share the same span-based kernels.
+def _bit(bits: _BufferData[UInt8], i: Int) -> Bool:
+    return _bit(bits.span(), i)
+
+
+def _count_set(bits: _BufferData[UInt8], offset: Int, length: Int) -> Int:
+    return _count_set(bits.span(), offset, length)
+
+
+def _copy_bits(
+    bits: _BufferData[UInt8], offset: Int, length: Int
+) -> List[UInt8]:
+    return _copy_bits(bits.span(), offset, length)
+
+
+def _validity_bit(bits: _BufferData[UInt8], index: Int) -> Bool:
+    return _validity_bit(bits.span(), index)
+
+
+def _count_valid(bits: _BufferData[UInt8], offset: Int, length: Int) -> Int:
+    return _count_valid(bits.span(), offset, length)
+
+
+def _copy_validity(
+    bits: _BufferData[UInt8], offset: Int, length: Int
+) -> List[UInt8]:
+    return _copy_validity(bits.span(), offset, length)
+
+
+def _append_bits(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: _BufferData[UInt8],
+    offset: Int,
+    count: Int,
+):
+    _append_bits(bits, length, incoming.span(), offset, count)
+
+
+def _append_validity(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: _BufferData[UInt8],
+    offset: Int,
+    count: Int,
+):
+    _append_validity(bits, length, incoming.span(), offset, count)
