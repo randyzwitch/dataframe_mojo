@@ -30,7 +30,6 @@ Filters never move past a slice, unique, right/full join, a group_by
 whose aggregates they read, or a group_by_dynamic or rolling, because
 that would change which rows those operators see.
 """
-from ._buffer import _Buffer
 from std.os import getenv
 from std.time import perf_counter_ns
 from std.io import RawFileDescriptor
@@ -58,12 +57,17 @@ from .pipeline import (
 from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .execution_backend import _select_backend, _BackendDecision
 from ._accel_provider import (
+    installed as _accel_installed,
     execute as _execute_accel,
     execute_profiled as _profile_accel,
     describe as _describe_accel,
     select_auto as _select_auto_accel,
     execute_auto as _execute_auto_accel,
+    handoff_supports as _handoff_supports,
+    handoff_execute as _handoff_execute,
+    handoff_estimate as _handoff_estimate,
 )
+from .placement import LinearCost, calibration_path, crossover_rows, load_costs
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     HORIZONTAL_ARGS,
@@ -97,7 +101,6 @@ from .frame import concat
 from .distinct_statistics import distinct_estimate
 from .frame import _describe_percentiles
 from .expr import null, is_grouping, has_grouping, grouping_value
-from .canonical_labels import label_map, remap_codes
 from .sorted_range import sorted_window
 from .time_windows import negate_period
 from .value import AnyValue
@@ -160,12 +163,9 @@ from .frame import _pivot_aggregate
 from .trace import trace_path
 from .execution import direct_reductions, evaluate
 from .binding import AGGREGATE, ROWS, bind
-from .plan_types import PlanEstimate, WindowKey, TextField
-from .key_query import KeyQuery
-from .byte_domain import ByteDomain
+from .plan_types import PlanEstimate
 from .execution_report import ExecutionReport
 from .execution_settings import ExecutionSettings
-from .producer_origin import ProducerOrigin, RegionProof
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -249,6 +249,11 @@ comptime GATHER = 41
 # into a table per set, as DuckDB's one sink feeds every set's table.
 comptime GROUPING_SETS = 43
 
+# How the executor offers nodes to an accelerator provider (`_handoff`).
+comptime HANDOFF_OFF = 0
+comptime HANDOFF_FORCED = 1
+comptime HANDOFF_AUTO = 2
+
 
 @fieldwise_init
 struct PlanNode(Copyable, Deinitable, Movable):
@@ -274,29 +279,7 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # No counter storage is allocated unless profiling/tests attach one.
     var _executions: Optional[ArcPointer[Int]]
     var asof_tolerance: Optional[AnyValue]
-    var window_keys: List[WindowKey]
     var source_failure: String
-    # Private text-code provenance; never inferred from UInt32 storage.
-    var code_domain: Optional[DataType]
-    var text_fields: List[TextField]
-    # Typed proof of an original row expression and its exact input prefix.
-    # Synthetic plans begin without either token; verified copies share it.
-    var producer_origin: Optional[ArcPointer[ProducerOrigin]]
-    var lineage_anchor: Optional[ArcPointer[Int]]
-    var producer_region: Optional[ArcPointer[RegionProof]]
-    # Original grouped key domains survive whole-query code normalization.
-    var grouped_keys: Optional[ArcPointer[KeyQuery]]
-    var grouped_byte_domain: Optional[ArcPointer[ByteDomain]]
-    # Original partition state/operand proof is outside rewritten row ASTs.
-    # Columns contain schema-only Series; no source values are retained here.
-    var partition_exprs: List[Expr]
-    var partition_columns: List[Series]
-
-    def __deinit__(deinit self):
-        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
-        # documentation trait inference cycles. Owned fields clean up
-        # automatically after this body; no owner is released manually.
-        pass
 
     def _record_execution(self):
         if self._executions:
@@ -319,12 +302,7 @@ def _plan_node(
     how: Int = -1,
     right_keys: List[String] = List[String](),
     coalesce: Bool = True,
-    window_keys: List[WindowKey] = List[WindowKey](),
     source_failure: String = "",
-    code_domain: Optional[DataType] = None,
-    text_fields: List[TextField] = List[TextField](),
-    partition_exprs: List[Expr] = List[Expr](),
-    partition_columns: List[Series] = List[Series](),
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -343,17 +321,7 @@ def _plan_node(
         coalesce,
         Optional[ArcPointer[Int]](),
         Optional[AnyValue](),
-        window_keys.copy(),
         source_failure,
-        code_domain,
-        text_fields.copy(),
-        Optional[ArcPointer[ProducerOrigin]](),
-        Optional[ArcPointer[Int]](),
-        Optional[ArcPointer[RegionProof]](),
-        None,
-        None,
-        partition_exprs.copy(),
-        partition_columns.copy(),
     )
 
 
@@ -1748,6 +1716,35 @@ def _apply_operation(
         )
 
 
+def _placement(
+    region: LazyFrame, rows: Int, cpu_costs: Dict[String, LinearCost]
+) -> Tuple[Bool, String]:
+    """Whether the accelerator is estimated faster for `region` at `rows`
+    input rows, and both estimates as text for profiles. False, keeping the
+    CPU, when either side has no measured cost."""
+    var estimate = _handoff_estimate(region, rows)
+    var cpu = cpu_costs.get(estimate[0])
+    if estimate[1] < 0 or not cpu:
+        return (False, String(" (no measured cost)"))
+    var cpu_ns = cpu.value().ns(rows)
+    var costs = (
+        " (accel "
+        + String(round(estimate[1] / 1e6, 3))
+        + " ms, cpu "
+        + String(round(cpu_ns / 1e6, 3))
+        + " ms, "
+        + String(rows)
+        + " rows)"
+    )
+    return (estimate[1] < cpu_ns, costs^)
+
+
+def _automatic_handoff() -> Bool:
+    """Whether `engine="auto"` places handed-off nodes by measured cost:
+    a provider is installed and a calibration is configured."""
+    return _accel_installed() and Bool(calibration_path())
+
+
 def _automatic_decision(
     selected: Tuple[String, String]
 ) raises -> _BackendDecision:
@@ -1865,25 +1862,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
-
-    def __deinit__(deinit self):
-        # Concrete witnesses across PlanNode/KeyQuery/LazyFrame avoid eager
-        # documentation trait inference cycles. Owned fields clean up
-        # automatically after this body; no owner is released manually.
-        pass
-
-    def __init__(out self, *, deinit move: Self):
-        # Declare the exact move explicitly: PlanNode retains an Arc KeyQuery,
-        # whose original query is a LazyFrame. This avoids recursive generated
-        # move inference while preserving all eight existing owner fields.
-        self._nodes = move._nodes^
-        self._frames = move._frames^
-        self._schemas = move._schemas^
-        self._report = move._report^
-        self._origin_rows = move._origin_rows^
-        self._accelerator_settings = move._accelerator_settings^
-        self._schema_memo = move._schema_memo^
-        self._prefetched = move._prefetched^
+    # How `_execute` offers nodes to the accelerator provider, which may run
+    # them on the columns the CPU computed below (`_handoff_region`):
+    # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
+    # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
+    var _handoff: Int
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1894,6 +1877,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._handoff = HANDOFF_OFF
 
     def __init__(
         out self,
@@ -1909,58 +1893,189 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
-
-    def _by_label(self) raises -> Self:
-        """This plan with each categorical scan column that a group_by names
-        as a key put on the first code of every label, so the
-        device groups equal labels together as the CPU does (#943). Other
-        columns keep their original codes."""
-        var keys = Dict[String, Bool]()
-        for node in self._nodes:
-            if node.kind == AGG:
-                for name in node.names:
-                    keys[name] = True
-        var result = self.copy()
-        if len(keys) == 0:
-            return result^
-        for f in range(len(result._frames)):
-            for c in range(result._frames[f].width()):
-                ref column = result._frames[f]._columns[c]
-                if column.name() not in keys:
-                    continue
-                var coded = column._dictionary_codes()
-                if coded:
-                    # Dictionary-coded text keeps its strings; only the codes
-                    # beside them move to the first code of each label.
-                    var map = label_map(coded.value())
-                    if map:
-                        var moved = remap_codes(coded.value(), map.value())
-                        var text = decode(moved)
-                        var rows = List[UInt32](capacity=len(moved))
-                        ref codes = moved.uint32()
-                        for row in range(len(moved)):
-                            rows.append(codes._get(row))
-                        text._data[StringColumn]._codes = ArcPointer(
-                            StringCodes(_Buffer(rows^), moved.dtype())
-                        )
-                        text._field_metadata = column._field_metadata
-                        result._frames[f]._columns[c] = text^
-                    continue
-                var map = label_map(column)
-                if map:
-                    result._frames[f]._columns[c] = remap_codes(
-                        column, map.value()
-                    )
-        return result^
+        self._handoff = HANDOFF_OFF
 
     def _with_accelerator_settings(
         self, optimize: Bool, streaming: Bool, batch_size: Int
     ) raises -> Self:
-        var configured = self._by_label()
+        var configured = self.copy()
         configured._accelerator_settings = ExecutionSettings(
             optimize, streaming, batch_size
         )
         return configured^
+
+    def _with_handoff(self, mode: Int = HANDOFF_FORCED) -> Self:
+        """This plan, run by the CPU executor with each node offered to the
+        registered accelerator provider (`_handoff_region`). A provider whose
+        device shares memory with the CPU runs its `execute` this way, with
+        HANDOFF_FORCED; `engine="auto"` uses HANDOFF_AUTO."""
+        var plan = self.copy()
+        plan._handoff = mode
+        return plan^
+
+    def _handoff_input(self, index: Int) -> Tuple[Int, List[Int]]:
+        """The input below node `index` and its filters: the node offered
+        with the filters directly beneath it, outermost first."""
+        var filters = List[Int]()
+        var input = self._nodes[index].left
+        while input >= 0 and self._nodes[input].kind == FILTER:
+            filters.append(input)
+            input = self._nodes[input].left
+        return (input, filters^)
+
+    def _handoff_plan(
+        self, index: Int, filters: List[Int], columns: DataFrame
+    ) -> Self:
+        """Node `index` and its filters as a plan over `columns`, the
+        input's result: what a provider receives, columns in."""
+        var region = Self(columns)
+        for f in reversed(range(len(filters))):
+            region = region._push(self._nodes[filters[f]].copy())
+        return region._push(self._nodes[index].copy())
+
+    def _handoff_region(
+        self, index: Int, streaming: Bool, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Node `index`'s result when it is handed to the provider; None to
+        execute it as usual.
+
+        A projection or aggregation is offered with the filters directly
+        below it. The provider decides from the input's schema alone, before
+        any input runs. HANDOFF_FORCED hands every accepted node over.
+        HANDOFF_AUTO compares the provider's estimate with the CPU's
+        measured cost for the same operator (`placement.mojo`) at the
+        input's rows: estimated from the plan when `_estimated_rows` can,
+        before anything runs, so a node the CPU keeps executes exactly as
+        it would have; otherwise counted once the input has run, and the CPU
+        then runs the node on those columns, so nothing runs twice."""
+        var kind = self._nodes[index].kind
+        if kind != SELECT and kind != AGG:
+            return None
+        var cpu_costs = Dict[String, LinearCost]()
+        if self._handoff == HANDOFF_AUTO:
+            cpu_costs = load_costs("cpu")
+            if len(cpu_costs) == 0:
+                return None
+        var found = self._handoff_input(index)
+        var input = found[0]
+        if input < 0:
+            return None
+        var schema = self._execute(input, True, streaming, batch_size)
+        var offered = self._handoff_plan(index, found[1], schema)
+        if not _handoff_supports(offered):
+            return None
+        var algorithm = String("handoff")
+        var decided = False
+        if self._handoff == HANDOFF_AUTO:
+            var estimated = self._estimated_rows(input)
+            if estimated >= 0:
+                var verdict = _placement(offered, estimated, cpu_costs)
+                if not verdict[0]:
+                    self._record(
+                        index,
+                        "placement",
+                        estimated,
+                        -1,
+                        algorithm="placed cpu" + verdict[1],
+                    )
+                    return None
+                algorithm += verdict[1]
+                decided = True
+        var columns = self._execute(input, False, streaming, batch_size)
+        var rows = columns.height()
+        var region = self._handoff_plan(index, found[1], columns)
+        if self._handoff == HANDOFF_AUTO and not decided:
+            var verdict = _placement(region, rows, cpu_costs)
+            if not verdict[0]:
+                var began = Int(perf_counter_ns())
+                var placed = region._execute(
+                    len(region._nodes) - 1, False, streaming, batch_size
+                )
+                self._record(
+                    index,
+                    "eager",
+                    rows,
+                    placed.height(),
+                    algorithm="placed cpu" + verdict[1],
+                    wall_ns=Int(perf_counter_ns()) - began,
+                )
+                return placed^
+            algorithm += verdict[1]
+        var began = Int(perf_counter_ns())
+        var result = _handoff_execute(region)
+        self._record(
+            index,
+            "accel",
+            rows,
+            result.height(),
+            algorithm=algorithm,
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        return result^
+
+    def _placement_lines(self) raises -> String:
+        """One `PLACE` line per node the provider supports: both measured
+        cost models and the row count from which the accelerator is
+        estimated faster, since rows are known only when the node runs."""
+        var cpu_costs = load_costs("cpu")
+        var out = String()
+        for index in range(len(self._nodes)):
+            var kind = self._nodes[index].kind
+            if kind != SELECT and kind != AGG:
+                continue
+            var found = self._handoff_input(index)
+            if found[0] < 0:
+                continue
+            var schema = self._execute(found[0], True)
+            var region = self._handoff_plan(index, found[1], schema)
+            if not _handoff_supports(region):
+                continue
+            var at_zero = _handoff_estimate(region, 0)
+            var at_million = _handoff_estimate(region, 1_000_000)
+            var cpu = cpu_costs.get(at_zero[0])
+            out += "PLACE " + self._label(index) + ": " + at_zero[0] + ": "
+            if at_zero[1] < 0 or not cpu:
+                out += "no measured cost; cpu\n"
+                continue
+            var accel = LinearCost(
+                at_zero[1], (at_million[1] - at_zero[1]) / 1e6
+            )
+            var from_rows = crossover_rows(cpu.value(), accel)
+            out += (
+                "cpu "
+                + String(round(cpu.value().fixed_ns / 1e3, 1))
+                + " us + "
+                + String(round(cpu.value().row_ns, 3))
+                + " ns/row, accel "
+                + String(round(accel.fixed_ns / 1e3, 1))
+                + " us + "
+                + String(round(accel.row_ns, 3))
+                + " ns/row; "
+                + (
+                    "accel from " + String(from_rows) + " rows" if from_rows
+                    >= 0 else "cpu at every size"
+                )
+                + "\n"
+            )
+        return out^
+
+    def _handoff_nodes(self) raises -> List[String]:
+        """The nodes of the optimized plan the provider would run, as
+        `explain` labels them: each projection or aggregation it accepts
+        from its input's schema."""
+        var plan = self._optimized()
+        var labels = List[String]()
+        for index in range(len(plan._nodes)):
+            var kind = plan._nodes[index].kind
+            if kind != SELECT and kind != AGG:
+                continue
+            var found = plan._handoff_input(index)
+            if found[0] < 0:
+                continue
+            var schema = plan._execute(found[0], True)
+            if _handoff_supports(plan._handoff_plan(index, found[1], schema)):
+                labels.append(plan._label(index))
+        return labels^
 
     def _record(
         self,
@@ -3036,9 +3151,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )[0].copy()
         var crew = Crew.start()
         try:
-            var result = self._collect(
-                optimize=optimize, streaming=streaming, batch_size=batch_size
-            )
+            var result: DataFrame
+            if engine == "auto" and _automatic_handoff():
+                result = self._with_handoff(HANDOFF_AUTO)._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
+            else:
+                result = self._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
             crew.release()
             return result^
         except e:
@@ -3059,9 +3184,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Execute with an explicit optional runtime and its placement policy.
 
         Requested execution settings travel with a dispatch copy of the plan.
-        Providers lower supported operators independently; stream batch sizes
-        do not override eager expression batches. Unsupported plans raise
-        before device submission.
+        A provider runs the plan its own way: a discrete device runs whole
+        plans, and a device sharing memory with the CPU runs the plan on the
+        CPU executor with supported nodes handed over (`_with_handoff`).
         """
         _ = _select_backend(engine)
         if batch_size <= 0:
@@ -3301,6 +3426,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._report = Optional(ArcPointer(ExecutionReport()))
+        if engine == "auto" and _automatic_handoff():
+            plan._handoff = HANDOFF_AUTO
         var result = plan._execute(
             len(plan._nodes) - 1, False, streaming, batch_size
         )
@@ -3355,6 +3482,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var out = String()
         if engine != "cpu":
             out = backend.describe()
+        if engine == "auto" and _automatic_handoff():
+            out += plan._placement_lines()
         plan._describe(len(plan._nodes) - 1, 0, out, streaming)
         return out^
 
@@ -5571,6 +5700,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             var ahead = self._prefetched.value()
             if index in ahead[]:
                 return ahead[].pop(index)
+        if self._handoff != HANDOFF_OFF and not empty:
+            var handed = self._handoff_region(index, streaming, batch_size)
+            if handed:
+                return handed.take()
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
@@ -6265,7 +6398,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         h = _mix_list(h, node.right_keys)
         h = _mix(h, UInt64(1) if node.coalesce else UInt64(0))
         h = _mix_text(h, node.source_failure)
-        h = _mix(h, UInt64(len(node.window_keys)))
         for e in node.exprs:
             h = _mix_expr(h, e)
         h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
@@ -6303,7 +6435,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             or x.coalesce != y.coalesce
             or x.source_failure != y.source_failure
             or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
-            or len(x.window_keys) != len(y.window_keys)
             or len(x.exprs) != len(y.exprs)
         ):
             return False
@@ -6316,16 +6447,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             y.asof_tolerance.value()
         ):
             return False
-        for k in range(len(x.window_keys)):
-            ref u = x.window_keys[k]
-            ref v = y.window_keys[k]
-            if (
-                u.name != v.name
-                or u.dtype.name() != v.dtype.name()
-                or u.string_hash != v.string_hash
-                or u.values[] != v.values[]
-            ):
-                return False
         for k in range(len(x.exprs)):
             if not _same_expr(x.exprs[k], y.exprs[k]):
                 return False

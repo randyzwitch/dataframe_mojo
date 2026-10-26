@@ -2,7 +2,9 @@
 
 from max.gpu.host import DeviceContext, DeviceBuffer
 from std.atomic import Atomic
+from std.ffi import _get_global
 from std.memory import ArcPointer, Pointer
+from std.memory.alloc import Layout, alloc
 from std.time import perf_counter_ns
 from .target import METAL_TARGET
 from .scratch_pool import ScratchPool
@@ -175,6 +177,44 @@ struct DeviceService(Copyable):
             state[].pool_lock.store(0)
             state[].context = None
         state[].cached_lease.store(0)
+
+
+def _shared_service_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    # Leaked on purpose: the service lives for the whole process.
+    var slot = alloc(Layout[Optional[DeviceService]].single()).unsafe_leak()
+    try:
+        slot.unsafe_write(Optional[DeviceService](DeviceService(0)))
+    except:
+        slot.unsafe_write(Optional[DeviceService](None))
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(slot))
+
+
+def _shared_service_keep(
+    address: Optional[Pointer[NoneType, MutUntrackedOrigin]],
+):
+    # Never freed: the context may still be finishing work at exit.
+    pass
+
+
+def shared_service() raises -> DeviceService:
+    """The process's one device service for device 0.
+
+    Work the CPU executor hands over arrives without a runtime of its own,
+    one call per node. Creating a context for each call costs time and
+    leaks Metal resources until kernels stop running, so every hand-off
+    leases this service's cached context instead.
+    """
+    var address = _get_global[
+        "DATAFRAME_METAL_DEVICE_SERVICE",
+        _shared_service_init,
+        _shared_service_keep,
+    ]()
+    ref slot = Pointer[Optional[DeviceService], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+    if not slot:
+        raise Error("Mojo GPU device service could not be created")
+    return slot.value().copy()
 
 
 struct _ScopeState(Movable):

@@ -173,8 +173,7 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
         # Polars' pow_on_floats (crates/polars-expr/src/dispatch/pow.rs):
         # exponent 0.5 is sqrt, and an integral exponent from 2 to 9
         # multiplies left to right. The platform pow can miss the correctly
-        # rounded square by an ulp, which made pow(corr, 2) differ between
-        # the CPU and Metal in H2O q9. Metal's power does the same.
+        # rounded square by an ulp; multiplying matches Polars exactly.
         if y == 0.5:
             return sqrt(x)
         if y > 1 and y < 10 and y == floor(y):
