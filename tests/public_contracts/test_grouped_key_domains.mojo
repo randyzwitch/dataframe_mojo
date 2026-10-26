@@ -148,7 +148,7 @@ def test_grouped_key_domain_original_categorical_and_coded_string_identity() rai
             var lists = grouped.column("xs").list_column()
             var offsets: List[Int64] = [0, 4, 5]
             var children: List[Int64] = [10, 20, 30, 40, 50]
-            assert_equal(lists._offsets[], offsets)
+            assert_equal(lists._offsets[].copy(), offsets)
             assert_equal(lists.child().int64().to_list(), children)
             var domain = KeyDomain(input)
             assert_equal(
