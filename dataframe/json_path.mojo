@@ -354,6 +354,13 @@ struct _Parser(Movable):
                 break
             self.at += width
             var right = self.expression(precedence + 1)
+            if precedence < 3 and (
+                self.expressions[left].kind <= 2
+                or self.expressions[right].kind <= 2
+            ):
+                raise Error(
+                    "JSONPath logical operands require paths or comparisons"
+                )
             left = self.add(
                 _expr(
                     4 if precedence == 3 else (5 if precedence == 2 else 6),
@@ -370,6 +377,7 @@ struct JsonPath(Copyable, Movable):
     var paths: List[List[Int]]
     var expressions: List[_Expr]
     var simple: List[Bool]
+    var references: List[Bool]
     var root: Int
 
     def __init__(out self, text: String) raises:
@@ -387,6 +395,15 @@ struct JsonPath(Copyable, Movable):
         swap(self.expressions, parser.expressions)
         self.root = path[0]
         self.simple = List[Bool]()
+        self.references = List[Bool]()
+        for expression in self.expressions:
+            var reference = expression.kind == 3
+            if expression.kind >= 4:
+                reference = (
+                    self.references[expression.left]
+                    or self.references[expression.right]
+                )
+            self.references.append(reference)
         for i in range(len(self.paths)):
             var simple = True
             for index in self.paths[i]:
@@ -574,6 +591,10 @@ def _select(
         return False
     if step.kind == 6:
         ref predicate = program.expressions[step.predicate]
+        if not program.references[step.predicate]:
+            if _predicate(program, reader, step.predicate, node):
+                return _send(program, reader, path, next, node, out, limit)
+            return False
         # Recursive predicate paths select the matching descendants in the
         # Polars evaluator; ordinary field predicates retain their owners.
         if _recursive_operand(program, step.predicate):
@@ -607,9 +628,12 @@ def _select(
                             return True
                 return False
         if predicate.kind == 5 or predicate.kind == 6:
-            for selected in _filter_nodes(
-                program, reader, step.predicate, node
-            ):
+            var term = _filter_term(program, reader, step.predicate, node)
+            if term.scalar:
+                if term.boolean:
+                    return _send(program, reader, path, next, node, out, limit)
+                return False
+            for selected in term.nodes:
                 if _send(program, reader, path, next, selected, out, limit):
                     return True
             return False
@@ -1006,35 +1030,79 @@ def _bare_current(program: JsonPath, index: Int) -> Bool:
     return False
 
 
-def _filter_nodes(
+@fieldwise_init
+struct _FilterTerm(Movable):
+    var scalar: Bool
+    var boolean: Bool
+    var nodes: List[Int]
+    var key: Int
+
+
+def _filter_bool(value: Bool) -> _FilterTerm:
+    return _FilterTerm(True, value, List[Int](), -1)
+
+
+def _filter_term(
     program: JsonPath, reader: JsonReader, index: Int, node: Int
-) raises -> List[Int]:
-    # Polars' vendored JSONPath evaluator combines selections, in left-query
-    # order. An empty comparison is a false scalar, including inside OR.
-    # Keep this work on compound filters; direct comparisons short-circuit.
+) raises -> _FilterTerm:
+    # The upstream evaluator distinguishes Boolean scalars from selections.
+    # Combining two selections uses identity, in left-query order; combining
+    # one with a scalar compares only its Boolean values, not its truthiness.
     ref expression = program.expressions[index]
+    if not program.references[index]:
+        return _filter_bool(_predicate(program, reader, index, node))
     var out = List[Int]()
     if expression.kind == 5 or expression.kind == 6:
-        var left = _filter_nodes(program, reader, expression.left, node)
-        var right = _filter_nodes(program, reader, expression.right, node)
-        if len(left) == 0 or len(right) == 0:
-            return out^
-        var seen = Dict[Int, Bool]()
-        if expression.kind == 5:
-            for selected in right:
-                seen[selected] = True
-            for selected in left:
-                if selected in seen:
-                    out.append(selected)
+        var left = _filter_term(program, reader, expression.left, node)
+        var right = _filter_term(program, reader, expression.right, node)
+        if left.scalar and right.scalar:
+            return _filter_bool(
+                left.boolean
+                and right.boolean if expression.kind
+                == 5 else (left.boolean or right.boolean)
+            )
+        if left.scalar or right.scalar:
+            var boolean = left.boolean if left.scalar else right.boolean
+            var key = right.key if left.scalar else left.key
+            var nodes = List[Int]()
+            if left.scalar:
+                swap(nodes, right.nodes)
+            else:
+                swap(nodes, left.nodes)
+            for selected in nodes:
+                var value = selected
+                if reader.nodes[value].kind == 123 and key >= 0:
+                    value = _field(reader, value, program.steps[key].text)
+                if value < 0:
+                    continue
+                var kind = reader.nodes[value].kind
+                if kind == 116 or kind == 102:
+                    var keep = (
+                        kind == 116
+                        and boolean if expression.kind
+                        == 5 else (kind == 116 or boolean)
+                    )
+                    if keep:
+                        out.append(selected)
         else:
-            for selected in left:
-                seen[selected] = True
-                out.append(selected)
-            for selected in right:
-                if selected not in seen:
+            var seen = Dict[Int, Bool]()
+            if expression.kind == 5:
+                for selected in right.nodes:
+                    seen[selected] = True
+                for selected in left.nodes:
+                    if selected in seen:
+                        out.append(selected)
+            else:
+                for selected in left.nodes:
                     seen[selected] = True
                     out.append(selected)
-        return out^
+                for selected in right.nodes:
+                    if selected not in seen:
+                        seen[selected] = True
+                        out.append(selected)
+        if len(out) == 0:
+            return _filter_bool(False)
+        return _FilterTerm(False, False, out^, -1)
     if reader.nodes[node].kind == 91 and not _bare_current(program, index):
         var child = node + 1
         while child < reader.nodes[node].after:
@@ -1043,7 +1111,14 @@ def _filter_nodes(
             child = reader.nodes[child].after
     elif _predicate(program, reader, index, node):
         out.append(node)
-    return out^
+    if expression.kind == 4 and len(out) == 0:
+        return _filter_bool(expression.op == 2)
+    var key = -1
+    if expression.kind == 3 and not expression.root:
+        ref path = program.paths[expression.path]
+        if len(path) == 1 and program.steps[path[0]].kind == 0:
+            key = path[0]
+    return _FilterTerm(False, False, out^, key)
 
 
 def _quoted(reader: JsonReader, start: Int, mut out: List[UInt8]) raises:

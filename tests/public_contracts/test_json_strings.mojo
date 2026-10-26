@@ -315,6 +315,61 @@ def test_json_path_layouts_first_null_duplicate_order_and_invalid_rows() raises:
                 ],
             )
 
+    # Scalar filter results retain the current selection; mixed expressions
+    # compare Boolean values rather than treating a selection as truthy.
+    var documents: List[String] = [
+        "[1,2]",
+        '[{"x":1},{"x":2}]',
+        "[false,true]",
+        '{"x":false}',
+        "null",
+        "{broken",
+    ]
+    var exprs: List[Expr] = [
+        col("s").str().json_path_match("$[?(1 == 1)]").alias("whole"),
+        col("s").str().json_path_match("$[?(1 == 2)]").alias("false"),
+        col("s").str().json_path_match("$[?(@.x == 1 && 1 == 1)]").alias("and"),
+        col("s")
+        .str()
+        .json_path_match("$[?(@.x || (true == true))]")
+        .alias("or"),
+    ]
+    for nullable in [False, True]:
+        var valid = List[Bool](length=6, fill=not nullable)
+        var whole_valid: List[Bool] = [True, True, True, True, False, False]
+        var or_valid: List[Bool] = [False, False, False, True, False, False]
+        if nullable:
+            whole_valid = List[Bool](length=6, fill=False)
+            or_valid = List[Bool](length=6, fill=False)
+        var expected = DataFrame(
+            [
+                Series("whole", Column[String](documents.copy(), whole_valid)),
+                Series(
+                    "false",
+                    Column[String](
+                        documents.copy(), List[Bool](length=6, fill=False)
+                    ),
+                ),
+                Series(
+                    "and",
+                    Column[String](
+                        documents.copy(), List[Bool](length=6, fill=False)
+                    ),
+                ),
+                Series("or", Column[String](documents.copy(), or_valid)),
+            ]
+        )
+        for layout in range(4):
+            var source = _source(documents, valid, layout)
+            assert_frame(source.select_exprs(exprs, batch_size=1), expected)
+            for streaming in [False, True]:
+                assert_frame(
+                    source.lazy()
+                    .select_exprs(exprs)
+                    .collect(streaming=streaming, batch_size=1),
+                    expected,
+                )
+
 
 def test_json_arguments_validate_on_empty_and_all_null_inputs() raises:
     for rows in [0, 2]:
