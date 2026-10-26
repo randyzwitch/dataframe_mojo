@@ -162,7 +162,7 @@ def _recompose(mut values: List[Int]) -> Int:
         var cp = values[i]
         var ccc = properties(cp) & 255
         var combined = -1
-        if starter >= 0 and (previous == 0 or previous < ccc):
+        if cp >= 128 and starter >= 0 and (previous == 0 or previous < ccc):
             combined = _compose(values[starter], cp)
         if combined >= 0:
             values[starter] = combined
@@ -217,7 +217,11 @@ def normalize_series(input: Series, form: String) raises -> Series:
             scratch.clear()
             var at = 0
             while at < len(row):
-                _decompose(scratch, _codepoint(row, at), compatible)
+                var cp = _codepoint(row, at)
+                if cp < 128:
+                    scratch.append(cp)
+                else:
+                    _decompose(scratch, cp, compatible)
             _order(scratch)
             var size = _recompose(scratch) if compose else len(scratch)
             for k in range(size):
