@@ -244,17 +244,19 @@ def _empty_output(
         return parent.list_column().child().slice(0, 0).renamed("")
     if node.op == STRUCT_FIELD:
         var parent = _empty_output(bound, columns, node.left)
-        return parent.struct_column().field(node.text).renamed("")
+        var field = parent.struct_column().field(node.text).renamed("")
+        return decode(field) if field.dtype().is_categorical() else field^
     if node.op == STRUCT_PACK:
         var names = struct_pack_names(node)
         var children = node_children(node)
         var fields = List[Series](capacity=len(children))
         for field in range(len(children)):
-            fields.append(
-                _empty_output(bound, columns, children[field]).renamed(
-                    names[field]
+            var value = _empty_output(bound, columns, children[field])
+            if bound.dtypes[children[field]].is_categorical():
+                value = cast_series(
+                    value, bound.dtypes[children[field]], True, 0, List[Bool]()
                 )
-            )
+            fields.append(value.renamed(names[field]))
         return Series("", StructColumn(fields^))
     return _empty(bound.dtypes[index])
 
@@ -509,9 +511,10 @@ def _eval[
     if is_text_function(node.op):
         return text_function(node, left, bound._regex(index))
     if is_nested_op(node.op):
-        return nested_op(
+        var value = nested_op(
             node, left, bound.dtypes[node.left], bound._regex(index)
         )
+        return decode(value) if value.dtype().is_categorical() else value^
     if node.right < 0:
         if is_math(node.op):
             return math_unary[width](
@@ -663,7 +666,12 @@ def _pack_struct[
             value = value._broadcast(size)
         # Kernel outputs carry physical tags; restore the bound logical type.
         if value.dtype() != bound.dtypes[children[k]]:
-            value = value.with_dtype(bound.dtypes[children[k]])
+            if bound.dtypes[children[k]].is_categorical():
+                value = cast_series(
+                    value, bound.dtypes[children[k]], True, 0, List[Bool]()
+                )
+            else:
+                value = value.with_dtype(bound.dtypes[children[k]])
         fields.append(value.renamed(names[k]))
     return Series("", StructColumn(fields^))
 
@@ -1296,6 +1304,8 @@ struct _RowsJob[width: Int](Job):
         return self.result^
 
     def run(mut self) raises:
+        var nested = self.bound.dtypes[self.root].is_nested()
+        var parts = List[Series]()
         for offset in range(self.start, self.end, self.batch_size):
             var chunk = _batch[Self.width](
                 self.bound,
@@ -1306,13 +1316,12 @@ struct _RowsJob[width: Int](Job):
                 min(self.batch_size, self.end - offset),
                 self.grouped,
             )
-            if (
-                self.bound.dtypes[self.root].is_struct()
-                and len(self.result) == 0
-            ):
-                self.result = chunk^
+            if nested:
+                parts.append(chunk^)
             else:
                 self.result._append_series(chunk)
+        if len(parts) != 0:
+            self.result = Series._from_chunks(parts).rechunk()
 
 
 def _direct_grouped_count_part(
@@ -2591,6 +2600,8 @@ def _full[
     if whole:
         return whole.take()
     var result = _output_seed(bound, columns, states, index)
+    var nested = bound.dtypes[index].is_nested()
+    var parts = List[Series]()
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
             bound,
@@ -2603,10 +2614,12 @@ def _full[
         )
         if len(chunk) == 1 and min(batch_size, height - offset) != 1:
             chunk = chunk._broadcast(min(batch_size, height - offset))
-        if bound.dtypes[index].is_struct() and len(result) == 0:
-            result = chunk^
+        if nested:
+            parts.append(chunk^)
         else:
             result._append_series(chunk)
+    if len(parts) != 0:
+        return Series._from_chunks(parts).rechunk()
     return result^
 
 
@@ -3168,7 +3181,7 @@ def evaluate[
         workers,
     )
     if bound.dtypes[root].is_categorical():
-        result = encode(result)
+        result = cast_series(result, bound.dtypes[root], True, 0, List[Bool]())
     result._name = bound.expr._name
     return result^
 
@@ -3190,6 +3203,8 @@ def _rows[
     when more than one."""
     var result = _output_seed(bound, columns, states, index)
     if workers <= 1:
+        var nested = bound.dtypes[index].is_nested()
+        var parts = List[Series]()
         result._reserve_rows(size, 0)
         for offset in range(0, size, batch_size):
             var chunk = _batch[width](
@@ -3201,10 +3216,12 @@ def _rows[
                 min(batch_size, size - offset),
                 grouped,
             )
-            if bound.dtypes[index].is_struct() and len(result) == 0:
-                result = chunk^
+            if nested:
+                parts.append(chunk^)
             else:
                 result._append_series(chunk)
+        if len(parts) != 0:
+            return Series._from_chunks(parts).rechunk()
         return result^
     # Row-parallel evaluation (#5): each worker evaluates the batches of
     # one contiguous partition into a private series; pieces are joined

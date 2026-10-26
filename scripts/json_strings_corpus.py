@@ -1,0 +1,215 @@
+"""Independent Polars JSONPath parity fixtures for issue798.
+
+Run with pixi run -e oracle python3 scripts/json_strings_corpus.py.
+Each record is query UTF8 hex, input UTF8 hex, then result hex/NULL/ERROR.
+"""
+from pathlib import Path
+import json
+import random
+import polars as pl
+
+ROOT = Path(__file__).resolve().parents[1]
+DOCS = [
+    "null",
+    "true",
+    "false",
+    "1",
+    "-0",
+    "-0.0",
+    "1.0",
+    "1e2",
+    "1e-6",
+    "1e20",
+    "18446744073709551615",
+    "18446744073709551616",
+    '"é\\n\\uD83D\\uDE00"',
+    "[]",
+    "{}",
+    "[0,1,2,3]",
+    "[null,1]",
+    '[{"a":1},{"a":2}]',
+    '{"a":1,"b":2}',
+    '{"b":{"a":1},"a":2}',
+    '{"a":2,"b":{"a":1}}',
+    '{"a":1,"a":2}',
+    '{"a":null}',
+    '{"a":[0,1,2,3]}',
+    '{"a":[{"x":1},{"x":2},{"x":3}]}',
+    '[{"x":1},{}]',
+    '[{}, {"x":2}]',
+    '[{"x":null},{"x":false},{"x":0},{}]',
+    '[{"x":1,"y":2},{"x":2,"y":3}]',
+    '[{"s":"a"},{"s":"b"}]',
+    '{"a.b":{"é":"hello"},"quote\\"key":3}',
+    '{"\\u0061":1,"a":2}',
+    '{"a":[1.0,1e2,null],"b":"x\\u0000\\t\\/é"}',
+    '{"x":1}',
+    '{"a":{"x":1}}',
+    "[1,2,3]",
+]
+PATHS = [
+    "$",
+    "$.a",
+    "$.b",
+    "$.missing",
+    "$.*",
+    "$[*]",
+    "$..a",
+    "$..x",
+    "$..*",
+    "$['b','a']",
+    "$['a.b']['é']",
+    "$[0]",
+    "$[-1]",
+    "$[2,0]",
+    "$[-1,0]",
+    "$[1:3]",
+    "$[-2:]",
+    "$[::2]",
+    "$[0:4:2]",
+    "$.a[0]",
+    "$.a[-1]",
+    "$.a[1:3]",
+    "$.a[*].x",
+    "$[*].a",
+    "$.a[?(@.x > 1)]",
+    "$.a[?(@.x <= 2)]",
+    "$[?(@.x)]",
+    "$[?(@.x == 1)]",
+    "$[?(@.x != 1)]",
+    "$[?(@.x == false)]",
+    "$[?(@.x > 1 && @.y < 4)]",
+    "$[?(@.x == 1 || @.x == 2)]",
+    "$[?(@.s == 'b')]",
+    "$[?(@ > 1)]",
+    "",
+    "a",
+    " $.a ",
+    "$..",
+    "$[",
+    "$[?(!(@.x == 1))]",
+    "$[?(@.x == null)]",
+    "$[?(@.x =~ 'a.*')]",
+]
+DOCS += ["[1,]", '{"a":1e400}', '{"a":"\\uD800"}', '{"a":1} trailing']
+DOCS += [
+    '{"x":{"a":1},"x":{"a":2}}',
+    '{"x":{"a":1},"x":null,"a":3}',
+    '[{"x":1},{"x":2}]',
+    '[{"x":2},{"x":1}]',
+    '[{"x":1,"y":2},{}]',
+    '[{"a":1,"b":1},{"a":2,"b":3}]',
+    '{"target":2,"items":[{"x":1},{"x":2}]}',
+    '[{"a":[0,2]},{"a":[1]}]',
+    '[{"a":{"x":2}},{"x":1}]',
+    '{"a":[{"x":1}],"b":[{"x":2}]}',
+    '[{"x":"a"},{"x":false},{"x":null},{"x":0}]',
+    '[false,true,0,1,"",null]',
+    '[true,false]',
+    '{"x":true,"y":false}',
+    '[{"x":false},{"x":true},{"y":true},{}]',
+    '[{"x":true,"y":false},{"x":false,"y":true}]',
+    '[{"x":true,"y":true},{"x":false,"y":false}]',
+]
+PATHS += [
+    "$[?(@)]",
+    "$[?(true)]",
+    "$[?(false)]",
+    "$[?(1)]",
+    "$[?('x')]",
+    "$[?(@.x == 2 || @.x == 1)]",
+    "$[?(@.x != 1 && @.y == 2)]",
+    "$[?(@.a == @.b)]",
+    "$.items[?(@.x == $.target)]",
+    "$[?(@.a[*] > 1)]",
+    "$[?(@..x > 1)]",
+    "$..['a','x']",
+    "$..[0]",
+    "$..[-1]",
+    "$..[?(@.x > 1)]",
+    "$[?((@.x > 0 && @.x < 2) || @.x == 2)]",
+    "$[?(1 == 1)]",
+    "$[?(1 == 2)]",
+    "$[?(true == true)]",
+    "$[?(1 == 2 || 1 == 1)]",
+    "$[?(1 == 1 && @.x == 1)]",
+    "$[?(@.x == 1 || 1 == 1)]",
+    "$[?(@.x == 1 && 1 == 1)]",
+    "$[?(1 == 2 || @.x == 1)]",
+    "$[?(@.x || @.y)]",
+    "$[?(@.x && @.y)]",
+    "$[?(@.x || true)]",
+    "$[?(false || @.x)]",
+    "$[?(@.x && true)]",
+    "$[?(true && @.x)]",
+    "$[?(@.x || (true == true))]",
+    "$[?((false == true) || @.x)]",
+    "$[?(@.x && (true == true))]",
+    "$[?((true == true) && @.x)]",
+]
+rng = random.Random(798)
+DOCS += [
+    json.dumps(rng.uniform(-10, 10) * 10 ** rng.randrange(-300, 300))
+    for _ in range(32)
+]
+rows = []
+reference_cases = 0
+for path in PATHS:
+    for doc in DOCS:
+        try:
+            value = pl.Series([doc]).str.json_path_match(path).to_list()[0]
+            result = "NULL" if value is None else value.encode().hex()
+            source = "POLARS"
+        except BaseException as error:
+            source = "POLARS"
+            if isinstance(error, Exception):
+                result = "ERROR"
+            else:
+                # The vendored evaluator panics for a wildcard predicate.
+                # Keep coverage using an independent Python JSON selection
+                # reference, rather than reproducing an upstream panic.
+                assert path == "$[?(@.a[*] > 1)]", (path, error)
+                source = "PYTHON_REFERENCE_UPSTREAM_PANIC"
+                value = json.loads(doc)
+                candidates = value if isinstance(value, list) else [value]
+                chosen = next(
+                    (
+                        v
+                        for v in candidates
+                        if isinstance(v, dict)
+                    and isinstance(v.get("a"), (list, dict))
+                        and any(
+                            isinstance(x, (int, float))
+                            and not isinstance(x, bool)
+                            and x > 1
+                        for x in (v["a"].values() if isinstance(v["a"], dict) else v["a"])
+                        )
+                    ),
+                    None,
+                )
+                result = (
+                    "NULL" if chosen
+                    is None else json.dumps(
+                        chosen, ensure_ascii=False, separators=(",", ":")
+                    )
+                    .encode()
+                    .hex()
+                )
+                reference_cases += 1
+        rows.append(
+            "\t".join([path.encode().hex(), doc.encode().hex(), result, source])
+        )
+out = ROOT / "tests/fixtures/json_strings/jsonpath.tsv"
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(
+    "# Polars "
+    + pl.__version__
+    + "; generated by scripts/json_strings_corpus.py\n"
+    + "\n".join(rows)
+    + "\n"
+)
+print(len(rows), "JSONPath oracle cases", out)
+print(
+    reference_cases,
+    "Python reference cases for upstream wildcard-predicate panic",
+)

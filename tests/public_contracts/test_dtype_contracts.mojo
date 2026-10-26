@@ -97,6 +97,8 @@ def test_logical_types_do_not_equal_their_physical_storage_and_nulls_keep_type()
         assert_true(AnyValue.null(dtype).is_null())
         with assert_raises():
             _ = DataType.decimal(limit + 1, 2, width)
-    assert_true(not DataType.is_known("int128"))
+    assert_true(DataType.is_known("int128"))
+    assert_true(DataType.parse("int128") == DataType.of(DType.int128))
+    assert_equal(DataType.parse("int128").bit_width(), 128)
     with assert_raises(contains="Unknown dtype"):
         _ = DataType.parse("decimal")

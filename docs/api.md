@@ -36,7 +36,7 @@ Only the payload field matching `dtype` is meaningful. Equality is
 structural: nulls equal nulls of the same dtype and NaN equals NaN.
 
 - `def __init__[D: DType](out self, value: Scalar[D])`
-  A numeric value. Integers are held in an Int64 slot (UInt64 by bit pattern) and floats in a Float64 slot; both are exact.
+  A numeric value, preserving integer precision including UInt64 and Int128, and floating-point precision.
 - `def __init__(out self, value: Bool)`
 - `def __init__(out self, value: String)`
 - `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
@@ -1913,6 +1913,10 @@ is searched as a substring.
   The UTF-8 bytes as "hex" (lowercase) or "base64" text.
 - `def decode(self, encoding: String, strict: Bool = True) -> Expr`
   Decode "hex" or "base64" text into Binary. Invalid text raises when strict, or is null otherwise.
+- `def json_path_match(self, path: String) -> Expr`
+  Extract the first JSONPath match as String; input null, missing matches, malformed JSON and selected JSON null become null. Invalid paths raise, including on empty input.
+- `def json_decode(self, dtype: DataType) -> Expr`
+  Decode JSON into an explicitly typed scalar, list or struct. Invalid JSON or incompatible value kinds raise; missing struct fields and out-of-range numeric values become null.
 - `def normalize(self, form: String = "NFC") -> Expr`
   Unicode 17 NFC, NFD, NFKC or NFKD normalization. Nulls propagate; already-normalized chunks retain their existing storage.
 - `def to_integer(self, base: Int = Int(10), strict: Bool = True) -> Expr`

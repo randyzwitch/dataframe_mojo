@@ -51,12 +51,16 @@ struct JsonReader(Movable):
     var address: Int
     var size: Int
     var pos: Int
+    var max_depth: Int
     var nodes: List[JsonNode]
 
-    def __init__(out self, data: Span[UInt8, _], pos: Int = 0):
+    def __init__(
+        out self, data: Span[UInt8, _], pos: Int = 0, max_depth: Int = 64
+    ):
         self.address = Int(data.unsafe_ptr())
         self.size = len(data)
         self.pos = pos
+        self.max_depth = max_depth
         self.nodes = List[JsonNode]()
 
     @always_inline
@@ -219,8 +223,8 @@ struct JsonReader(Movable):
         key_end: Int = -1,
         key_escaped: Bool = False,
     ) raises -> Int:
-        if depth > 64:
-            raise Error("JSON nesting exceeds 64")
+        if depth > self.max_depth:
+            raise Error("JSON nesting exceeds " + String(self.max_depth))
         self.space()
         if self.pos >= self.size:
             raise Error("Expected JSON value")
@@ -291,10 +295,11 @@ struct JsonReader(Movable):
             self.nodes[index].after = len(self.nodes)
         return index
 
-    def parse(mut self, data: Span[UInt8, _]) raises:
+    def parse(mut self, data: Span[UInt8, _], max_depth: Int = 1024) raises:
         self.address = Int(data.unsafe_ptr())
         self.size = len(data)
         self.pos = 0
+        self.max_depth = max_depth
         self.nodes.clear()
         _ = self.scan(store=True, unique_keys=False)
         self.space()
