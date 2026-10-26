@@ -1869,8 +1869,9 @@ def _direct_float_extreme[
     +inf for min). Whether any value was compared and whether a NaN was
     seen are kept in lane masks rather than read off the result, so a
     column of infinities still records its extreme and an all-NaN interval
-    records only `nan_seen`, as the per-row path does. `-0.0` equals `0.0`
-    (docs/semantics.md), so either may be the extreme of a tie.
+    records only `nan_seen`, as the per-row path does. A tie between
+    `-0.0` and `0.0` goes to the earlier row, the one arg_min and arg_max
+    report; vector min and max may order the zeros (ARM does).
     """
     var count = _count_valid(
         column._bits[], column._offset + start, end - start
@@ -1942,6 +1943,11 @@ def _direct_float_extreme[
         reducer.nan_seen[0] = True
     if not any_value:
         return
+    if best == 0:
+        for row in range(start, end):
+            if (all_valid or column._valid(row)) and column._get(row) == 0:
+                best = column._get(row)
+                break
     var floating = best.cast[DType.float64]()
     if (
         not reducer.seen[0]

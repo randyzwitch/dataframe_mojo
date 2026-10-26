@@ -3,6 +3,7 @@ reference: NaN and nulls never win, an all-NaN column gives NaN, and one with
 no valid value gives null (the rules in test_nan_extrema.mojo)."""
 # contract-group: reduce.global
 from std.testing import assert_equal, assert_true
+from std.memory import bitcast
 from std.utils.numerics import inf, nan
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.coverage_generators import chunk_layout, offset_layout
@@ -10,13 +11,18 @@ from tests.support.coverage_generators import chunk_layout, offset_layout
 
 def _value(row: Int, pattern: Int) -> Float64:
     """Pattern 0 mixes numbers and NaN, 1 is all NaN, 2 all -inf, 3 all +inf,
-    4 has infinities at the ends among numbers."""
+    4 has infinities at the ends among numbers, 5 and 6 are zeros of both
+    signs starting with -0.0 and 0.0."""
     if pattern == 1:
         return nan[DType.float64]()
     if pattern == 2:
         return -inf[DType.float64]()
     if pattern == 3:
         return inf[DType.float64]()
+    if pattern == 5 or pattern == 6:
+        # Zeros of both signs: the earlier row wins the tie.
+        var negative = (row // 3) % 2 == (0 if pattern == 5 else 1)
+        return -0.0 if negative else 0.0
     if row % 13 == 5:
         return nan[DType.float64]()
     if pattern == 4 and row == 0:
@@ -33,6 +39,7 @@ def _check[D: DType](n: Int, pattern: Int, nulls: Bool) raises:
     var high = -inf[DType.float64]()
     var numbers = 0
     var present = 0
+    var first = Float64(0)
     for row in range(n):
         var value = _value(row, pattern)
         var keep = not nulls or row % 7 != 3
@@ -42,6 +49,8 @@ def _check[D: DType](n: Int, pattern: Int, nulls: Bool) raises:
             continue
         present += 1
         if value == value:
+            if numbers == 0:
+                first = value
             numbers += 1
             low = min(low, value)
             high = max(high, value)
@@ -75,13 +84,20 @@ def _check[D: DType](n: Int, pattern: Int, nulls: Bool) raises:
                     assert_true(got != got, label)
                     continue
                 var want = low if name == "lo" else high
-                assert_equal(got, want.cast[D]().cast[DType.float64](), label)
+                if pattern >= 5:
+                    want = first
+                want = want.cast[D]().cast[DType.float64]()
+                assert_equal(
+                    bitcast[DType.uint64](got),
+                    bitcast[DType.uint64](want),
+                    label,
+                )
 
 
 def test_float_min_max_match_a_scalar_reference_over_long_columns() raises:
     # Lengths around the 8- and 16-lane loops and their scalar tails.
     for n in [0, 1, 7, 8, 15, 16, 17, 33, 1000, 70_001]:
-        for pattern in range(5):
+        for pattern in range(7):
             for nulls in [False, True]:
                 _check[DType.float32](n, pattern, nulls)
                 _check[DType.float64](n, pattern, nulls)
