@@ -28,6 +28,8 @@ from .expr import (
     N_UNIQUE,
     MIN,
     MAX,
+    STD,
+    VAR,
     LT,
     GE,
     LE,
@@ -132,7 +134,7 @@ from .expr_kernels import (
     math_unary,
     arctan2_series,
 )
-from .aggregate import Reducer, _sum_bools
+from .aggregate import Reducer, _sum_bools, _variance_blocks
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -2050,6 +2052,9 @@ def _direct_numeric_column[
             _count_valid(column._bits[], column._offset + start, end - start)
         )
         return True
+    if op == STD or op == VAR:
+        _variance_blocks[D](reducer.moments[0], column, start, end)
+        return True
     comptime if D.is_integral():
         if op == SUM or op == MEAN:
             _direct_int_sum[D](reducer, column, start, end)
@@ -2201,6 +2206,8 @@ def _direct_numeric_reduction(
         and node.op != COUNT
         and node.op != MIN
         and node.op != MAX
+        and node.op != STD
+        and node.op != VAR
     ):
         return False
     ref series = columns[bound.sources[input]]
