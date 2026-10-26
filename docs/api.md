@@ -468,7 +468,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 A logical column type.
 
 Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
-FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
+FLOAT32, FLOAT64. Also NULL (all values null), BOOL, STRING, DATE (days since 1970-01-01), TIME
 (nanoseconds since midnight), and datetime(unit, time_zone) /
 duration(unit) with unit "ns", "us", or "ms". A datetime with a time zone
 holds UTC ticks, like an Arrow timestamp whose zone is set. Temporal types are stored as Int64. Nested:
@@ -1590,6 +1590,22 @@ def read_ipc_stream(path: String, *, columns: Optional[List[String]] = None, n_r
 def read_ipc_stream(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
 ```
 
+## `read_json`
+
+Read a JSON array of objects; retain a tape for one object at a time.
+
+```mojo
+def read_json(path: String, schema: Optional[DataType] = None, *, infer_schema_length: Int = Int(100), ignore_errors: Bool = False, batch_size: Int = Int(65536), columns: List[String] = List()) -> DataFrame
+```
+
+## `read_ndjson`
+
+Read local newline-delimited JSON objects into typed columns.
+
+```mojo
+def read_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema_length: Int = Int(100), ignore_errors: Bool = False, batch_size: Int = Int(65536), n_rows: Int = Int(-1), columns: List[String] = List()) -> DataFrame
+```
+
 ## `read_parquet`
 
 Read a local Parquet file into a DataFrame.
@@ -1624,6 +1640,14 @@ Lazily scan an IPC/Feather v2 file in record batches.
 
 ```mojo
 def scan_ipc(path: String, *, memory_map: Bool = True) -> LazyFrame
+```
+
+## `scan_ndjson`
+
+Defer NDJSON reading until collection or sampled schema discovery.
+
+```mojo
+def scan_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema_length: Int = Int(100), ignore_errors: Bool = False) -> LazyFrame
 ```
 
 ## `scan_parquet`
@@ -2055,6 +2079,22 @@ Write a local IPC stream file, preserving input chunk boundaries.
 
 ```mojo
 def write_ipc_stream(frame: DataFrame, path: String, *, compression: String = "uncompressed", batch_size: Int = Int(65536))
+```
+
+## `write_json`
+
+Write a JSON array of objects using the same wire forms as NDJSON.
+
+```mojo
+def write_json(frame: DataFrame, path: String, *, buffer_size: Int = Int(65536))
+```
+
+## `write_ndjson`
+
+Write UTF-8 objects, one per line, with bounded output buffering.
+
+```mojo
+def write_ndjson(frame: DataFrame, path: String, *, buffer_size: Int = Int(65536))
 ```
 
 ## `write_parquet`

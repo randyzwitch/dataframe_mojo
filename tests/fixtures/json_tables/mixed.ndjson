@@ -1,0 +1,266 @@
+{"row":0,"text":null,"integer":null,"number":-0.0,"boolean":null,"list":[],"struct":{"left":0,"right":""},"none":null}
+
+{"row":1,"integer":-127,"number":0.125,"boolean":true,"list":[1,null,1.5],"struct":{"left":1,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":2,"text":"é","integer":-126,"number":0.25,"boolean":false,"list":null,"struct":{"left":2,"right":"é"},"none":null}
+{"row":3,"text":"\u6c49\u5b57","integer":-125,"number":0.375,"boolean":true,"list":[],"struct":null,"none":null}
+{"row":4,"text":"  ","integer":-124,"number":0.5,"boolean":false,"list":[4,null,4.5],"struct":{"left":4},"none":null}
+{"row":5,"text":"Greek \u03b1\u03b2","integer":-123,"number":0.625,"boolean":null,"list":[5,null,5.5],"struct":{"left":5,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":6,"text":"\u0001\u001f","integer":-122,"number":0.75,"boolean":false,"list":[],"struct":{"left":6,"right":"\u0001\u001f"},"none":null}
+{"row":7,"text":null,"integer":-121,"number":0.875,"boolean":true,"list":[7,null,7.5],"struct":{"left":7,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":8,"text":"","integer":-120,"number":1.0,"boolean":false,"list":[8,null,8.5],"struct":{"left":8,"right":""},"none":null}
+{"row":9,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-119,"number":1.125,"boolean":true,"list":[],"struct":{"left":9,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":10,"text":"é","integer":-118,"number":1.25,"boolean":null,"list":[10,null,10.5],"struct":{"left":10,"right":"é"},"none":null}
+{"row":11,"text":"\u6c49\u5b57","integer":null,"number":1.375,"boolean":true,"list":[11,null,11.5],"struct":{"left":11,"right":"\u6c49\u5b57"},"none":null}
+{"row":12,"text":"  ","integer":-116,"number":1.5,"boolean":false,"list":[],"struct":{"left":12,"right":"  "},"none":null}
+{"row":13,"text":"Greek \u03b1\u03b2","integer":-115,"number":-0.0,"boolean":true,"list":[13,null,13.5],"struct":{"left":13,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":14,"text":null,"integer":-114,"number":1.75,"boolean":false,"list":[14,null,14.5],"struct":{"left":14,"right":"\u0001\u001f"},"none":null}
+{"row":15,"text":"long UTF-8 value beyond twelve bytes","integer":-113,"number":1.875,"boolean":null,"list":[],"struct":{"left":15,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":16,"text":"","integer":-112,"number":2.0,"boolean":false,"list":[16,null,16.5],"struct":{"left":16,"right":""},"none":null}
+{"row":17,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-111,"number":2.125,"boolean":true,"list":[17,null,17.5],"struct":{"left":17,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":18,"integer":-110,"number":2.25,"boolean":false,"list":[],"struct":{"left":18,"right":"é"},"none":null}
+{"row":19,"text":"\u6c49\u5b57","integer":-109,"number":2.375,"boolean":true,"list":[19,null,19.5],"struct":{"left":19,"right":"\u6c49\u5b57"},"none":null}
+{"row":20,"text":"  ","integer":-108,"number":2.5,"boolean":null,"list":[20,null,20.5],"struct":{"left":20,"right":"  "},"none":null}
+{"row":21,"text":null,"integer":-107,"number":2.625,"boolean":true,"list":null,"struct":{"left":21,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":22,"text":"\u0001\u001f","integer":null,"number":2.75,"boolean":false,"list":[22,null,22.5],"struct":{"left":22,"right":"\u0001\u001f"},"none":null}
+{"row":23,"text":"long UTF-8 value beyond twelve bytes","integer":-105,"number":2.875,"boolean":true,"list":[23,null,23.5],"struct":{"left":23,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":24,"text":"","integer":-104,"number":3.0,"boolean":false,"list":[],"struct":{"left":24,"right":""},"none":null}
+{"row":25,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-103,"number":3.125,"boolean":null,"list":[25,null,25.5],"struct":{"left":25,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":26,"text":"é","integer":-102,"number":-0.0,"boolean":false,"list":[26,null,26.5],"struct":null,"none":null}
+{"row":27,"text":"\u6c49\u5b57","integer":-101,"number":3.375,"boolean":true,"list":[],"struct":{"left":27,"right":"\u6c49\u5b57"},"none":null}
+{"row":28,"text":null,"integer":-100,"number":3.5,"boolean":false,"list":[28,null,28.5],"struct":{"left":28,"right":"  "},"none":null}
+{"row":29,"text":"Greek \u03b1\u03b2","integer":-99,"number":3.625,"boolean":true,"list":[29,null,29.5],"struct":{"left":29,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":30,"text":"\u0001\u001f","integer":-98,"number":3.75,"boolean":null,"list":[],"struct":{"left":30,"right":"\u0001\u001f"},"none":null}
+{"row":31,"text":"long UTF-8 value beyond twelve bytes","integer":-97,"number":3.875,"boolean":true,"list":[31,null,31.5],"struct":{"left":31,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+
+{"row":32,"text":"","integer":-96,"number":4.0,"boolean":false,"list":[32,null,32.5],"struct":{"left":32,"right":""},"none":null}
+{"row":33,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":null,"number":4.125,"boolean":true,"list":[],"struct":{"left":33},"none":null}
+{"row":34,"text":"é","integer":-94,"number":4.25,"boolean":false,"list":[34,null,34.5],"struct":{"left":34,"right":"é"},"none":null}
+{"row":35,"integer":-93,"number":4.375,"boolean":null,"list":[35,null,35.5],"struct":{"left":35,"right":"\u6c49\u5b57"},"none":null}
+{"row":36,"text":"  ","integer":-92,"number":4.5,"boolean":false,"list":[],"struct":{"left":36,"right":"  "},"none":null}
+{"row":37,"text":"Greek \u03b1\u03b2","integer":-91,"number":4.625,"boolean":true,"list":[37,null,37.5],"struct":{"left":37,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":38,"text":"\u0001\u001f","integer":-90,"number":4.75,"boolean":false,"list":[38,null,38.5],"struct":{"left":38,"right":"\u0001\u001f"},"none":null}
+{"row":39,"text":"long UTF-8 value beyond twelve bytes","integer":-89,"number":-0.0,"boolean":true,"list":[],"struct":{"left":39,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":40,"text":"","integer":-88,"number":5.0,"boolean":null,"list":null,"struct":{"left":40,"right":""},"none":null}
+{"row":41,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-87,"number":5.125,"boolean":true,"list":[41,null,41.5],"struct":{"left":41,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":42,"text":null,"integer":-86,"number":5.25,"boolean":false,"list":[],"struct":{"left":42,"right":"é"},"none":null}
+{"row":43,"text":"\u6c49\u5b57","integer":-85,"number":5.375,"boolean":true,"list":[43,null,43.5],"struct":{"left":43,"right":"\u6c49\u5b57"},"none":null}
+{"row":44,"text":"  ","integer":null,"number":5.5,"boolean":false,"list":[44,null,44.5],"struct":{"left":44,"right":"  "},"none":null}
+{"row":45,"text":"Greek \u03b1\u03b2","integer":-83,"number":5.625,"boolean":null,"list":[],"struct":{"left":45,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":46,"text":"\u0001\u001f","integer":-82,"number":5.75,"boolean":false,"list":[46,null,46.5],"struct":{"left":46,"right":"\u0001\u001f"},"none":null}
+{"row":47,"text":"long UTF-8 value beyond twelve bytes","integer":-81,"number":5.875,"boolean":true,"list":[47,null,47.5],"struct":{"left":47,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":48,"text":"","integer":-80,"number":6.0,"boolean":false,"list":[],"struct":{"left":48,"right":""},"none":null}
+{"row":49,"text":null,"integer":-79,"number":6.125,"boolean":true,"list":[49,null,49.5],"struct":null,"none":null}
+{"row":50,"text":"é","integer":-78,"number":6.25,"boolean":null,"list":[50,null,50.5],"struct":{"left":50,"right":"é"},"none":null}
+{"row":51,"text":"\u6c49\u5b57","integer":-77,"number":6.375,"boolean":true,"list":[],"struct":{"left":51,"right":"\u6c49\u5b57"},"none":null}
+{"row":52,"integer":-76,"number":-0.0,"boolean":false,"list":[52,null,52.5],"struct":{"left":52,"right":"  "},"none":null}
+{"row":53,"text":"Greek \u03b1\u03b2","integer":-75,"number":6.625,"boolean":true,"list":[53,null,53.5],"struct":{"left":53,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":54,"text":"\u0001\u001f","integer":-74,"number":6.75,"boolean":false,"list":[],"struct":{"left":54,"right":"\u0001\u001f"},"none":null}
+{"row":55,"text":"long UTF-8 value beyond twelve bytes","integer":null,"number":6.875,"boolean":null,"list":[55,null,55.5],"struct":{"left":55,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":56,"text":null,"integer":-72,"number":7.0,"boolean":false,"list":[56,null,56.5],"struct":{"left":56,"right":""},"none":null}
+{"row":57,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-71,"number":7.125,"boolean":true,"list":[],"struct":{"left":57,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":58,"text":"é","integer":-70,"number":7.25,"boolean":false,"list":[58,null,58.5],"struct":{"left":58,"right":"é"},"none":null}
+{"row":59,"text":"\u6c49\u5b57","integer":-69,"number":7.375,"boolean":true,"list":null,"struct":{"left":59,"right":"\u6c49\u5b57"},"none":null}
+{"row":60,"text":"  ","integer":-68,"number":7.5,"boolean":null,"list":[],"struct":{"left":60,"right":"  "},"none":null}
+{"row":61,"text":"Greek \u03b1\u03b2","integer":-67,"number":7.625,"boolean":true,"list":[61,null,61.5],"struct":{"left":61,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":62,"text":"\u0001\u001f","integer":-66,"number":7.75,"boolean":false,"list":[62,null,62.5],"struct":{"left":62},"none":null}
+
+{"row":63,"text":null,"integer":-65,"number":7.875,"boolean":true,"list":[],"struct":{"left":63,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":64,"text":"","integer":-64,"number":8.0,"boolean":false,"list":[64,null,64.5],"struct":{"left":64,"right":""},"none":null}
+{"row":65,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-63,"number":-0.0,"boolean":null,"list":[65,null,65.5],"struct":{"left":65,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":66,"text":"é","integer":null,"number":8.25,"boolean":false,"list":[],"struct":{"left":66,"right":"é"},"none":null}
+{"row":67,"text":"\u6c49\u5b57","integer":-61,"number":8.375,"boolean":true,"list":[67,null,67.5],"struct":{"left":67,"right":"\u6c49\u5b57"},"none":null}
+{"row":68,"text":"  ","integer":-60,"number":8.5,"boolean":false,"list":[68,null,68.5],"struct":{"left":68,"right":"  "},"none":null}
+{"row":69,"integer":-59,"number":8.625,"boolean":true,"list":[],"struct":{"left":69,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":70,"text":null,"integer":-58,"number":8.75,"boolean":null,"list":[70,null,70.5],"struct":{"left":70,"right":"\u0001\u001f"},"none":null}
+{"row":71,"text":"long UTF-8 value beyond twelve bytes","integer":-57,"number":8.875,"boolean":true,"list":[71,null,71.5],"struct":{"left":71,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":72,"text":"","integer":-56,"number":9.0,"boolean":false,"list":[],"struct":null,"none":null}
+{"row":73,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-55,"number":9.125,"boolean":true,"list":[73,null,73.5],"struct":{"left":73,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":74,"text":"é","integer":-54,"number":9.25,"boolean":false,"list":[74,null,74.5],"struct":{"left":74,"right":"é"},"none":null}
+{"row":75,"text":"\u6c49\u5b57","integer":-53,"number":9.375,"boolean":null,"list":[],"struct":{"left":75,"right":"\u6c49\u5b57"},"none":null}
+{"row":76,"text":"  ","integer":-52,"number":9.5,"boolean":false,"list":[76,null,76.5],"struct":{"left":76,"right":"  "},"none":null}
+{"row":77,"text":null,"integer":null,"number":9.625,"boolean":true,"list":[77,null,77.5],"struct":{"left":77,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":78,"text":"\u0001\u001f","integer":-50,"number":-0.0,"boolean":false,"list":null,"struct":{"left":78,"right":"\u0001\u001f"},"none":null}
+{"row":79,"text":"long UTF-8 value beyond twelve bytes","integer":-49,"number":9.875,"boolean":true,"list":[79,null,79.5],"struct":{"left":79,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":80,"text":"","integer":-48,"number":10.0,"boolean":null,"list":[80,null,80.5],"struct":{"left":80,"right":""},"none":null}
+{"row":81,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-47,"number":10.125,"boolean":true,"list":[],"struct":{"left":81,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":82,"text":"é","integer":-46,"number":10.25,"boolean":false,"list":[82,null,82.5],"struct":{"left":82,"right":"é"},"none":null}
+{"row":83,"text":"\u6c49\u5b57","integer":-45,"number":10.375,"boolean":true,"list":[83,null,83.5],"struct":{"left":83,"right":"\u6c49\u5b57"},"none":null}
+{"row":84,"text":null,"integer":-44,"number":10.5,"boolean":false,"list":[],"struct":{"left":84,"right":"  "},"none":null}
+{"row":85,"text":"Greek \u03b1\u03b2","integer":-43,"number":10.625,"boolean":null,"list":[85,null,85.5],"struct":{"left":85,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":86,"integer":-42,"number":10.75,"boolean":false,"list":[86,null,86.5],"struct":{"left":86,"right":"\u0001\u001f"},"none":null}
+{"row":87,"text":"long UTF-8 value beyond twelve bytes","integer":-41,"number":10.875,"boolean":true,"list":[],"struct":{"left":87,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":88,"text":"","integer":null,"number":11.0,"boolean":false,"list":[88,null,88.5],"struct":{"left":88,"right":""},"none":null}
+{"row":89,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-39,"number":11.125,"boolean":true,"list":[89,null,89.5],"struct":{"left":89,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":90,"text":"é","integer":-38,"number":11.25,"boolean":null,"list":[],"struct":{"left":90,"right":"é"},"none":null}
+{"row":91,"text":null,"integer":-37,"number":-0.0,"boolean":true,"list":[91,null,91.5],"struct":{"left":91},"none":null}
+{"row":92,"text":"  ","integer":-36,"number":11.5,"boolean":false,"list":[92,null,92.5],"struct":{"left":92,"right":"  "},"none":null}
+{"row":93,"text":"Greek \u03b1\u03b2","integer":-35,"number":11.625,"boolean":true,"list":[],"struct":{"left":93,"right":"Greek \u03b1\u03b2"},"none":null}
+
+{"row":94,"text":"\u0001\u001f","integer":-34,"number":11.75,"boolean":false,"list":[94,null,94.5],"struct":{"left":94,"right":"\u0001\u001f"},"none":null}
+{"row":95,"text":"long UTF-8 value beyond twelve bytes","integer":-33,"number":11.875,"boolean":null,"list":[95,null,95.5],"struct":null,"none":null}
+{"row":96,"text":"","integer":-32,"number":12.0,"boolean":false,"list":[],"struct":{"left":96,"right":""},"none":null}
+{"row":97,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-31,"number":12.125,"boolean":true,"list":null,"struct":{"left":97,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":98,"text":null,"integer":-30,"number":12.25,"boolean":false,"list":[98,null,98.5],"struct":{"left":98,"right":"é"},"none":null}
+{"row":99,"text":"\u6c49\u5b57","integer":null,"number":12.375,"boolean":true,"list":[],"struct":{"left":99,"right":"\u6c49\u5b57"},"none":null}
+{"row":100,"text":"  ","integer":-28,"number":12.5,"boolean":null,"list":[100,null,100.5],"struct":{"left":100,"right":"  "},"none":null}
+{"row":101,"text":"Greek \u03b1\u03b2","integer":-27,"number":12.625,"boolean":true,"list":[101,null,101.5],"struct":{"left":101,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":102,"text":"\u0001\u001f","integer":-26,"number":12.75,"boolean":false,"list":[],"struct":{"left":102,"right":"\u0001\u001f"},"none":null}
+{"row":103,"integer":-25,"number":12.875,"boolean":true,"list":[103,null,103.5],"struct":{"left":103,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":104,"text":"","integer":-24,"number":-0.0,"boolean":false,"list":[104,null,104.5],"struct":{"left":104,"right":""},"none":null}
+{"row":105,"text":null,"integer":-23,"number":13.125,"boolean":null,"list":[],"struct":{"left":105,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":106,"text":"é","integer":-22,"number":13.25,"boolean":false,"list":[106,null,106.5],"struct":{"left":106,"right":"é"},"none":null}
+{"row":107,"text":"\u6c49\u5b57","integer":-21,"number":13.375,"boolean":true,"list":[107,null,107.5],"struct":{"left":107,"right":"\u6c49\u5b57"},"none":null}
+{"row":108,"text":"  ","integer":-20,"number":13.5,"boolean":false,"list":[],"struct":{"left":108,"right":"  "},"none":null}
+{"row":109,"text":"Greek \u03b1\u03b2","integer":-19,"number":13.625,"boolean":true,"list":[109,null,109.5],"struct":{"left":109,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":110,"text":"\u0001\u001f","integer":null,"number":13.75,"boolean":null,"list":[110,null,110.5],"struct":{"left":110,"right":"\u0001\u001f"},"none":null}
+{"row":111,"text":"long UTF-8 value beyond twelve bytes","integer":-17,"number":13.875,"boolean":true,"list":[],"struct":{"left":111,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":112,"text":null,"integer":-16,"number":14.0,"boolean":false,"list":[112,null,112.5],"struct":{"left":112,"right":""},"none":null}
+{"row":113,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":-15,"number":14.125,"boolean":true,"list":[113,null,113.5],"struct":{"left":113,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":114,"text":"é","integer":-14,"number":14.25,"boolean":false,"list":[],"struct":{"left":114,"right":"é"},"none":null}
+{"row":115,"text":"\u6c49\u5b57","integer":-13,"number":14.375,"boolean":null,"list":[115,null,115.5],"struct":{"left":115,"right":"\u6c49\u5b57"},"none":null}
+{"row":116,"text":"  ","integer":-12,"number":14.5,"boolean":false,"list":null,"struct":{"left":116,"right":"  "},"none":null}
+{"row":117,"text":"Greek \u03b1\u03b2","integer":-11,"number":-0.0,"boolean":true,"list":[],"struct":{"left":117,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":118,"text":"\u0001\u001f","integer":-10,"number":14.75,"boolean":false,"list":[118,null,118.5],"struct":null,"none":null}
+{"row":119,"text":null,"integer":-9,"number":14.875,"boolean":true,"list":[119,null,119.5],"struct":{"left":119,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":120,"integer":-8,"number":15.0,"boolean":null,"list":[],"struct":{"left":120},"none":null}
+{"row":121,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":null,"number":15.125,"boolean":true,"list":[121,null,121.5],"struct":{"left":121,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":122,"text":"é","integer":-6,"number":15.25,"boolean":false,"list":[122,null,122.5],"struct":{"left":122,"right":"é"},"none":null}
+{"row":123,"text":"\u6c49\u5b57","integer":-5,"number":15.375,"boolean":true,"list":[],"struct":{"left":123,"right":"\u6c49\u5b57"},"none":null}
+{"row":124,"text":"  ","integer":-4,"number":15.5,"boolean":false,"list":[124,null,124.5],"struct":{"left":124,"right":"  "},"none":null}
+
+{"row":125,"text":"Greek \u03b1\u03b2","integer":-3,"number":15.625,"boolean":null,"list":[125,null,125.5],"struct":{"left":125,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":126,"text":null,"integer":-2,"number":15.75,"boolean":false,"list":[],"struct":{"left":126,"right":"\u0001\u001f"},"none":null}
+{"row":127,"text":"long UTF-8 value beyond twelve bytes","integer":-1,"number":15.875,"boolean":true,"list":[127,null,127.5],"struct":{"left":127,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":128,"text":"","integer":0,"number":16.0,"boolean":false,"list":[128,null,128.5],"struct":{"left":128,"right":""},"none":null}
+{"row":129,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":1,"number":16.125,"boolean":true,"list":[],"struct":{"left":129,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":130,"text":"é","integer":2,"number":-0.0,"boolean":null,"list":[130,null,130.5],"struct":{"left":130,"right":"é"},"none":null}
+{"row":131,"text":"\u6c49\u5b57","integer":3,"number":16.375,"boolean":true,"list":[131,null,131.5],"struct":{"left":131,"right":"\u6c49\u5b57"},"none":null}
+{"row":132,"text":"  ","integer":null,"number":16.5,"boolean":false,"list":[],"struct":{"left":132,"right":"  "},"none":null}
+{"row":133,"text":null,"integer":5,"number":16.625,"boolean":true,"list":[133,null,133.5],"struct":{"left":133,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":134,"text":"\u0001\u001f","integer":6,"number":16.75,"boolean":false,"list":[134,null,134.5],"struct":{"left":134,"right":"\u0001\u001f"},"none":null}
+{"row":135,"text":"long UTF-8 value beyond twelve bytes","integer":7,"number":16.875,"boolean":null,"list":null,"struct":{"left":135,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":136,"text":"","integer":8,"number":17.0,"boolean":false,"list":[136,null,136.5],"struct":{"left":136,"right":""},"none":null}
+{"row":137,"integer":9,"number":17.125,"boolean":true,"list":[137,null,137.5],"struct":{"left":137,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":138,"text":"é","integer":10,"number":17.25,"boolean":false,"list":[],"struct":{"left":138,"right":"é"},"none":null}
+{"row":139,"text":"\u6c49\u5b57","integer":11,"number":17.375,"boolean":true,"list":[139,null,139.5],"struct":{"left":139,"right":"\u6c49\u5b57"},"none":null}
+{"row":140,"text":null,"integer":12,"number":17.5,"boolean":null,"list":[140,null,140.5],"struct":{"left":140,"right":"  "},"none":null}
+{"row":141,"text":"Greek \u03b1\u03b2","integer":13,"number":17.625,"boolean":true,"list":[],"struct":null,"none":null}
+{"row":142,"text":"\u0001\u001f","integer":14,"number":17.75,"boolean":false,"list":[142,null,142.5],"struct":{"left":142,"right":"\u0001\u001f"},"none":null}
+{"row":143,"text":"long UTF-8 value beyond twelve bytes","integer":null,"number":-0.0,"boolean":true,"list":[143,null,143.5],"struct":{"left":143,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":144,"text":"","integer":16,"number":18.0,"boolean":false,"list":[],"struct":{"left":144,"right":""},"none":null}
+{"row":145,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":17,"number":18.125,"boolean":null,"list":[145,null,145.5],"struct":{"left":145,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":146,"text":"é","integer":18,"number":18.25,"boolean":false,"list":[146,null,146.5],"struct":{"left":146,"right":"é"},"none":null}
+{"row":147,"text":null,"integer":19,"number":18.375,"boolean":true,"list":[],"struct":{"left":147,"right":"\u6c49\u5b57"},"none":null}
+{"row":148,"text":"  ","integer":20,"number":18.5,"boolean":false,"list":[148,null,148.5],"struct":{"left":148,"right":"  "},"none":null}
+{"row":149,"text":"Greek \u03b1\u03b2","integer":21,"number":18.625,"boolean":true,"list":[149,null,149.5],"struct":{"left":149},"none":null}
+{"row":150,"text":"\u0001\u001f","integer":22,"number":18.75,"boolean":null,"list":[],"struct":{"left":150,"right":"\u0001\u001f"},"none":null}
+{"row":151,"text":"long UTF-8 value beyond twelve bytes","integer":23,"number":18.875,"boolean":true,"list":[151,null,151.5],"struct":{"left":151,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":152,"text":"","integer":24,"number":19.0,"boolean":false,"list":[152,null,152.5],"struct":{"left":152,"right":""},"none":null}
+{"row":153,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":25,"number":19.125,"boolean":true,"list":[],"struct":{"left":153,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":154,"integer":null,"number":19.25,"boolean":false,"list":null,"struct":{"left":154,"right":"é"},"none":null}
+{"row":155,"text":"\u6c49\u5b57","integer":27,"number":19.375,"boolean":null,"list":[155,null,155.5],"struct":{"left":155,"right":"\u6c49\u5b57"},"none":null}
+
+{"row":156,"text":"  ","integer":28,"number":-0.0,"boolean":false,"list":[],"struct":{"left":156,"right":"  "},"none":null}
+{"row":157,"text":"Greek \u03b1\u03b2","integer":29,"number":19.625,"boolean":true,"list":[157,null,157.5],"struct":{"left":157,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":158,"text":"\u0001\u001f","integer":30,"number":19.75,"boolean":false,"list":[158,null,158.5],"struct":{"left":158,"right":"\u0001\u001f"},"none":null}
+{"row":159,"text":"long UTF-8 value beyond twelve bytes","integer":31,"number":19.875,"boolean":true,"list":[],"struct":{"left":159,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":160,"text":"","integer":32,"number":20.0,"boolean":null,"list":[160,null,160.5],"struct":{"left":160,"right":""},"none":null}
+{"row":161,"text":null,"integer":33,"number":20.125,"boolean":true,"list":[161,null,161.5],"struct":{"left":161,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":162,"text":"é","integer":34,"number":20.25,"boolean":false,"list":[],"struct":{"left":162,"right":"é"},"none":null}
+{"row":163,"text":"\u6c49\u5b57","integer":35,"number":20.375,"boolean":true,"list":[163,null,163.5],"struct":{"left":163,"right":"\u6c49\u5b57"},"none":null}
+{"row":164,"text":"  ","integer":36,"number":20.5,"boolean":false,"list":[164,null,164.5],"struct":null,"none":null}
+{"row":165,"text":"Greek \u03b1\u03b2","integer":null,"number":20.625,"boolean":null,"list":[],"struct":{"left":165,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":166,"text":"\u0001\u001f","integer":38,"number":20.75,"boolean":false,"list":[166,null,166.5],"struct":{"left":166,"right":"\u0001\u001f"},"none":null}
+{"row":167,"text":"long UTF-8 value beyond twelve bytes","integer":39,"number":20.875,"boolean":true,"list":[167,null,167.5],"struct":{"left":167,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":168,"text":null,"integer":40,"number":21.0,"boolean":false,"list":[],"struct":{"left":168,"right":""},"none":null}
+{"row":169,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":41,"number":-0.0,"boolean":true,"list":[169,null,169.5],"struct":{"left":169,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":170,"text":"é","integer":42,"number":21.25,"boolean":null,"list":[170,null,170.5],"struct":{"left":170,"right":"é"},"none":null}
+{"row":171,"integer":43,"number":21.375,"boolean":true,"list":[],"struct":{"left":171,"right":"\u6c49\u5b57"},"none":null}
+{"row":172,"text":"  ","integer":44,"number":21.5,"boolean":false,"list":[172,null,172.5],"struct":{"left":172,"right":"  "},"none":null}
+{"row":173,"text":"Greek \u03b1\u03b2","integer":45,"number":21.625,"boolean":true,"list":null,"struct":{"left":173,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":174,"text":"\u0001\u001f","integer":46,"number":21.75,"boolean":false,"list":[],"struct":{"left":174,"right":"\u0001\u001f"},"none":null}
+{"row":175,"text":null,"integer":47,"number":21.875,"boolean":null,"list":[175,null,175.5],"struct":{"left":175,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":176,"text":"","integer":null,"number":22.0,"boolean":false,"list":[176,null,176.5],"struct":{"left":176,"right":""},"none":null}
+{"row":177,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":49,"number":22.125,"boolean":true,"list":[],"struct":{"left":177,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":178,"text":"é","integer":50,"number":22.25,"boolean":false,"list":[178,null,178.5],"struct":{"left":178},"none":null}
+{"row":179,"text":"\u6c49\u5b57","integer":51,"number":22.375,"boolean":true,"list":[179,null,179.5],"struct":{"left":179,"right":"\u6c49\u5b57"},"none":null}
+{"row":180,"text":"  ","integer":52,"number":22.5,"boolean":null,"list":[],"struct":{"left":180,"right":"  "},"none":null}
+{"row":181,"text":"Greek \u03b1\u03b2","integer":53,"number":22.625,"boolean":true,"list":[181,null,181.5],"struct":{"left":181,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":182,"text":null,"integer":54,"number":-0.0,"boolean":false,"list":[182,null,182.5],"struct":{"left":182,"right":"\u0001\u001f"},"none":null}
+{"row":183,"text":"long UTF-8 value beyond twelve bytes","integer":55,"number":22.875,"boolean":true,"list":[],"struct":{"left":183,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":184,"text":"","integer":56,"number":23.0,"boolean":false,"list":[184,null,184.5],"struct":{"left":184,"right":""},"none":null}
+{"row":185,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":57,"number":23.125,"boolean":null,"list":[185,null,185.5],"struct":{"left":185,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":186,"text":"é","integer":58,"number":23.25,"boolean":false,"list":[],"struct":{"left":186,"right":"é"},"none":null}
+
+{"row":187,"text":"\u6c49\u5b57","integer":null,"number":23.375,"boolean":true,"list":[187,null,187.5],"struct":null,"none":null}
+{"row":188,"integer":60,"number":23.5,"boolean":false,"list":[188,null,188.5],"struct":{"left":188,"right":"  "},"none":null}
+{"row":189,"text":null,"integer":61,"number":23.625,"boolean":true,"list":[],"struct":{"left":189,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":190,"text":"\u0001\u001f","integer":62,"number":23.75,"boolean":null,"list":[190,null,190.5],"struct":{"left":190,"right":"\u0001\u001f"},"none":null}
+{"row":191,"text":"long UTF-8 value beyond twelve bytes","integer":63,"number":23.875,"boolean":true,"list":[191,null,191.5],"struct":{"left":191,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":192,"text":"","integer":64,"number":24.0,"boolean":false,"list":null,"struct":{"left":192,"right":""},"none":null}
+{"row":193,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":65,"number":24.125,"boolean":true,"list":[193,null,193.5],"struct":{"left":193,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":194,"text":"é","integer":66,"number":24.25,"boolean":false,"list":[194,null,194.5],"struct":{"left":194,"right":"é"},"none":null}
+{"row":195,"text":"\u6c49\u5b57","integer":67,"number":-0.0,"boolean":null,"list":[],"struct":{"left":195,"right":"\u6c49\u5b57"},"none":null}
+{"row":196,"text":null,"integer":68,"number":24.5,"boolean":false,"list":[196,null,196.5],"struct":{"left":196,"right":"  "},"none":null}
+{"row":197,"text":"Greek \u03b1\u03b2","integer":69,"number":24.625,"boolean":true,"list":[197,null,197.5],"struct":{"left":197,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":198,"text":"\u0001\u001f","integer":null,"number":24.75,"boolean":false,"list":[],"struct":{"left":198,"right":"\u0001\u001f"},"none":null}
+{"row":199,"text":"long UTF-8 value beyond twelve bytes","integer":71,"number":24.875,"boolean":true,"list":[199,null,199.5],"struct":{"left":199,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":200,"text":"","integer":72,"number":25.0,"boolean":null,"list":[200,null,200.5],"struct":{"left":200,"right":""},"none":null}
+{"row":201,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":73,"number":25.125,"boolean":true,"list":[],"struct":{"left":201,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":202,"text":"é","integer":74,"number":25.25,"boolean":false,"list":[202,null,202.5],"struct":{"left":202,"right":"é"},"none":null}
+{"row":203,"text":null,"integer":75,"number":25.375,"boolean":true,"list":[203,null,203.5],"struct":{"left":203,"right":"\u6c49\u5b57"},"none":null}
+{"row":204,"text":"  ","integer":76,"number":25.5,"boolean":false,"list":[],"struct":{"left":204,"right":"  "},"none":null}
+{"row":205,"integer":77,"number":25.625,"boolean":null,"list":[205,null,205.5],"struct":{"left":205,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":206,"text":"\u0001\u001f","integer":78,"number":25.75,"boolean":false,"list":[206,null,206.5],"struct":{"left":206,"right":"\u0001\u001f"},"none":null}
+{"row":207,"text":"long UTF-8 value beyond twelve bytes","integer":79,"number":25.875,"boolean":true,"list":[],"struct":{"left":207},"none":null}
+{"row":208,"text":"","integer":80,"number":-0.0,"boolean":false,"list":[208,null,208.5],"struct":{"left":208,"right":""},"none":null}
+{"row":209,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":null,"number":26.125,"boolean":true,"list":[209,null,209.5],"struct":{"left":209,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":210,"text":null,"integer":82,"number":26.25,"boolean":null,"list":[],"struct":null,"none":null}
+{"row":211,"text":"\u6c49\u5b57","integer":83,"number":26.375,"boolean":true,"list":null,"struct":{"left":211,"right":"\u6c49\u5b57"},"none":null}
+{"row":212,"text":"  ","integer":84,"number":26.5,"boolean":false,"list":[212,null,212.5],"struct":{"left":212,"right":"  "},"none":null}
+{"row":213,"text":"Greek \u03b1\u03b2","integer":85,"number":26.625,"boolean":true,"list":[],"struct":{"left":213,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":214,"text":"\u0001\u001f","integer":86,"number":26.75,"boolean":false,"list":[214,null,214.5],"struct":{"left":214,"right":"\u0001\u001f"},"none":null}
+{"row":215,"text":"long UTF-8 value beyond twelve bytes","integer":87,"number":26.875,"boolean":null,"list":[215,null,215.5],"struct":{"left":215,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":216,"text":"","integer":88,"number":27.0,"boolean":false,"list":[],"struct":{"left":216,"right":""},"none":null}
+{"row":217,"text":null,"integer":89,"number":27.125,"boolean":true,"list":[217,null,217.5],"struct":{"left":217,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+
+{"row":218,"text":"é","integer":90,"number":27.25,"boolean":false,"list":[218,null,218.5],"struct":{"left":218,"right":"é"},"none":null}
+{"row":219,"text":"\u6c49\u5b57","integer":91,"number":27.375,"boolean":true,"list":[],"struct":{"left":219,"right":"\u6c49\u5b57"},"none":null}
+{"row":220,"text":"  ","integer":null,"number":27.5,"boolean":null,"list":[220,null,220.5],"struct":{"left":220,"right":"  "},"none":null}
+{"row":221,"text":"Greek \u03b1\u03b2","integer":93,"number":-0.0,"boolean":true,"list":[221,null,221.5],"struct":{"left":221,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":222,"integer":94,"number":27.75,"boolean":false,"list":[],"struct":{"left":222,"right":"\u0001\u001f"},"none":null}
+{"row":223,"text":"long UTF-8 value beyond twelve bytes","integer":95,"number":27.875,"boolean":true,"list":[223,null,223.5],"struct":{"left":223,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":224,"text":null,"integer":96,"number":28.0,"boolean":false,"list":[224,null,224.5],"struct":{"left":224,"right":""},"none":null}
+{"row":225,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":97,"number":28.125,"boolean":null,"list":[],"struct":{"left":225,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":226,"text":"é","integer":98,"number":28.25,"boolean":false,"list":[226,null,226.5],"struct":{"left":226,"right":"é"},"none":null}
+{"row":227,"text":"\u6c49\u5b57","integer":99,"number":28.375,"boolean":true,"list":[227,null,227.5],"struct":{"left":227,"right":"\u6c49\u5b57"},"none":null}
+{"row":228,"text":"  ","integer":100,"number":28.5,"boolean":false,"list":[],"struct":{"left":228,"right":"  "},"none":null}
+{"row":229,"text":"Greek \u03b1\u03b2","integer":101,"number":28.625,"boolean":true,"list":[229,null,229.5],"struct":{"left":229,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":230,"text":"\u0001\u001f","integer":102,"number":28.75,"boolean":null,"list":null,"struct":{"left":230,"right":"\u0001\u001f"},"none":null}
+{"row":231,"text":null,"integer":null,"number":28.875,"boolean":true,"list":[],"struct":{"left":231,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":232,"text":"","integer":104,"number":29.0,"boolean":false,"list":[232,null,232.5],"struct":{"left":232,"right":""},"none":null}
+{"row":233,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":105,"number":29.125,"boolean":true,"list":[233,null,233.5],"struct":null,"none":null}
+{"row":234,"text":"é","integer":106,"number":-0.0,"boolean":false,"list":[],"struct":{"left":234,"right":"é"},"none":null}
+{"row":235,"text":"\u6c49\u5b57","integer":107,"number":29.375,"boolean":null,"list":[235,null,235.5],"struct":{"left":235,"right":"\u6c49\u5b57"},"none":null}
+{"row":236,"text":"  ","integer":108,"number":29.5,"boolean":false,"list":[236,null,236.5],"struct":{"left":236},"none":null}
+{"row":237,"text":"Greek \u03b1\u03b2","integer":109,"number":29.625,"boolean":true,"list":[],"struct":{"left":237,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":238,"text":null,"integer":110,"number":29.75,"boolean":false,"list":[238,null,238.5],"struct":{"left":238,"right":"\u0001\u001f"},"none":null}
+{"row":239,"integer":111,"number":29.875,"boolean":true,"list":[239,null,239.5],"struct":{"left":239,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":240,"text":"","integer":112,"number":30.0,"boolean":null,"list":[],"struct":{"left":240,"right":""},"none":null}
+{"row":241,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":113,"number":30.125,"boolean":true,"list":[241,null,241.5],"struct":{"left":241,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":242,"text":"é","integer":null,"number":30.25,"boolean":false,"list":[242,null,242.5],"struct":{"left":242,"right":"é"},"none":null}
+{"row":243,"text":"\u6c49\u5b57","integer":115,"number":30.375,"boolean":true,"list":[],"struct":{"left":243,"right":"\u6c49\u5b57"},"none":null}
+{"row":244,"text":"  ","integer":116,"number":30.5,"boolean":false,"list":[244,null,244.5],"struct":{"left":244,"right":"  "},"none":null}
+{"row":245,"text":null,"integer":117,"number":30.625,"boolean":null,"list":[245,null,245.5],"struct":{"left":245,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":246,"text":"\u0001\u001f","integer":118,"number":30.75,"boolean":false,"list":[],"struct":{"left":246,"right":"\u0001\u001f"},"none":null}
+{"row":247,"text":"long UTF-8 value beyond twelve bytes","integer":119,"number":-0.0,"boolean":true,"list":[247,null,247.5],"struct":{"left":247,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":248,"text":"","integer":120,"number":31.0,"boolean":false,"list":[248,null,248.5],"struct":{"left":248,"right":""},"none":null}
+
+{"row":249,"text":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/","integer":121,"number":31.125,"boolean":true,"list":null,"struct":{"left":249,"right":"\u00e9\ud83d\ude00\n\r\t\b\f\u0000\"\\/"},"none":null}
+{"row":250,"text":"é","integer":122,"number":31.25,"boolean":null,"list":[250,null,250.5],"struct":{"left":250,"right":"é"},"none":null}
+{"row":251,"text":"\u6c49\u5b57","integer":123,"number":31.375,"boolean":true,"list":[251,null,251.5],"struct":{"left":251,"right":"\u6c49\u5b57"},"none":null}
+{"row":252,"text":null,"integer":124,"number":31.5,"boolean":false,"list":[],"struct":{"left":252,"right":"  "},"none":null}
+{"row":253,"text":"Greek \u03b1\u03b2","integer":null,"number":31.625,"boolean":true,"list":[253,null,253.5],"struct":{"left":253,"right":"Greek \u03b1\u03b2"},"none":null}
+{"row":254,"text":"\u0001\u001f","integer":126,"number":31.75,"boolean":false,"list":[254,null,254.5],"struct":{"left":254,"right":"\u0001\u001f"},"none":null}
+{"row":255,"text":"long UTF-8 value beyond twelve bytes","integer":127,"number":31.875,"boolean":null,"list":[],"struct":{"left":255,"right":"long UTF-8 value beyond twelve bytes"},"none":null}
+{"row":256,"integer":128,"number":32.0,"boolean":false,"list":[256,null,256.5],"struct":null,"none":null}

@@ -143,6 +143,13 @@ Float64 accepts the standard parser's values, including `nan`, and only explicit
 `write_csv(frame, path)` writes the inverse format: reading it back with
 `CsvSchema.of(frame)` reproduces the frame exactly.
 
+## JSON and NDJSON
+
+`read_ndjson` and `scan_ndjson` read newline-delimited objects with sampled
+schema inference or an explicit schema. `read_json` reads arrays of objects;
+`write_ndjson` and `write_json` handle nested columns and typed wire forms.
+See [JSON and NDJSON](docs/json.md) for conversion and round-trip rules.
+
 ## Parquet reading and writing
 
 `read_parquet(path)` reads a local Parquet file; `columns=[...]` selects

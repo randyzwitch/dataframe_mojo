@@ -17,6 +17,7 @@ from .lazy import (
     scan_csv,
     scan_parquet,
     scan_ipc,
+    scan_ndjson,
 )
 
 from .expr import (
@@ -101,3 +102,6 @@ from .wkb import GeometryBounds
 from .io.geojson import read_geojson, from_geojson
 
 from .io.shapefile import read_shapefile
+
+from .io.json import read_json, read_ndjson
+from .io.json_write import write_json, write_ndjson

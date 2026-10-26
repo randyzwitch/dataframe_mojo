@@ -37,6 +37,9 @@ from std.collections import Dict, Optional
 from std.memory import ArcPointer, bitcast
 from .io.csv_reader import _CsvBatches, _DecodeJob
 from .io.csv_types import _map_file
+from .io.json import read_ndjson, _options as _json_options
+from .io.json_batches import _NdjsonBatches
+from .io.json_parallel import _DecodeJob as _JsonDecodeJob
 from .io.parquet import _ParquetBatches
 from .io.ipc import _IpcBatches, _read_scan, _schema_frame as _ipc_schema_frame
 from .pipeline import (
@@ -201,6 +204,7 @@ comptime SCAN_PARQUET = 11
 # File IPC scan: offset remains the input slot; names2[0] is the row offset,
 # length is the row limit; flags hold mapped input and explicit projection.
 comptime SCAN_IPC = 44
+comptime SCAN_NDJSON = 45
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
@@ -280,6 +284,7 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var _executions: Optional[ArcPointer[Int]]
     var asof_tolerance: Optional[AnyValue]
     var source_failure: String
+    var json_schema: Optional[DataType]
 
     def _record_execution(self):
         if self._executions:
@@ -303,6 +308,7 @@ def _plan_node(
     right_keys: List[String] = List[String](),
     coalesce: Bool = True,
     source_failure: String = "",
+    json_schema: Optional[DataType] = None,
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -322,6 +328,7 @@ def _plan_node(
         Optional[ArcPointer[Int]](),
         Optional[AnyValue](),
         source_failure,
+        json_schema.copy(),
     )
 
 
@@ -1366,6 +1373,7 @@ def _bounded_batch(
 
 struct _StreamJob(Job):
     var decode: List[_DecodeJob]
+    var json_decode: List[_JsonDecodeJob]
     var frame: DataFrame
     var operations: List[PlanNode]
     var joins: ArcPointer[List[DataFrame]]
@@ -1414,6 +1422,7 @@ struct _StreamJob(Job):
         keys: List[String],
     ):
         self.decode = List[_DecodeJob]()
+        self.json_decode = List[_JsonDecodeJob]()
         self.frame = frame^
         self.operations = operations.copy()
         self.joins = joins.copy()
@@ -1464,6 +1473,9 @@ struct _StreamJob(Job):
         if len(self.decode):
             self.decode[0].run()
             self.frame = self.decode.pop().into_frame()
+        if len(self.json_decode):
+            self.json_decode[0].run()
+            self.frame = self.json_decode.pop().into_frame()
         if self.counting:
             self.counts = List[Int](length=2 * len(self.operations), fill=0)
             self.times = List[Int](length=len(self.operations) + 1, fill=0)
@@ -5010,6 +5022,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var csv = List[_CsvBatches]()
         var parquet = List[_ParquetBatches]()
         var ipc = List[_IpcBatches]()
+        var ndjson = List[_NdjsonBatches]()
         var input = DataFrame(List[Series](), height=0)
         if source.kind == SCAN_CSV:
             var mapping = _map_file(source.text)
@@ -5034,6 +5047,19 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 )
             parquet.append(
                 _ParquetBatches(source.text, source.names, groups, batch_size)
+            )
+        elif source.kind == SCAN_NDJSON:
+            source._record_execution()
+            ndjson.append(
+                _NdjsonBatches(
+                    source.text,
+                    source.json_schema,
+                    Int(source.names2[0]),
+                    source.flags[0],
+                    source.names,
+                    source.length,
+                    batch_size,
+                )
             )
         elif source.kind == SCAN_IPC:
             source._record_execution()
@@ -5226,7 +5252,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # ungrouped reduce sink run as a thread-owned pipeline (#538): each
         # worker takes morsels from a shared cursor and runs every step on
         # them; nothing is held, judged or merged on the main thread.
-        if piped and len(csv) == 0 and len(parquet) == 0 and len(ipc) == 0:
+        if (
+            piped
+            and len(csv) == 0
+            and len(parquet) == 0
+            and len(ipc) == 0
+            and len(ndjson) == 0
+        ):
             var began = Int(perf_counter_ns())
             var piped_counts = List[Int]()
             # A top-k's TOP_K node was appended to the operations for the
@@ -5371,7 +5403,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # those keep one a worker, as does a top-k (ClickBench q26 lost its
         # bound for a first round four times as long).
         var per_round = workers
-        if len(csv) == 0 and len(parquet) == 0 and len(ipc) == 0 and top < 0:
+        if (
+            len(csv) == 0
+            and len(parquet) == 0
+            and len(ipc) == 0
+            and len(ndjson) == 0
+            and top < 0
+        ):
             # Not for a top-k, whose bound tightens between rounds.
             per_round = 4 * workers
         # Batches held while undecided, to reduce in the next round once
@@ -5396,6 +5434,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             for _ in range(per_round if not ended else 0):
                 var frame = DataFrame(List[Series](), height=0)
                 var decode = List[_DecodeJob]()
+                var json_decode = List[_JsonDecodeJob]()
                 if len(csv):
                     var next = csv[0].next()
                     if not next:
@@ -5408,6 +5447,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         ended = True
                         break
                     frame = next.take()
+                elif len(ndjson):
+                    var next = ndjson[0].next()
+                    if not next:
+                        ended = True
+                        break
+                    json_decode.append(next.take())
                 elif len(ipc):
                     var next = ipc[0].next()
                     if not next:
@@ -5430,6 +5475,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     keys,
                 )
                 job.decode = decode^
+                job.json_decode = json_decode^
                 job.bits = acc.bits
                 job.split_groups = split_groups
                 job.counting = counting
@@ -5615,6 +5661,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 held = List[DataFrame]()
                 held_states = List[List[_StreamReduction]]()
         pool.release()
+        # NDJSON jobs borrow mapped addresses; retain the source through
+        # the final worker join, even after an early head or an error.
+        _ = ndjson^
         var result = Optional[DataFrame]()
         if collecting and len(acc.states) == 0:
             trace_path("lazy.collect_group_by")
@@ -5913,6 +5962,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 ignore_errors=scan.ignore_errors,
                 truncate_ragged_lines=scan.truncate_ragged_lines,
                 encoding=scan.encoding,
+            )
+        if node.kind == SCAN_NDJSON:
+            if not empty:
+                node._record_execution()
+            return read_ndjson(
+                node.text,
+                node.json_schema,
+                infer_schema_length=Int(node.names2[0]),
+                ignore_errors=node.flags[0],
+                n_rows=0 if empty else node.length,
+                batch_size=batch_size,
+                columns=node.names,
             )
         if node.kind == SCAN_IPC:
             if empty:
@@ -6398,6 +6459,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         h = _mix_list(h, node.right_keys)
         h = _mix(h, UInt64(1) if node.coalesce else UInt64(0))
         h = _mix_text(h, node.source_failure)
+        if node.json_schema:
+            h = _mix_text(h, node.json_schema.value().name())
         for e in node.exprs:
             h = _mix_expr(h, e)
         h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
@@ -6435,6 +6498,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             or x.coalesce != y.coalesce
             or x.source_failure != y.source_failure
             or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
+            or Bool(x.json_schema) != Bool(y.json_schema)
             or len(x.exprs) != len(y.exprs)
         ):
             return False
@@ -6446,6 +6510,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if x.asof_tolerance and String(x.asof_tolerance.value()) != String(
             y.asof_tolerance.value()
         ):
+            return False
+        if x.json_schema and x.json_schema.value() != y.json_schema.value():
             return False
         for k in range(len(x.exprs)):
             if not _same_expr(x.exprs[k], y.exprs[k]):
@@ -6531,7 +6597,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     ):
                         return True
                 seen.append(node.offset)
-            elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC]:
+            elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC, SCAN_NDJSON]:
                 if node.text in files:
                     return True
                 files.append(node.text)
@@ -8983,7 +9049,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 self._nodes[i] = replacement^
                 pushed = True
             elif (
-                scan.kind == SCAN_CSV
+                scan.kind in [SCAN_CSV, SCAN_NDJSON]
                 and node.offset == 0
                 and node.length >= 0
                 and (scan.length < 0 or scan.length > node.length)
@@ -9399,6 +9465,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SCAN CSV " + node.text
         elif node.kind == SCAN_PARQUET:
             label = "SCAN PARQUET " + node.text
+        elif node.kind == SCAN_NDJSON:
+            label = "SCAN NDJSON " + node.text
         elif node.kind == SCAN_IPC:
             label = "SCAN IPC " + node.text
         elif node.kind == HCONCAT:
@@ -9536,7 +9604,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     label += " [offset " + node.names2[0] + "]"
                 if node.length >= 0:
                     label += " [n_rows " + String(node.length) + "]"
-            if node.kind == SCAN_CSV and node.length >= 0:
+            if node.kind in [SCAN_CSV, SCAN_NDJSON] and node.length >= 0:
                 label += " [n_rows " + String(node.length) + "]"
         if streaming:
             if _is_scan(node.kind) or _stream_rows(node):
@@ -9967,7 +10035,7 @@ def _merge_copy_needs(
 
 
 def _is_scan(kind: Int) -> Bool:
-    return kind in [SCAN_FRAME, SCAN_CSV, SCAN_PARQUET, SCAN_IPC]
+    return kind in [SCAN_FRAME, SCAN_CSV, SCAN_PARQUET, SCAN_IPC, SCAN_NDJSON]
 
 
 def _set_members(node: PlanNode) -> List[List[String]]:
@@ -10731,6 +10799,36 @@ def _scan_options(node: PlanNode) raises -> _CsvScanOptions:
     options.try_parse_dates = node.flags[3]
     options.null_values = node.right_keys.copy()
     return options^
+
+
+def scan_ndjson(
+    path: String,
+    schema: Optional[DataType] = None,
+    *,
+    infer_schema_length: Int = 100,
+    ignore_errors: Bool = False,
+) raises -> LazyFrame:
+    """Defer NDJSON reading until collection or sampled schema discovery.
+
+    Projection and head push into the reader. Streaming parses bounded
+    row batches on the existing worker pool and preserves source order.
+    Schema inference and conversion rules match read_ndjson.
+    """
+    _json_options(schema, infer_schema_length, 65536)
+    return LazyFrame(
+        [
+            _plan_node(
+                SCAN_NDJSON,
+                text=path,
+                offset=0,
+                json_schema=schema,
+                names2=[String(infer_schema_length)],
+                flags=[ignore_errors],
+            )
+        ],
+        [DataFrame([])],
+        [Optional[CsvSchema]()],
+    )
 
 
 def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:

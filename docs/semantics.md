@@ -19,6 +19,11 @@ There is no implicit numeric promotion. Typed extraction raises on a mismatch.
 
 ## Nulls and access
 
+`DataType.NULL` is the logical type of an entirely null inferred JSON field.
+It carries no valid values, including inside List and Struct schemas; Arrow
+interchange uses the Arrow Null format. An explicit schema gives an all-null
+field another logical dtype when that type is known in advance.
+
 Validity is separate from payloads and stored as an LSB-first bitmap. A false
 validity bit denotes null, regardless of its payload. Constructors require a
 payload slot for every row, including null rows. Null payloads are never evaluated

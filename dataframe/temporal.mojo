@@ -319,18 +319,25 @@ def parse(text: String, dtype: DataType, format: String = "") raises -> Int64:
 
 
 def parse_in(
-    text: String, dtype: DataType, format: String, zone: TimeZone
+    text: String,
+    dtype: DataType,
+    format: String,
+    zone: TimeZone,
+    *,
+    year_digits: Int = 6,
 ) raises -> Int64:
     """Parse as `parse` does. Text with an offset is converted to UTC; for a
     zone-aware dtype, text without one is a wall-clock time in `zone`, and
     raises when that time is non-existent or ambiguous there."""
+    if year_digits < 4 or year_digits > 18:
+        raise Error("ISO year digit limit must be between 4 and 18")
     var seen = False
     var value: Int64
     try:
         if format.byte_length() > 0:
             value = _parse_format(text, dtype, format, seen)
         else:
-            value = _parse_iso(text, dtype, seen)
+            value = _parse_iso(text, dtype, seen, year_digits)
     except e:
         raise Error(
             "cannot parse '" + text + "' as " + dtype.name() + ": " + String(e)
@@ -360,17 +367,23 @@ def parse_prepared_in(
     ).value()
 
 
-def has_offset(text: String) -> Bool:
+def has_offset(
+    text: String, *, unit: String = "us", year_digits: Int = 6
+) -> Bool:
     """Whether ISO text for a datetime parses with a UTC offset or Z."""
     var seen = False
+    if year_digits < 4 or year_digits > 18:
+        return False
     try:
-        _ = _parse_iso(text, DataType.datetime("us"), seen)
+        _ = _parse_iso(text, DataType.datetime(unit), seen, year_digits)
     except:
         return False
     return seen
 
 
-def _parse_iso(text: String, dtype: DataType, mut seen: Bool) raises -> Int64:
+def _parse_iso(
+    text: String, dtype: DataType, mut seen: Bool, year_digits: Int = 6
+) raises -> Int64:
     var bytes = text.as_bytes()
     var pos = 0
     var parts = Parts(1970, 1, 1, 0, 0, 0, 0)
@@ -378,7 +391,7 @@ def _parse_iso(text: String, dtype: DataType, mut seen: Bool) raises -> Int64:
         var negative = pos < len(bytes) and bytes[pos] == 45
         if negative or (pos < len(bytes) and bytes[pos] == 43):
             pos += 1
-        parts.year = _digits(text, pos, 4, 6) * (
+        parts.year = _digits(text, pos, 4, year_digits) * (
             Int64(-1) if negative else Int64(1)
         )
         _expect(text, pos, 45)

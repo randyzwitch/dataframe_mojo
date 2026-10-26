@@ -77,6 +77,11 @@ def main() raises:
         "ipc-written-empty.arrow",
         "tests/support/ipc_oracle.py",
     )
+    var json_count = _consume_outputs(
+        String(args[1]),
+        "json-written-oracle.ndjson",
+        "tests/support/json_oracle.py",
+    )
     run_command(["python3", "tests/support/arrow_oracle.py", "--check"])
     var library = getenv("DATAFRAME_PARQUET_LIBRARY")
     if not library:
@@ -101,4 +106,7 @@ def main() raises:
         "spatial and",
         ipc_count,
         "IPC contract run directories",
+        "and",
+        json_count,
+        "JSON contract run directories",
     )

@@ -1,0 +1,14 @@
+{
+  "polars": "2.0.0",
+  "rows": 257,
+  "schema": {
+    "row": "Int64",
+    "text": "String",
+    "integer": "Int64",
+    "number": "Float64",
+    "boolean": "Boolean",
+    "list": "List(Float64)",
+    "struct": "Struct({'left': Int64, 'right': String})",
+    "none": "Null"
+  }
+}
