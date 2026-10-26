@@ -157,6 +157,7 @@ from .expr import (
     STR_DECODE,
     STR_TO_INTEGER,
     STR_SPLIT_FIELDS,
+    STR_NORMALIZE,
     is_nested_op,
     IMPLODE,
     STRUCT_PACK,
@@ -254,6 +255,8 @@ struct BoundExpr(Copyable):
 
 
 def _text_function_name(op: Int) -> String:
+    if op == STR_NORMALIZE:
+        return "str.normalize"
     if op == STR_TITLECASE:
         return "str.to_titlecase"
     if op == STR_STRIP_PREFIX:
@@ -1087,6 +1090,10 @@ def _text_function_dtype(node: Node) raises -> DataType:
     """The result dtype of a text_functions.mojo operation, after checking
     its arguments."""
     var op = node.op
+    if op == STR_NORMALIZE:
+        if node.text not in ["NFC", "NFD", "NFKC", "NFKD"]:
+            raise Error("str.normalize form must be NFC, NFD, NFKC or NFKD")
+        return DataType.STRING
     if op == STR_FIND or op == STR_COUNT_MATCHES:
         return DataType.UINT32
     if op == STR_CONTAINS_ANY or op == STR_REPLACE_MANY:

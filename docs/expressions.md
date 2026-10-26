@@ -457,6 +457,7 @@ same method convention. Inputs must be String and nulls propagate.
 | `replace_many(patterns, replace_with, ascii_case_insensitive=False, leftmost=False)` | String | one pass over all literal patterns; `replace_with` is one string or one per pattern |
 | `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
 | `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 must be canonical and padded |
+| `normalize(form="NFC")` | String | Unicode 17.0 NFC, NFD, NFKC or NFKD; nulls propagate |
 | `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36, as Rust's `from_str_radix`; failures raise, or are null with `strict=False` |
 | `split_exact(by, n, inclusive=False)` | Struct | `n + 1` String fields `field_0`..`field_n`; extra parts are dropped, missing parts null |
 | `splitn(by, n)` | Struct | `n` String fields; the last keeps the rest of the string |
@@ -469,8 +470,8 @@ of only nulls is `""` (DuckDB's `concat_ws`). Character operations work on
 code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
 combining mark.
 
-These follow Polars 1.44. Polars' `normalize`,
-`json_decode` and `json_path_match` are not available. Where DuckDB differs:
+These follow Polars 1.44. `normalize` uses Unicode 17.0 and matches the pinned
+Polars 2.0 normalization oracle. `json_decode` and `json_path_match` are not available. Where DuckDB differs:
 `strpos`/`instr` count code points from 1 and give 0 when absent (`find`
 counts bytes from 0 and gives null), `split_part` gives `""` for a missing
 part (null here), and `to_hex` writes uppercase digits. `splitn(by, 0)`
@@ -480,6 +481,18 @@ storage alike; stripped affixes and split fields are views into the input's
 buffers rather than copies, and a categorical input runs each function once
 per dictionary value when it has few values. The accelerator backends run none of these and leave
 them to the CPU.
+
+Normalization first checks the requested form without constructing output
+strings. A fully normalized chunk retains its input buffers, including Arrow
+views. Changed chunks use a shared output builder and reuse decomposition
+scratch across rows. Canonical ordering uses bounded insertion for short
+combining runs and stable counting sort for long runs. Tables and all 20,034
+conformance vectors come from the official Unicode 17.0 data under the
+[Unicode License v3](../scripts/vendor/unicode-LICENSE). Regenerate them with
+`pixi run python3 scripts/normalization_tables.py --ucd DIRECTORY`, where
+`DIRECTORY` contains the versioned `UnicodeData.txt`,
+`DerivedNormalizationProps.txt`, and `NormalizationTest.txt` from
+<https://www.unicode.org/Public/17.0.0/ucd/>.
 
 #### Regular expressions
 

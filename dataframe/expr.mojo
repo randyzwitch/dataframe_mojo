@@ -323,6 +323,7 @@ comptime STR_TO_INTEGER = 239
 # A struct of min_count string fields. integer bit 0: inclusive; bit 1:
 # the last field keeps the remainder (splitn).
 comptime STR_SPLIT_FIELDS = 240
+comptime STR_NORMALIZE = 243
 
 # Additional temporal operations (#794). Multi-input operations consume a
 # STRUCT_PACK so ordinary expression traversal handles every dependency.
@@ -442,7 +443,9 @@ def is_string_op(op: Int) -> Bool:
 
 def is_text_function(op: Int) -> Bool:
     """Whether op is one of the string functions in text_functions.mojo."""
-    return op >= STR_TITLECASE and op <= STR_SPLIT_FIELDS
+    return (
+        op >= STR_TITLECASE and op <= STR_SPLIT_FIELDS
+    ) or op == STR_NORMALIZE
 
 
 def pack_literals(values: List[String]) -> String:
@@ -2671,6 +2674,11 @@ struct StrNamespace(Copyable):
         """Decode "hex" or "base64" text into Binary. Invalid text raises
         when strict, or is null otherwise."""
         return self._op(STR_DECODE, encoding, Int64(strict))
+
+    def normalize(self, form: String = "NFC") -> Expr:
+        """Unicode 17 NFC, NFD, NFKC or NFKD normalization. Nulls propagate;
+        already-normalized chunks retain their existing storage."""
+        return self._op(STR_NORMALIZE, form)
 
     def to_integer(self, base: Int = 10, strict: Bool = True) -> Expr:
         """Parse an optionally signed integer in base 2 to 36 as Int64.
