@@ -62,3 +62,8 @@ length, which the cached Arrow path does not compare. It never prebuffers
 later record-batch bodies, preserving early stops and skipped corrupt-body
 behavior. Native-address tests observe upstream buffers before import, close
 the reader, and verify actual unmapping after the final column view dies.
+
+Fixed-width buffer facts retain the array's declared row interval. Shared
+ascending-order and zone-map caches scan that interval, excluding unused
+prefix/suffix slots whose values are not specified by a foreign producer.
+Column views share these facts only within the original declared interval.

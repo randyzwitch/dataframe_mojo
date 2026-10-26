@@ -477,16 +477,18 @@ def _ensure_zones(series: Series):
 def _fill_zones[D: DType](column: Column[Scalar[D]]):
     if len(column._facts[].zones) > 0:
         return
-    var whole = column.copy()
-    whole._offset = 0
-    whole._length = len(column._data[])
-    var blocks = (whole._length + _ZONE_ROWS - 1) // _ZONE_ROWS
+    var first_row = column._facts[].first
+    var last_row = column._facts[].last
+    if last_row < 0:
+        last_row = len(column._data[])
+    var blocks = (last_row + _ZONE_ROWS - 1) // _ZONE_ROWS
     var zones = List[Int64](capacity=2 * blocks)
     for b in range(blocks):
-        var first = b * _ZONE_ROWS
-        var block = whole.copy()
+        var first = max(b * _ZONE_ROWS, first_row)
+        var last = min((b + 1) * _ZONE_ROWS, last_row)
+        var block = column.copy()
         block._offset = first
-        block._length = min(_ZONE_ROWS, whole._length - first)
+        block._length = max(0, last - first)
         var found = _column_bounds(block)
         if found[0]:
             zones.append(found[1])

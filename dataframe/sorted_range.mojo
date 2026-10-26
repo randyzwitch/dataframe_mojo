@@ -201,8 +201,11 @@ def _ascending_cached[D: DType](column: Column[Scalar[D]]) raises -> Bool:
     )
     if cell[] == 0:
         var whole = column.copy()
-        whole._offset = 0
-        whole._length = len(column._data[])
+        whole._offset = column._facts[].first
+        var last = column._facts[].last
+        whole._length = (
+            len(column._data[]) if last < 0 else last
+        ) - whole._offset
         # Two threads may race to fill it; both write the same answer.
         cell[] = 1 if (
             whole.null_count() == 0 and _ascending_parallel[D](whole)
