@@ -458,6 +458,8 @@ same method convention. Inputs must be String and nulls propagate.
 | `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
 | `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 must be canonical and padded |
 | `normalize(form="NFC")` | String | Unicode 17.0 NFC, NFD, NFKC or NFKD; nulls propagate |
+| `json_decode(dtype)` | `dtype` | decode into an explicit scalar, list or struct schema; invalid JSON and incompatible value kinds raise |
+| `json_path_match(path)` | String | first match, with strings unquoted and containers compact; malformed JSON, missing matches and JSON null return null; invalid paths raise |
 | `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36, as Rust's `from_str_radix`; failures raise, or are null with `strict=False` |
 | `split_exact(by, n, inclusive=False)` | Struct | `n + 1` String fields `field_0`..`field_n`; extra parts are dropped, missing parts null |
 | `splitn(by, n)` | Struct | `n` String fields; the last keeps the rest of the string |
@@ -471,7 +473,7 @@ code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
 combining mark.
 
 These follow Polars 1.44. `normalize` uses Unicode 17.0 and matches the pinned
-Polars 2.0 normalization oracle. `json_decode` and `json_path_match` are not available. Where DuckDB differs:
+Polars 2.0 normalization and JSON oracles. Where DuckDB differs:
 `strpos`/`instr` count code points from 1 and give 0 when absent (`find`
 counts bytes from 0 and gives null), `split_part` gives `""` for a missing
 part (null here), and `to_hex` writes uppercase digits. `splitn(by, 0)`
@@ -493,6 +495,38 @@ conformance vectors come from the official Unicode 17.0 data under the
 `DIRECTORY` contains the versioned `UnicodeData.txt`,
 `DerivedNormalizationProps.txt`, and `NormalizationTest.txt` from
 <https://www.unicode.org/Public/17.0.0/ucd/>.
+
+`json_decode` requires its output dtype before execution, for example
+`col("json").str().json_decode(DataType.struct(["id", "tags"],
+[DataType.INT64, DataType.list(DataType.STRING)]))`. It supports numeric,
+Boolean, String, categorical, decimal, date, time, duration, naive datetime
+and UTC datetime output, including nested lists and structs. Missing struct
+fields become null and extra fields are validated then ignored. Duplicate
+fields keep their first value. A non-null scalar decoded as a list becomes
+a one-element list; JSON null and input null remain null. Numeric overflow
+becomes null; incompatible value kinds raise with the input row. Datetime
+strings without a zone keep their wall time for a naive output; UTC output
+requires an explicit offset. Other output time zones and Binary/geometry
+schemas raise during binding. Unpaired Unicode surrogates are rejected,
+where Polars 2.0's decoder can produce NUL instead.
+
+`json_path_match` accepts a constant path rooted at `$`: dot or quoted
+fields, array indices (including negative ones), wildcards, recursive descent,
+name/index unions, slices with positive steps, and comparison filters with
+`&&`, `||`, `@` and `$` references. It follows the first-match ordering and
+selection behavior of Polars 2.0's JSONPath evaluator. Duplicate object keys
+keep their last value. Strings are returned unquoted; numbers, Booleans and
+containers use compact JSON spelling. A first match of JSON null ends the
+search and returns null. Unsupported syntax, including regular-expression
+filters, raises before rows are evaluated. Zero or negative slice steps
+raise. A reusable shared parser validates the whole input row, even when
+only one field is requested; schemas and paths compile once per column
+operation, and output builders write directly into typed buffers.
+Wildcard paths inside predicates are also supported; Polars 2.0 can panic
+for this combination, so those contracts use an independent Python JSON
+selection reference. JSONPath uses Polars' serde-style floating-point
+conversion and spelling, separately from typed decoding's correctly rounded
+conversion.
 
 #### Regular expressions
 

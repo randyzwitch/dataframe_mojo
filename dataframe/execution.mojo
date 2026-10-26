@@ -3168,7 +3168,7 @@ def evaluate[
         workers,
     )
     if bound.dtypes[root].is_categorical():
-        result = encode(result)
+        result = cast_series(result, bound.dtypes[root], True, 0, List[Bool]())
     result._name = bound.expr._name
     return result^
 

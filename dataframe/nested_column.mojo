@@ -300,6 +300,8 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
 
     def _append_column(self, other: Self) raises -> Self:
         """A new column with other's rows after this one's."""
+        from .categorical import unify
+
         var offsets = List[Int64](capacity=self._length + other._length + 1)
         var valid = List[Bool](capacity=self._length + other._length)
         offsets.append(0)
@@ -322,6 +324,8 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
             (other._end(other._length - 1) - other._start(0)) if other._length
             > 0 else 0,
         )
+        if mine.dtype().is_categorical() and theirs.dtype().is_categorical():
+            unify(mine, theirs)
         var child = Series._from_chunks([mine^, theirs^]).rechunk()
         var bits = List[UInt8]()
         if len(self._bits[]) != 0 or len(other._bits[]) != 0:
@@ -507,6 +511,8 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
         return self.take(indices)
 
     def _append_column(self, other: Self) raises -> Self:
+        from .categorical import unify
+
         if self.field_count() != other.field_count():
             raise Error("Cannot append structs with different fields")
         var fields = List[Series]()
@@ -515,6 +521,11 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
             var theirs = other.field(i)
             if mine.name() != theirs.name():
                 raise Error("Cannot append structs with different fields")
+            if (
+                mine.dtype().is_categorical()
+                and theirs.dtype().is_categorical()
+            ):
+                unify(mine, theirs)
             fields.append(Series._from_chunks([mine^, theirs^]).rechunk())
         var bits = List[UInt8]()
         if len(self._bits[]) != 0 or len(other._bits[]) != 0:

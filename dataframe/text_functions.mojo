@@ -29,6 +29,8 @@ from .expr import (
     STR_TO_INTEGER,
     STR_SPLIT_FIELDS,
     STR_NORMALIZE,
+    STR_JSON_DECODE,
+    STR_JSON_PATH,
 )
 from .dtype import DataType
 from .nested_column import StructColumn
@@ -39,6 +41,8 @@ from .string_bytes import _Bytes, _find_bytes, _same_bytes
 from .string_column import StringColumn, StringBuilder
 from .string_predicates import decode_values
 from .string_view import StringView, StringViewStorage
+from .json_decode import decode_json
+from .json_strings import json_path_match
 from .unicode_normalization import normalize_series
 from .unicode_alphabetic import alphabetic_ranges, is_alphabetic
 
@@ -49,6 +53,15 @@ def text_function(
     node: Node, input: Series, compiled: Optional[Regex] = None
 ) raises -> Series:
     """Evaluate one text_functions operation on a String series."""
+    if node.op == STR_JSON_PATH:
+        return json_path_match(input, node.text)
+    if node.op == STR_JSON_DECODE:
+        var dtype = node.dtypes[0].value()
+        # Like CAST, a root categorical is carried as strings inside the
+        # evaluator and encoded once after the batches have been assembled.
+        return decode_json(
+            input, DataType.STRING if dtype.is_categorical() else dtype
+        )
     if node.op == STR_NORMALIZE:
         return normalize_series(input, node.text)
     if input.is_chunked():

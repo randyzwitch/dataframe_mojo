@@ -81,6 +81,11 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
             return format_string(cell.string(), max_string_length)
         except:
             return "?"
+    if series.dtype() == DataType.of(DType.int128):
+        ref column = series._data[Column[Int128]]
+        return String(column._get(row)) if column._valid(row) else String(
+            "null"
+        )
     comptime for i in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[i]
         if series._data.isa[Column[Scalar[D]]]():

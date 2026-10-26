@@ -3,7 +3,7 @@ from ._buffer import _Buffer
 from .field_metadata import _equal_metadata, _without_extensions
 from .wkb import GeometryBounds
 from .geometry import geometry_type, crs, bounding_box, total_bounds
-from .dtype import DataType, NUMERIC_DTYPES
+from .dtype import DataType, NUMERIC_DTYPES, CategoricalDictionary
 from std.utils import Variant
 from .bool_column import BoolColumn
 from .column import Column, SCALAR_DTYPES, _copy_validity, gather_scalars
@@ -679,8 +679,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return AnyValue(
                 String(self._dtype.dictionary()[].get(Int(codes._get(index))))
             )
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
+        comptime for D in SCALAR_DTYPES:
             if self._data.isa[Column[Scalar[D]]]():
                 ref column = self._data[Column[Scalar[D]]]
                 if column.is_null(index):
@@ -1522,6 +1521,13 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         var name: String, dtype: DataType, length: Int
     ) raises -> Self:
         """A column of `length` nulls with the requested dtype."""
+        if dtype.is_categorical():
+            var target = dtype.copy()
+            if not target.has_dictionary():
+                target = DataType.categorical(CategoricalDictionary())
+            return Self(name^, Column[UInt32]._nulls(length, 0)).with_dtype(
+                target
+            )
         if dtype.is_temporal():
             return Self(name^, Column[Int64]._nulls(length, 0)).with_dtype(
                 dtype
@@ -1539,8 +1545,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return Self(name^, Column[Int128]._nulls(length, 0)).with_dtype(
                 dtype
             )
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
+        comptime for D in SCALAR_DTYPES:
             if dtype == DataType.of(D):
                 return Self(name^, Column[Scalar[D]]._nulls(length, 0))
         if dtype == DataType.BOOL:

@@ -534,6 +534,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.BINARY
         if name == "categorical" or name == "cat":
             return DataType.CATEGORICAL
+        if name == "int128":
+            return DataType.of(DType.int128)
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if name == String(D):
@@ -786,6 +788,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return 1
         if self.is_decimal():
             return self.decimal_width()
+        if self._storage == DType.int128:
+            return 128
         # A runtime DType cannot report its width in Mojo 1.2; match it
         # against the comptime list, whose members can.
         comptime for i in range(len(NUMERIC_DTYPES)):

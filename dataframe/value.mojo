@@ -28,9 +28,13 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     var _nested: Optional[ArcPointer[_Box[Series]]]
 
     def __init__[D: DType](out self, value: Scalar[D]):
-        """A numeric value. Integers are held in an Int64 slot (UInt64 by
-        bit pattern) and floats in a Float64 slot; both are exact."""
-        comptime if D.is_floating_point():
+        """A numeric value, preserving integer precision including UInt64
+        and Int128, and floating-point precision."""
+        comptime if D == DType.int128:
+            # Keep the exact wide scalar in the existing text slot; the
+            # ordinary integer slot intentionally remains Int64-sized.
+            self = Self(DataType.of(D), True, 0, 0, False, String(value))
+        elif D.is_floating_point():
             self = Self(DataType.of(D), True, 0, Float64(value), False, "")
         elif D == DType.uint64:
             self = Self(
@@ -163,7 +167,15 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     def numeric[D: DType](self) raises -> Scalar[D]:
         """The value as Scalar[D]; the dtype must match exactly."""
         self._check(DataType.of(D))
-        comptime if D.is_floating_point():
+        comptime if D == DType.int128:
+            var bytes = self._string.as_bytes()
+            var negative = bytes[0] == 45
+            var value = Int128(0)
+            for i in range(Int(negative), len(bytes)):
+                var digit = Int128(bytes[i] - 48)
+                value = value * 10 - digit if negative else value * 10 + digit
+            return rebind[Scalar[D]](value)
+        elif D.is_floating_point():
             return self._float.cast[D]()
         else:
             return self._int.cast[D]()
@@ -211,6 +223,8 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
             return False
         if not self._valid:
             return True
+        if self._dtype == DataType.of(DType.int128):
+            return self._string == other._string
         if self._dtype.physical() == DataType.INT64 or self._dtype.is_integer():
             return self._int == other._int
         if self._dtype.is_float():
@@ -269,6 +283,8 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
             except:
                 pass
             writer.write("}")
+        elif self._dtype == DataType.of(DType.int128):
+            writer.write(self._string)
         elif self._dtype == DataType.UINT64:
             writer.write(self._int.cast[DType.uint64]())
         elif self._dtype.is_integer():

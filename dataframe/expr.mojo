@@ -324,6 +324,8 @@ comptime STR_TO_INTEGER = 239
 # the last field keeps the remainder (splitn).
 comptime STR_SPLIT_FIELDS = 240
 comptime STR_NORMALIZE = 243
+comptime STR_JSON_DECODE = 244
+comptime STR_JSON_PATH = 245
 
 # Additional temporal operations (#794). Multi-input operations consume a
 # STRUCT_PACK so ordinary expression traversal handles every dependency.
@@ -444,8 +446,11 @@ def is_string_op(op: Int) -> Bool:
 def is_text_function(op: Int) -> Bool:
     """Whether op is one of the string functions in text_functions.mojo."""
     return (
-        op >= STR_TITLECASE and op <= STR_SPLIT_FIELDS
-    ) or op == STR_NORMALIZE
+        (op >= STR_TITLECASE and op <= STR_SPLIT_FIELDS)
+        or op == STR_NORMALIZE
+        or op == STR_JSON_DECODE
+        or op == STR_JSON_PATH
+    )
 
 
 def pack_literals(values: List[String]) -> String:
@@ -2674,6 +2679,22 @@ struct StrNamespace(Copyable):
         """Decode "hex" or "base64" text into Binary. Invalid text raises
         when strict, or is null otherwise."""
         return self._op(STR_DECODE, encoding, Int64(strict))
+
+    def json_path_match(self, path: String) -> Expr:
+        """Extract the first JSONPath match as String; input null, missing
+        matches, malformed JSON and selected JSON null become null.
+        Invalid paths raise, including on empty input."""
+        return self._op(STR_JSON_PATH, path)
+
+    def json_decode(self, dtype: DataType) -> Expr:
+        """Decode JSON into an explicitly typed scalar, list or struct.
+        Invalid JSON or incompatible value kinds raise; missing struct
+        fields and out-of-range numeric values become null."""
+        var nodes = self._expr._nodes.copy()
+        nodes.append(
+            _node(STR_JSON_DECODE, len(nodes) - 1, dtypes=[Optional(dtype)])
+        )
+        return Expr(nodes^, self._expr._name)
 
     def normalize(self, form: String = "NFC") -> Expr:
         """Unicode 17 NFC, NFD, NFKC or NFKD normalization. Nulls propagate;
