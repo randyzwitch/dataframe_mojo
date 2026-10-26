@@ -1425,10 +1425,12 @@ def _direct_grouped_sum(
     return False
 
 
-def _direct_float_column_sum(
-    mut reducer: Reducer, column: Column[Float64], start: Int, end: Int
-):
-    """Accumulate a contiguous Float64 interval into one reducer state."""
+def _direct_float_column_sum[
+    D: DType
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Accumulate a contiguous Float32 or Float64 interval into one reducer
+    state, eight lanes at a time. Float32 values widen to Float64 lanes
+    before they are added, as every float sum adds them (`_sum_floats`)."""
     var values = column.unsafe_values()
     var total = SIMD[DType.float64, 8](0)
     var count = _count_valid(
@@ -1437,7 +1439,7 @@ def _direct_float_column_sum(
     var i = start
     if count == end - start:
         while i + 8 <= end:
-            total += values.unsafe_load[width=8](i)
+            total += values.unsafe_load[width=8](i).cast[DType.float64]()
             i += 8
     else:
         var bits = column.unsafe_validity()
@@ -1462,41 +1464,28 @@ def _direct_float_column_sum(
                 & SIMD[DType.uint64, 8](1, 2, 4, 8, 16, 32, 64, 128)
             ).ne(SIMD[DType.uint64, 8](0))
             total += valid.select(
-                values.unsafe_load[width=8](i), SIMD[DType.float64, 8](0)
+                values.unsafe_load[width=8](i).cast[DType.float64](),
+                SIMD[DType.float64, 8](0),
             )
             i += 8
     reducer.float_sums[0].total += total.reduce_add()
     reducer.float_sums[0].count += Int64(count)
     while i < end:
         if column._valid(i):
-            reducer.float_sums[0].total += column._get(i)
+            reducer.float_sums[0].total += column._get(i).cast[DType.float64]()
         i += 1
 
 
-def _direct_float_sum(
-    mut reducer: Reducer,
-    bound: BoundExpr,
-    columns: List[Series],
-    node: Node,
-    start: Int,
-    end: Int,
-    grouped: Bool,
-) raises -> Bool:
-    """SIMD Float64 sum/mean across intersecting physical chunk intervals."""
-    if (
-        grouped
-        or (node.op != SUM and node.op != MEAN)
-        or bound.expr._nodes[node.left].op != COL
-    ):
-        return False
-    ref series = columns[bound.sources[node.left]]
-    if series.dtype() != DataType.FLOAT64:
-        return False
+def _direct_float_series_sum[
+    D: DType
+](mut reducer: Reducer, series: Series, start: Int, end: Int):
+    """`_direct_float_column_sum` across the physical chunks of `series`
+    that intersect [start, end)."""
     if not series.is_chunked():
-        _direct_float_column_sum(
-            reducer, series._data[Column[Float64]], start, end
+        _direct_float_column_sum[D](
+            reducer, series._data[Column[Scalar[D]]], start, end
         )
-        return True
+        return
     ref chunks = series._chunked.value()[]
     var first = 0
     var upper = len(chunks.ends)
@@ -1514,13 +1503,39 @@ def _direct_float_sum(
         var lo = max(start, chunk_start)
         var hi = min(end, chunk_end)
         if lo < hi:
-            _direct_float_column_sum(
+            _direct_float_column_sum[D](
                 reducer,
-                chunks.arrays[index][Column[Float64]],
+                chunks.arrays[index][Column[Scalar[D]]],
                 lo - chunk_start,
                 hi - chunk_start,
             )
-    return True
+
+
+def _direct_float_sum(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    grouped: Bool,
+) raises -> Bool:
+    """SIMD Float32 or Float64 sum/mean across intersecting physical chunk
+    intervals."""
+    if (
+        grouped
+        or (node.op != SUM and node.op != MEAN)
+        or bound.expr._nodes[node.left].op != COL
+    ):
+        return False
+    ref series = columns[bound.sources[node.left]]
+    if series.dtype() == DataType.FLOAT64:
+        _direct_float_series_sum[DType.float64](reducer, series, start, end)
+        return True
+    if series.dtype() == DataType.FLOAT32:
+        _direct_float_series_sum[DType.float32](reducer, series, start, end)
+        return True
+    return False
 
 
 @always_inline
@@ -1937,16 +1952,11 @@ def _direct_numeric_column[
         if op == MIN:
             _direct_int_extreme[D, False](reducer, column, start, end)
             return True
-    comptime if D == DType.float64:
+    comptime if D == DType.float64 or D == DType.float32:
         if op == SUM or op == MEAN:
             # The same eight-wide masked sum a plain column takes; a
             # masked conditional branch arrives here with its validity.
-            _direct_float_column_sum(
-                reducer,
-                rebind[Column[Float64]](column),
-                start,
-                end,
-            )
+            _direct_float_column_sum[D](reducer, column, start, end)
             return True
     for i in range(start, end):
         if not column._valid(i):
