@@ -28,6 +28,8 @@ from .expr import (
     N_UNIQUE,
     MIN,
     MAX,
+    STD,
+    VAR,
     LT,
     GE,
     LE,
@@ -133,6 +135,7 @@ from .expr_kernels import (
     arctan2_series,
 )
 from .aggregate import Reducer, _sum_bools
+from .reductions import VarState
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -1927,6 +1930,79 @@ def _direct_int_extreme[
         reducer.seen[0] = True
 
 
+# Values per variance block, as in Polars' `moment.rs`: a block's mean and
+# squared deviations take two passes over values still in cache, and Chan's
+# update merges the block into the running moments.
+comptime _VARIANCE_BLOCK = 128
+
+
+def _block_moments[
+    D: DType
+](values: Pointer[Scalar[D], MutAnyOrigin], count: Int) -> VarState:
+    """Moments of `count` values: their mean, then the squared deviations
+    from it (Polars' `VarState::new`)."""
+    var lanes = SIMD[DType.float64, 8](0)
+    var i = 0
+    while i + 8 <= count:
+        lanes += values.unsafe_load[width=8](i).cast[DType.float64]()
+        i += 8
+    var total = lanes.reduce_add()
+    for j in range(i, count):
+        total += values.unsafe_load(j).cast[DType.float64]()
+    var state = VarState()
+    state.count = Int64(count)
+    state.mean = total / Float64(count)
+    var centre = SIMD[DType.float64, 8](state.mean)
+    lanes = SIMD[DType.float64, 8](0)
+    i = 0
+    while i + 8 <= count:
+        var delta = (
+            values.unsafe_load[width=8](i).cast[DType.float64]() - centre
+        )
+        lanes += delta * delta
+        i += 8
+    state.m2 = lanes.reduce_add()
+    for j in range(i, count):
+        var delta = values.unsafe_load(j).cast[DType.float64]() - state.mean
+        state.m2 += delta * delta
+    return state^
+
+
+def _direct_variance[
+    D: DType
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Accumulate the valid values of [start, end) into the reducer's moments
+    a block at a time (Polars' `var`): an all-valid interval is read in place,
+    and a nullable one gathers its valid values into a block first."""
+    var values = column.unsafe_values()
+    if (
+        _count_valid(column._bits[], column._offset + start, end - start)
+        == end - start
+    ):
+        var i = start
+        while i < end:
+            var count = min(_VARIANCE_BLOCK, end - i)
+            reducer.moments[0].merge(
+                _block_moments[D](values.unsafe_offset(i), count)
+            )
+            i += count
+        return
+    var buffer = List[Scalar[D]](length=_VARIANCE_BLOCK, fill=0)
+    var block = buffer.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var count = 0
+    for i in range(start, end):
+        if not column._valid(i):
+            continue
+        block.unsafe_store(count, values.unsafe_load(i))
+        count += 1
+        if count == _VARIANCE_BLOCK:
+            reducer.moments[0].merge(_block_moments[D](block, count))
+            count = 0
+    if count > 0:
+        reducer.moments[0].merge(_block_moments[D](block, count))
+    _ = buffer^
+
+
 def _direct_numeric_column[
     D: DType
 ](
@@ -1941,6 +2017,9 @@ def _direct_numeric_column[
         reducer.counts[0] += Int64(
             _count_valid(column._bits[], column._offset + start, end - start)
         )
+        return True
+    if op == STD or op == VAR:
+        _direct_variance[D](reducer, column, start, end)
         return True
     comptime if D.is_integral():
         if op == SUM or op == MEAN:
@@ -2087,6 +2166,8 @@ def _direct_numeric_reduction(
         and node.op != COUNT
         and node.op != MIN
         and node.op != MAX
+        and node.op != STD
+        and node.op != VAR
     ):
         return False
     ref series = columns[bound.sources[input]]
