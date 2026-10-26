@@ -2591,6 +2591,7 @@ struct Reducer(Movable):
             return Series("", Column[Float64](output^, valid))
         if op == N_UNIQUE:
             var output = List[Int64](length=n, fill=0)
+            var include_nulls = self.integer == 0
             for g in range(n):
                 var count: Int
                 if (
@@ -2598,7 +2599,7 @@ struct Reducer(Movable):
                     or self.dtype == DataType.FLOAT64
                 ):
                     var state = self.distinct_state[g]
-                    count = Int(self.picked_valid[g]) + (
+                    count = Int(include_nulls and self.picked_valid[g]) + (
                         Int(state) if state
                         < 2 else (
                             len(self.int_sets[g]) if self.dtype
@@ -2610,10 +2611,12 @@ struct Reducer(Movable):
                     count = (
                         Int(state.saw_true)
                         + Int(state.saw_false)
-                        + Int(state.saw_null)
+                        + Int(include_nulls and state.saw_null)
                     )
                 else:
-                    count = len(self.string_sets[g]) + Int(self.picked_valid[g])
+                    count = len(self.string_sets[g]) + Int(
+                        include_nulls and self.picked_valid[g]
+                    )
                 output[g] = Int64(count)
             return Series("", Column[Int64](output^))
         if op == MIN or op == MAX or op == FIRST or op == LAST:

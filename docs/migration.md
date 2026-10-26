@@ -34,6 +34,12 @@ equality is `==` or `.eq()`, and builds an expression rather than a Bool; there 
 
 Behavioral differences worth knowing:
 
+- `n_unique()` counts null once, matching Polars. For SQL
+  `COUNT(DISTINCT x)`, use `col("x").n_unique(ignore_nulls=True)`, which
+  excludes nulls and returns 0 for empty or all-null inputs. The Polars
+  equivalent is `pl.col("x").drop_nulls().n_unique()`; the `ignore_nulls`
+  parameter is an extension here. The same rule applies inside `group_by`
+  aggregations and `over()` windows.
 - Sums of empty or all-null input are 0; pass `min_count=1` for null.
 - Int64 arithmetic raises on overflow instead of wrapping.
 - NaN is a value, distinct from null; `fill_null` does not touch NaN (use
