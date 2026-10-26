@@ -764,7 +764,12 @@ comptime _CLOSED = Int64(1) << 31
 # group-by's jobs 1.5x slower than a thread started fresh (PDS-H q1); one
 # kept busy between stages stays at full clock. Gaps inside a query are
 # mostly serial stretches of a few milliseconds, so 50 ms covers them; the
-# crew is joined when the operation ends, so no thread spins past it.
+# crew is joined when the operation ends, so no thread spins past it. A crew
+# larger than the performance cores parks at once instead, as a `Pool` does
+# (`_pool_spin_limit`): on an M1 (4P+4E), eight threads spinning held every
+# core, so the system's other threads took one of ours for a whole 10 ms
+# time slice, and one run in two of a 5M-row filtered sum took 9-13 ms
+# instead of 2.1 ms.
 comptime _CREW_SPIN_NS = 50_000_000
 
 
@@ -787,6 +792,8 @@ struct _Crew(Movable):
     var spawned: Atomic[Int64]
     var ids: Int
     var wanted: Int
+    # How long a thread looks for work before parking (`_CREW_SPIN_NS`).
+    var spin_ns: Int
 
     def __init__(out self, postings: Int, ids: Int, wanted: Int):
         self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
@@ -797,6 +804,10 @@ struct _Crew(Movable):
         self.spawned = Atomic[Int64](0)
         self.ids = ids
         self.wanted = wanted
+        # The crew's threads and the operation's own.
+        self.spin_ns = 0 if wanted + 1 > _performance_core_count() else (
+            _CREW_SPIN_NS
+        )
 
     def spawn(mut self, address: Int):
         """Start the threads, once: the caller that wins the flag creates
@@ -941,7 +952,7 @@ def _crew_worker(address: Int) abi("C") -> Int:
             return 0
         var p = crew._take()
         if p < 0:
-            var deadline = perf_counter_ns() + _CREW_SPIN_NS
+            var deadline = perf_counter_ns() + crew.spin_ns
             while p < 0 and crew.stopping.load() == 0:
                 for _ in range(64):
                     p = crew._take()
@@ -951,7 +962,7 @@ def _crew_worker(address: Int) abi("C") -> Int:
                     # Work is waiting for a thread the budget has not
                     # freed: yield rather than park, and look again.
                     _ = external_call["sched_yield", Int32]()
-                    deadline = perf_counter_ns() + _CREW_SPIN_NS
+                    deadline = perf_counter_ns() + crew.spin_ns
                     continue
                 if perf_counter_ns() > deadline:
                     break
