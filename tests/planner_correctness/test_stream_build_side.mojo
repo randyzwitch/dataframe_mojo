@@ -124,8 +124,8 @@ def _dimension(rows: Int, repeat: Int) raises -> DataFrame:
     return DataFrame(
         [
             ints("d_key", key),
-            Series("d_name", Column[String](name^, name_valid^)),
-            Series("d_region", Column[String](region^, region_valid^)),
+            Series("d_name", Column[String](name^, name_valid)),
+            Series("d_region", Column[String](region^, region_valid)),
             Series("d_city", Column[String](city^)),
             Series("d_country", Column[String](country^)),
         ]
@@ -146,7 +146,7 @@ def _facts(rows: Int, spread: Int, step: Int) raises -> DataFrame:
         [
             ints("f_key", key),
             ints("f_year", year),
-            Series("f_amount", Column[Float64](amount^, valid^)),
+            Series("f_amount", Column[Float64](amount^, valid)),
         ]
     )._with_statistics()
 
@@ -257,7 +257,7 @@ def test_a_small_left_of_a_left_join_builds_in_the_pipeline_and_emits_unmatched_
         o_id.append(Int64(row))
     var customers = DataFrame(
         [
-            Series("c_key", Column[Int64](c_key^, c_valid^)),
+            Series("c_key", Column[Int64](c_key^, c_valid)),
             ints("c_val", c_val),
         ]
     )

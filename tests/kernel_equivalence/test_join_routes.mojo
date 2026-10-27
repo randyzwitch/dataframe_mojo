@@ -188,7 +188,7 @@ def test_unordered_left_join_on_a_smaller_left_emits_unmatched_left_rows_after_t
         left_ids.append(Int64(i))
     var left = DataFrame(
         [
-            Series("k", Column[Int64](left_keys^, left_valid^)),
+            Series("k", Column[Int64](left_keys^, left_valid)),
             Series("l", Column[Int64](left_ids^)),
         ]
     )
