@@ -21,9 +21,6 @@ from dataframe.binding import (
     BoundExpr,
     bind,
 )
-from dataframe.column import (
-    Column,
-)
 from dataframe.dtype import (
     DataType,
 )
@@ -38,12 +35,7 @@ from dataframe.expr import (
     Expr,
     col,
     is_reduction,
-    null,
     subtree,
-    when,
-)
-from dataframe.expr_kernels import (
-    validity,
 )
 from dataframe.frame import (
     DataFrame,
@@ -58,7 +50,6 @@ from dataframe.huge_pages import (
 )
 from dataframe.parallel import (
     Job,
-    partitions,
     run_jobs,
     worker_count,
 )

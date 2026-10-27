@@ -53,8 +53,6 @@ from dataframe.expr import (
     changes_length,
     col,
     is_reduction,
-    null,
-    when,
 )
 from dataframe.frame import (
     DataFrame,

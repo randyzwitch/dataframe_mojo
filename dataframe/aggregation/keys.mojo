@@ -11,10 +11,6 @@ from dataframe.column import (
 from dataframe.expr import (
     decode_name,
     encode_name,
-    null,
-)
-from dataframe.expr_kernels import (
-    validity,
 )
 from dataframe.frame import (
     DataFrame,

@@ -35,7 +35,6 @@ from dataframe.expr import (
     is_window,
     node_children,
     subtree,
-    when,
 )
 from dataframe.selectors import (
     expand_all,
