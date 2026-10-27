@@ -241,8 +241,8 @@ struct MetalRuntime(AcceleratorBackend):
 
     def _configured(self, query: LazyFrame) -> Self:
         var configured = self.copy()
-        if query._accelerator_settings:
+        if query._plan._accelerator_settings:
             configured._execution_settings = (
-                query._accelerator_settings.value().copy()
+                query._plan._accelerator_settings.value().copy()
             )
         return configured^

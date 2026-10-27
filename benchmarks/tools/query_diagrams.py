@@ -174,6 +174,15 @@ def build_catalog(work, root):
     return catalog
 
 
+def source_fingerprint():
+    """Include implementation subpackages when identifying captured plans."""
+    sources = (
+        sorted((ROOT / 'dataframe').rglob('*.mojo'))
+        + sorted((ROOT / 'benchmarks/suites').glob('*.mojo'))
+    )
+    return hashlib.sha256(b''.join(p.read_bytes() for p in sources)).hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=data_root())
@@ -186,8 +195,7 @@ def main():
         payload = json.loads(args.from_json.read_text())
     else:
         catalog = build_catalog(work, args.data_root)
-        sources = sorted((ROOT / 'dataframe').glob('*.mojo')) + sorted((ROOT / 'dataframe/io').glob('*.mojo')) + sorted((ROOT / 'benchmarks/suites').glob('*.mojo'))
-        fingerprint = hashlib.sha256(b''.join(p.read_bytes() for p in sources)).hexdigest()
+        fingerprint = source_fingerprint()
         payload = {"catalog": catalog, "fingerprint": fingerprint,
                    "revision": subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                    "dirty": bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True))}

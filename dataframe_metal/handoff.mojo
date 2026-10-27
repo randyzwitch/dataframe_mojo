@@ -173,10 +173,10 @@ def _predicate(mut plan: FilterSum, predicate: Expr, at: Int) raises -> Bool:
 
 def plan_region(region: LazyFrame) raises -> Optional[FilterSum]:
     """The accepted shape of `region`, or None to leave it on the CPU."""
-    var nodes = len(region._nodes)
-    if nodes < 2 or region._nodes[0].kind != SCAN_FRAME:
+    var nodes = len(region._plan._nodes)
+    if nodes < 2 or region._plan._nodes[0].kind != SCAN_FRAME:
         return None
-    ref root = region._nodes[nodes - 1]
+    ref root = region._plan._nodes[nodes - 1]
     if root.kind != SELECT or len(root.exprs) != 1:
         return None
     ref total = root.exprs[0]
@@ -185,7 +185,7 @@ def plan_region(region: LazyFrame) raises -> Optional[FilterSum]:
     if total._nodes[0].op != COL or total._nodes[1].op != SUM:
         return None
     var name = total._nodes[0].text
-    var frame = region._frames[region._nodes[0].offset].copy()
+    var frame = region._plan._frames[region._plan._nodes[0].offset].copy()
     if name not in frame.columns():
         return None
     var dtype = frame.column(name).dtype()
@@ -198,7 +198,7 @@ def plan_region(region: LazyFrame) raises -> Optional[FilterSum]:
     var plan = FilterSum(name, total._name, dtype)
     plan.min_count = total._nodes[1].min_count
     for i in range(1, nodes - 1):
-        ref node = region._nodes[i]
+        ref node = region._plan._nodes[i]
         if node.kind != FILTER or len(node.exprs) != 1:
             return None
         if not _predicate(plan, node.exprs[0], len(node.exprs[0]._nodes) - 1):
@@ -502,7 +502,7 @@ def _execute_on_device(
         raise Error("Metal unsupported [handoff]: region was not accepted")
     var plan = accepted.take()
     var timings = HandoffTimings()
-    var frame = region._frames[region._nodes[0].offset].copy()
+    var frame = region._plan._frames[region._plan._nodes[0].offset].copy()
     var series = frame.column(plan.column)
     if len(series) >= Int(Int32.MAX):
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")

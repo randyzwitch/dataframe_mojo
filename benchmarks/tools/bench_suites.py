@@ -261,7 +261,7 @@ def build_runners(names, force=False):
     """Runners for this checkout, rebuilt when a library or suite source is
     newer than the binary."""
     out = ROOT / "build" / "suites"
-    sources = list((ROOT / "dataframe").glob("*.mojo")) + list(
+    sources = list((ROOT / "dataframe").rglob("*.mojo")) + list(
         SUITES_DIR.glob("*.mojo")
     )
     newest = max(path.stat().st_mtime for path in sources)
@@ -1139,7 +1139,7 @@ def _suite_table(suite, cells, all_engines):
 
 def instrumented_paths():
     found = set()
-    for path in (ROOT / "dataframe").glob("*.mojo"):
+    for path in (ROOT / "dataframe").rglob("*.mojo"):
         found.update(re.findall(r'trace_path\(\s*"([^"]+)"', path.read_text()))
     return sorted(found)
 

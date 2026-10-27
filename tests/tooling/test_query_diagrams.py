@@ -1,7 +1,9 @@
 """Contract checks for the explain-to-Mermaid adapter and query catalog."""
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('query_diagrams', ROOT / 'benchmarks/tools/query_diagrams.py')
@@ -10,6 +12,17 @@ spec.loader.exec_module(diagrams)
 
 
 class QueryDiagrams(unittest.TestCase):
+    def test_fingerprint_changes_when_nested_implementation_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            nested = root / "dataframe/planning/model.mojo"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("comptime SCAN_FRAME = 0\n")
+            with patch.object(diagrams, "ROOT", root):
+                before = diagrams.source_fingerprint()
+                nested.write_text("comptime SCAN_FRAME = 1\n")
+                self.assertNotEqual(diagrams.source_fingerprint(), before)
+
     def test_tree_edges_preserve_join_sides_and_flow_toward_result(self):
         plan = ('JOIN inner on a [stream probe; materialize build]\n'
                 '  FILTER [stream]\n    SCAN frame [project a]\n'

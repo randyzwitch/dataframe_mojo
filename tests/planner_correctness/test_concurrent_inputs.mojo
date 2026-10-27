@@ -153,6 +153,6 @@ def test_whole_input_selections_cross_joined_run_ahead_and_match() raises:
         )
         row = Optional(row.value().join(part, how="cross") if row else part^)
     var plan = row.take()
-    var top = len(plan._nodes) - 1
-    assert_true(plan._ends_in_breaker(plan._nodes[top].right))
+    var top = len(plan._plan._nodes) - 1
+    assert_true(plan._ends_in_breaker(plan._plan._nodes[top].right))
     assert_frame(plan.collect(), eager.take())
