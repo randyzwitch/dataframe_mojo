@@ -79,6 +79,11 @@ from .expr import (
     split_names,
     CUM_SUM,
     CUM_COUNT,
+    IS_DUPLICATED,
+    IS_UNIQUE,
+    IS_FIRST_DISTINCT,
+    IS_LAST_DISTINCT,
+    is_distinct_flag,
     RANK,
     ROLLING_SUM,
     ROLLING_STD,
@@ -322,6 +327,14 @@ def _check_pattern(node: Node) raises -> Optional[Regex]:
 
 
 def op_name(op: Int) -> String:
+    if op == IS_DUPLICATED:
+        return "is_duplicated"
+    if op == IS_UNIQUE:
+        return "is_unique"
+    if op == IS_FIRST_DISTINCT:
+        return "is_first_distinct"
+    if op == IS_LAST_DISTINCT:
+        return "is_last_distinct"
     if op == APPROX_N_UNIQUE:
         return "approx_n_unique"
     if op == EQ_MISSING:
@@ -1432,13 +1445,27 @@ def bind(
             if shapes[node.left] != ROWS:
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
-            if input.is_nested():
+            if is_distinct_flag(node.op):
+                if input.is_list():
+                    raise Error(
+                        op_name(node.op) + " does not support list values"
+                    )
+                if input.is_struct():
+                    for field in input.field_dtypes():
+                        if field.is_nested():
+                            raise Error(
+                                op_name(node.op)
+                                + " requires scalar struct fields"
+                            )
+            elif input.is_nested():
                 raise Error(
                     op_name(node.op)
                     + " does not support list or struct expressions, found "
                     + input.name()
                 )
             dtype = input
+            if is_distinct_flag(node.op):
+                dtype = DataType.BOOL
             if node.op == INTERPOLATE_BY:
                 if node.right < 0 or node.right >= i:
                     raise Error("Invalid interpolate_by input")
