@@ -2781,6 +2781,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )
         )
 
+    def fill_nan(self, value: Float64) raises -> Self:
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        return self.fill_nan(lit(value))
+
     def fill_nan(self, value: Expr) raises -> Self:
         """Replace NaNs in floating columns; see DataFrame.fill_nan."""
         return self.with_columns(self._input_schema()._fill_nan_exprs(value))

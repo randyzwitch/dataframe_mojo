@@ -3908,6 +3908,10 @@ struct DataFrame(Copyable, Sized, Writable):
                     return value.cast(dtype) if dtype.is_temporal() else value^
         return mean.cast(dtype)
 
+    def fill_nan(self, value: Float64) raises -> Self:
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        return self.fill_nan(lit(value))
+
     def fill_nan(self, value: Expr) raises -> Self:
         """Replace NaNs in floating columns; nulls and other columns stay.
 

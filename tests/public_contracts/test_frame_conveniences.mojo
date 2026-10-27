@@ -225,3 +225,49 @@ def test_frame_gather_every_keeps_global_offsets_under_lazy_optimization() raise
     assert_equal(
         zero_columns.lazy().gather_every(2, 1).collect(engine="cpu").height(), 2
     )
+
+
+def test_frame_conveniences_compose_across_lazy_plan_boundaries_and_exports() raises:
+    var source = DataFrame(
+        [
+            Series("x", Column[Int64]([3, 0, 1], [True, False, True])),
+            Series("s", Column[String](["B", "a", "A"])),
+        ]
+    )
+    var position = Series("position", Column[Int64]([0, 1, 2]))
+    var keys: List[Expr] = [col("new_s").str().to_lowercase(), col("new_x")]
+    var expected = DataFrame(
+        [
+            Series("new_x", Column[Int64]([1, 3])),
+            Series("position", Column[Int64]([2, 0])),
+            Series("new_s", Column[String](["A", "B"])),
+        ]
+    )
+    var eager = (
+        source.fill_null(strategy="forward")
+        .rename(_renamer)
+        .insert_column(1, position)
+        .sort(keys)
+        .gather_every(2)
+    )
+    assert_frame(eager, expected)
+    var plan = (
+        source.lazy()
+        .fill_null(strategy="forward")
+        .rename(_renamer)
+        .insert_column(1, position)
+        .sort(keys)
+        .gather_every(2)
+        .head(2)
+    )
+    for optimize in [False, True]:
+        var result = plan.collect(engine="cpu", optimize=optimize, batch_size=1)
+        assert_frame(result, expected)
+        var rows = result.to_dicts()
+        assert_equal(rows[0]["position"].int64(), 2)
+        assert_equal(rows[1]["new_s"].string(), "B")
+        var index = 0
+        for row in result.iter_rows():
+            assert_equal(row["new_x"].int64(), Int64(1 if index == 0 else 3))
+            index += 1
+        assert_equal(index, 2)

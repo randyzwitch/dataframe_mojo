@@ -388,5 +388,26 @@ def test_nested_fill_expressions_validate_empty_schemas_and_parent_validity() ra
                 )
                 assert_frame(frame.select(expression), expected)
                 var plan = frame.lazy().select(expression)
-                assert_equal(plan.collect_schema()[0].dtype, source.dtype())
+                assert_equal(
+                    plan.collect_schema(),
+                    List[String](["x: " + source.dtype().name()]),
+                )
                 assert_frame(plan.collect(engine="cpu", batch_size=1), expected)
+
+
+def test_frame_nan_fill_accepts_numeric_literals() raises:
+    var nan = Float64(0) / Float64(0)
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float64]([nan, 1])),
+            Series("y", Column[Float32]([Float32(nan), 2])),
+        ]
+    )
+    var expected = DataFrame(
+        [
+            Series("x", Column[Float64]([0, 1])),
+            Series("y", Column[Float32]([0, 2])),
+        ]
+    )
+    assert_frame(frame.fill_nan(0.0), expected)
+    assert_frame(frame.lazy().fill_nan(0.0).collect(engine="cpu"), expected)
