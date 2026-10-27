@@ -97,6 +97,8 @@ comptime KEEP_NULLS = 35
 comptime STR_CONCAT = 36
 # arctan2(y, x): left is y, right is x; x is cast to y's float type.
 comptime ARCTAN2 = 37
+comptime EQ_MISSING = 38
+comptime NE_MISSING = 39
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
 comptime NEG = 50
@@ -802,6 +804,14 @@ struct Expr(Copyable):
     def ne(self, other: String) -> Self:
         return self.ne(lit(other))
 
+    def eq_missing(self, other: String) -> Self:
+        """Null-safe equality with a string literal; see the Expr overload."""
+        return self.eq_missing(lit(other))
+
+    def ne_missing(self, other: String) -> Self:
+        """Null-safe inequality with a string literal; see the Expr overload."""
+        return self.ne_missing(lit(other))
+
     def fill_null(self, value: String) -> Self:
         return self.fill_null(lit(value))
 
@@ -816,6 +826,19 @@ struct Expr(Copyable):
 
     def ne(self, other: Self) -> Self:
         return self._binary(other, NE)
+
+    def eq_missing(self, other: Self) -> Self:
+        """Compare for equality, returning a Bool for every row.
+
+        Null equals null and differs from a value. Two NaNs compare equal;
+        signed zeros compare equal. Categoricals compare by label and
+        nested values compare structurally.
+        """
+        return self._binary(other, EQ_MISSING)
+
+    def ne_missing(self, other: Self) -> Self:
+        """The Boolean complement of eq_missing, with no null results."""
+        return self._binary(other, NE_MISSING)
 
     def abs(self) -> Self:
         return self._unary(ABS)
@@ -1353,6 +1376,10 @@ struct Expr(Copyable):
     def null_count(self) -> Self:
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
+
+    def has_nulls(self) -> Self:
+        """Whether any value is null, as one Bool; false for empty input."""
+        return self.null_count() > 0
 
     def cast(self, dtype: DataType, strict: Bool = True) -> Self:
         """Convert to dtype; see the String overload."""

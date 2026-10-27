@@ -29,6 +29,8 @@ from .expr import (
     MUL,
     GT,
     EQ,
+    EQ_MISSING,
+    NE_MISSING,
     LT,
     GE,
     LE,
@@ -2062,6 +2064,75 @@ def _keep_nulls[
     return Column[T](values^, valid)
 
 
+def _missing_nan_pairs[
+    D: DType
+](
+    left: Column[Scalar[D]],
+    right: Column[Scalar[D]],
+    n: Int,
+    mut values: List[UInt8],
+) where D.is_floating_point():
+    for k in range(n // 8):
+        values[k] |= pack_bits[DType.uint8](
+            isnan(_lanes[D, 8](left, 8 * k)) & isnan(_lanes[D, 8](right, 8 * k))
+        )
+    for row in range(n - n % 8, n):
+        if isnan(left._get(0 if len(left) == 1 else row)) and isnan(
+            right._get(0 if len(right) == 1 else row)
+        ):
+            values[row // 8] |= UInt8(1) << UInt8(row % 8)
+
+
+def _missing_compare[equal: Bool](left: Series, right: Series) raises -> Series:
+    var n = _length(len(left), len(right))
+    if left.dtype().is_categorical() or right.dtype().is_categorical():
+        var a = left.cast(
+            DataType.STRING
+        ) if left.dtype().is_categorical() else left.copy()
+        var b = right.cast(
+            DataType.STRING
+        ) if right.dtype().is_categorical() else right.copy()
+        return _missing_compare[equal](a, b)
+    var values: List[UInt8]
+    if left.dtype() != DataType.NULL and right.dtype() != DataType.NULL:
+        if left._data.isa[ListColumn]() or left._data.isa[StructColumn]():
+            values = List[UInt8](length=(n + 7) // 8, fill=0)
+            for row in range(n):
+                var a = left.slice(0 if len(left) == 1 else row, 1)
+                var b = right.slice(0 if len(right) == 1 else row, 1)
+                if a.equals(b):
+                    values[row // 8] |= UInt8(1) << UInt8(row % 8)
+        else:
+            var compared = binary[EQ](left, right)
+            ref column = compared._data[BoolColumn]
+            values = _window_bytes(column._data[], column._offset, n, n, 0)
+        if left._data.isa[Column[Float32]]():
+            _missing_nan_pairs[DType.float32](
+                left._data[Column[Float32]],
+                right._data[Column[Float32]],
+                n,
+                values,
+            )
+        elif left._data.isa[Column[Float64]]():
+            _missing_nan_pairs[DType.float64](
+                left._data[Column[Float64]],
+                right._data[Column[Float64]],
+                n,
+                values,
+            )
+    else:
+        values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var a = _validity_bytes(left, n)
+    var b = _validity_bytes(right, n)
+    for k in range(len(values)):
+        values[k] = (values[k] & a[k] & b[k]) | (~a[k] & ~b[k])
+        comptime if not equal:
+            values[k] = ~values[k]
+    if n % 8 != 0:
+        values[len(values) - 1] &= UInt8((1 << (n % 8)) - 1)
+    return Series("", BoolColumn(values=values^, bits=List[UInt8](), length=n))
+
+
 def binary[
     op: Int, width: Int = 4
 ](
@@ -2069,6 +2140,8 @@ def binary[
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
+    comptime if op == EQ_MISSING or op == NE_MISSING:
+        return _missing_compare[op == EQ_MISSING](left, right)
     comptime if op == FILL_NULL:
         if left.dtype().is_decimal() and right.dtype().is_decimal():
             # Left where valid, else right, at the operands' common type

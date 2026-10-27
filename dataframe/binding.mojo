@@ -16,6 +16,8 @@ from .expr import (
     MUL,
     GT,
     EQ,
+    EQ_MISSING,
+    NE_MISSING,
     SUM,
     COUNT,
     NE,
@@ -319,6 +321,10 @@ def _check_pattern(node: Node) raises -> Optional[Regex]:
 
 
 def op_name(op: Int) -> String:
+    if op == EQ_MISSING:
+        return "eq_missing"
+    if op == NE_MISSING:
+        return "ne_missing"
     if is_text_function(op):
         return _text_function_name(op)
     if op == ADD:
@@ -546,7 +552,16 @@ def temporal_result(
 
 
 def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
-    if left.is_nested() or right.is_nested():
+    var missing = op == EQ_MISSING or op == NE_MISSING
+    if missing and (left == DataType.NULL or right == DataType.NULL):
+        return DataType.BOOL
+    if (
+        missing
+        and (left.is_categorical() or left == DataType.STRING)
+        and (right.is_categorical() or right == DataType.STRING)
+    ):
+        return DataType.BOOL
+    if not missing and (left.is_nested() or right.is_nested()):
         raise Error(
             op_name(op)
             + " does not support list or struct operands, found "
@@ -572,7 +587,7 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
     if left.is_decimal() or right.is_decimal():
         if not left.is_decimal() or not right.is_decimal():
             raise Error(op_name(op) + " requires two decimal operands")
-        if is_comparison(op):
+        if is_comparison(op) or missing:
             return DataType.BOOL
         # DuckDB's decimal arithmetic types: sums and differences at the
         # larger scale with one more integer digit, exact products, and
@@ -595,7 +610,7 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
             + right.name()
             + "; use typed literals"
         )
-    if op == EQ or op == NE:
+    if op == EQ or op == NE or missing:
         return DataType.BOOL
     if is_comparison(op):
         return DataType.BOOL
@@ -1898,7 +1913,11 @@ def bind(
                     _adopt(nodes, types, node.right, _target(left))
                 # A string literal compared with binary stands for its
                 # UTF-8 bytes, as in Polars; both share one storage layout.
-                if is_comparison(node.op):
+                if (
+                    is_comparison(node.op)
+                    or node.op == EQ_MISSING
+                    or node.op == NE_MISSING
+                ):
                     if left.is_binary() and nodes[node.right].op == LIT_STRING:
                         types[node.right] = DataType.BINARY
                     elif (
