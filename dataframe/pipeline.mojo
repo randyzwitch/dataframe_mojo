@@ -468,9 +468,12 @@ def _column_bounds[
 
 
 comptime _ZONE_ROWS = 2048
-# Rows a worker checks against a bloom filter (a vector, so its first morsel)
-# before it may leave it alone.
-comptime _BLOOM_TRIAL_ROWS = 2048
+# Rows a worker checks against a bloom filter before it may leave it alone,
+# and the share kept from which it does: DuckDB pauses a bloom filter that
+# keeps a quarter or more of its first 75 vectors
+# (`SelectivityOptionalFilter::BF_CHECK_N`, `BF_THRESHOLD`).
+comptime _BLOOM_TRIAL_ROWS = 75 * 2048
+comptime _BLOOM_PAUSE_SHARE = 0.25
 
 
 def _zones_lock_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -2728,14 +2731,11 @@ struct _PipelineJob(Job):
                 continue
             var shared = r.bloom.value().copy()
             # Rows whose key the bloom filter lacks join nothing. It is
-            # left alone once, on this worker's first rows, it keeps more
-            # than one in eight of the rows it looks at: the join drops a
-            # row it does not match about as cheaply as the filter would
-            # (the maintainers' rule for passing a key set, too).
-            if (
-                self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS
-                and 8 * self.bloom_kept[k] > self.bloom_checked[k]
-            ):
+            # left alone once this worker's first rows show it keeps a
+            # quarter or more of what it looks at.
+            if self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS and Float64(
+                self.bloom_kept[k]
+            ) >= _BLOOM_PAUSE_SHARE * Float64(self.bloom_checked[k]):
                 continue
             var plain = (
                 morsel.selected
