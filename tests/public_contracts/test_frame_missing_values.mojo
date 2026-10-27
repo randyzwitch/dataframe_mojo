@@ -363,3 +363,30 @@ def test_frame_nan_helpers_preserve_nulls_dtypes_and_subset_selection() raises:
         assert_frame(frame.drop_nans([String("i")]), raw)
     with assert_raises(contains="Unknown"):
         _ = raw.lazy().drop_nans([String("absent")])
+
+
+def test_nested_fill_expressions_validate_empty_schemas_and_parent_validity() raises:
+    from tests.public_contracts.test_extended_windows import extended_frame
+
+    for n in [0, 9]:
+        for kind in [26, 27]:
+            var frame = extended_frame(kind, n, 7, 1)
+            var source = frame.column("x")
+            for backward in [False, True]:
+                var picks = List[Int](length=n, fill=-1)
+                var carry = -1
+                for step in range(n):
+                    var row = n - step - 1 if backward else step
+                    if not source.get(row).is_null():
+                        carry = row
+                    picks[row] = carry
+                var expected = DataFrame([source.take_or_null(picks)])
+                var expression = (
+                    col("x")
+                    .backward_fill() if backward else col("x")
+                    .forward_fill()
+                )
+                assert_frame(frame.select(expression), expected)
+                var plan = frame.lazy().select(expression)
+                assert_equal(plan.collect_schema()[0].dtype, source.dtype())
+                assert_frame(plan.collect(engine="cpu", batch_size=1), expected)
