@@ -12,7 +12,7 @@ from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
 
-from .aggregate import float_key
+from dataframe.aggregation.reducer import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES

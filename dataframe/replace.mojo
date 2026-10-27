@@ -31,7 +31,7 @@ from .expr import (
     REPLACE_STRICT,
     replace_literals,
 )
-from .aggregate import float_key
+from dataframe.aggregation.reducer import float_key
 from .column import _validity_at
 from .expr_kernels import choose
 from .gather import take_parallel

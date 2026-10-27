@@ -17,7 +17,7 @@
 - `binding.mojo`: schema resolution, dtypes, shape, and aggregate dependencies.
 - `execution.mojo`: bounded eager evaluation and grouped accumulator scheduling.
 - `expr_kernels.mojo`: specialized binary kernels, including explicit Float64 SIMD.
-- `reductions.mojo`: mergeable exact-integer and reassociable floating-point states.
+- `aggregation/scalar_states.mojo`: mergeable exact-integer and reassociable floating-point states.
 - `frame.mojo`: validated eager dataframe operations and expression entry points.
 - `aggregation/`: eager grouping implementations and shared streaming reduction state.
 
@@ -117,9 +117,7 @@ subpackages preserves those checks.
 ## Aggregation implementation
 
 `aggregation/group_by.mojo` owns `GroupBy` and `GroupingSets`, grouping strategy
-selection, and the range, perfect-hash and bucket worker jobs. The existing
-`aggregate_table.mojo`, `hash_agg.mojo`, `perfect_aggregate.mojo` and
-`indexed_reduce.mojo` kernels remain in place.
+selection, and the range, perfect-hash and bucket worker jobs. The kernels below live alongside the eager and streaming implementation.
 
 `aggregation/state.mojo` owns `_ReductionPlan`, `_StreamReduction`, merge and
 finish jobs, and aggregate-table input/output adapters. Both eager grouping and
@@ -155,3 +153,24 @@ all moved helpers and constants for compatibility. Shared categorical dictionary
 normalization for concatenation and chunk-filter jobs stay on the frame.
 `scripts/check_join_boundaries.py` enforces the internal dependency direction
 and prevents imports of frame implementation helpers or higher execution layers.
+
+## Aggregation kernels
+
+The computational aggregation modules share `aggregation/` with the eager and
+streaming orchestration. Their names distinguish the state and table layouts:
+
+| Module | Responsibility | Compatibility import |
+| --- | --- | --- |
+| `scalar_states.mojo` | Mergeable integer, floating, logical and moment states | `dataframe.reductions` |
+| `reducer.mojo` | Typed `Reducer` update/merge/finalize and reduction kernels | `dataframe.aggregate` |
+| `hash_reduce.mojo` | Per-worker high-cardinality Int64 grouped reductions | `dataframe.hash_agg` |
+| `dense.mojo` | Perfect-hash layouts and dense group slots | `dataframe.perfect_aggregate` |
+| `hash_table.mojo` | Radix-partitioned aggregate tables and inline group states | `dataframe.aggregate_table` |
+| `selected_rows.mojo` | Reduction kernels reading inputs through selected row indices | `dataframe.indexed_reduce` |
+
+The six compatibility modules re-export their original declarations, including
+private helpers and constants. Engine consumers import the canonical modules;
+contract tests retain legacy imports. The aggregation boundary gate rejects new
+engine dependencies on those facades. Existing dependencies on expression
+execution and pipeline buffer facts remain; this move preserves algorithms,
+thresholds, state layouts, allocation, ownership and worker behavior.

@@ -27,7 +27,7 @@ from std.sys import size_of
 from std.sys.intrinsics import prefetch
 from std.collections import Dict
 
-from .aggregate import float_key
+from dataframe.aggregation.reducer import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .dtype import NUMERIC_DTYPES

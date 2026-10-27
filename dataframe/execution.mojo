@@ -143,7 +143,7 @@ from .expr_kernels import (
     math_unary,
     arctan2_series,
 )
-from .aggregate import Reducer, _sum_bools, _variance_blocks
+from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -2792,7 +2792,7 @@ def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
 
 # Imported here, not with the others: a recorded process-failure diagnostic
 # in tests/tooling/suite_policy.mojo names a line number above.
-from .aggregate_table import key_supported, table_row_keys
+from dataframe.aggregation.hash_table import key_supported, table_row_keys
 from .gather import take_parallel
 from .parallel import configured_workers
 from .window_layout import PartitionLayout, keyed_layout, partition_layout

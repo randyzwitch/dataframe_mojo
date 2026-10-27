@@ -1,8 +1,8 @@
 """Eager grouping requests, strategy dispatch, and worker jobs."""
-from dataframe.aggregate import (
+from dataframe.aggregation.reducer import (
     Reducer,
 )
-from dataframe.aggregate_table import (
+from dataframe.aggregation.hash_table import (
     aggregate_table,
     key_supported,
     reduction_supported,
@@ -63,7 +63,7 @@ from dataframe.gather import (
     take_parallel,
     take_sorted_chunked,
 )
-from dataframe.hash_agg import (
+from dataframe.aggregation.hash_reduce import (
     hash_agg_eligible,
     hash_aggregate,
 )
@@ -73,7 +73,7 @@ from dataframe.hashing import (
     encode_rows_parallel,
     encode_string_rows_parallel,
 )
-from dataframe.indexed_reduce import (
+from dataframe.aggregation.selected_rows import (
     indexed_reductions,
     reduce_indexed,
     reduce_indexed_batches,
@@ -94,7 +94,7 @@ from dataframe.partition import (
     low_cardinality,
     small_key_product,
 )
-from dataframe.perfect_aggregate import (
+from dataframe.aggregation.dense import (
     PerfectLayout,
     perfect_layout,
     perfect_slots,
