@@ -67,6 +67,7 @@ from .expr import (
     FIRST,
     LAST,
     N_UNIQUE,
+    APPROX_N_UNIQUE,
     STD,
     VAR,
     MEDIAN,
@@ -334,6 +335,8 @@ def op_name(op: Int) -> String:
         return "is_first_distinct"
     if op == IS_LAST_DISTINCT:
         return "is_last_distinct"
+    if op == APPROX_N_UNIQUE:
+        return "approx_n_unique"
     if op == EQ_MISSING:
         return "eq_missing"
     if op == NE_MISSING:
@@ -725,6 +728,8 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
                 "product requires a numeric expression, found " + input.name()
             )
         return input.product_type()
+    if op == APPROX_N_UNIQUE:
+        return DataType.UINT32
     if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
         return DataType.INT64
     if op == ANY or op == ALL:
