@@ -276,7 +276,7 @@ def test_pivot_first_last_missing_cells_and_counts_preserve_all_logical_value_ty
                 ]
             )
             for sorted_columns in [False, True]:
-                for function in ["first", "last"]:
+                for function in ["first", "last", "count", "len"]:
                     if kind in [26, 27]:
                         continue
                     if function == "count" and kind == 16 and mode != 0:
@@ -459,7 +459,7 @@ def test_pivot_nested_reductions_reject_explicitly_before_execution() raises:
                     selection_column(kind, n, 7, 1).renamed("value"),
                 ]
             )
-            for function in ["first", "last", "count", "len"]:
+            for function in ["first", "last"]:
                 with assert_raises(
                     contains="does not support list or struct expressions yet"
                 ):
