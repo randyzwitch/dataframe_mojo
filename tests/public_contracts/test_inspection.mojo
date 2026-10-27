@@ -571,10 +571,6 @@ def _assert_nested_description(nested: DataFrame) raises:
                 assert_true(actual.item(row, "nested").is_null())
 
 
-# expected-failure: describe() rejects lists instead of returning documented
-# expected-failure: parent counts and null summary statistics.
-# expected-diagnostic: count does not support list or struct expressions yet,
-# expected-diagnostic: found list[int64]
 def test_describe_lists_reports_only_parent_counts() raises:
     _assert_nested_description(
         DataFrame(
@@ -592,10 +588,6 @@ def test_describe_lists_reports_only_parent_counts() raises:
     )
 
 
-# expected-failure: describe() rejects structs instead of returning documented
-# expected-failure: parent counts and null summary statistics.
-# expected-diagnostic: count does not support list or struct expressions yet,
-# expected-diagnostic: found struct[x: int64]
 def test_describe_structs_reports_only_parent_counts() raises:
     _assert_nested_description(
         DataFrame(
