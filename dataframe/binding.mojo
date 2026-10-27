@@ -1427,7 +1427,11 @@ def bind(
             if shapes[node.left] != ROWS:
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
-            if input.is_nested():
+            if (
+                input.is_nested()
+                and node.op != FORWARD_FILL
+                and node.op != BACKWARD_FILL
+            ):
                 raise Error(
                     op_name(node.op)
                     + " does not support list or struct expressions, found "
