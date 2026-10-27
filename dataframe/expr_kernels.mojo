@@ -3,6 +3,7 @@ from ._buffer import _Buffer, _BufferData
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.ffi import external_call
 from std.sys import size_of
+from std.sys.info import simd_width_of
 from std.memory import pack_bits
 from .float_ops import arithmetic, compare
 from .nested_column import ListColumn, StructColumn
@@ -256,6 +257,43 @@ def _binary_validity[
     return bits^
 
 
+def _apply_mask(mut bits: List[UInt8], n: Int, mask: List[Bool]):
+    """Intersect in place using fit_mask's scalar rules, without its copy."""
+    if len(mask) == 0 or n == 0:
+        return
+    if len(mask) != n or n == 1:
+        var active = mask[0]
+        if n == 1:
+            active = False
+            for flag in mask:
+                if flag:
+                    active = True
+                    break
+        if not active:
+            if len(bits) == 0:
+                bits.resize((n + 7) // 8, 0)
+            else:
+                for k in range(len(bits)):
+                    bits[k] = 0
+        return
+    if len(bits) == 0:
+        bits.resize((n + 7) // 8, 255)
+    var source = mask.unsafe_ptr().unsafe_bitcast[UInt8]()
+    for k in range(n // 8):
+        bits[k] &= pack_bits[DType.uint8](
+            source.unsafe_load[width=8](8 * k).ne(SIMD[DType.uint8, 8](0))
+        )
+    for i in range(n - n % 8, n):
+        if not mask[i]:
+            bits[i // 8] &= ~(UInt8(1) << UInt8(i % 8))
+
+
+def _clear_validity(mut bits: List[UInt8], n: Int, row: Int):
+    if len(bits) == 0:
+        bits.resize((n + 7) // 8, 255)
+    bits[row // 8] &= ~(UInt8(1) << UInt8(row % 8))
+
+
 def _numeric_float[
     op: Int, width: Int, D: DType
 ](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
@@ -407,17 +445,23 @@ def _lane_op[
 
 
 def _vector_int[
-    op: Int, D: DType
-](left: Column[Scalar[D]], right: Column[Scalar[D]], n: Int) raises -> Series:
-    """`+`, `-` or `*` of signed 8-, 16- or 32-bit columns without nulls,
-    16 rows at a time in Int64 lanes, with each block's range checked once
-    (#384). An overflowing block is redone row by row, so the error is the
-    checked operation's own."""
-    comptime lanes = 16
+    op: Int, D: DType, nullable: Bool = False
+](
+    left: Column[Scalar[D]],
+    right: Column[Scalar[D]],
+    n: Int,
+    var valid: List[UInt8] = List[UInt8](),
+) raises -> Series:
+    """Checked `+`, `-` or `*` in widened lanes, with one range check per
+    block (#384). Nullable inputs substitute zero before arithmetic; only
+    observed rows in an overflowing block are redone with scalar checks."""
     # 8- and 16-bit values add, subtract and multiply within Int32, so
     # their lanes are Int32: half the registers of Int64 lanes (ClickBench
     # q29 adds a constant to a 16-bit column 90 times).
     comptime L = DType.int32 if size_of[Scalar[D]]() <= 2 else DType.int64
+    # Nullable selection and overflow masks stay in a native register.
+    # Dense inputs retain the existing 16-row widening kernel.
+    comptime lanes = simd_width_of[L]() if nullable else 16
     var values = List[Scalar[D]](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var a = left._ptr()
@@ -434,9 +478,16 @@ def _vector_int[
         var y = SIMD[L, lanes](Scalar[L](b[])) if b_scalar else b.unsafe_load[
             width=lanes
         ](i).cast[L]()
+        comptime if nullable:
+            var active = _packed_mask[lanes](Span(valid), i)
+            x = active.select(x, SIMD[L, lanes](0))
+            y = active.select(y, SIMD[L, lanes](0))
         var r = _lane_op[op, L, lanes](x, y)
         if (r.lt(low) | r.gt(high)).reduce_or():
             for k in range(lanes):
+                comptime if nullable:
+                    if len(valid) > 0 and not _bit(Span(valid), i + k):
+                        continue
                 _ = _int_binary[op, D](
                     left._get(0 if a_scalar else i + k),
                     right._get(0 if b_scalar else i + k),
@@ -444,11 +495,16 @@ def _vector_int[
         out.unsafe_store(i, r.cast[D]())
         i += lanes
     while i < n:
+        comptime if nullable:
+            if len(valid) > 0 and not _bit(Span(valid), i):
+                out.unsafe_offset(i)[] = 0
+                i += 1
+                continue
         out.unsafe_offset(i)[] = _int_binary[op, D](
             left._get(0 if a_scalar else i), right._get(0 if b_scalar else i)
         )
         i += 1
-    return Series("", Column[Scalar[D]](values^))
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _numeric_int[
@@ -467,8 +523,12 @@ def _numeric_int[
             and right.null_count() == 0
         ):
             return _vector_int[op, D](left, right, n)
-    var active = fit_mask(mask, n)
-    var valid = List[Bool](length=n, fill=False)
+    var valid = _binary_validity(left, right, n)
+    _apply_mask(valid, n, mask)
+    comptime if (op == ADD or op == SUB or op == MUL) and (
+        D == DType.int8 or D == DType.int16 or D == DType.int32
+    ):
+        return _vector_int[op, D, True](left, right, n, valid^)
     comptime predicate = is_comparison(op)
     comptime floating = op == DIV
     var values = List[Scalar[D]](
@@ -476,16 +536,12 @@ def _numeric_int[
     )
     var floats = List[Float64](length=n if floating else 0, fill=0)
     var predicates = List[Bool](length=n if predicate else 0, fill=False)
-    # Checked integer arithmetic stays scalar until a vector overflow path
-    # has equivalent semantics. No null payload enters arithmetic.
+    # Wider integers and other operations keep their scalar checks. Validity
+    # is combined once; no null or inactive payload enters arithmetic.
     for i in range(n):
         var a = 0 if len(left) == 1 else i
         var b = 0 if len(right) == 1 else i
-        valid[i] = left._valid(a) and right._valid(b)
-        # Rows outside the mask are never selected, so they must not raise.
-        if len(active) > 0 and not active[i]:
-            valid[i] = False
-        if not valid[i]:
+        if len(valid) > 0 and not _bit(Span(valid), i):
             continue
         var x = left._get(a)
         var y = right._get(b)
@@ -495,7 +551,7 @@ def _numeric_int[
             floats[i] = x.cast[DType.float64]() / y.cast[DType.float64]()
         elif op == FLOORDIV or op == MOD:
             if y == 0:
-                valid[i] = False
+                _clear_validity(valid, n, i)
             else:
                 values[i] = _int_binary[op, D](x, y)
         elif op == CLIP_LOW:
@@ -515,11 +571,13 @@ def _numeric_int[
         else:
             predicates[i] = x != y
     comptime if predicate:
-        return Series("", BoolColumn(predicates, valid))
+        return Series(
+            "", BoolColumn(values=_pack_bits(predicates), bits=valid^, length=n)
+        )
     elif floating:
-        return Series("", Column[Float64](floats^, valid))
+        return Series("", Column[Float64](values=floats^, bits=valid^))
     else:
-        return Series("", Column[Scalar[D]](values^, valid))
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _compare_bools[
@@ -1334,14 +1392,15 @@ def _unary_int[
     op: Int, D: DType
 ](input: Column[Scalar[D]], mask: List[Bool]) raises -> Series:
     var n = len(input)
-    var active = fit_mask(mask, n)
-    var valid = List[Bool](length=n, fill=False)
+    var valid = List[UInt8]() if len(input._bits[]) == 0 else _window_bytes(
+        input._bits[], input._offset, n, n, 255
+    )
+    _apply_mask(valid, n, mask)
     comptime floating = op == SQRT or op == EXP or op == LOG
     var values = List[Scalar[D]](length=0 if floating else n, fill=0)
     var floats = List[Float64](length=n if floating else 0, fill=0)
     for i in range(n):
-        valid[i] = input._valid(i) and (len(active) == 0 or active[i])
-        if not valid[i]:
+        if len(valid) > 0 and not _bit(Span(valid), i):
             continue
         var x = input._get(i)
         comptime if op == NEG or op == ABS:
@@ -1373,9 +1432,9 @@ def _unary_int[
         else:
             values[i] = x
     comptime if floating:
-        return Series("", Column[Float64](floats^, valid))
+        return Series("", Column[Float64](values=floats^, bits=valid^))
     else:
-        return Series("", Column[Scalar[D]](values^, valid))
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _math[
