@@ -1,5 +1,5 @@
 """Shared subplan materialization and independent input prefetch."""
-from dataframe.frame import (
+from dataframe.aggregation.expressions import (
     _stream_reductions,
 )
 from dataframe.io.csv import (

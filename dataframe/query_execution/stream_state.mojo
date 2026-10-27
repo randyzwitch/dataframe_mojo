@@ -10,6 +10,8 @@ from dataframe.expr import (
 )
 from dataframe.frame import (
     DataFrame,
+)
+from dataframe.aggregation.expressions import (
     _row_local,
 )
 from dataframe.io.csv_reader import (
@@ -65,7 +67,7 @@ from dataframe.planning.strategies import (
 from dataframe.series import (
     Series,
 )
-from dataframe.streaming import (
+from dataframe.aggregation.state import (
     _StreamMergeJob,
     _StreamReduction,
 )

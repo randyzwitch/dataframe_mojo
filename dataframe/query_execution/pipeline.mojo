@@ -21,9 +21,13 @@ from dataframe.expr import (
 )
 from dataframe.frame import (
     DataFrame,
+    concat,
+)
+from dataframe.aggregation.expressions import (
     _row_local,
     _stream_reductions,
-    concat,
+)
+from dataframe.aggregation.state import (
     table_supported,
 )
 from dataframe.hashing import (
@@ -173,7 +177,7 @@ from dataframe.series import (
 from dataframe.sorted_range import (
     sorted_window,
 )
-from dataframe.streaming import (
+from dataframe.aggregation.state import (
     _StreamReduction,
     _finish_parts,
 )

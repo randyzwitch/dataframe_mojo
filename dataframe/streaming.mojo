@@ -1,6 +1,5 @@
-"""Merge aggregate states across ordered batches without finalizing partial sums.
+"""Compatibility exports for shared streaming reduction state.
 
-The state type lives in frame.mojo, where eager group_by also uses it to
-reduce worker row ranges before merging them.
+The implementation lives in aggregation/state.mojo and also serves eager grouping.
 """
-from .frame import _StreamReduction, _StreamMergeJob, _finish_parts
+from .aggregation.state import _StreamReduction, _StreamMergeJob, _finish_parts

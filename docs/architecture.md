@@ -19,6 +19,7 @@
 - `expr_kernels.mojo`: specialized binary kernels, including explicit Float64 SIMD.
 - `reductions.mojo`: mergeable exact-integer and reassociable floating-point states.
 - `frame.mojo`: validated eager dataframe operations and expression entry points.
+- `aggregation/`: eager grouping implementations and shared streaming reduction state.
 
 The only runtime dependency is the Mojo standard library. This is an eager CPU
 implementation, not a production query engine. Buffers are immutable once
@@ -112,3 +113,26 @@ jobs retain their own prefetch dictionaries.
 Benchmark runner freshness, trace discovery, and query-diagram source
 fingerprints traverse the implementation recursively so moving code into
 subpackages preserves those checks.
+
+## Aggregation implementation
+
+`aggregation/group_by.mojo` owns `GroupBy` and `GroupingSets`, grouping strategy
+selection, and the range, perfect-hash and bucket worker jobs. The existing
+`aggregate_table.mojo`, `hash_agg.mojo`, `perfect_aggregate.mojo` and
+`indexed_reduce.mojo` kernels remain in place.
+
+`aggregation/state.mojo` owns `_ReductionPlan`, `_StreamReduction`, merge and
+finish jobs, and aggregate-table input/output adapters. Both eager grouping and
+streaming execution import this state directly. `aggregation/keys.mojo` handles
+struct expansion/repacking and categorical key normalization;
+`aggregation/expressions.mojo` provides binding and row-local/reduction checks
+also used by ordinary frame operations and query planning.
+
+The extracted code still uses the existing `DataFrame` value type and `concat`
+from `frame.mojo`; `GroupingSets` also retains its `LazyGroupingSets` plan type.
+These dependencies preserve the existing representations and operations.
+`frame.mojo` re-exports the moved symbols, and `streaming.mojo` re-exports its
+three existing state helpers for import compatibility. Internal consumers use
+the implementation modules directly. `scripts/check_aggregation_boundaries.py`
+checks that aggregation does not import frame implementation helpers, streaming
+or execution facades, or accelerator dispatch, and has no internal module cycles.

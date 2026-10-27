@@ -1,5 +1,5 @@
 """Logical plan labels and streaming capability descriptions."""
-from dataframe.frame import (
+from dataframe.aggregation.expressions import (
     _stream_reductions,
 )
 from dataframe.join_hash import (

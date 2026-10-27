@@ -54,18 +54,22 @@ from .aggregate_table import (
 )
 from .frame import (
     DataFrame,
+    _rows_mask,
+    concat,
+)
+from dataframe.aggregation.state import (
     _StreamReduction,
     table_frame,
     table_inputs,
     table_specs,
     table_supported,
     _equality_words,
+    _finish_parts,
+    _word_hash,
+)
+from dataframe.aggregation.keys import (
     _expand_struct_keys,
     _group_keys,
-    _finish_parts,
-    _rows_mask,
-    _word_hash,
-    concat,
 )
 from .indexed_reduce import _reduce_floats, _reduce_ints
 from .join_hash import (

@@ -6,7 +6,7 @@ from dataframe.frame import (
 from dataframe.hashing import (
     encode_rows,
 )
-from dataframe.streaming import (
+from dataframe.aggregation.state import (
     _StreamReduction,
 )
 from std.os import (

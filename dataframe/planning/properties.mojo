@@ -65,9 +65,11 @@ from dataframe.expr import (
 )
 from dataframe.frame import (
     DataFrame,
+    concat,
+)
+from dataframe.aggregation.expressions import (
     _bind_all,
     _row_local,
-    concat,
 )
 from dataframe.hashing import (
     encode_rows,

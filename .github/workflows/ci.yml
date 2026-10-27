@@ -61,6 +61,8 @@ jobs:
         run: bash scripts/check_accelerator_boundary.sh
       - name: Check lazy query boundaries
         run: python3 scripts/check_lazy_boundaries.py
+      - name: Check aggregation boundaries
+        run: python3 scripts/check_aggregation_boundaries.py
 
   native-linux:
     runs-on: ubuntu-latest
