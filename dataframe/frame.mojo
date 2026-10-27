@@ -707,6 +707,57 @@ struct DataFrame(Copyable, Sized, Writable):
             columns.append(column.renamed(name))
         return Self(columns^, height=self._height)
 
+    def rename(
+        self, function: def(String) raises thin -> String
+    ) raises -> Self:
+        """Rename every column using a Mojo function; reject duplicate outputs."""
+        var mapping = Dict[String, String]()
+        for name in self.columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
+    def rename(self, function: def(String) thin -> String) raises -> Self:
+        """Rename every column using a Mojo function; reject duplicate outputs."""
+        var mapping = Dict[String, String]()
+        for name in self.columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
+    def insert_column(self, index: Int, column: Series) raises -> Self:
+        """Insert a column by position, returning a frame with shared buffers.
+
+        Negative positions count from the end. Names must be unique and
+        heights must match; a 0x0 frame takes its first column's height.
+        """
+        var position = index + self.width() if index < 0 else index
+        if position < 0 or position > self.width():
+            raise Error("Column insertion index out of bounds")
+        var height = self._height
+        if height == 0 and self.width() == 0:
+            height = len(column)
+        if len(column) != height:
+            raise Error("Inserted column must match dataframe height")
+        var columns = List[Series](capacity=self.width() + 1)
+        for i in range(self.width() + 1):
+            if i == position:
+                columns.append(column.copy())
+            if i < self.width():
+                columns.append(self._columns[i].copy())
+        return Self(columns^, height=height)
+
+    def gather_every(self, n: Int, offset: Int = 0) raises -> Self:
+        """Take every nth row from a nonnegative offset; n must be positive."""
+        if n <= 0 or offset < 0:
+            raise Error("gather_every needs positive n and nonnegative offset")
+        var indices = List[Int]()
+        var row = offset
+        while row < self._height:
+            indices.append(row)
+            if n >= self._height - row:
+                break
+            row += n
+        return self.take(indices)
+
     def with_row_index(
         self, name: String = "index", offset: Int64 = 0
     ) raises -> Self:
@@ -1362,6 +1413,82 @@ struct DataFrame(Copyable, Sized, Writable):
         _ = maintain_order
         return self.take(
             self.arg_sort(by, descending=descending, nulls_last=nulls_last)
+        )
+
+    def _sort_key_exprs(self, by: List[Expr]) raises -> List[Expr]:
+        var expressions = expand_all(by, self._columns)
+        var names = self.columns()
+        for i in range(len(expressions)):
+            var name = String("__dataframe_sort_key_") + String(i)
+            while name in names:
+                name += "_"
+            names.append(name)
+            expressions[i] = expressions[i].alias(name)
+        return expressions^
+
+    def sort(
+        self,
+        by: Expr,
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by an expression, evaluated once before sorting."""
+        return self.sort(
+            [by.copy()], descending, nulls_last, maintain_order=maintain_order
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with common direction and null placement."""
+        var keys = self._sort_key_exprs(by)
+        return self._sort_by_keys(
+            keys,
+            List[Bool](length=len(keys), fill=descending),
+            List[Bool](length=len(keys), fill=nulls_last),
+            maintain_order,
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with a direction and null placement each."""
+        return self._sort_by_keys(
+            self._sort_key_exprs(by), descending, nulls_last, maintain_order
+        )
+
+    def _sort_by_keys(
+        self,
+        keys: List[Expr],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+    ) raises -> Self:
+        _ = maintain_order
+        if len(descending) != len(keys) or len(nulls_last) != len(keys):
+            raise Error("sort needs one descending and nulls_last flag per key")
+        if len(keys) == 0:
+            return self.copy()
+        var names = List[String](capacity=len(keys))
+        for key in keys:
+            names.append(key._name)
+        var evaluated = self.with_columns(keys).select(names)
+        return self.take(
+            evaluated.arg_sort(
+                names, descending=descending, nulls_last=nulls_last
+            )
         )
 
     def arg_sort(
