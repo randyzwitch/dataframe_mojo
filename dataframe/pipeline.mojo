@@ -2505,8 +2505,22 @@ struct _PipelineJob(Job):
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
-    # The join builds' key ranges on source columns (`_key_ranges`).
+    # The join builds' key ranges on source columns (`_key_ranges`); with
+    # union legs, every leg's in turn, leg l's from `leg_first[l]`.
     var key_ranges: List[_KeyRange]
+    # A UNION ALL's legs as sources of their own, each with the row-local
+    # steps that run before the shared ones (DuckDB's union pipelines,
+    # `MetaPipeline::CreateUnionPipeline`: every child of a union runs the
+    # operators above it into the same sink). Empty: `frame` is the
+    # source. The legs' rows are numbered one after another from
+    # `leg_base`, so morsel offsets keep the union's row order.
+    var legs: ArcPointer[List[DataFrame]]
+    var leg_steps: List[List[Step]]
+    var leg_base: List[Int]
+    var leg_first: List[Int]
+    # The current morsel's key ranges: [range_low, range_high).
+    var range_low: Int
+    var range_high: Int
     # Per range with a bloom filter: this worker's rows checked and kept.
     var bloom_checked: List[Int]
     var bloom_kept: List[Int]
@@ -2540,8 +2554,18 @@ struct _PipelineJob(Job):
         derive_order: List[Int],
         workers: Int,
         key_ranges: List[_KeyRange],
+        legs: ArcPointer[List[DataFrame]],
+        leg_steps: List[List[Step]],
+        leg_base: List[Int],
+        leg_first: List[Int],
     ):
         self.key_ranges = key_ranges.copy()
+        self.legs = legs.copy()
+        self.leg_steps = leg_steps.copy()
+        self.leg_base = leg_base.copy()
+        self.leg_first = leg_first.copy()
+        self.range_low = 0
+        self.range_high = len(key_ranges)
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
         self.marks = List[List[UInt8]](capacity=len(steps))
@@ -2578,7 +2602,8 @@ struct _PipelineJob(Job):
         self.expressions = expressions.copy()
         self.keys = keys.copy()
         self.insert = insert
-        self.filter_only = True
+        # A collecting sink's selections are over `frame`; legs have none.
+        self.filter_only = len(legs[]) == 0
         for step in steps:
             if step.kind != STEP_FILTER:
                 self.filter_only = False
@@ -2695,7 +2720,7 @@ struct _PipelineJob(Job):
         as it is, both told by its keys' least and greatest values (a
         zone map); only a morsel straddling the range is filtered row by
         row."""
-        for k in range(len(self.key_ranges)):
+        for k in range(self.range_low, self.range_high):
             ref r = self.key_ranges[k]
             if not r.any:
                 return False
@@ -2773,11 +2798,35 @@ struct _PipelineJob(Job):
                 return
             var offset = self.ranges[][2 * k]
             var length = self.ranges[][2 * k + 1]
-            var morsel = Morsel(self.frame[].slice(offset, length), k)
-            morsel.source_rows = self.frame[].height()
+            var leg = -1
+            var morsel: Morsel
+            if len(self.legs[]) == 0:
+                morsel = Morsel(self.frame[].slice(offset, length), k)
+                morsel.source_rows = self.frame[].height()
+            else:
+                leg = len(self.leg_base) - 1
+                while self.leg_base[leg] > offset:
+                    leg -= 1
+                ref source = self.legs[][leg]
+                morsel = Morsel(
+                    source.slice(offset - self.leg_base[leg], length), k
+                )
+                morsel.source_rows = source.height()
+                self.range_low = self.leg_first[leg]
+                self.range_high = self.leg_first[leg + 1]
             self.counts[0] += length
             if not self._in_key_ranges(morsel):
                 continue
+            if leg >= 0:
+                # The leg's own row-local steps, before the shared ones.
+                for step in self.leg_steps[leg]:
+                    morsel.apply(
+                        step, self.batch_size, self.joins, self.indexes
+                    )
+                    if morsel.height() == 0:
+                        break
+                if morsel.height() == 0:
+                    continue
             if self.top > 0 and self.bounded:
                 self.shared_bound.tighten(
                     self.bound,
@@ -3460,6 +3509,8 @@ def run_pipeline(
     top_nulls_last: List[Bool] = List[Bool](),
     bounded: Bool = False,
     table: Bool = False,
+    legs: List[DataFrame] = List[DataFrame](),
+    leg_steps: List[List[Step]] = List[List[Step]](),
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -3472,7 +3523,9 @@ def run_pipeline(
     whose finished frames (set order) land in `set_frames`, the grand
     total's among them with its one row, and the result is the steps'
     empty output). `counts` receives the rows fed,
-    then each step's input and output rows."""
+    then each step's input and output rows. With `legs`, a UNION ALL's
+    inputs are the sources, each running its `leg_steps` before `steps`,
+    and `frame` is an empty frame of the rows they give the steps."""
     trace_path("pipeline.run")
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
@@ -3532,9 +3585,23 @@ def run_pipeline(
         else:
             trace_path("pipeline.group_collect")
     var shared = ArcPointer(frame.copy())
-    var ranges = ArcPointer(
-        _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
-    )
+    var leg_base = List[Int]()
+    var joined = List[Int]()
+    if len(legs) == 0:
+        joined = _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
+    else:
+        trace_path("pipeline.union_legs")
+        var base = 0
+        for leg in legs:
+            leg_base.append(base)
+            var pieces = _morsel_ranges(
+                leg, max(1, morsel_rows), max(1, workers)
+            )
+            for k in range(0, len(pieces), 2):
+                joined.append(base + pieces[k])
+                joined.append(pieces[k + 1])
+            base += leg.height()
+    var ranges = ArcPointer(joined^)
     # Grouping sets: which come from another set's group rows. Largest
     # first, each takes the smallest earlier source whose keys hold its own,
     # when every reduction merges (`reaggregable`).
@@ -3594,15 +3661,33 @@ def run_pipeline(
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
-    var key_ranges = _key_ranges(frame, steps, joins[])
+    var key_ranges: List[_KeyRange]
+    var leg_first = List[Int]()
+    if len(legs) == 0:
+        key_ranges = _key_ranges(frame, steps, joins[])
+        for r in key_ranges:
+            _ensure_zones(frame.column(r.column))
+    else:
+        # Each leg's own source columns, through its steps and the shared
+        # ones: a build's key range skips the leg's morsels by their zone
+        # maps before any step reads them, as DuckDB's join filters reach
+        # each scan under a union.
+        key_ranges = List[_KeyRange]()
+        for l in range(len(legs)):
+            leg_first.append(len(key_ranges))
+            var through = leg_steps[l].copy()
+            for step in steps:
+                through.append(step.copy())
+            for r in _key_ranges(legs[l], through, joins[]):
+                _ensure_zones(legs[l].column(r.column))
+                key_ranges.append(r.copy())
+        leg_first.append(len(key_ranges))
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
     for r in key_ranges:
         if r.bloom:
             trace_path("pipeline.key_bloom")
             break
-    for r in key_ranges:
-        _ensure_zones(frame.column(r.column))
     # A top-k on an integer key reads each morsel's key range from the
     # zone maps before comparing its rows with the bound (`_zoned_top`).
     if (
@@ -3615,6 +3700,7 @@ def run_pipeline(
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
+    var shared_legs = ArcPointer(legs.copy())
     var jobs = List[_PipelineJob](capacity=job_count)
     for _ in range(job_count):
         jobs.append(
@@ -3633,7 +3719,7 @@ def run_pipeline(
                 top_names,
                 top_descending,
                 top_nulls_last,
-                bounded,
+                bounded and len(legs) == 0,
                 shared_bound,
                 floating_key,
                 layout,
@@ -3643,6 +3729,10 @@ def run_pipeline(
                 derive_order,
                 workers,
                 key_ranges,
+                shared_legs,
+                leg_steps,
+                leg_base,
+                leg_first,
             )
         )
     try:

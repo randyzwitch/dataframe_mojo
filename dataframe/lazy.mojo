@@ -4166,8 +4166,97 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return min(height, node.length) if node.length >= 0 else height
         return -1
 
+    def _source_first(
+        self, source: Int, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Run the stream's computed source in full, then the plan at
+        `index` over its rows as an in-memory frame."""
+        var computed = self._execute(source, False, True, batch_size)
+        var plan = self.copy()
+        plan._frames.append(computed^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes[source] = _plan_node(
+            SCAN_FRAME, offset=len(plan._frames) - 1
+        )
+        return plan._execute(index, False, True, batch_size)
+
+    def _union_legs(
+        self, index: Int, batch_size: Int
+    ) raises -> Optional[Tuple[List[Int], List[List[PlanNode]], DataFrame]]:
+        """The UNION ALL at `index` as a pipeline's sources: for each leg,
+        nested unions flattened left to right, its lowest node that is not
+        a row-local step (an in-memory scan, or a node run on its own) and
+        the row-local steps above it, lowest first; and an empty frame of
+        the rows the union gives. A leg whose columns come in another order
+        gets a projection to the first leg's; None when a leg's names or
+        types differ, or its steps are not ones a pipeline runs."""
+        var leaves = List[Int]()
+        var pending: List[Int] = [index]
+        while len(pending) > 0:
+            var at = pending.pop()
+            if self._nodes[at].kind == CONCAT:
+                pending.append(self._nodes[at].right)
+                pending.append(self._nodes[at].left)
+            else:
+                leaves.append(at)
+        var lowest = List[Int](capacity=len(leaves))
+        var steps = List[List[PlanNode]](capacity=len(leaves))
+        var shape = Optional[DataFrame]()
+        var no_indexes = List[Optional[PreparedHashIndex]]()
+        for leaf in leaves:
+            var operations = List[PlanNode]()
+            var at = leaf
+            while at >= 0 and _stream_rows(self._nodes[at]):
+                operations.append(self._nodes[at].copy())
+                at = self._nodes[at].left
+            if at < 0:
+                return None
+            operations.reverse()
+            if not _pipeline_steps(operations, no_indexes):
+                return None
+            var rows = self._execute(leaf, True, True, batch_size)
+            if not shape:
+                shape = rows.clear()
+            else:
+                ref first = shape.value()
+                if rows.width() != first.width():
+                    return None
+                var same_order = True
+                for c in range(first.width()):
+                    var name = first._columns[c].name()
+                    if name not in rows.columns():
+                        return None
+                    if rows.column(name).dtype() != first._columns[c].dtype():
+                        return None
+                    same_order = same_order and rows._columns[c].name() == name
+                if not same_order:
+                    var reorder = List[Expr](capacity=first.width())
+                    for name in first.columns():
+                        reorder.append(col(name))
+                    operations.append(_plan_node(SELECT, exprs=reorder))
+            lowest.append(at)
+            steps.append(operations^)
+        return Optional((lowest^, steps^, shape.value().copy()))
+
     def _stream_execute(
         self, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """The streamed result of the plan at `index`, or None to run it
+        eagerly. A union source the pipeline takes leg by leg is first
+        tried that way; any other decision for it is the one it got when
+        run in full first (`_source_first`)."""
+        var deferred = False
+        var result = self._stream_route(index, batch_size, deferred, True)
+        if not result and deferred:
+            return self._stream_route(index, batch_size, deferred, False)
+        return result^
+
+    def _stream_route(
+        self,
+        index: Int,
+        batch_size: Int,
+        mut deferred: Bool,
+        union_sources: Bool,
     ) raises -> Optional[DataFrame]:
         var cursor = index
         var expressions = List[Expr]()
@@ -4277,15 +4366,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             first >= 0
             and first != index
             and not _is_scan(self._nodes[first].kind)
-        ):
-            var computed = self._execute(first, False, True, batch_size)
-            var plan = self.copy()
-            plan._frames.append(computed^)
-            plan._schemas.append(Optional[CsvSchema]())
-            plan._nodes[first] = _plan_node(
-                SCAN_FRAME, offset=len(plan._frames) - 1
+            and not (
+                union_sources
+                and self._nodes[first].kind == CONCAT
+                and self._union_legs(first, batch_size)
             )
-            return plan._execute(index, False, True, batch_size)
+        ):
+            return self._source_first(first, index, batch_size)
+        deferred = (
+            first >= 0 and first != index and self._nodes[first].kind == CONCAT
+        )
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
@@ -4642,6 +4732,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return None
         operations.reverse()
         operation_nodes.reverse()
+        # A UNION ALL under the steps: its legs are the pipeline's sources,
+        # each running its own row-local steps first, so a join's key range
+        # skips each leg's morsels before any step reads them, rather than
+        # the union being run and stacked first (DuckDB's union pipelines;
+        # TPC-DS q5 stacked 5.5M sales and return rows to keep 56K of them).
+        var union_legs = List[Int]()
+        var union_steps = List[List[PlanNode]]()
+        var union_shape = DataFrame(List[Series](), height=0)
+        if self._nodes[cursor].kind == CONCAT:
+            var found = self._union_legs(cursor, batch_size)
+            if found:
+                union_legs = found.value()[0].copy()
+                union_steps = found.value()[1].copy()
+                union_shape = found.value()[2].copy()
         # Late materialization of group keys a join gathers from its build
         # side (a dimension's names): each such key's build column becomes
         # its values' codes, encoded once over the build frame, so the
@@ -4696,7 +4800,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # morsel's output rows carry no unique position in the join's
         # left-major order.
         var piped = (
-            self._nodes[cursor].kind == SCAN_FRAME
+            (self._nodes[cursor].kind == SCAN_FRAME or len(union_legs) > 0)
             and (top < 0 and limit < 0 and skip == 0 or top > 0)
             and _pipeline_steps(operations, indexes)
             and (not distinct or len(keys) > 0 and len(joins) > 0)
@@ -4729,7 +4833,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             and not ordered
             and not distinct
         ):
-            var empty = self._frames[self._nodes[cursor].offset].clear()
+            var empty = union_shape.copy() if len(union_legs) > 0 else (
+                self._frames[self._nodes[cursor].offset].clear()
+            )
             var empty_joins = ArcPointer(joins.copy())
             var empty_indexes = ArcPointer(indexes.copy())
             for operation in operations:
@@ -4740,6 +4846,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         # (`_run_grouping_sets`).
         if not table and (grouping or _has_quantile(expressions)):
             return None
+        if piped and len(keys) > 0 and not table and len(union_legs) > 0:
+            # The insert and collect routes sample their keys from one
+            # source frame; a union's take its stacked rows instead.
+            piped = False
         if piped and len(keys) > 0 and not table:
             var frame = self._nodes[cursor].offset
             ref source_frame = self._frames[frame]
@@ -5016,6 +5126,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 return None
             operations.append(self._nodes[top_node].copy())
             operation_nodes.append(top_node)
+        if len(union_legs) > 0 and not piped:
+            # Not a pipeline after all: the union runs first, as any
+            # computed source does (above).
+            return self._source_first(cursor, index, batch_size)
         var shared_joins = ArcPointer(joins^)
         var shared_indexes = ArcPointer(indexes^)
         ref source = self._nodes[cursor]
@@ -5024,6 +5138,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var ipc = List[_IpcBatches]()
         var ndjson = List[_NdjsonBatches]()
         var input = DataFrame(List[Series](), height=0)
+        # A union's legs, run or scanned, and their rows (`union_legs`).
+        var union_frames = List[DataFrame]()
+        var union_rows = 0
         if source.kind == SCAN_CSV:
             var mapping = _map_file(source.text)
             if mapping.address == 0:
@@ -5110,6 +5227,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         for k in range(1, len(rest)):
                             remaining = remaining & rest[k]
                         operations[0].exprs = [remaining^]
+        elif piped and len(union_legs) > 0:
+            for at in union_legs:
+                ref leg = self._nodes[at]
+                if leg.kind == SCAN_FRAME:
+                    leg._record_execution()
+                    var rows = self._frames[leg.offset].copy()
+                    if len(leg.names):
+                        rows = rows.select(leg.names)
+                    union_frames.append(rows^)
+                else:
+                    union_frames.append(
+                        self._execute(at, False, True, batch_size)
+                    )
+                union_rows += union_frames[len(union_frames) - 1].height()
+            input = union_shape.copy()
         else:
             input = self._execute(cursor, False, True, batch_size)
         if strings_sampled and not _keys_repeat(input, keys, operations):
@@ -5224,14 +5356,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         ):
                             bounded = False
         var rows_per_batch = batch_size
-        if len(shared_joins[]) > 0 and input.height() > 0 and not table:
+        var source_rows = union_rows if len(union_legs) > 0 else input.height()
+        if len(shared_joins[]) > 0 and source_rows > 0 and not table:
             # Still four batches a worker: input stored in key order (sales
             # by date) puts every row a selective join keeps into a few
             # batches, and one batch per worker left the others idle while
             # one worked through them (TPC-DS q99: 175K of 1.4M rows in one
             # 180K-row batch, 74 ms on one worker).
             rows_per_batch = max(
-                batch_size, min(4 * batch_size, input.height() // (4 * workers))
+                batch_size, min(4 * batch_size, source_rows // (4 * workers))
             )
         elif (
             len(operations) == 0
@@ -5276,6 +5409,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     for name in members:
                         indices.append(keys.index(name))
                     set_indices.append(indices^)
+            var leg_steps = List[List[Step]](capacity=len(union_steps))
+            for leg in union_steps:
+                leg_steps.append(_steps_of(leg))
             var piped_result = run_pipeline(
                 input,
                 _steps_of(step_nodes),
@@ -5297,6 +5433,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 top_nulls_last=top_nulls_last,
                 bounded=bounded,
                 table=table,
+                legs=union_frames,
+                leg_steps=leg_steps,
             )
             if grouping:
                 if len(set_frames) != len(set_indices):
@@ -8192,12 +8330,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Rows a join-graph relation yields, estimated without running it:
         `_estimated_rows`, else, for a join the order cannot reorder,
         combine its inputs' estimates: a semi or anti join keeps its left
-        input's rows; other joins use the larger input's estimate. -1 when an
-        input has no estimate."""
+        input's rows; other joins use the larger input's estimate. A UNION
+        ALL yields its inputs' rows together, as DuckDB's estimate of a set
+        operation (`RelationStatisticsHelper`). -1 when an input has no
+        estimate."""
         var known = self._estimated_rows(index)
         if known >= 0:
             return known
         ref node = self._nodes[index]
+        if node.kind == CONCAT:
+            var left = self._relation_estimate(node.left)
+            var right = self._relation_estimate(node.right)
+            if left < 0 or right < 0:
+                return -1
+            return left + right
         if node.kind == DROP or (
             (node.kind == SELECT or node.kind == WITH_COLUMNS)
             and _stream_rows(node)
