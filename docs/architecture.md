@@ -136,3 +136,22 @@ three existing state helpers for import compatibility. Internal consumers use
 the implementation modules directly. `scripts/check_aggregation_boundaries.py`
 checks that aggregation does not import frame implementation helpers, streaming
 or execution facades, or accelerator dispatch, and has no internal module cycles.
+
+## Eager join implementation
+
+`DataFrame.join` retains its public overloads, key-argument checks, and cross-join
+name/overflow validation. `_join_impl` delegates to `joins/eager.mojo`, which
+owns the existing strategy order and output assembly. Key dtype and struct
+preparation remain in that implementation with their original error ordering.
+
+`joins/range.mojo` owns bounded-integer/progression matching, membership and
+range filtering, including their existing byte budgets and worker thresholds.
+`joins/rows.mojo` owns stable pair ordering, CSR layouts and row count/fill jobs;
+`joins/keys.mojo` encodes both sides into one key-id space for dictionary joins.
+The existing hash/fused join kernels and as-of joins remain in their modules.
+
+The join modules use the existing `DataFrame` value type, while frame re-exports
+all moved helpers and constants for compatibility. Shared categorical dictionary
+normalization for concatenation and chunk-filter jobs stay on the frame.
+`scripts/check_join_boundaries.py` enforces the internal dependency direction
+and prevents imports of frame implementation helpers or higher execution layers.

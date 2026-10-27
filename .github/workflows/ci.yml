@@ -63,6 +63,8 @@ jobs:
         run: python3 scripts/check_lazy_boundaries.py
       - name: Check aggregation boundaries
         run: python3 scripts/check_aggregation_boundaries.py
+      - name: Check join boundaries
+        run: python3 scripts/check_join_boundaries.py
 
   native-linux:
     runs-on: ubuntu-latest
