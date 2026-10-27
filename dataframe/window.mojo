@@ -6,6 +6,11 @@ earlier row. cum_min and cum_max skip NaN: a NaN row gets the running
 value so far, and is NaN only before the first number (#816). A
 rolling_min or rolling_max window holding a NaN is NaN.
 """
+from .bool_column import BoolColumn
+from .canonical_labels import canonical_labels
+from .hashing import encode_rows
+from .partition import encode_partitioned, low_cardinality
+from .parallel import worker_count
 from .column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
@@ -16,6 +21,11 @@ from .expr import (
     CUM_MAX,
     CUM_COUNT,
     CUM_PROD,
+    IS_DUPLICATED,
+    IS_UNIQUE,
+    IS_FIRST_DISTINCT,
+    IS_LAST_DISTINCT,
+    is_distinct_flag,
     SHIFT,
     RANK,
     ROLLING_SUM,
@@ -149,10 +159,62 @@ def _narrow_sum(result: Series, target: DataType) raises -> Series:
     return result.copy()
 
 
+def _distinct_flags(op: Int, input: Series, ids: List[Int]) raises -> Series:
+    var keys = List[Series]()
+    if input.dtype().is_struct():
+        var structs = input.struct_column()
+        var picks = List[Int]()
+        if input.null_count() > 0:
+            for row in range(len(input)):
+                picks.append(row if structs._valid(row) else -1)
+        for k in range(structs.field_count()):
+            var field = structs.field(k)
+            if len(picks) > 0:
+                field = field.take_or_null(picks)
+            keys.append(canonical_labels(field))
+        keys.append(Series("", BoolColumn(structs.validity())))
+    else:
+        keys.append(canonical_labels(input))
+    if len(ids) > 0:
+        var partitions = List[Int64](capacity=len(ids))
+        for id in ids:
+            partitions.append(Int64(id))
+        keys.append(Series("", Column[Int64](partitions^)))
+    var workers = worker_count(len(input))
+    var encoded = encode_partitioned(
+        keys, workers, nulls_equal=True
+    ) if workers > 1 and not low_cardinality(keys) else encode_rows(
+        keys, nulls_equal=True
+    )
+    var values = List[UInt8](length=(len(input) + 7) // 8, fill=0)
+    if op == IS_FIRST_DISTINCT:
+        for row in encoded.representatives:
+            values[row // 8] |= UInt8(1) << UInt8(row % 8)
+    elif op == IS_LAST_DISTINCT:
+        var last = encoded.representatives.copy()
+        for row in range(len(input)):
+            last[encoded.ids[row]] = row
+        for row in last:
+            values[row // 8] |= UInt8(1) << UInt8(row % 8)
+    else:
+        var counts = List[Int](length=encoded.count(), fill=0)
+        for id in encoded.ids:
+            counts[id] += 1
+        for row in range(len(input)):
+            var unique = counts[encoded.ids[row]] == 1
+            if unique == (op == IS_UNIQUE):
+                values[row // 8] |= UInt8(1) << UInt8(row % 8)
+    return Series(
+        "", BoolColumn(values=values^, bits=List[UInt8](), length=len(input))
+    )
+
+
 def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if input.is_chunked():
         return window_op(node, input.rechunk(), ids)
     var op_code = node.op
+    if is_distinct_flag(op_code):
+        return _distinct_flags(op_code, input, ids)
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
