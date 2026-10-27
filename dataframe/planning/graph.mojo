@@ -66,10 +66,12 @@ from dataframe.planning.properties import (
     _order_insensitive,
     _partitioned_order_free,
     _produced_at,
-    _references,
     _row_order_step,
     _same_expr,
     _stream_rows,
+)
+from dataframe.planning.expression_inputs import (
+    _references,
 )
 from dataframe.series import (
     Series,

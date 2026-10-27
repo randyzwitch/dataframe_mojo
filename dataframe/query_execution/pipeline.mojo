@@ -1,4 +1,14 @@
 """Streaming pipeline lowering and execution."""
+from dataframe.planning.cost.aggregation import (
+    select_aggregation_strategy,
+    refine_string_sample,
+)
+from dataframe.planning.cost.eligibility import (
+    pipeline_eligibility,
+    consider_inline_table,
+)
+from dataframe.planning.cost.model import trace_decision
+
 from dataframe.categorical import (
     decode,
 )
@@ -114,39 +124,42 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
     _plan_node,
 )
-from dataframe.planning.physical import (
+from dataframe.planning.cost.aggregation import (
     plan_batch_states_win,
-    plan_direct_key,
-    plan_joins_below,
     plan_row_number_shape,
     plan_sampled_groups,
+)
+from dataframe.planning.physical import (
+    plan_direct_key,
+    plan_joins_below,
     plan_swap_join_sides,
     plan_swap_left_join_sides,
 )
 from dataframe.planning.properties import (
-    _counts_distinct,
     _distinct_inputs,
-    _filters,
-    _has_quantile,
     _is_scan,
-    _key_group_bound,
-    _key_read,
-    _keys_repeat,
-    _late_key_build,
     _order_free_reductions,
-    _order_sensitive,
-    _references,
-    _row_merge_reductions,
-    _row_steps_only,
     _same_names,
     _set_members,
     _stream_rows,
+)
+from dataframe.planning.cost.eligibility import (
+    _counts_distinct,
+    _filters,
+    _late_key_build,
+)
+from dataframe.planning.cost.sampling import (
+    _key_group_bound,
+    _keys_repeat,
     _unique_key_column,
+)
+from dataframe.planning.expression_inputs import (
+    _references,
 )
 from dataframe.planning.scans import (
     _scan_options,
 )
-from dataframe.planning.strategies import (
+from dataframe.planning.cost.sampling import (
     _all_reduced,
     _frame_bytes,
     _judge_held,
@@ -168,8 +181,10 @@ from dataframe.query_execution.stream_state import (
     _StreamJob,
     _apply_operation,
     _coalesced,
-    _pipeline_steps,
     _steps_of,
+)
+from dataframe.planning.cost.eligibility import (
+    _pipeline_steps,
 )
 from dataframe.series import (
     Series,
@@ -667,10 +682,6 @@ def plan_stream_execute(
     var late_names = List[String]()
     var late_builds = List[Int]()
     # Group keys carried as one build's row numbers (see below).
-    var row_names = List[String]()
-    var row_holder = -1
-    var row_unique = False
-    var row_merge = List[Expr]()
     var row_original = Optional[DataFrame]()
     var original_keys = keys.copy()
     if (
@@ -691,238 +702,55 @@ def plan_stream_execute(
                 continue
             late_names.append(name)
             late_builds.append(b)
-    # Row-local steps and a reduction over an in-memory frame run as a
-    # thread-owned pipeline (#538), grouped or not. A reduction that
-    # counts distinct values (per-group sets, which the eager
-    # partitioned group-by handles on every worker, #336) runs its
-    # joins in the pipeline too when grouped (probes run in morsels on
-    # every worker), into the collecting sink, whose finish is that
-    # eager group-by. Without a join the eager route, which reads the
-    # columns in place, was faster (ClickBench q10, q11): PDS-H
-    # q21's semi-join reduced supplier counts filtered and probed 6M
-    # lineitem rows in batches on the streaming route (105 ms busy
-    # filtering, against 10 in morsels).
     var distinct = _counts_distinct(expressions)
-    # Joins run in the pipeline as probe steps; a grouped sink that
-    # must keep first-occurrence order does not take them, since a
-    # morsel's output rows carry no unique position in the join's
-    # left-major order.
-    var piped = (
-        self._nodes[cursor].kind == SCAN_FRAME
-        and (top < 0 and limit < 0 and skip == 0 or top > 0)
-        and _pipeline_steps(operations, indexes)
-        and (not distinct or len(keys) > 0 and len(joins) > 0)
-        and (len(joins) == 0 or len(keys) == 0 or not ordered)
-        # Ungrouped states merge in worker order, not morsel order.
-        # Positional reductions therefore retain ordered streaming.
-        and (len(keys) > 0 or not _order_sensitive(expressions))
+    var eligibility = pipeline_eligibility(
+        self._nodes[cursor].kind,
+        top,
+        limit,
+        skip,
+        operations,
+        indexes,
+        distinct,
+        len(keys),
+        len(joins),
+        ordered,
+        expressions,
     )
-    # A grouped sink either inserts rows into per-worker group tables
-    # (few groups among 4,096 sampled key rows, fixed-width keys) or
-    # keeps the morsels' rows for the eager partitioned group-by at
-    # the finish. The finish gathers kept rows once over the whole
-    # frame; strings gathered that way cost more than the eager
-    # route's per-chunk filter (ClickBench q12: 85 ms against 48), so
-    # with steps, a collecting plan is piped only when every column
-    # it groups or reduces is fixed-width.
-    var insert = False
-    # String keys to insert, pending a sample of the narrowed input.
-    var strings_sampled = False
-    # The aggregate table takes any grouped reduction whose states it
-    # keeps inline, over any keys but nested ones, and adapts to how
-    # many groups there are as rows arrive (DuckDB's radix-partitioned
-    # sink): no sample, mode or key-type rule decides for it. The
-    # types are those of an empty frame through every operation.
-    var table = False
-    if (
-        piped
-        and len(keys) > 0
-        and len(expressions) > 0
-        and not ordered
-        and not distinct
+    var inline_table_eligible = False
+    if consider_inline_table(
+        eligibility, len(keys), len(expressions), ordered, distinct
     ):
         var empty = self._frames[self._nodes[cursor].offset].clear()
         var empty_joins = ArcPointer(joins.copy())
         var empty_indexes = ArcPointer(indexes.copy())
         for operation in operations:
             _apply_operation(operation, empty, empty_joins, empty_indexes)
-        table = table_supported(empty, keys, expressions)
-    # Only the aggregate table sinks every grouping set at once; the
-    # others group the collected input once per set
-    # (`_run_grouping_sets`).
-    if not table and (grouping or _has_quantile(expressions)):
+        inline_table_eligible = table_supported(empty, keys, expressions)
+    var decision = select_aggregation_strategy(
+        self,
+        cursor,
+        batch_size,
+        keys,
+        expressions,
+        operations,
+        joins,
+        distinct,
+        ordered,
+        top,
+        grouping,
+        late_names,
+        late_builds,
+        eligibility,
+        inline_table_eligible,
+    )
+    if decision.is_eager():
+        trace_decision(decision)
         return None
-    if piped and len(keys) > 0 and not table:
-        var frame = self._nodes[cursor].offset
-        ref source_frame = self._frames[frame]
-        var fixed = True
-        # String keys group exactly in the insert tables (a long
-        # string's bytes compared, `_PartIndex`); collected, they stay
-        # on the eager route (below).
-        var string_keys = False
-        var used = keys.copy()
-        for expression in expressions:
-            var reads = _references(expression)
-            if not reads:
-                fixed = False
-                break
-            for name in reads.value():
-                if name not in used:
-                    used.append(name)
-        for name in used:
-            if not fixed:
-                break
-            if name in late_names:
-                # Grouped by codes if the plan inserts (below).
-                continue
-            var dtype = DataType.INT64
-            if name in source_frame.columns():
-                dtype = source_frame.column(name).dtype()
-            else:
-                # A join's build column, or made by a step (then its
-                # dtype is not known here).
-                var found = False
-                for build in joins:
-                    if name in build.columns():
-                        dtype = build.column(name).dtype()
-                        found = True
-                        break
-                if not found:
-                    continue
-            if (
-                dtype.physical() == DataType.STRING
-                and name in keys
-                and not _key_read(name, expressions)
-            ):
-                string_keys = True
-            elif (
-                dtype.is_nested()
-                or dtype.is_decimal()
-                or dtype.physical() == DataType.STRING
-            ):
-                fixed = False
-        if not fixed and len(operations) > 0:
-            piped = False
-        elif fixed and not _order_sensitive(expressions):
-            # Sampled only when the mode is still open: the sample
-            # takes and encodes 4,096 key rows (a millisecond on
-            # strings, an eighth of ClickBench q38).
-            var sample = min(source_frame.height(), 4096)
-            # A key from a join's build side is not in the source to
-            # sample (and the source's key columns are not taken).
-            var sampled = -1 if len(late_names) > 0 else (
-                -1 if string_keys else plan_sampled_groups(self, keys, frame)
-            )
-            if string_keys:
-                # String keys insert behind a filter, which the eager
-                # route pays for by gathering the kept rows' strings
-                # (ClickBench q37: 22.7 -> 15.9 ms). Without one, the
-                # eager route reads the keys in place, and inserting
-                # many groups was slower (q16 119 -> 176 ms, q33 189
-                # -> 235).
-                # Whether the keys repeat is sampled once the input
-                # is narrowed (below); a plan with joins keeps the
-                # eager route, which would redo their builds if the
-                # sample sent it back (TPC-DS q45: 5.9 -> 16.8 ms).
-                insert = _filters(operations) and len(joins) == 0
-                strings_sampled = insert
-            elif sampled >= 0:
-                insert = 4 * sampled <= sample
-            else:
-                # The groups' bound from where each key is stored,
-                # held to the sampled rule's density: at most a
-                # quarter of the sample's rows.
-                var bound = _key_group_bound(
-                    keys, source_frame, joins, sample // 4
-                )
-                insert = bound >= 0
-        if string_keys and not insert and len(operations) > 0:
-            # Collected strings gather slower than the eager route's
-            # per-chunk filter (ClickBench q12: 85 ms against 48).
-            piped = False
-    if distinct:
-        # Distinct counts are collected for the eager group-by.
-        insert = False
-    # Under the aggregate table, coded keys pay as they did in the
-    # insert tables: when the builds holding the keys bound the groups
-    # to a few (the insert rule's bound), coding each build once costs
-    # less than gathering and hashing their strings at every joined
-    # row (TPC-DS q99's three names from 5-, 20- and 6-row builds);
-    # coding a 100K-row customer build per key did not (q4).
-    var late_table = False
-    if table and len(late_names) > 0:
-        ref source_frame = self._frames[self._nodes[cursor].offset]
-        var sample = min(source_frame.height(), 4096)
-        late_table = (
-            _key_group_bound(keys, source_frame, joins, sample // 4) >= 0
-        )
-    if len(late_names) > 0 and not (piped and (insert or late_table)):
-        # Coded keys pay only in the insert tables: collecting them
-        # for the finish's group-by ran slower than the eager route
-        # their strings take (TPC-DS q45 5.9 -> 13.4 ms, q24 40 -> 81),
-        # so those plans take the strings' route, as before; the
-        # aggregate table groups the strings themselves.
-        if len(operations) > 0 and not table:
-            piped = False
-        # Several of these keys from one build side, under the aggregate
-        # table: the sink groups by that build's row number alone
-        # (DuckDB carries a build row's payload by its address through
-        # the join and reads it once, at the output), and the finished
-        # groups, far fewer than the joined rows, read their key values
-        # from the build and merge where two build rows hold the same
-        # values.
-        if table and piped and not distinct and top < 0:
-            var best = -1
-            var best_count = 1
-            for h in late_builds:
-                var count = 0
-                for other in late_builds:
-                    if other == h:
-                        count += 1
-                if count > best_count:
-                    best = h
-                    best_count = count
-            var carried = List[String]()
-            for k in range(len(late_names)):
-                if best >= 0 and late_builds[k] == best:
-                    carried.append(late_names[k])
-            if best >= 0:
-                var shape = plan_row_number_shape(
-                    self,
-                    self._nodes[cursor].offset,
-                    keys,
-                    carried,
-                    best,
-                    joins,
-                    operations,
-                )
-                var merge = _row_merge_reductions(expressions)
-                var unique = _unique_key_column(joins[best], carried)
-                var rows = shape[0]
-                var groups = shape[1]
-                var width = Float64(len(carried))
-                var build = Float64(joins[best].height())
-                if rows >= 0 and unique:
-                    # Unique values per build row: no two row numbers
-                    # hold equal values, so the first pass's groups are
-                    # final (any reduction) and only their key values
-                    # are read. Paid: the uniqueness check (hash and
-                    # insert one key per build row, 2 units each) and
-                    # reading the k keys of the G groups (k units).
-                    if rows * width > 2.0 * build + groups * width:
-                        row_holder = best
-                        row_unique = True
-                        row_names = carried^
-                elif rows >= 0 and merge:
-                    # Paid: the regroup of the G groups by all K keys,
-                    # 4 units a key (read from the build, hashed and
-                    # partitioned, inserted and compared, written out)
-                    # and 4 for the group (slot, states' merge, row).
-                    var paid = groups * Float64(4 * len(keys) + 4)
-                    if rows * width > paid:
-                        row_holder = best
-                        row_merge = merge.take()
-                        row_names = carried^
+    var row_names = decision.row_names.copy()
+    var row_holder = decision.row_holder
+    var row_unique = decision.row_unique
+    var row_merge = decision.row_merge.copy()
+    if not decision.code_late_keys:
         late_names = List[String]()
     if len(row_names) > 0:
         trace_path("lazy.row_number_keys")
@@ -982,51 +810,7 @@ def plan_stream_execute(
         )
         late_values.append(values^)
         late_rows.append(groups.representatives.copy())
-    # A right join's unmatched build rows come out of the pipeline
-    # alone: where the stream does not run as a pipeline, the plan runs
-    # eagerly.
-    if not piped:
-        for operation in operations:
-            if operation.kind == JOIN and operation.how == JOIN_RIGHT:
-                return None
-    # Grouped aggregations over an in-memory frame, filtered or
-    # projected at most: whether the eager group-by is faster.
-    var eager = False
-    if (
-        not piped
-        and len(expressions)
-        and self._nodes[cursor].kind == SCAN_FRAME
-        and _row_steps_only(operations)
-    ):
-        if _counts_distinct(expressions):
-            eager = True
-        elif len(keys) > 0:
-            eager = _filters(operations) or not plan_batch_states_win(
-                self, keys, self._nodes[cursor].offset, batch_size
-            )
-    if eager:
-        # Over a frame already in memory, filtered or projected at most,
-        # batches save no memory, and most grouped aggregations run
-        # faster eagerly, measured on 10M ClickBench rows (#381):
-        # - n_unique keeps per-group sets in batch states that the eager
-        #   aggregation replaces with hash partitions on every worker
-        #   (#336).
-        # - After a filter, the eager group-by only sees the kept rows,
-        #   where every batch state holds and merges its groups again:
-        #   non-empty SearchPhrase counts take 66 ms against 358
-        #   streamed, and q39's five keys 99 against 371.
-        # - Unfiltered, the eager group-by wins unless its keys would be
-        #   hash-partitioned while the batches keep states of their own
-        #   (`_batch_states_win`).
-        # Ungrouped reductions stream, as do plans with a join, whose
-        # batched probes beat the eager join.
-        return None
     if top >= 0:
-        # Over a frame already in memory with nothing to apply first,
-        # batches save no memory, and the eager selection already works
-        # in cache-sized chunks on every worker.
-        if len(operations) == 0 and self._nodes[cursor].kind == SCAN_FRAME:
-            return None
         operations.append(self._nodes[top_node].copy())
         operation_nodes.append(top_node)
     var shared_joins = ArcPointer(joins^)
@@ -1123,11 +907,9 @@ def plan_stream_execute(
                     operations[0].exprs = [remaining^]
     else:
         input = self._execute(cursor, False, True, batch_size)
-    if strings_sampled and not _keys_repeat(input, keys, operations):
-        # String keys that mostly differ: inserted, each would be a new
-        # group copied and combined (ClickBench q12's phrases: 62 ms
-        # against 49 on the eager route), and the eager route reads
-        # them once.
+    decision = refine_string_sample(decision^, input, keys, operations)
+    trace_decision(decision)
+    if decision.is_eager():
         return None
     var workers = configured_workers()
     var pool = Pool(1)
@@ -1235,7 +1017,11 @@ def plan_stream_execute(
                     ):
                         bounded = False
     var rows_per_batch = batch_size
-    if len(shared_joins[]) > 0 and input.height() > 0 and not table:
+    if (
+        len(shared_joins[]) > 0
+        and input.height() > 0
+        and not decision.uses_aggregate_table()
+    ):
         # Still four batches a worker: input stored in key order (sales
         # by date) puts every row a selective join keeps into a few
         # batches, and one batch per worker left the others idle while
@@ -1264,7 +1050,7 @@ def plan_stream_execute(
     # worker takes morsels from a shared cursor and runs every step on
     # them; nothing is held, judged or merged on the main thread.
     if (
-        piped
+        decision.uses_pipeline()
         and len(csv) == 0
         and len(parquet) == 0
         and len(ipc) == 0
@@ -1295,7 +1081,7 @@ def plan_stream_execute(
             expressions,
             keys,
             ordered,
-            insert,
+            decision.inserts_groups(),
             workers,
             rows_per_batch,
             batch_size,
@@ -1307,7 +1093,7 @@ def plan_stream_execute(
             top_descending=top_descending,
             top_nulls_last=top_nulls_last,
             bounded=bounded,
-            table=table,
+            table=decision.uses_aggregate_table(),
         )
         if grouping:
             if len(set_frames) != len(set_indices):
