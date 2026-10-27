@@ -933,6 +933,10 @@ A flat, topologically ordered tree; composition never evaluates data.
   Number of null values, as Int64.
 - `def approx_n_unique(self) -> Self`
   Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+- `def drop_nulls(self) -> Self`
+  Remove null values, preserving the order of the remaining values.
+- `def drop_nans(self) -> Self`
+  Remove NaNs while retaining nulls; a no-op for non-float values.
 - `def has_nulls(self) -> Self`
   Whether any value is null, as one Bool; false for empty input.
 - `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
