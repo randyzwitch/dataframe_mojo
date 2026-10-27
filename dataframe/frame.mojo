@@ -43,6 +43,7 @@ from .expr import (
     PRODUCT,
     is_reduction,
     is_window,
+    changes_length,
     subtree,
     node_children,
     conjuncts,
@@ -2734,10 +2735,19 @@ struct DataFrame(Copyable, Sized, Writable):
                 batch_size=batch_size,
                 layouts=Int(Pointer(to=layouts)),
             )
-            if expression.shape() != ROWS and has_rows:
-                result = result._broadcast(height)
             columns.append(result^)
         _ = layouts^
+        var row_height = -1
+        for k in range(len(bound)):
+            if bound[k].shape() == ROWS:
+                if row_height >= 0 and len(columns[k]) != row_height:
+                    raise Error("Selected expressions have different lengths")
+                row_height = len(columns[k])
+        if row_height >= 0:
+            height = row_height
+        for k in range(len(bound)):
+            if bound[k].shape() != ROWS and has_rows:
+                columns[k] = columns[k]._broadcast(height)
         var frame = Self(columns^, height=height)
         if len(modes) > 0:
             # An empty input has no modes: zero rows, not one null row.
@@ -6301,6 +6311,16 @@ struct GroupBy(Copyable):
     def agg(
         self, expressions: List[Expr], *, batch_size: Int = 1024
     ) raises -> DataFrame:
+        var prepared = List[Expr](capacity=len(expressions))
+        var changed = False
+        for expression in expressions:
+            if changes_length(expression):
+                prepared.append(expression.implode())
+                changed = True
+            else:
+                prepared.append(expression.copy())
+        if changed:
+            return self.agg(prepared, batch_size=batch_size)
         # String keys that carry their source's dictionary codes (a Parquet
         # scan) group by the codes, as categorical keys do, and come back as
         # strings: H2O q2's two string keys 102 -> 49 ms.

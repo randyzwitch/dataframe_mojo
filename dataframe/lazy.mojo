@@ -137,6 +137,7 @@ from .expr import (
     lit,
     is_reduction,
     is_window,
+    changes_length,
     subtree,
 )
 from .aggregate_table import reduction_supported
@@ -10461,10 +10462,17 @@ struct LazyGroupBy(Copyable):
             else:
                 every_column = True
         var grouped = self._grouped(reads, every_column)
+        var prepared = List[Expr](capacity=len(exprs))
+        for expression in exprs:
+            prepared.append(
+                expression.implode() if changes_length(
+                    expression
+                ) else expression.copy()
+            )
         var plan = grouped[0]._push(
             _plan_node(
                 AGG,
-                exprs=exprs,
+                exprs=prepared,
                 names=grouped[1],
                 maintain_order=self._maintain_order,
             )
