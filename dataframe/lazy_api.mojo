@@ -39,8 +39,10 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
     _describe_percentiles,
-    _reduce_column,
     concat,
+)
+from dataframe.aggregation.group_by import (
+    _reduce_column,
 )
 from dataframe.io.csv import (
     CsvSchema,

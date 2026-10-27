@@ -10,6 +10,8 @@ from dataframe.expr import (
 )
 from dataframe.frame import (
     DataFrame,
+)
+from dataframe.aggregation.expressions import (
     _row_local,
     _stream_reductions,
 )
