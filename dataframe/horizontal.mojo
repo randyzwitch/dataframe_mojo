@@ -9,6 +9,7 @@ output buffer a SIMD vector at a time instead of allocating a column per
 pair. Dtype dispatch happens once per input, never per row.
 """
 from std.math import isnan
+from std.memory import pack_bits
 from std.sys import size_of
 from .bool_column import BoolColumn
 from .cast import cast_series
@@ -30,7 +31,7 @@ from .expr import (
     H_SUM,
     horizontal_name,
 )
-from .expr_kernels import binary, choose, fit_mask, validity
+from .expr_kernels import binary, choose, fit_mask, validity, _packed_mask
 from .series import Series
 
 
@@ -164,21 +165,18 @@ def horizontal_result(
     return result
 
 
-def _flags[W: Int](flags: List[Bool], start: Int) -> SIMD[DType.bool, W]:
-    return (
-        flags.unsafe_ptr()
-        .unsafe_offset(start)
-        .unsafe_bitcast[Scalar[DType.bool]]()
-        .unsafe_load[width=W]()
-    )
-
-
 def _store_flags[
     W: Int
-](mut flags: List[Bool], start: Int, value: SIMD[DType.bool, W]):
-    flags.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[
-        Scalar[DType.bool]
-    ]().unsafe_store(value)
+](mut flags: List[UInt8], start: Int, value: SIMD[DType.bool, W]):
+    comptime if W == 8:
+        flags[start // 8] = pack_bits[DType.uint8](value)
+    else:
+        comptime assert W == 1
+        var shift = UInt8(start & 7)
+        var bit = UInt8(1) << shift
+        flags[start // 8] = (flags[start // 8] & ~bit) | (
+            UInt8(value[0]) << shift
+        )
 
 
 struct _Input[D: DType](Movable):
@@ -186,15 +184,13 @@ struct _Input[D: DType](Movable):
     input broadcasts."""
 
     var column: Column[Scalar[Self.D]]
-    var flags: List[Bool]
     var dense: Bool
     var scalar: Bool
 
     def __init__(out self, series: Series) raises:
         var flat = series.rechunk() if series.is_chunked() else series.copy()
         self.column = flat._data[Column[Scalar[Self.D]]].copy()
-        self.dense = self.column.null_count() == 0
-        self.flags = List[Bool]() if self.dense else validity(flat)
+        self.dense = len(self.column._bits[]) == 0
         self.scalar = len(self.column) == 1
 
     def values[W: Int](self, start: Int) -> SIMD[Self.D, W]:
@@ -206,8 +202,10 @@ struct _Input[D: DType](Movable):
         if self.dense:
             return SIMD[DType.bool, W](fill=True)
         if self.scalar:
-            return SIMD[DType.bool, W](fill=self.flags[0])
-        return _flags[W](self.flags, start)
+            return SIMD[DType.bool, W](fill=self.column._valid(0))
+        return _packed_mask[W](
+            self.column._bits[].span(), self.column._offset + start
+        )
 
 
 @always_inline
@@ -229,10 +227,10 @@ def _extreme_block[
     input: _Input[D],
     start: Int,
     mut values: List[Scalar[D]],
-    mut valid: List[Bool],
+    mut valid: List[UInt8],
 ):
     var x = values.unsafe_ptr().unsafe_offset(start).unsafe_load[width=W]()
-    var x_valid = _flags[W](valid, start)
+    var x_valid = _packed_mask[W](Span(valid), start)
     var y = input.values[W](start)
     var y_valid = input.valid[W](start)
     # Where only one side is valid that side wins; where both are, the
@@ -245,9 +243,18 @@ def _extreme_block[
 def _extreme[
     D: DType, is_max: Bool
 ](inputs: List[Series], n: Int) raises -> Series:
+    # Polars' min/max horizontal also separates null-free inputs. They need
+    # only payload comparisons: no running validity bitmap to unpack/repack.
+    var dense = True
+    for input in inputs:
+        if input.null_count() != 0:
+            dense = False
+            break
+    if dense:
+        return _extreme_dense[D, is_max](inputs, n)
     comptime W = 1 if size_of[Scalar[D]]() > 8 else 8
     var values = List[Scalar[D]](length=n, fill=0)
-    var valid = List[Bool](length=n, fill=False)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
     var main = n - n % W
     for k in range(len(inputs)):
         var input = _Input[D](inputs[k])
@@ -255,7 +262,34 @@ def _extreme[
             _extreme_block[D, W, is_max](input, start, values, valid)
         for start in range(main, n):
             _extreme_block[D, 1, is_max](input, start, values, valid)
-    return Series("", Column[Scalar[D]](values^, valid))
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
+def _extreme_dense[
+    D: DType, is_max: Bool
+](inputs: List[Series], n: Int) raises -> Series:
+    comptime W = 1 if size_of[Scalar[D]]() > 8 else 8
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var main = n - n % W
+    var first = _Input[D](inputs[0])
+    for start in range(0, main, W):
+        out.unsafe_offset(start).unsafe_store(first.values[W](start))
+    for start in range(main, n):
+        values[start] = first.values[1](start)[0]
+    for k in range(1, len(inputs)):
+        var input = _Input[D](inputs[k])
+        for start in range(0, main, W):
+            var x = out.unsafe_offset(start).unsafe_load[width=W]()
+            var y = input.values[W](start)
+            out.unsafe_offset(start).unsafe_store(
+                _takes_right[D, W, is_max](x, y).select(y, x)
+            )
+        for start in range(main, n):
+            var x = SIMD[D, 1](values[start])
+            var y = input.values[1](start)
+            values[start] = _takes_right[D, 1, is_max](x, y).select(y, x)[0]
+    return Series("", Column[Scalar[D]](values^))
 
 
 def _extreme_rows[is_max: Bool](inputs: List[Series], n: Int) raises -> Series:
@@ -312,15 +346,29 @@ def _float_fold[
                 sums[start] += input.values[1](start)[0]
                 counts[start] += 1
     var total = Scalar[D](len(inputs))
-    var valid = List[Bool](length=n, fill=True)
-    for i in range(n):
-        if not ignore_nulls:
-            valid[i] = counts[i] == total
+    comptime if not mean:
+        if ignore_nulls:
+            return Series("", Column[Scalar[D]](sums^))
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    for start in range(0, main, W):
+        var count = counts.unsafe_ptr().unsafe_load[width=W](start)
+        var present = count.gt(SIMD[D, W](0)) if ignore_nulls else count.eq(
+            SIMD[D, W](total)
+        )
         comptime if mean:
-            if ignore_nulls:
-                valid[i] = counts[i] > 0
-            sums[i] = sums[i] / counts[i] if valid[i] else 0
-    return Series("", Column[Scalar[D]](sums^, valid))
+            var ptr = sums.unsafe_ptr().unsafe_offset(start)
+            ptr.unsafe_store(
+                present.select(
+                    ptr.unsafe_load[width=W]() / count, SIMD[D, W](0)
+                )
+            )
+        valid[start // 8] = pack_bits[DType.uint8](present)
+    for i in range(main, n):
+        var present = counts[i] > 0 if ignore_nulls else counts[i] == total
+        comptime if mean:
+            sums[i] = sums[i] / counts[i] if present else 0
+        valid[i // 8] |= UInt8(present) << UInt8(i % 8)
+    return Series("", Column[Scalar[D]](values=sums^, bits=valid^))
 
 
 def _zero(dtype: DataType) raises -> Series:

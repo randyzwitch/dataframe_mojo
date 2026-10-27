@@ -221,6 +221,41 @@ def _mask[width: Int](valid: List[Bool], start: Int) -> SIMD[DType.bool, width]:
     )
 
 
+@always_inline
+def _packed_mask[
+    width: Int
+](bits: Span[UInt8, _], start: Int) -> SIMD[DType.bool, width]:
+    """Expand only the current register's validity; absence means all valid."""
+    if len(bits) == 0:
+        return SIMD[DType.bool, width](fill=True)
+    var result = SIMD[DType.bool, width](fill=False)
+    comptime for byte in range((width + 7) // 8):
+        var value = _window_byte(bits, start + 8 * byte, 255)
+        comptime for lane in range(min(8, width - 8 * byte)):
+            result[8 * byte + lane] = (value >> UInt8(lane)) & 1 != 0
+    return result
+
+
+def _binary_validity[
+    T: Copyable & Deinitable
+](left: Column[T], right: Column[T], n: Int) -> List[UInt8]:
+    """AND operand windows without expanding validity or packing it again."""
+    if len(left._bits[]) == 0:
+        if len(right._bits[]) == 0:
+            return List[UInt8]()
+        return _window_bytes(right._bits[], right._offset, len(right), n, 255)
+    var bits = _window_bytes(left._bits[], left._offset, len(left), n, 255)
+    if len(right._bits[]) == 0:
+        return bits^
+    var scalar = len(right) == 1
+    var fill = UInt8(255) if scalar and right._valid(0) else UInt8(0)
+    for k in range(len(bits)):
+        bits[k] &= fill if scalar else _window_byte(
+            right._bits[], right._offset + 8 * k, 255
+        )
+    return bits^
+
+
 def _numeric_float[
     op: Int, width: Int, D: DType
 ](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
@@ -229,13 +264,9 @@ def _numeric_float[
     slots (harmless for floats) and zeroed in the output; the final
     `n % width` rows run one lane at a time, so no load passes the end."""
     var n = _length(len(left), len(right))
-    var valid = List[Bool](length=n, fill=False)
-    for i in range(n):
-        valid[i] = left._valid(0 if len(left) == 1 else i) and right._valid(
-            0 if len(right) == 1 else i
-        )
+    var valid = _binary_validity(left, right, n)
     comptime predicate = is_comparison(op)
-    var values = List[Scalar[D]](length=0 if predicate else n, fill=0)
+    var values = List[Scalar[D]](unsafe_uninit_length=0 if predicate else n)
     var predicates = List[Bool](length=n if predicate else 0, fill=False)
     var main = n - n % width
     for start in range(0, main, width):
@@ -245,9 +276,11 @@ def _numeric_float[
     for start in range(main, n):
         _float_block[op, 1, D](left, right, start, valid, values, predicates)
     comptime if predicate:
-        return Series("", BoolColumn(predicates, valid))
+        return Series(
+            "", BoolColumn(values=_pack_bits(predicates), bits=valid^, length=n)
+        )
     else:
-        return Series("", Column[Scalar[D]](values^, valid))
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _float_block[
@@ -256,7 +289,7 @@ def _float_block[
     left: Column[Scalar[D]],
     right: Column[Scalar[D]],
     start: Int,
-    valid: List[Bool],
+    valid: List[UInt8],
     mut values: List[Scalar[D]],
     mut predicates: List[Bool],
 ):
@@ -264,7 +297,7 @@ def _float_block[
     var y = _lanes[D, width](right, start)
     comptime if is_comparison(op):
         var result = compare[D, width](op, x, y)
-        var mask = _mask[width](valid, start)
+        var mask = _packed_mask[width](Span(valid), start)
         predicates.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[
             Scalar[DType.bool]
         ]().unsafe_store(result & mask)
@@ -277,7 +310,9 @@ def _float_block[
             comptime for lane in range(width):
                 result[lane] = _float_scalar[op, D](x[lane], y[lane])
         values.unsafe_ptr().unsafe_offset(start).unsafe_store(
-            _mask[width](valid, start).select(result, SIMD[D, width](0))
+            _packed_mask[width](Span(valid), start).select(
+                result, SIMD[D, width](0)
+            )
         )
 
 
@@ -1203,16 +1238,16 @@ def _unary_float[
 ) raises -> Series where D.is_floating_point():
     """Float unary kernel with contiguous SIMD loads (see _numeric_float)."""
     var n = len(input)
-    var valid = List[Bool](length=n, fill=False)
-    for i in range(n):
-        valid[i] = input._valid(i)
-    var values = List[Scalar[D]](length=n, fill=0)
+    var valid = List[UInt8]() if len(input._bits[]) == 0 else _window_bytes(
+        input._bits[], input._offset, n, n, 255
+    )
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
     var main = n - n % width
     for start in range(0, main, width):
         _unary_block[op, width, D](input, start, decimals, valid, values)
     for start in range(main, n):
         _unary_block[op, 1, D](input, start, decimals, valid, values)
-    return Series("", Column[Scalar[D]](values^, valid))
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 @always_inline
@@ -1254,10 +1289,11 @@ def _unary_block[
     input: Column[Scalar[D]],
     start: Int,
     decimals: Int,
-    valid: List[Bool],
+    valid: List[UInt8],
     mut values: List[Scalar[D]],
 ) where D.is_floating_point():
     var x = input._ptr().unsafe_load[width=width](start)
+    var mask = _packed_mask[width](Span(valid), start)
     var result: SIMD[D, width]
     comptime if op == NEG:
         result = -x
@@ -1269,7 +1305,7 @@ def _unary_block[
         result = exp(x)
         comptime for lane in range(width):
             var value = x[lane]
-            if valid[start + lane] and (
+            if mask[lane] and (
                 isnan(value)
                 or abs(value) > Scalar[D](80 if D == DType.float32 else 700)
             ):
@@ -1277,7 +1313,7 @@ def _unary_block[
     elif op == LOG:
         result = SIMD[D, width](0)
         comptime for lane in range(width):
-            if valid[start + lane]:
+            if mask[lane]:
                 result[lane] = _log_value[D](x[lane])
     elif op == FLOOR:
         result = floor(x)
@@ -1290,7 +1326,7 @@ def _unary_block[
                 x[lane].cast[DType.float64](), decimals
             ).cast[D]()
     values.unsafe_ptr().unsafe_offset(start).unsafe_store(
-        _mask[width](valid, start).select(result, SIMD[D, width](0))
+        mask.select(result, SIMD[D, width](0))
     )
 
 
@@ -1437,10 +1473,11 @@ def _math_block[
     input: Column[Scalar[D]],
     start: Int,
     base: Scalar[D],
-    valid: List[Bool],
+    valid: List[UInt8],
     mut values: List[Scalar[D]],
 ) where D.is_floating_point():
     var x = input._ptr().unsafe_load[width=width](start)
+    var mask = _packed_mask[width](Span(valid), start)
     var zero = SIMD[D, width](0)
     var result: SIMD[D, width]
     comptime if op == SIGN:
@@ -1458,10 +1495,10 @@ def _math_block[
     else:
         result = zero
         comptime for lane in range(width):
-            if valid[start + lane]:
+            if mask[lane]:
                 result[lane] = _math_value[op, D](x[lane], base)
     values.unsafe_ptr().unsafe_offset(start).unsafe_store(
-        _mask[width](valid, start).select(result, zero)
+        mask.select(result, zero)
     )
 
 
@@ -1471,17 +1508,17 @@ def _math_float[
     input: Column[Scalar[D]], base: Float64
 ) raises -> Series where D.is_floating_point():
     var n = len(input)
-    var valid = List[Bool](length=n, fill=False)
-    for i in range(n):
-        valid[i] = input._valid(i)
-    var values = List[Scalar[D]](length=n, fill=0)
+    var valid = List[UInt8]() if len(input._bits[]) == 0 else _window_bytes(
+        input._bits[], input._offset, n, n, 255
+    )
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
     var main = n - n % width
     var b = base.cast[D]()
     for start in range(0, main, width):
         _math_block[op, width, D](input, start, b, valid, values)
     for start in range(main, n):
         _math_block[op, 1, D](input, start, b, valid, values)
-    return Series("", Column[Scalar[D]](values^, valid))
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _sign_ints[D: DType](input: Column[Scalar[D]]) raises -> Series:
