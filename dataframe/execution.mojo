@@ -21,6 +21,8 @@ from .expr import (
     MUL,
     GT,
     EQ,
+    EQ_MISSING,
+    NE_MISSING,
     SUM,
     MEAN,
     COUNT,
@@ -337,6 +339,10 @@ def _binary_op[
         return binary[EQ, width](left, right, mask)
     if op == NE:
         return binary[NE, width](left, right, mask)
+    if op == EQ_MISSING:
+        return binary[EQ_MISSING, width](left, right, mask)
+    if op == NE_MISSING:
+        return binary[NE_MISSING, width](left, right, mask)
     if op == AND:
         return binary[AND, width](left, right, mask)
     if op == OR:

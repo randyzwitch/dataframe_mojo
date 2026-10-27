@@ -780,6 +780,14 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def eq(self, other: Self) -> Self`
 - `def ne(self, other: String) -> Self`
 - `def ne(self, other: Self) -> Self`
+- `def eq_missing(self, other: String) -> Self`
+  Null-safe equality with a string literal; see the Expr overload.
+- `def eq_missing(self, other: Self) -> Self`
+  Compare for equality, returning a Bool for every row.
+- `def ne_missing(self, other: String) -> Self`
+  Null-safe inequality with a string literal; see the Expr overload.
+- `def ne_missing(self, other: Self) -> Self`
+  The Boolean complement of eq_missing, with no null results.
 - `def fill_null(self, value: String) -> Self`
 - `def fill_null(self, value: Self) -> Self`
   Replace nulls with value; the dtypes must match.
@@ -903,6 +911,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
 - `def null_count(self) -> Self`
   Number of null values, as Int64.
+- `def has_nulls(self) -> Self`
+  Whether any value is null, as one Bool; false for empty input.
 - `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
   Convert to dtype; see the String overload.
 - `def cast(self, dtype: String, strict: Bool = True) -> Self`
