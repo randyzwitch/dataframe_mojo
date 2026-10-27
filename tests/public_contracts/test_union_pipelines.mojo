@@ -72,7 +72,7 @@ def test_union_legs_through_a_join_into_each_sink() raises:
     var a = leg(ROWS, 0, False)
     var b = leg(ROWS // 2, 15_000, True)
     var d = dimension()
-    var order = ["k", "v", "s"]
+    var order: List[String] = ["k", "v", "s"]
     # Eager reference: the union stacked, then joined.
     var stacked = concat([a.copy(), b.select(order)])
     var joined = stacked.join(d, "k")
@@ -110,7 +110,7 @@ def test_three_legs_one_from_an_aggregation() raises:
     var a = leg(ROWS, 0, False)
     var b = leg(ROWS // 2, 15_000, True)
     var d = dimension()
-    var order = ["k", "v", "s"]
+    var order: List[String] = ["k", "v", "s"]
     var keys: List[String] = ["k", "s"]
     var summed = a.lazy().group_by(keys).agg([col("v").sum().alias("v")])
     var summed_eager = a.group_by(keys).agg([col("v").sum().alias("v")])
