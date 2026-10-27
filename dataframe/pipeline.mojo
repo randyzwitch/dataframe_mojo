@@ -649,10 +649,12 @@ def _key_bloom(
     (`join_runtime_filter.rs`): the build holds at most an eighth of the
     rows it filters, and, where the column's distinct count is known (a
     loaded table's statistics), at most 0.3 of it."""
-    if equalities != 1 or step == 0:
-        # As DuckDB's, only a join with one equality condition; and not the
-        # first step, where the join's own probe drops a row as the filter
-        # would.
+    if equalities != 1:
+        # As DuckDB's, only a join with one equality condition. The first
+        # step takes one too: DuckDB's sits in the probe table's scan
+        # whatever the join's place, and a lookup of one word costs a
+        # fraction of a hash probe (PDS-H q21's semi joins of 6M lineitem
+        # rows against 72K order keys).
         return None
     var keys = len(key) - key.null_count()
     if keys == 0 or LOPSIDED_FACTOR * keys > frame.height():
