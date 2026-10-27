@@ -357,6 +357,23 @@ def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
     assert_equal(inner._relation_estimate(len(inner._plan._nodes) - 1), -1)
 
 
+def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:
+    var left = DataFrame([Series("k", Column[Int64]([1, 2]))]).lazy()
+    var right = DataFrame([Series("k", Column[Int64]([3, 4, 5]))]).lazy()
+    var empty = DataFrame([Series("k", Column[Int64](List[Int64]()))]).lazy()
+    for query in [
+        left.concat(right),
+        left.concat(right).concat(left),
+        left.concat(empty),
+    ]:
+        assert_equal(
+            query._relation_estimate(len(query._plan._nodes) - 1),
+            query.collect(optimize=False, engine="cpu").height(),
+        )
+    var unknown = left.concat(left.select(col("k").sum()))
+    assert_equal(unknown._relation_estimate(len(unknown._plan._nodes) - 1), -1)
+
+
 def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
     # The left join is one relation of the graph: its rows are estimated,
     # the graph is ordered, and the rows equal the written joins'.
