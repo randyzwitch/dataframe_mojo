@@ -8412,12 +8412,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Rows a join-graph relation yields, estimated without running it:
         `_estimated_rows`, else, for a join the order cannot reorder,
         combine its inputs' estimates: a semi or anti join keeps its left
-        input's rows; other joins use the larger input's estimate. -1 when an
-        input has no estimate."""
+        input's rows; other joins use the larger input's estimate. A UNION
+        ALL yields its inputs' rows together, as DuckDB's estimate of a set
+        operation (`RelationStatisticsHelper`). -1 when an input has no
+        estimate."""
         var known = self._estimated_rows(index)
         if known >= 0:
             return known
         ref node = self._nodes[index]
+        if node.kind == CONCAT:
+            var left = self._relation_estimate(node.left)
+            var right = self._relation_estimate(node.right)
+            if left < 0 or right < 0:
+                return -1
+            return left + right
         if node.kind == DROP or (
             (node.kind == SELECT or node.kind == WITH_COLUMNS)
             and _stream_rows(node)
