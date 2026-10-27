@@ -3,8 +3,10 @@ wide for its range to tell, hands the pipeline a bloom filter over its keys
 (`runtime_filter.mojo`); a probe row whose key the filter lacks is dropped
 before any step reads it. Joins against a scalar model: inner and semi joins,
 Int64 and Int32 keys, nullable probe keys, a second join after the first so
-the filter works on rows an earlier filter kept, and builds too big for a
-filter, on one and eight workers. The filter itself never loses a key."""
+the filter works on rows an earlier filter kept, a probe filter before the
+joins (on another column, and on the filtered key itself, whose nulls leave
+the filter's mask with a validity bitmap), and builds too big for a filter,
+on one and eight workers. The filter itself never loses a key."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -92,22 +94,29 @@ def ids(frame: DataFrame) raises -> List[Int]:
 
 
 def check(
-    dtype: DataType, a_every: Int, b_every: Int, semi: Bool, expect_bloom: Bool
+    dtype: DataType,
+    a_every: Int,
+    b_every: Int,
+    semi: Bool,
+    expect_bloom: Bool,
+    prefilter: Int = 0,
 ) raises:
-    var source = probe(dtype)
-    var plan = (
-        source.lazy()
-        .join(
-            build("a", 5000, 1, a_every, dtype).lazy(),
-            left_on=["ak"],
-            right_on=["a"],
-        )
-        .join(
-            build("b", 7000, 2, b_every, dtype).lazy(),
-            left_on=["bk"],
-            right_on=["b"],
-            how="semi" if semi else "inner",
-        )
+    """`prefilter` 1 keeps rows whose id is not a multiple of 3 before the
+    joins; 2 keeps rows whose `bk` is even (null where `bk` is)."""
+    var source = probe(dtype).lazy()
+    if prefilter == 1:
+        source = source.filter(col("id") % 3 != 0)
+    elif prefilter == 2:
+        source = source.filter(col("bk") % 2 == 0)
+    var plan = source.join(
+        build("a", 5000, 1, a_every, dtype).lazy(),
+        left_on=["ak"],
+        right_on=["a"],
+    ).join(
+        build("b", 7000, 2, b_every, dtype).lazy(),
+        left_on=["bk"],
+        right_on=["b"],
+        how="semi" if semi else "inner",
     )
     var expected = List[Int]()
     for row in range(ROWS):
@@ -116,6 +125,10 @@ def check(
         if (row % 5000) % a_every != 0:
             continue
         if (row % 7000) % b_every != 0:
+            continue
+        if prefilter == 1 and row % 3 == 0:
+            continue
+        if prefilter == 2 and spread(row % 7000, 2) % 2 != 0:
             continue
         expected.append(row)
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -136,6 +149,11 @@ def test_bloom_filters_keep_exactly_the_joining_rows() raises:
             # Builds of 50 and 70 keys against 400,000 rows.
             check(dtype, 100, 100, False, True)
         check(DataType.INT64, 100, 100, True, True)
+        # Joins after a probe filter: one that reads another column, and
+        # one that reads the filtered key itself.
+        for prefilter in [1, 2]:
+            check(DataType.INT64, 100, 100, False, True, prefilter)
+            check(DataType.INT32, 100, 100, True, True, prefilter)
         # A build whose keys are most of the probe's: no filter pays.
         check(DataType.INT64, 1, 1, False, False)
         _ = workers^
@@ -151,7 +169,8 @@ def test_a_bloom_filter_never_loses_a_key() raises:
         bloom.insert(keys[k])
     for k in keys:
         assert_true(bloom.contains(k))
-    # Few keys outside it pass: 8 bits a key leaves about 2% false hits.
+    # Few keys outside it pass: 12 bits a key, four of them set in one
+    # word, leaves about 1% false hits.
     var false_hits = 0
     for k in range(10_000):
         if bloom.contains(Int64(SPAN + 1 + k)):
