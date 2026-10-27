@@ -102,7 +102,7 @@ def test_union_legs_through_a_join_into_each_sink() raises:
     var eager_filtered = a.filter(col("v") > 50).with_columns(
         [(col("v") * 2).alias("v")]
     )
-    var mixed = concat([eager_filtered, b.select(order)]).join(d, "k")
+    var mixed = concat([eager_filtered^, b.select(order)]).join(d, "k")
     check(filtered.concat(b.lazy()).join(d.lazy(), "k"), mixed.sort(rows), rows)
 
 
