@@ -174,3 +174,32 @@ contract tests retain legacy imports. The aggregation boundary gate rejects new
 engine dependencies on those facades. Existing dependencies on expression
 execution and pipeline buffer facts remain; this move preserves algorithms,
 thresholds, state layouts, allocation, ownership and worker behavior.
+
+## Streaming reduction strategy selection
+
+`planning/cost/eligibility.mojo` owns semantic permission for morsel execution:
+row-local operations, prepared join kinds, ordered joins and positional global
+reductions. It also owns the expression/operation predicates used by these
+checks. It does not import sampling or cost policy. Expression input references
+live below both eligibility and observations in `planning/expression_inputs.mojo`.
+
+`planning/cost/sampling.mojo` owns the existing cardinality observations, build-key
+bounds, deferred string-density probe, and streaming split/collection budgets.
+`planning/cost/aggregation.mojo` combines those observations and the prepared
+inline-state capability into one `AggregationDecision`: batch streaming, a
+morsel pipeline, an insertion pipeline, an aggregate-table pipeline, or eager
+execution. The result carries its semantic eligibility reason, preference
+reason, sampled counts/bounds, and any key-coding or build-row-number plan.
+
+Execution still prepares empty-frame types, applies key transformations and
+opens/narrows inputs. A pending string-key choice is refined at its original
+post-narrowing sampling point. Existing predicate order, sampling schedules,
+thresholds, budgets, specialized-path traces and execution/report schemas are
+preserved. With `DATAFRAME_TRACE_PATHS` enabled, separate `dataframe-strategy:`
+records explain the final route; existing `dataframe-path:` coverage events are
+unchanged. Plain `explain()` continues to avoid executing or sampling inputs.
+
+The old planning/stream helper imports remain available through re-exports.
+The lazy boundary gate enforces eligibility/observation/policy direction and
+prevents execution from reintroducing separate `piped`, `insert`, `table` and
+`eager` choice variables. Join graph rewriting remains in physical orchestration.

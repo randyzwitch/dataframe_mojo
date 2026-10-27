@@ -66,8 +66,22 @@ def check():
             if name.startswith("dataframe.planning.") and name != "dataframe.planning.physical":
                 if dependency.startswith("dataframe.optimizer"):
                     failures.append(f"{name} imports optimizer passes: {dependency}")
+            if name.startswith("dataframe.planning.cost."):
+                if dependency == "dataframe.planning.physical":
+                    failures.append(f"{name} imports physical orchestration: {dependency}")
+                if name.endswith((".model", ".eligibility", ".sampling")) and dependency == "dataframe.planning.cost.aggregation":
+                    failures.append(f"{name} imports higher strategy policy: {dependency}")
+                if name.endswith((".model", ".eligibility")) and dependency in {
+                    "dataframe.planning.properties", "dataframe.planning.cost.sampling",
+                }:
+                    failures.append(f"{name} mixes semantic eligibility with cost observations: {dependency}")
             if name == "dataframe.planning.model" and dependency in sources:
                 failures.append(f"the node model imports a higher query layer: {dependency}")
+
+    stream_source = (ROOT / "dataframe/query_execution/pipeline.mojo").read_text()
+    stream_source = re.sub(r'"""[\s\S]*?"""|#[^\n]*', "", stream_source)
+    if re.search(r"\bvar\s+(piped|insert|table|eager)\s*=", stream_source):
+        failures.append("stream execution declares independent physical-strategy flags")
 
     visited = set()
     active = []

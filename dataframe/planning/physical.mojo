@@ -1,10 +1,14 @@
 """CPU strategy selection, join ordering, and measured input planning."""
+from dataframe.planning.cost.aggregation import (
+    plan_sampled_groups,
+    plan_batch_states_win,
+    plan_row_number_shape,
+)
+
 from dataframe.column import (
     Column,
 )
-from dataframe.distinct_statistics import (
-    distinct_estimate,
-)
+
 from dataframe.dtype import (
     DataType,
 )
@@ -23,13 +27,8 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.aggregation.group_by import (
-    group_by_workers,
-    range_states,
-)
-from dataframe.hashing import (
-    encode_rows,
-)
+
+
 from dataframe.io.csv import (
     CsvSchema,
 )
@@ -106,13 +105,8 @@ from dataframe.planning.properties import (
     _key_set_filter,
     _references,
 )
-from dataframe.planning.strategies import (
-    _batch_shows_many_groups,
-    _stream_split_groups,
-)
-from dataframe.series import (
-    Series,
-)
+
+
 from dataframe.trace import (
     trace_path,
 )
@@ -120,75 +114,6 @@ from std.collections import (
     Dict,
     Optional,
 )
-
-
-def plan_sampled_groups(
-    self: QueryContext, keys: List[String], frame: Int
-) raises -> Int:
-    """Distinct grouping keys among 4,096 evenly spaced rows of an
-    in-memory frame, or -1 when the frame does not hold every key (one
-    made by an earlier step).
-    """
-    ref source = self._frames[frame]
-    var height = source.height()
-    var sample = min(height, 4096)
-    if sample == 0:
-        return -1
-    var rows = List[Int](capacity=sample)
-    for k in range(sample):
-        rows.append(k * height // sample)
-    var picked = List[Series](capacity=len(keys))
-    for name in keys:
-        if name not in source.columns():
-            return -1
-        picked.append(source.column(name).take(rows))
-    return encode_rows(picked, nulls_equal=True).count()
-
-
-def plan_batch_states_win(
-    self: QueryContext, keys: List[String], frame: Int, batch_size: Int
-) raises -> Bool:
-    """Whether an unfiltered grouped reduction over in-memory `frame`
-    runs faster as batches, each reduced into a state of its own, than
-    through the eager group-by (#608). Each route's own tests decide,
-    not a count of groups:
-    - The eager group-by keeps private per-worker states when its keys
-      have few values (`range_states`); batch states are the same work
-      plus batching and a merge per batch.
-    - Otherwise it hash-partitions every row, which costs more than
-      batch states while a batch holds few of its rows' groups. A
-      batch that shows many (`_batch_shows_many_groups`, the stream's
-      own test) makes the stream collect its batches into that same
-      partitioned group-by, which then also pays the copy.
-    - The stream reduces one batch per worker, so with fewer batches
-      than the eager group-by has workers (or one worker) it leaves
-      threads idle.
-    Measured on generated int, string and two-key frames of 100K to
-    10M rows, 50 to 5,000 groups, uniform and skewed, one and six
-    aggregates, 1 and 8 threads: batch states won only where all three
-    hold (int and string keys of about 190 to 1,000 groups at 1M and
-    10M rows, 8 threads: 0.4-0.85 of the eager time); everywhere else
-    the eager route was as fast or faster (up to 2.6 times)."""
-    ref source = self._frames[frame]
-    var height = source.height()
-    var columns = List[Series](capacity=len(keys))
-    for name in keys:
-        if name not in source.columns():
-            # Made by an earlier step: ClickBench q18's (UserID,
-            # minute, SearchPhrase) took 354 ms eagerly, 1,645 batched.
-            return False
-        columns.append(source.column(name).copy())
-    var workers = group_by_workers(height)
-    if workers <= 1 or (height + batch_size - 1) // batch_size < workers:
-        return False
-    if range_states(columns) or _batch_shows_many_groups(
-        source.slice(0, min(height, batch_size)),
-        keys,
-        _stream_split_groups(),
-    ):
-        return False
-    trace_path("stream.batch_states")
-    return True
 
 
 def plan_joins_below(self: QueryContext, index: Int) -> Bool:
@@ -304,68 +229,6 @@ def plan_swap_join_sides(
     plan._nodes[at] = _plan_node(SELECT, left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_join_sides")
     return Optional(plan^)
-
-
-def plan_row_number_shape(
-    self: QueryContext,
-    source: Int,
-    keys: List[String],
-    carried: List[String],
-    holder: Int,
-    joins: List[DataFrame],
-    operations: List[PlanNode],
-) raises -> Tuple[Float64, Float64]:
-    """The rows the joins leave for the sink and the groups of the
-    first pass if it groups by the holder build's row number instead of
-    the `carried` string keys, estimated from the planner's statistics
-    as the join order estimates them; (-1, -1) when a key has none.
-
-    - Rows: the source rows times, for each inner join whose probe key
-      is a source column, the share of probe keys its build holds,
-      min(1, distinct build keys / distinct probe keys) (DuckDB's join
-      cardinality estimate); a join with no statistics for its probe key
-      leaves the rows as they are.
-    - Groups: min(rows, R * O), with R the build rows the probe reaches
-      (the build's rows, or fewer when the holder join's probe key has
-      fewer distinct values) and O the product of the other keys'
-      distinct counts."""
-    ref table = self._frames[source]
-    var rows = Float64(table.height())
-    var holder_probe = String("")
-    for op in operations:
-        if op.kind != JOIN:
-            continue
-        if op.offset == holder:
-            holder_probe = op.names[0]
-        if op.how != JOIN_INNER or len(op.names) == 0:
-            continue
-        if op.names[0] not in table.columns():
-            continue
-        var probe = table._distinct_count(op.names[0])
-        var build = distinct_estimate(joins[op.offset].column(op.right_keys[0]))
-        if probe > 0 and build > 0:
-            rows *= min(1.0, Float64(build) / Float64(probe))
-    var reached = Float64(joins[holder].height())
-    if holder_probe in table.columns():
-        var probe = table._distinct_count(holder_probe)
-        if probe > 0:
-            reached = min(reached, Float64(probe))
-    var others = 1.0
-    for key in keys:
-        if key in carried:
-            continue
-        var count = -1
-        if key in table.columns():
-            count = table._distinct_count(key)
-        else:
-            for build in joins:
-                if key in build.columns():
-                    count = distinct_estimate(build.column(key))
-                    break
-        if count <= 0:
-            return (-1.0, -1.0)
-        others *= Float64(count)
-    return (rows, min(rows, reached * others))
 
 
 def plan_swap_left_join_sides(

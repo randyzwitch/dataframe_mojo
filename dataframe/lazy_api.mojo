@@ -187,7 +187,6 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.physical import (
     plan_any_selective,
-    plan_batch_states_win,
     plan_cost_order_joins,
     plan_direct_key,
     plan_joins_below,
@@ -198,19 +197,24 @@ from dataframe.planning.physical import (
     plan_probe_largest_inputs,
     plan_push_join_key_sets,
     plan_restore_measured_chain,
-    plan_row_number_shape,
-    plan_sampled_groups,
     plan_selective_on,
     plan_selectivity,
     plan_side_comparisons,
     plan_swap_join_sides,
     plan_swap_left_join_sides,
 )
+from dataframe.planning.cost.aggregation import (
+    plan_batch_states_win,
+    plan_row_number_shape,
+    plan_sampled_groups,
+)
 from dataframe.planning.properties import (
     _bare_column,
     _is_scan,
-    _references,
     _same_names,
+)
+from dataframe.planning.expression_inputs import (
+    _references,
 )
 from dataframe.planning.scans import (
     _csv_scan_node,

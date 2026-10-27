@@ -1,4 +1,22 @@
 """Expression and operation properties shared by planning and execution."""
+from dataframe.planning.cost.eligibility import (
+    _counts_distinct,
+    _order_sensitive,
+    _has_quantile,
+    _row_steps_only,
+    _filters,
+    _key_read,
+    _row_merge_reductions,
+    _late_key_build,
+)
+
+from dataframe.planning.expression_inputs import _references
+from dataframe.planning.cost.sampling import (
+    _keys_repeat,
+    _key_group_bound,
+    _unique_key_column,
+)
+
 from dataframe.aggregation.hash_table import (
     reduction_supported,
 )
@@ -10,9 +28,7 @@ from dataframe.binding import (
 from dataframe.column import (
     Column,
 )
-from dataframe.distinct_statistics import (
-    distinct_estimate,
-)
+
 from dataframe.dtype import (
     DataType,
     NUMERIC_DTYPES,
@@ -60,7 +76,6 @@ from dataframe.expr import (
     is_reduction,
     is_window,
     lit,
-    split_names,
     subtree,
 )
 from dataframe.frame import (
@@ -71,9 +86,7 @@ from dataframe.aggregation.expressions import (
     _bind_all,
     _row_local,
 )
-from dataframe.hashing import (
-    encode_rows,
-)
+
 from dataframe.join_order import (
     FilterEdge,
 )
@@ -119,22 +132,6 @@ from std.collections import (
 from std.memory import (
     bitcast,
 )
-
-
-def _references(expr: Expr) -> Optional[List[String]]:
-    """Columns an expression reads, or None when a selector reads any."""
-    var names = List[String]()
-    for node in expr._nodes:
-        if node.op == SELECTOR:
-            return None
-        if node.op == COL:
-            names.append(node.text)
-        if node.op == OVER and node.text2.byte_length() > 0:
-            # over() partitions read their key columns. Other operators
-            # keep other text there (a strptime dtype, cut labels).
-            for part in split_names(node.text2):
-                names.append(part)
-    return names^
 
 
 def _comparison_edge(
@@ -489,15 +486,6 @@ def _same_names(a: List[String], b: List[String]) -> Bool:
     return True
 
 
-def _has_quantile(expressions: List[Expr]) -> Bool:
-    """Whether some expression reduces to a median or quantile."""
-    for expression in expressions:
-        for node in expression._nodes:
-            if node.op == MEDIAN or node.op == QUANTILE:
-                return True
-    return False
-
-
 def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     """Whether a grouped reduction's results are the same whatever order
     its rows arrive in: the aggregate table's states, and distinct counts,
@@ -515,258 +503,6 @@ def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     return True
 
 
-def _row_steps_only(operations: List[PlanNode]) -> Bool:
-    for operation in operations:
-        if operation.kind not in [FILTER, SELECT, WITH_COLUMNS, DROP]:
-            return False
-    return True
-
-
-def _filters(operations: List[PlanNode]) -> Bool:
-    for operation in operations:
-        if operation.kind == FILTER:
-            return True
-    return False
-
-
-def _order_sensitive(expressions: List[Expr]) -> Bool:
-    """Whether a reduction's answer depends on the order rows arrive
-    (first, last, the position of a minimum or maximum): its states
-    merge by row order, which workers taking morsels from a shared
-    cursor do not keep."""
-    for expression in expressions:
-        for node in expression._nodes:
-            if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
-                return True
-    return False
-
-
-def _key_read(name: String, expressions: List[Expr]) -> Bool:
-    """Whether a reduction reads the key `name` (or any column)."""
-    for expression in expressions:
-        var reads = _references(expression)
-        if not reads or name in reads.value():
-            return True
-    return False
-
-
-def _keys_repeat(
-    input: DataFrame, keys: List[String], operations: List[PlanNode]
-) raises -> Bool:
-    """Whether the plan's grouping keys repeat: among the rows of eight
-    evenly spaced runs of 512 rows of `input` that pass the plan's leading
-    row-local filters, at most half as many distinct keys as rows. Runs,
-    not single rows, see the repeats a morsel does. False when too few
-    rows pass to say (under 64) or a filter reads what `input` lacks."""
-    var height = input.height()
-    if height == 0:
-        return False
-    var names = keys.copy()
-    var filters = List[Expr]()
-    for operation in operations:
-        if operation.kind != FILTER or not _row_local(operation.exprs):
-            break
-        filters.append(operation.exprs[0].copy())
-        var reads = _references(operation.exprs[0])
-        if not reads:
-            return False
-        for name in reads.value():
-            if name not in names:
-                names.append(name)
-    for name in names:
-        if name not in input.columns():
-            return False
-    var narrowed = input.select(names)
-    var runs = 8
-    var length = 512
-    var rows = List[Int]()
-    if height <= runs * length:
-        for r in range(height):
-            rows.append(r)
-    else:
-        for k in range(runs):
-            var start = k * (height - length) // (runs - 1)
-            for r in range(start, start + length):
-                rows.append(r)
-    var picked = narrowed.take(rows)
-    for f in filters:
-        picked = picked.filter(f)
-    if picked.height() < 64:
-        return False
-    var columns = List[Series](capacity=len(keys))
-    for name in keys:
-        columns.append(picked.column(name))
-    var distinct = encode_rows(columns, nulls_equal=True).count()
-    return 2 * distinct <= picked.height()
-
-
-def _key_group_bound(
-    keys: List[String], source: DataFrame, builds: List[DataFrame], limit: Int
-) raises -> Int:
-    """An upper bound on the groups of `keys`, or -1 once it passes `limit`
-    or when a key is in no frame (made by a step). Keys held by one frame
-    count together, as that frame's distinct key rows; the frames' counts
-    multiply. A frame's height bounds its count for free, so frames are
-    taken smallest first and sampled (evenly spaced rows, a sample with
-    every row distinct standing for the whole height) only where the
-    height alone would pass the limit."""
-    # Each key's holder: -2 the source, else a build's index.
-    var holders = List[Int]()
-    for name in keys:
-        var holder = -1
-        if name in source.columns():
-            holder = -2
-        else:
-            for b in range(len(builds)):
-                if name in builds[b].columns():
-                    holder = b
-                    break
-        if holder == -1:
-            return -1
-        holders.append(holder)
-    var frames = List[Int]()
-    for h in holders:
-        if h not in frames:
-            frames.append(h)
-    # Smallest frame first.
-    var heights = List[Int]()
-    for h in frames:
-        heights.append(source.height() if h == -2 else builds[h].height())
-    for i in range(1, len(frames)):
-        var j = i
-        while j > 0 and heights[j - 1] > heights[j]:
-            heights.swap_elements(j - 1, j)
-            frames.swap_elements(j - 1, j)
-            j -= 1
-    var bound = 1
-    for f in range(len(frames)):
-        var height = heights[f]
-        var count = max(height, 1)
-        if bound * count > limit:
-            # Only whether this frame's count passes what is left of the
-            # limit matters, so the sample is twice that remainder: a
-            # sample with every row distinct ends the bound (q46's three
-            # source keys over 2.9M rows: six rows, not 4,096, whose
-            # strided reads took 1.3 ms).
-            var left = limit // bound
-            var sample = min(height, 4096, 2 * (left + 1))
-            var rows = List[Int](capacity=sample)
-            for k in range(sample):
-                rows.append(k * height // sample)
-            var picked = List[Series]()
-            for i in range(len(keys)):
-                if holders[i] != frames[f]:
-                    continue
-                if frames[f] == -2:
-                    picked.append(source.column(keys[i]).take(rows))
-                else:
-                    picked.append(builds[frames[f]].column(keys[i]).take(rows))
-            var distinct = encode_rows(picked, nulls_equal=True).count()
-            count = height if distinct == sample else max(distinct, 1)
-        bound *= count
-        if bound > limit:
-            return -1
-    return bound
-
-
-def _unique_key_column(build: DataFrame, names: List[String]) raises -> Bool:
-    """Whether one of the build's columns `names` holds no null and no value
-    twice, so no two rows of the build hold the same values for all of
-    them. A column whose sampled distinct count is under nine tenths of the
-    rows is not checked."""
-    var height = build.height()
-    for name in names:
-        var column = build.column(name)
-        if column.null_count() > 0:
-            continue
-        if 10 * distinct_estimate(column) < 9 * height:
-            continue
-        if column.n_unique() == height:
-            return True
-    return False
-
-
-def _row_merge_reductions(expressions: List[Expr]) -> Optional[List[Expr]]:
-    """The reductions that merge groups' partial results, when each of
-    `expressions` is a sum (skipping nulls, or null when none is valid), a
-    minimum or a maximum: the same reduction over the partial results.
-    None when one is anything else."""
-    var merge = List[Expr]()
-    for e in expressions:
-        var root = e._nodes[len(e._nodes) - 1].copy()
-        var again = col(e._name)
-        if root.op == SUM and root.min_count <= 1:
-            again = again.sum(min_count=root.min_count)
-        elif root.op == MIN:
-            again = again.min()
-        elif root.op == MAX:
-            again = again.max()
-        else:
-            return None
-        merge.append(again.alias(e._name))
-    return Optional(merge^)
-
-
-def _late_key_build(
-    name: String,
-    source_columns: List[String],
-    builds: List[DataFrame],
-    operations: List[PlanNode],
-    expressions: List[Expr],
-) raises -> Int:
-    """The build frame a group key `name` comes from when the key can be
-    grouped by its codes instead of its values: a String column of exactly
-    one inner or left join's build side, not in the source, not a join key,
-    read by no step or reduction (a plain pass-through select aside) and
-    made by none. -1 otherwise."""
-    if name in source_columns:
-        return -1
-    var holder = -1
-    for b in range(len(builds)):
-        if name in builds[b].columns():
-            if holder >= 0:
-                return -1
-            holder = b
-    if holder < 0:
-        return -1
-    if builds[holder].column(name).dtype() != DataType.STRING:
-        return -1
-    for expression in expressions:
-        var reads = _references(expression)
-        if not reads or name in reads.value():
-            return -1
-    for operation in operations:
-        if operation.kind == JOIN:
-            if name in operation.names:
-                return -1
-            if operation.offset == holder:
-                if operation.how != JOIN_INNER and operation.how != JOIN_LEFT:
-                    return -1
-                if name in operation.right_keys:
-                    return -1
-            continue
-        if operation.kind == DROP:
-            if name in operation.names:
-                return -1
-            continue
-        for e in operation.exprs:
-            # A select passing the column through unchanged is the one
-            # step that may read or name it.
-            var passes = (
-                operation.kind == SELECT
-                and len(e._nodes) == 1
-                and e._nodes[0].op == COL
-                and e._nodes[0].text == name
-                and e._name == name
-            )
-            if passes:
-                continue
-            var reads = _references(e)
-            if not reads or name in reads.value() or e._name == name:
-                return -1
-    return holder
-
-
 def _distinct_inputs(expressions: List[Expr]) -> Optional[List[String]]:
     """The columns `n_unique` reductions read, or None when one reads an
     expression rather than a column."""
@@ -781,14 +517,6 @@ def _distinct_inputs(expressions: List[Expr]) -> Optional[List[String]]:
             if nodes[node.left].text not in names:
                 names.append(nodes[node.left].text)
     return names^
-
-
-def _counts_distinct(expressions: List[Expr]) -> Bool:
-    for expression in expressions:
-        for node in expression._nodes:
-            if node.op == N_UNIQUE:
-                return True
-    return False
 
 
 def _partitioned_order_free(exprs: List[Expr]) -> Bool:

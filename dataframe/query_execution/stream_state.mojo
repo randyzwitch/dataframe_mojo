@@ -1,4 +1,6 @@
 """Streaming jobs, reduction state, and bounded batch helpers."""
+from dataframe.planning.cost.eligibility import _pipeline_steps
+
 from dataframe.categorical import (
     decode,
 )
@@ -24,12 +26,7 @@ from dataframe.join_hash import (
     PreparedHashIndex,
 )
 from dataframe.join_type import (
-    JOIN_ANTI,
     JOIN_CROSS,
-    JOIN_INNER,
-    JOIN_LEFT,
-    JOIN_RIGHT,
-    JOIN_SEMI,
 )
 from dataframe.parallel import (
     Job,
@@ -473,36 +470,6 @@ def _filter_keeps(
     if len(names) == 0:
         return None
     return Optional(names^)
-
-
-def _pipeline_steps(
-    operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
-) -> Bool:
-    """Whether every operation is a step a pipeline runs: a row-local
-    step, or an inner, left, semi, anti or (uncoalesced) right join whose
-    build index was prepared (its morsels probe the shared index on their
-    own worker)."""
-    for node in operations:
-        if (
-            node.kind == FILTER
-            or node.kind == SELECT
-            or node.kind == WITH_COLUMNS
-        ):
-            if not _row_local(node.exprs):
-                return False
-        elif node.kind == JOIN:
-            if node.how == JOIN_RIGHT:
-                # Only without coalescing: its unmatched build rows come
-                # out as a final morsel with the probe columns null.
-                if node.coalesce:
-                    return False
-            elif node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
-                return False
-            if node.offset >= len(indexes) or not indexes[node.offset]:
-                return False
-        elif node.kind != DROP:
-            return False
-    return True
 
 
 def _steps_of(operations: List[PlanNode]) -> List[Step]:
