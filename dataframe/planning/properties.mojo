@@ -1,5 +1,5 @@
 """Expression and operation properties shared by planning and execution."""
-from dataframe.aggregate_table import (
+from dataframe.aggregation.hash_table import (
     reduction_supported,
 )
 from dataframe.binding import (

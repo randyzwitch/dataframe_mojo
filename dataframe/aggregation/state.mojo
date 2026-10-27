@@ -1,8 +1,8 @@
 """Mergeable reduction state shared by eager grouping and streaming."""
-from dataframe.aggregate import (
+from dataframe.aggregation.reducer import (
     Reducer,
 )
-from dataframe.aggregate_table import (
+from dataframe.aggregation.hash_table import (
     AggregateResult,
     ReducerSpec,
     key_supported,

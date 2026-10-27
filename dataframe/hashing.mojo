@@ -8,7 +8,7 @@ Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 from std.collections import Dict
 from std.memory import Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
-from .aggregate import float_key
+from dataframe.aggregation.reducer import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .huge_pages import huge_list

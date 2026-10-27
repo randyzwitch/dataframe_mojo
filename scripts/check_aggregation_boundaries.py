@@ -34,6 +34,18 @@ def check():
             ):
                 failures.append(f"{name} imports a higher layer: {dependency}")
 
+    legacy = {
+        "dataframe.aggregate", "dataframe.reductions", "dataframe.hash_agg",
+        "dataframe.perfect_aggregate", "dataframe.aggregate_table", "dataframe.indexed_reduce",
+    }
+    for tree in ("dataframe", "dataframe_metal", "dataframe_provider", "providers"):
+        for path in sorted((ROOT / tree).rglob("*.mojo")):
+            name = module_name(path)
+            if name in legacy:
+                continue
+            for dependency in sorted(set(imports(path)) & legacy):
+                failures.append(f"{name} imports legacy aggregation facade: {dependency}")
+
     visited = set()
     active = []
 

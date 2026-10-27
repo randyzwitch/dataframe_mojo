@@ -50,9 +50,9 @@ from .expr_kernels import checked_add, validity
 from .string_column import StringColumn
 from .nested_column import StructColumn
 from .parse import parse_float64
-from .aggregate import quantile_of, _checked_product
+from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
-from .reductions import WideInt
+from dataframe.aggregation.scalar_states import WideInt
 from .series import Series, sort_indices
 from .rank import rank_numeric
 from .packed_sort import packed_arg_sort

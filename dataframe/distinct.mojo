@@ -21,7 +21,7 @@ partition saw for it.
 from std.bit import count_leading_zeros
 from std.memory import bitcast
 
-from .aggregate import float_key
+from dataframe.aggregation.reducer import float_key
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES

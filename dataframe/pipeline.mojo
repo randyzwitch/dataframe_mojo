@@ -21,7 +21,7 @@ from std.time import perf_counter_ns
 from .canonical_labels import canonical_labels
 from .bool_column import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
-from .aggregate import Reducer
+from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -44,7 +44,7 @@ from .expr import (
     is_reduction,
     subtree,
 )
-from .aggregate_table import (
+from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
     aggregate_finish,
@@ -71,7 +71,7 @@ from dataframe.aggregation.keys import (
     _expand_struct_keys,
     _group_keys,
 )
-from .indexed_reduce import _reduce_floats, _reduce_ints
+from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from .join_hash import (
     PreparedHashIndex,
     prepared_hash_join_rows,
