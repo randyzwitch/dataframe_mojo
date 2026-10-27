@@ -83,6 +83,22 @@ def check():
     if re.search(r"\bvar\s+(piped|insert|table|eager)\s*=", stream_source):
         failures.append("stream execution declares independent physical-strategy flags")
 
+    # Packed payload storage belongs to the node model and its builders. The
+    # graph's structural hash/equality deliberately inspect every raw field.
+    for name, path in sources.items():
+        source = re.sub(r'"""[\s\S]*?"""|#[^\n]*', "", path.read_text())
+        if name in {"dataframe.planning.model", "dataframe.planning.node_builders"}:
+            continue
+        if re.search(r"\b_plan_node\s*\(", source):
+            failures.append(f"{name} constructs raw payloads instead of named nodes")
+        if name == "dataframe.planning.graph":
+            source = re.sub(
+                r"^def (?:plan_node_hash|plan_canonical_slot|plan_same_node)\([\s\S]*?(?=^def |\Z)",
+                "", source, flags=re.M,
+            )
+        if re.search(r"\.(?:names2|flags|offset|length)\b", source):
+            failures.append(f"{name} accesses packed payload storage instead of named accessors")
+
     visited = set()
     active = []
 

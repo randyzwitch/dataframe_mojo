@@ -196,9 +196,9 @@ def plan_execute_node(
             if node.source_failure:
                 raise Error(node.source_failure)
             node._record_execution()
-        var frame = self._frames[node.offset].copy()
-        if len(node.names) > 0:
-            frame = frame.select(node.names)
+        var frame = self._frames[node.source_slot()].copy()
+        if len(node.scan_projection()) > 0:
+            frame = frame.select(node.scan_projection())
         return frame.clear() if empty else frame^
     if node.kind == SCAN_CSV:
         if empty:
@@ -208,8 +208,8 @@ def plan_execute_node(
             if mapping.address != 0:
                 var batches = _CsvBatches(
                     mapping^,
-                    self._schemas[node.offset],
-                    node.names,
+                    self._schemas[node.source_slot()],
+                    node.scan_projection(),
                     0,
                     batch_size,
                     _scan_options(node),
@@ -218,19 +218,19 @@ def plan_execute_node(
                 var job = next.take()
                 job.run()
                 return job^.into_frame()
-        var rows = 0 if empty else node.length
+        var rows = 0 if empty else node.scan_row_limit()
         var scan = _scan_options(node)
-        if self._schemas[node.offset]:
+        if self._schemas[node.source_slot()]:
             return read_csv(
                 node.text,
-                self._schemas[node.offset].value(),
+                self._schemas[node.source_slot()].value(),
                 has_header=scan.has_header,
                 separator=scan.separator,
                 quote_char=scan.quote_char,
                 comment_prefix=scan.comment_prefix,
                 skip_rows=scan.skip_rows,
                 n_rows=rows,
-                columns=node.names,
+                columns=node.scan_projection(),
                 null_values=scan.null_values,
                 ignore_errors=scan.ignore_errors,
                 truncate_ragged_lines=scan.truncate_ragged_lines,
@@ -247,7 +247,7 @@ def plan_execute_node(
             comment_prefix=scan.comment_prefix,
             skip_rows=scan.skip_rows,
             n_rows=rows,
-            columns=node.names,
+            columns=node.scan_projection(),
             null_values=scan.null_values,
             ignore_errors=scan.ignore_errors,
             truncate_ragged_lines=scan.truncate_ragged_lines,
@@ -259,31 +259,38 @@ def plan_execute_node(
         return read_ndjson(
             node.text,
             node.json_schema,
-            infer_schema_length=Int(node.names2[0]),
-            ignore_errors=node.flags[0],
-            n_rows=0 if empty else node.length,
+            infer_schema_length=Int(node.ndjson_infer_schema_length()),
+            ignore_errors=node.ndjson_ignore_errors(),
+            n_rows=0 if empty else node.scan_row_limit(),
             batch_size=batch_size,
-            columns=node.names,
+            columns=node.scan_projection(),
         )
     if node.kind == SCAN_IPC:
         if empty:
             var schema = _ipc_schema_frame(node.text)
-            return schema.select(node.names) if node.flags[1] else schema^
+            return (
+                schema.select(
+                    node.scan_projection()
+                ) if node.ipc_has_projection() else schema
+                ^
+            )
         node._record_execution()
         return _read_scan(
             node.text,
-            node.names,
-            node.flags[1],
-            node.flags[0],
-            Int(node.names2[0]),
-            node.length,
+            node.scan_projection(),
+            node.ipc_has_projection(),
+            node.ipc_memory_map(),
+            Int(node.ipc_row_offset()),
+            node.scan_row_limit(),
         )
     if node.kind == SCAN_PARQUET:
         if empty:
             return read_parquet(
-                node.text, columns=node.names, row_groups=List[Int]()
+                node.text,
+                columns=node.scan_projection(),
+                row_groups=List[Int](),
             )
-        return read_parquet(node.text, columns=node.names)
+        return read_parquet(node.text, columns=node.scan_projection())
     # Keep a sort's row permutation until after a plain projection, so
     # columns used only as sort keys are never gathered into output.
     if node.kind == SELECT and not empty:
@@ -298,16 +305,19 @@ def plan_execute_node(
                 var source = self._execute(
                     sorted.left, False, streaming, batch_size
                 )
-                var n = len(sorted.names)
+                var n = len(sorted.sort_keys())
                 var descending = List[Bool]()
                 var nulls_last = List[Bool]()
                 for i in range(n):
-                    descending.append(sorted.flags[i])
-                    nulls_last.append(sorted.flags[n + i])
+                    descending.append(sorted.sort_descending(i))
+                    nulls_last.append(sorted.sort_nulls_last(i))
                 var order = source._arg_sort_head(
-                    sorted.names, descending, nulls_last, sorted.length
-                ) if sorted.length >= 0 else source.arg_sort(
-                    sorted.names,
+                    sorted.sort_keys(),
+                    descending,
+                    nulls_last,
+                    sorted.sort_limit(),
+                ) if sorted.sort_limit() >= 0 else source.arg_sort(
+                    sorted.sort_keys(),
                     descending=descending,
                     nulls_last=nulls_last,
                 )
@@ -326,12 +336,12 @@ def plan_execute_node(
             return read_parquet(
                 source.text, columns=source.names, row_groups=groups
             ).filter(node.exprs[0])
-        if source.kind == SCAN_CSV and source.length < 0:
+        if source.kind == SCAN_CSV and source.scan_row_limit() < 0:
             var scan = _scan_options(source)
-            if self._schemas[source.offset]:
+            if self._schemas[source.source_slot()]:
                 return read_csv_explicit(
                     source.text,
-                    self._schemas[source.offset].value(),
+                    self._schemas[source.source_slot()].value(),
                     has_header=scan.has_header,
                     separator=scan.separator,
                     quote_char=scan.quote_char,
@@ -377,10 +387,10 @@ def plan_execute_node(
             left = left.clear()
             right = right.clear()
         if node.kind == INSERT_COLUMN:
-            return left.insert_column(node.offset, right._columns[0])
+            return left.insert_column(node.insert_position(), right._columns[0])
         if node.kind == HCONCAT:
             return concat([left^, right^], "horizontal")
-        return _gathered(left, right, node.flags[0])
+        return _gathered(left, right, node.gather_null_on_oob())
     if (
         node.kind == JOIN
         and not _is_scan(self._nodes[node.left].kind)
@@ -406,44 +416,44 @@ def plan_execute_node(
         return input.with_columns(node.exprs)
     if node.kind == AGG:
         return input.group_by(
-            node.names, maintain_order=node.maintain_order
+            node.group_keys(), maintain_order=node.maintain_order
         ).agg(node.exprs)
     if node.kind == ASOF:
         var right = self._execute(node.right, empty, streaming, batch_size)
         var groups = List[String]()
-        for i in range(1, len(node.names2)):
-            groups.append(node.names2[i])
+        for i in range(node.asof_group_count()):
+            groups.append(node.asof_group(i))
         return input.join_asof(
             right,
-            left_on=node.names[0],
-            right_on=node.right_keys[0],
+            left_on=node.join_left_keys()[0],
+            right_on=node.join_right_keys()[0],
             by=groups,
             strategy=node.text,
             tolerance=node.asof_tolerance,
-            suffix=node.names2[0],
-            allow_exact_matches=node.flags[0],
+            suffix=node.join_suffix(),
+            allow_exact_matches=node.asof_allow_exact_matches(),
         )
     if node.kind == JOIN:
         var right = self._execute(node.right, empty, streaming, batch_size)
         return plan_join_frames(self, index, input^, right^, empty)
     if node.kind == SORT:
-        var n = len(node.names)
+        var n = len(node.sort_keys())
         var descending = List[Bool]()
         var nulls_last = List[Bool]()
         for i in range(n):
-            descending.append(node.flags[i])
-            nulls_last.append(node.flags[n + i])
-        if node.length >= 0:
+            descending.append(node.sort_descending(i))
+            nulls_last.append(node.sort_nulls_last(i))
+        if node.sort_limit() >= 0:
             return input.take(
                 input._arg_sort_head(
-                    node.names, descending, nulls_last, node.length
+                    node.sort_keys(), descending, nulls_last, node.sort_limit()
                 )
             )
         return input.sort(
-            node.names, descending=descending, nulls_last=nulls_last
+            node.sort_keys(), descending=descending, nulls_last=nulls_last
         )
     if node.kind == SLICE:
-        return input.slice(node.offset, node.length)
+        return input.slice(node.slice_offset(), node.slice_length())
     if node.kind == PIVOT:
         return _pivoted(input, node)
     if node.kind == UNIQUE:
@@ -456,31 +466,35 @@ def plan_execute_node(
         return input.unnest(node.text)
     if node.kind == UNPIVOT:
         return input.unpivot(
-            node.names,
-            node.names2,
-            variable_name=node.right_keys[0],
-            value_name=node.right_keys[1],
+            node.unpivot_columns(),
+            node.unpivot_index(),
+            variable_name=node.unpivot_output_names()[0],
+            value_name=node.unpivot_output_names()[1],
         )
     if _is_time_window(node.kind):
         return _run_time_window(node, input)
     if node.kind == GROUPING_SETS:
         return _run_grouping_sets(node, input)
     if node.kind == TAIL:
-        return input.tail(node.offset)
+        return input.tail(node.tail_count())
     if node.kind == REVERSE:
         return input.reverse()
     if node.kind == SHIFT:
         if len(node.exprs) > 0:
-            return input.shift(node.offset, fill_value=node.exprs[0].copy())
-        return input.shift(node.offset)
+            return input.shift(
+                node.shift_count(), fill_value=node.exprs[0].copy()
+            )
+        return input.shift(node.shift_count())
     if node.kind == GATHER_EVERY:
-        return input.gather_every(node.length, node.offset)
+        return input.gather_every(node.gather_stride(), node.gather_offset())
     if node.kind == ROW_INDEX:
-        return input.with_row_index(node.names[0], Int64(node.offset))
+        return input.with_row_index(
+            node.row_index_name(), Int64(node.row_index_offset())
+        )
     if node.kind == FILL_NULL_STRATEGY:
         var limit: Optional[Int] = None
-        if node.length >= 0:
-            limit = node.length
+        if node.fill_limit() >= 0:
+            limit = node.fill_limit()
         return input.fill_null(
             strategy=node.text, limit=limit, subset=node.names
         )

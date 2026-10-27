@@ -1,4 +1,36 @@
 """Public lazy query construction and backend dispatch."""
+from dataframe.planning.node_builders import (
+    _aggregate_node,
+    _concat_node,
+    _drop_node,
+    _dynamic_window_node,
+    _explode_node,
+    _fill_null_strategy_node,
+    _filter_node,
+    _frame_scan_node,
+    _gather_every_node,
+    _gather_node,
+    _grouping_sets_node,
+    _hconcat_node,
+    _insert_column_node,
+    _ipc_scan_node,
+    _join_node,
+    _ndjson_scan_node,
+    _parquet_scan_node,
+    _pivot_node,
+    _reverse_node,
+    _rolling_window_node,
+    _row_index_node,
+    _select_node,
+    _shift_node,
+    _slice_node,
+    _sort_node,
+    _tail_node,
+    _unique_node,
+    _unnest_node,
+    _unpivot_node,
+    _with_columns_node,
+)
 from dataframe._accel_provider import (
     describe as _describe_accel,
     execute as _execute_accel,
@@ -183,7 +215,6 @@ from dataframe.planning.model import (
     UNNEST,
     UNPIVOT,
     WITH_COLUMNS,
-    _plan_node,
 )
 from dataframe.planning.physical import (
     plan_any_selective,
@@ -278,7 +309,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def __init__(out self, frame: DataFrame):
         self._plan = _new_context(
-            [_plan_node(SCAN_FRAME, offset=0)],
+            [_frame_scan_node(slot=0)],
             [frame.copy()],
             [Optional[CsvSchema]()],
         )
@@ -371,7 +402,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         return result^
 
     def filter(self, predicate: Expr) -> Self:
-        return self._push(_plan_node(FILTER, exprs=[predicate.copy()]))
+        return self._push(_filter_node(exprs=[predicate.copy()]))
 
     def select(self, expr: Expr) -> Self:
         return self.select_exprs([expr.copy()])
@@ -383,13 +414,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         return self.select_exprs(exprs)
 
     def select_exprs(self, exprs: List[Expr]) -> Self:
-        return self._push(_plan_node(SELECT, exprs=exprs))
+        return self._push(_select_node(exprs=exprs))
 
     def with_columns(self, expr: Expr) -> Self:
         return self.with_columns([expr.copy()])
 
     def with_columns(self, exprs: List[Expr]) -> Self:
-        return self._push(_plan_node(WITH_COLUMNS, exprs=exprs))
+        return self._push(_with_columns_node(exprs=exprs))
 
     def group_by(
         self, keys: List[String], *, maintain_order: Bool = False
@@ -463,12 +494,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         `maintain_order` preserves their input order."""
         var n = len(by)
         return self._push(
-            _plan_node(
-                SORT,
-                names=by,
-                flags=List[Bool](length=n, fill=descending)
-                + List[Bool](length=n, fill=nulls_last),
+            _sort_node(
+                keys=by,
                 maintain_order=maintain_order,
+                descending=List[Bool](length=n, fill=descending),
+                nulls_last=List[Bool](length=n, fill=nulls_last),
             )
         )
 
@@ -486,11 +516,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if len(descending) != len(by) or len(nulls_last) != len(by):
             raise Error("sort needs one descending and nulls_last flag per key")
         return self._push(
-            _plan_node(
-                SORT,
-                names=by,
-                flags=descending + nulls_last.copy(),
+            _sort_node(
+                keys=by,
                 maintain_order=maintain_order,
+                descending=descending,
+                nulls_last=nulls_last,
             )
         )
 
@@ -578,7 +608,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Take every nth row from a nonnegative offset; n must be positive."""
         if n <= 0 or offset < 0:
             raise Error("gather_every needs positive n and nonnegative offset")
-        return self._push(_plan_node(GATHER_EVERY, offset=offset, length=n))
+        return self._push(_gather_every_node(row_offset=offset, stride=n))
 
     def insert_column(self, index: Int, column: Series) raises -> Self:
         """Insert a column by position; validate its height when collecting."""
@@ -590,11 +620,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             raise Error("Duplicate column name: " + column.name())
         return self._binary(
             DataFrame([column.copy()]).lazy(),
-            _plan_node(INSERT_COLUMN, offset=position),
+            _insert_column_node(position=position),
         )
 
     def slice(self, offset: Int, length: Int = -1) -> Self:
-        return self._push(_plan_node(SLICE, offset=offset, length=length))
+        return self._push(_slice_node(row_offset=offset, row_count=length))
 
     def head(self, n: Int = 5) -> Self:
         return self.slice(0, n)
@@ -626,12 +656,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 raise Error("pivot column name collides: " + name)
             seen[name] = True
         return self._push(
-            _plan_node(
-                PIVOT,
-                names=index + [on, values],
-                text=aggregate_function,
-                offset=len(index),
-                right_keys=on_columns,
+            _pivot_node(
+                index=index,
+                on=on,
+                values=values,
+                output_columns=on_columns,
+                aggregate_function=aggregate_function,
             )
         )
 
@@ -665,13 +695,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         maintain_order: Bool = False,
     ) -> Self:
         return self._push(
-            _plan_node(
-                UNIQUE, names=subset, text=keep, maintain_order=maintain_order
+            _unique_node(
+                subset=subset, keep=keep, maintain_order=maintain_order
             )
         )
 
     def drop(self, names: List[String]) -> Self:
-        return self._push(_plan_node(DROP, names=names))
+        return self._push(_drop_node(columns=names))
 
     def rename(
         self, mapping: Dict[String, String], *, strict: Bool = True
@@ -742,7 +772,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         selection above reaches both scans. The inputs must have the same
         column names and types; `other`'s columns are taken in this plan's
         order. SQL UNION is `concat` followed by `unique`."""
-        return self._binary(other, _plan_node(CONCAT))
+        return self._binary(other, _concat_node())
 
     def _binary(self, other: Self, var node: PlanNode) -> Self:
         """`node` over this plan (left) and `other`'s (right), as one plan."""
@@ -761,7 +791,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if copied.right >= 0:
                 copied.right += shift
             if _is_scan(copied.kind):
-                copied.offset += frame_shift
+                copied.set_source_slot(copied.source_slot() + frame_shift)
             result._plan._nodes.append(copied^)
         node.left = left_root
         node.right = len(result._plan._nodes) - 1
@@ -872,7 +902,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         index out of range raises when the plan runs, or with
         null_on_oob=True gives a row of nulls. Filters and slices above it
         stay above it."""
-        return self._binary(indices, _plan_node(GATHER, flags=[null_on_oob]))
+        return self._binary(indices, _gather_node(null_on_oob=null_on_oob))
 
     def top_k(
         self, k: Int, by: List[String], *, reverse: Bool = False
@@ -916,11 +946,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """The last n rows; a negative n drops the first -n rows. See
         DataFrame.tail. Filters and slices written above it stay above
         it."""
-        return self._push(_plan_node(TAIL, offset=n))
+        return self._push(_tail_node(count=n))
 
     def reverse(self) -> Self:
         """The rows in reverse order; see DataFrame.reverse."""
-        return self._push(_plan_node(REVERSE))
+        return self._push(_reverse_node())
 
     def shift(self, n: Int = 1, *, fill_value: Optional[Expr] = None) -> Self:
         """Every column moved n rows later (earlier when negative), the
@@ -928,26 +958,24 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var exprs = List[Expr]()
         if fill_value:
             exprs.append(fill_value.value().copy())
-        return self._push(_plan_node(SHIFT, exprs=exprs, offset=n))
+        return self._push(_shift_node(fill=exprs, count=n))
 
     def with_row_index(self, name: String = "index", offset: Int64 = 0) -> Self:
         """Prepend an Int64 row number starting at offset; see
         DataFrame.with_row_index. The numbers count the rows this plan
         produces here, so filters and slices above it stay above it."""
-        return self._push(
-            _plan_node(ROW_INDEX, names=[name], offset=Int(offset))
-        )
+        return self._push(_row_index_node(name=name, start=Int(offset)))
 
     def explode(self, columns: List[String]) -> Self:
         """One row per list element; see DataFrame.explode."""
-        return self._push(_plan_node(EXPLODE, names=columns))
+        return self._push(_explode_node(columns=columns))
 
     def explode(self, column: String) -> Self:
         return self.explode([column])
 
     def unnest(self, column: String) -> Self:
         """Replace a struct column with its fields; see DataFrame.unnest."""
-        return self._push(_plan_node(UNNEST, text=column))
+        return self._push(_unnest_node(column=column))
 
     def unpivot(
         self,
@@ -961,11 +989,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         same output and errors as DataFrame.unpivot. `on` defaults to every
         non-index column. Filters and slices above it stay above it."""
         return self._push(
-            _plan_node(
-                UNPIVOT,
-                names=on,
-                names2=index,
-                right_keys=[variable_name, value_name],
+            _unpivot_node(
+                columns=on,
+                index=index,
+                variable_name=variable_name,
+                value_name=value_name,
             )
         )
 
@@ -1007,11 +1035,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             strategy, limit, subset
         )
         return self._push(
-            _plan_node(
-                FILL_NULL_STRATEGY,
-                text=strategy,
-                length=run_limit,
-                names=subset,
+            _fill_null_strategy_node(
+                strategy=strategy, limit=run_limit, subset=subset
             )
         )
 
@@ -1113,16 +1138,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """
         return LazyTimeGroupBy(
             self.copy(),
-            _plan_node(
-                GROUP_BY_DYNAMIC,
-                names=List[String]([index_column]) + group_by.copy(),
-                names2=[
-                    every,
-                    period.value() if period else every,
-                    offset.value() if offset else "0d",
-                    closed,
-                    label,
-                ],
+            _dynamic_window_node(
+                index_column=index_column,
+                groups=group_by,
+                every=every,
+                period=period.value() if period else every,
+                offset=offset.value() if offset else "0d",
+                closed=closed,
+                label=label,
             ),
         )
 
@@ -1179,16 +1202,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """
         return LazyTimeGroupBy(
             self.copy(),
-            _plan_node(
-                ROLLING,
-                names=List[String]([index_column]) + group_by.copy(),
-                names2=[
-                    String(""),
-                    period,
-                    offset.value() if offset else negate_period(period),
-                    closed,
-                    String("datapoint"),
-                ],
+            _rolling_window_node(
+                index_column=index_column,
+                groups=group_by,
+                period=period,
+                offset=offset.value() if offset else negate_period(period),
+                closed=closed,
             ),
         )
 
@@ -1249,12 +1268,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             other, left_on=[lhs], right_on=[rhs], suffix=suffix
         )
         ref node = result._plan._nodes[len(result._plan._nodes) - 1]
-        node.kind = ASOF
-        node.text = strategy
-        node.flags = [allow_exact_matches]
-        node.asof_tolerance = tolerance.copy()
-        for name in by:
-            node.names2.append(name)
+        node.set_asof_options(strategy, allow_exact_matches, tolerance, by)
         return result^
 
     def join_asof(
@@ -1505,19 +1519,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if copied.right >= 0:
                 copied.right += shift
             if _is_scan(copied.kind):
-                copied.offset += frame_shift
+                copied.set_source_slot(copied.source_slot() + frame_shift)
             result._plan._nodes.append(copied^)
-        var join = _plan_node(
-            JOIN,
-            left_root,
-            len(result._plan._nodes) - 1,
-            names=left_on,
-            text=how,
-            how=join_code(how),
+        var join = _join_node(
+            left=left_root,
+            right=len(result._plan._nodes) - 1,
+            left_keys=left_on,
+            join_type=how,
+            type_code=join_code(how),
             right_keys=right_on,
             coalesce=coalesce,
+            suffix=suffix,
         )
-        join.names2 = [suffix]
         result._plan._nodes.append(join^)
         return result^
 
@@ -2577,10 +2590,9 @@ struct LazyGroupBy(Copyable):
                 ) else expression.copy()
             )
         var plan = grouped[0]._push(
-            _plan_node(
-                AGG,
+            _aggregate_node(
                 exprs=prepared,
-                names=grouped[1],
+                keys=grouped[1],
                 maintain_order=self._maintain_order,
             )
         )
@@ -2600,10 +2612,9 @@ struct LazyGroupBy(Copyable):
         GroupBy.len."""
         var grouped = self._grouped(List[String](), False)
         return grouped[0]._push(
-            _plan_node(
-                AGG,
+            _aggregate_node(
                 exprs=[col(grouped[1][0]).len().alias(name)],
-                names=grouped[1],
+                keys=grouped[1],
                 maintain_order=self._maintain_order,
             )
         )
@@ -2717,11 +2728,8 @@ struct LazyGroupingSets(Copyable):
         if aggregates == 0:
             raise Error("agg needs an aggregation besides grouping")
         return self._frame._push(
-            _plan_node(
-                GROUPING_SETS,
-                exprs=exprs.copy(),
-                names=keys,
-                flags=membership,
+            _grouping_sets_node(
+                exprs=exprs.copy(), keys=keys, membership=membership
             )
         )
 
@@ -2740,8 +2748,7 @@ struct LazyTimeGroupBy(Copyable):
         """One row per window: the `group_by` keys, the index column (the
         window's label) and the aggregations; see TimeGroupBy.agg."""
         var node = self._node.copy()
-        node.exprs = exprs.copy()
-        node.length = batch_size
+        node.set_window_aggregations(exprs.copy(), batch_size)
         return self._frame._push(node^)
 
     def agg(self, expr: Expr, *, batch_size: Int = 1024) -> LazyFrame:
@@ -2843,13 +2850,12 @@ def scan_ndjson(
     _json_options(schema, infer_schema_length, 65536)
     return LazyFrame(
         [
-            _plan_node(
-                SCAN_NDJSON,
-                text=path,
-                offset=0,
-                json_schema=schema,
-                names2=[String(infer_schema_length)],
-                flags=[ignore_errors],
+            _ndjson_scan_node(
+                path=path,
+                schema=schema,
+                infer_schema_length=infer_schema_length,
+                ignore_errors=ignore_errors,
+                slot=0,
             )
         ],
         [DataFrame([])],
@@ -2866,15 +2872,7 @@ def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:
     or schema discovery, so a plan can be collected repeatedly.
     """
     return LazyFrame(
-        [
-            _plan_node(
-                SCAN_IPC,
-                text=path,
-                offset=0,
-                names2=["0"],
-                flags=[memory_map, False],
-            )
-        ],
+        [_ipc_scan_node(path=path, memory_map=memory_map, slot=0)],
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
@@ -2885,7 +2883,7 @@ def scan_parquet(path: String) raises -> LazyFrame:
     is pushed into the reader, and a filter directly above the scan decodes
     only the row groups whose footer statistics can hold a match."""
     return LazyFrame(
-        [_plan_node(SCAN_PARQUET, text=path, offset=0)],
+        [_parquet_scan_node(path=path, slot=0)],
         [DataFrame([])],
         [Optional[CsvSchema]()],
     )
@@ -2937,7 +2935,7 @@ def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
     var result = inputs[0].copy()
     for f in range(1, len(inputs)):
         if how == "horizontal":
-            result = result._binary(inputs[f], _plan_node(HCONCAT))
+            result = result._binary(inputs[f], _hconcat_node())
         else:
             result = result.concat(inputs[f])
     return result^

@@ -185,7 +185,9 @@ def plan_region(region: LazyFrame) raises -> Optional[FilterSum]:
     if total._nodes[0].op != COL or total._nodes[1].op != SUM:
         return None
     var name = total._nodes[0].text
-    var frame = region._plan._frames[region._plan._nodes[0].offset].copy()
+    var frame = region._plan._frames[
+        region._plan._nodes[0].source_slot()
+    ].copy()
     if name not in frame.columns():
         return None
     var dtype = frame.column(name).dtype()
@@ -502,7 +504,9 @@ def _execute_on_device(
         raise Error("Metal unsupported [handoff]: region was not accepted")
     var plan = accepted.take()
     var timings = HandoffTimings()
-    var frame = region._plan._frames[region._plan._nodes[0].offset].copy()
+    var frame = region._plan._frames[
+        region._plan._nodes[0].source_slot()
+    ].copy()
     var series = frame.column(plan.column)
     if len(series) >= Int(Int32.MAX):
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")

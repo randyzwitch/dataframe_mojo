@@ -62,20 +62,20 @@ def _set_rows(
         if is_grouping(e):
             marked = True
             constants.append(lit(grouping_value(e, members)).alias(e._name))
-    for k in range(len(node.names)):
-        if node.names[k] not in members:
-            constants.append(null(dtypes[k]).alias(node.names[k]))
+    for k in range(len(node.group_keys())):
+        if node.group_keys()[k] not in members:
+            constants.append(null(dtypes[k]).alias(node.group_keys()[k]))
     if len(constants) > 0:
         part = part.with_columns(constants)
     var order = List[Expr]()
-    for name in node.names:
+    for name in node.group_keys():
         order.append(col(name))
     if marked:
         # Output names are known only for single-output expressions.
         for e in node.exprs:
             order.append(col(e._name))
     else:
-        order.append(exclude(node.names))
+        order.append(exclude(node.group_keys()))
     return part.select_exprs(order)
 
 
@@ -84,7 +84,7 @@ def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
     stacked. The stream's single sink replaces this when the aggregate
     table keeps every state."""
     var dtypes = List[DataType]()
-    for name in node.names:
+    for name in node.group_keys():
         dtypes.append(input.column(name).dtype())
     var aggregates = List[Expr]()
     for e in node.exprs:
@@ -105,34 +105,34 @@ def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
 def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
     """The eager `group_by_dynamic` or `rolling` aggregation a time window
     node records, over its executed input."""
-    var by = List[String](node.names[1:])
+    var by = List[String](node.window_columns()[1:])
     if node.kind == ROLLING:
         return input.rolling(
-            node.names[0],
-            node.names2[1],
-            Optional(node.names2[2]),
-            node.names2[3],
+            node.window_columns()[0],
+            node.window_period(),
+            Optional(node.window_offset()),
+            node.window_closed(),
             by,
-        ).agg(node.exprs, batch_size=node.length)
+        ).agg(node.exprs, batch_size=node.window_batch_size())
     return input.group_by_dynamic(
-        node.names[0],
-        node.names2[0],
-        Optional(node.names2[1]),
-        Optional(node.names2[2]),
-        node.names2[3],
-        node.names2[4],
+        node.window_columns()[0],
+        node.window_every(),
+        Optional(node.window_period()),
+        Optional(node.window_offset()),
+        node.window_closed(),
+        node.window_label(),
         by,
-    ).agg(node.exprs, batch_size=node.length)
+    ).agg(node.exprs, batch_size=node.window_batch_size())
 
 
 def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:
     """A PIVOT node's result: DataFrame.pivot's, its columns chosen and
     ordered by the node's names, a name the input has no cell for filled
     with nulls of the aggregate's type."""
-    var index = List[String](node.names[: node.offset])
-    var values = node.names[node.offset + 1]
+    var index = List[String](node.pivot_columns()[: node.pivot_index_count()])
+    var values = node.pivot_values()
     var wide = input.pivot(
-        node.names[node.offset],
+        node.pivot_on(),
         index=index,
         values=values,
         aggregate_function=node.text,
@@ -142,10 +142,12 @@ def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:
     var present = Dict[String, Bool]()
     for name in wide.columns():
         present[name] = True
-    var columns = List[Series](capacity=len(index) + len(node.right_keys))
+    var columns = List[Series](
+        capacity=len(index) + len(node.pivot_output_columns())
+    )
     for name in index:
         columns.append(wide.column(name))
-    for name in node.right_keys:
+    for name in node.pivot_output_columns():
         if name in present:
             columns.append(wide.column(name))
         else:
@@ -187,7 +189,7 @@ def plan_join_frames(
     """Join node `index`'s executed inputs."""
     ref node = self._nodes[index]
     if node.how == JOIN_CROSS:
-        return input.join(right, how=node.text, suffix=node.names2[0])
+        return input.join(right, how=node.text, suffix=node.join_suffix())
     if empty and input.height() == 0 and right.height() == 0:
         var schema = _join_schema(node, input, right)
         if schema:
@@ -200,12 +202,12 @@ def plan_join_frames(
     )
     return input._join_impl(
         right,
-        left_on=node.names,
-        right_on=node.right_keys,
+        left_on=node.join_left_keys(),
+        right_on=node.join_right_keys(),
         # Parsed here, as `DataFrame.join` would: an unknown type
         # raises.
         how=join_type(node.text),
-        suffix=node.names2[0],
+        suffix=node.join_suffix(),
         coalesce=node.coalesce,
         keep_order=not free,
     )

@@ -1,4 +1,7 @@
 """Shared query state and runtime ports supplied by the public API."""
+from dataframe.planning.node_builders import (
+    _frame_scan_node,
+)
 from dataframe.execution_report import (
     ExecutionReport,
 )
@@ -15,7 +18,6 @@ from dataframe.planning.model import (
     HANDOFF_OFF,
     PlanNode,
     SCAN_FRAME,
-    _plan_node,
 )
 from std.collections import (
     Dict,
@@ -95,7 +97,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
 
     def with_input(self, frame: DataFrame) -> Self:
         return Self(
-            [_plan_node(SCAN_FRAME, offset=0)],
+            [_frame_scan_node(slot=0)],
             [frame.copy()],
             [Optional[CsvSchema]()],
             self._executor,

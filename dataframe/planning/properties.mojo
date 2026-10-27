@@ -346,7 +346,7 @@ def _join_schema(
             continue
         var name = right._columns[i].name()
         if name in left_names:
-            name += node.names2[0]
+            name += node.join_suffix()
         if name in names:
             return None
         names[name] = True
@@ -357,7 +357,7 @@ def _join_schema(
 def _pinned(node: PlanNode) -> Bool:
     """A filter that reads a shared subplan and stays above it
     (`_filter_shared_subplans`)."""
-    return node.kind == FILTER and len(node.flags) > 0 and node.flags[0]
+    return node.kind == FILTER and node.filter_is_pinned()
 
 
 def _through_projection(predicate: Expr, exprs: List[Expr]) -> Expr:
@@ -649,10 +649,10 @@ def _set_members(node: PlanNode) -> List[List[String]]:
     """The keys each grouping set of a GROUPING_SETS node groups by."""
     var width = len(node.names)
     var sets = List[List[String]]()
-    for s in range(len(node.flags) // width):
+    for s in range(len(node.grouping_membership()) // width):
         var members = List[String]()
         for k in range(width):
-            if node.flags[s * width + k]:
+            if node.grouping_membership()[s * width + k]:
                 members.append(node.names[k])
         sets.append(members^)
     return sets^

@@ -489,10 +489,10 @@ def _steps_of(operations: List[PlanNode]) -> List[Step]:
                 kind,
                 node.exprs.copy(),
                 node.names.copy(),
-                node.offset,
+                node.join_build_slot(),
                 node.right_keys.copy(),
                 node.how,
-                node.names2[0] if len(node.names2) > 0 else String(""),
+                node.join_suffix() if node.kind == JOIN else String(""),
                 node.coalesce,
             )
         )
@@ -506,29 +506,29 @@ def _apply_operation(
     indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
 ) raises:
     """Apply one row-local operation or join to a batch."""
-    if node.kind == JOIN and indexes[][node.offset]:
+    if node.kind == JOIN and indexes[][node.join_build_slot()]:
         frame = frame._join_impl(
-            joins[][node.offset],
+            joins[][node.join_build_slot()],
             left_on=node.names,
             right_on=node.right_keys,
             how=node.how,
-            suffix=node.names2[0],
+            suffix=node.join_suffix(),
             coalesce=node.coalesce,
-            prepared=indexes[][node.offset],
+            prepared=indexes[][node.join_build_slot()],
         )
     elif node.kind == JOIN and node.how == JOIN_CROSS:
         frame = frame.join(
-            joins[][node.offset],
+            joins[][node.join_build_slot()],
             how=node.text,
-            suffix=node.names2[0],
+            suffix=node.join_suffix(),
         )
     elif node.kind == JOIN:
         frame = frame.join(
-            joins[][node.offset],
+            joins[][node.join_build_slot()],
             left_on=node.names,
             right_on=node.right_keys,
             how=node.text,
-            suffix=node.names2[0],
+            suffix=node.join_suffix(),
             coalesce=node.coalesce,
         )
     elif node.kind == FILTER:
@@ -550,9 +550,9 @@ def _apply_operation(
         frame = frame.take(
             frame._arg_sort_head(
                 node.names,
-                List[Bool](node.flags[:n]),
-                List[Bool](node.flags[n:]),
-                node.length,
+                List[Bool](node.sort_options()[:n]),
+                List[Bool](node.sort_options()[n:]),
+                node.sort_limit(),
                 threads=1,
             )
         )

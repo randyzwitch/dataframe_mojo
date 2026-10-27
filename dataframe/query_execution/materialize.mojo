@@ -1,4 +1,7 @@
 """Shared subplan materialization and independent input prefetch."""
+from dataframe.planning.node_builders import (
+    _frame_scan_node,
+)
 from dataframe.aggregation.expressions import (
     _stream_reductions,
 )
@@ -35,7 +38,6 @@ from dataframe.planning.model import (
     JOIN,
     SCAN_FRAME,
     SELECT,
-    _plan_node,
 )
 from dataframe.planning.properties import (
     _pinned,
@@ -144,7 +146,7 @@ def plan_share_subplans(
         for j in range(len(self._nodes)):
             if not covered[j] and classes[j] == classes[best]:
                 plan_cover(self, j, covered)
-                self._nodes[j] = _plan_node(SCAN_FRAME, offset=slot)
+                self._nodes[j] = _frame_scan_node(slot=slot)
         shared = True
     if shared:
         plan_reorder(self)

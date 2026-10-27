@@ -163,14 +163,16 @@ def plan_row_number_shape(
     for op in operations:
         if op.kind != JOIN:
             continue
-        if op.offset == holder:
+        if op.join_build_slot() == holder:
             holder_probe = op.names[0]
         if op.how != JOIN_INNER or len(op.names) == 0:
             continue
         if op.names[0] not in table.columns():
             continue
         var probe = table._distinct_count(op.names[0])
-        var build = distinct_estimate(joins[op.offset].column(op.right_keys[0]))
+        var build = distinct_estimate(
+            joins[op.join_build_slot()].column(op.right_keys[0])
+        )
         if probe > 0 and build > 0:
             rows *= min(1.0, Float64(build) / Float64(probe))
     var reached = Float64(joins[holder].height())
@@ -235,7 +237,7 @@ def select_aggregation_strategy(
         and len(keys) > 0
         and not choice.uses_aggregate_table()
     ):
-        var frame = self._nodes[cursor].offset
+        var frame = self._nodes[cursor].source_slot()
         ref source_frame = self._frames[frame]
         var fixed = True
         # String keys group exactly in the insert tables (a long
@@ -336,7 +338,7 @@ def select_aggregation_strategy(
 
     var late_table_codes_pay = False
     if choice.uses_aggregate_table() and len(late_names) > 0:
-        ref source_frame = self._frames[self._nodes[cursor].offset]
+        ref source_frame = self._frames[self._nodes[cursor].source_slot()]
         var sample = min(source_frame.height(), 4096)
         late_table_codes_pay = (
             _key_group_bound(keys, source_frame, joins, sample // 4) >= 0
@@ -383,7 +385,7 @@ def select_aggregation_strategy(
             if best >= 0:
                 var shape = plan_row_number_shape(
                     self,
-                    self._nodes[cursor].offset,
+                    self._nodes[cursor].source_slot(),
                     keys,
                     carried,
                     best,
@@ -439,7 +441,7 @@ def select_aggregation_strategy(
                 choice.choose(EAGER_FRAME, "filtered_frame_grouping")
                 return choice^
             if not plan_batch_states_win(
-                self, keys, self._nodes[cursor].offset, batch_size
+                self, keys, self._nodes[cursor].source_slot(), batch_size
             ):
                 choice.choose(EAGER_FRAME, "eager_grouping_preferred")
                 return choice^

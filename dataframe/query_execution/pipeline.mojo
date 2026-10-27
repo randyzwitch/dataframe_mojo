@@ -1,4 +1,8 @@
 """Streaming pipeline lowering and execution."""
+from dataframe.planning.node_builders import (
+    _frame_scan_node,
+    _join_node,
+)
 from dataframe.planning.cost.aggregation import (
     select_aggregation_strategy,
     refine_string_sample,
@@ -122,7 +126,6 @@ from dataframe.planning.model import (
     SLICE,
     SORT,
     WITH_COLUMNS,
-    _plan_node,
 )
 from dataframe.planning.cost.aggregation import (
     plan_batch_states_win,
@@ -244,10 +247,10 @@ def plan_stream_execute(
                     return None
             cursor = terminal.left
     if terminal.kind == SLICE:
-        if terminal.offset < 0:
+        if terminal.slice_offset() < 0:
             return None
-        skip = terminal.offset
-        limit = terminal.length
+        skip = terminal.slice_offset()
+        limit = terminal.slice_length()
         cursor = terminal.left
     # A sort limited to its first rows (#332) streams: each batch keeps
     # its own first rows, which contain the overall first rows, since a
@@ -262,15 +265,15 @@ def plan_stream_execute(
         terminal.kind == SLICE
         and cursor >= 0
         and self._nodes[cursor].kind == SORT
-        and self._nodes[cursor].length >= 0
+        and self._nodes[cursor].sort_limit() >= 0
     ):
-        top = self._nodes[cursor].length
+        top = self._nodes[cursor].sort_limit()
         top_node = cursor
         top_names = self._nodes[cursor].names.copy()
         var n = len(top_names)
         for k in range(n):
-            top_descending.append(self._nodes[cursor].flags[k])
-            top_nulls_last.append(self._nodes[cursor].flags[n + k])
+            top_descending.append(self._nodes[cursor].sort_descending(k))
+            top_nulls_last.append(self._nodes[cursor].sort_nulls_last(k))
         cursor = self._nodes[cursor].left
     var candidates = List[DataFrame]()
     var candidate_rows = 0
@@ -323,9 +326,7 @@ def plan_stream_execute(
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
-        plan._nodes[first] = _plan_node(
-            SCAN_FRAME, offset=len(plan._frames) - 1
-        )
+        plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
         return plan._execute(index, False, True, batch_size)
     while cursor >= 0:
         ref node = self._nodes[cursor]
@@ -393,14 +394,11 @@ def plan_stream_execute(
                             if operations[k].kind != JOIN:
                                 continue
                             plan._frames.append(
-                                joins[operations[k].offset].copy()
+                                joins[operations[k].join_build_slot()].copy()
                             )
                             plan._schemas.append(Optional[CsvSchema]())
                             plan._nodes.append(
-                                _plan_node(
-                                    SCAN_FRAME,
-                                    offset=len(plan._frames) - 1,
-                                )
+                                _frame_scan_node(slot=len(plan._frames) - 1)
                             )
                             plan._nodes[operation_nodes[k]].right = (
                                 len(plan._nodes) - 1
@@ -446,7 +444,7 @@ def plan_stream_execute(
                 ref build_node = self._nodes[node.right]
                 if build_node.kind == SCAN_FRAME and len(node.right_keys) == 1:
                     var sources: List[Series] = [
-                        self._frames[build_node.offset][
+                        self._frames[build_node.source_slot()][
                             node.right_keys[0]
                         ].copy()
                     ]
@@ -454,7 +452,7 @@ def plan_stream_execute(
                 if not prepared:
                     break
             var operation = node.copy()
-            operation.offset = len(joins)
+            operation.set_join_build_slot(len(joins))
             var algorithm = String(
                 "progression" if prepared else (
                     "cross" if node.how == JOIN_CROSS else "eager_hash"
@@ -489,10 +487,12 @@ def plan_stream_execute(
                     for k in range(len(operations)):
                         if operations[k].kind != JOIN:
                             continue
-                        plan._frames.append(joins[operations[k].offset].copy())
+                        plan._frames.append(
+                            joins[operations[k].join_build_slot()].copy()
+                        )
                         plan._schemas.append(Optional[CsvSchema]())
                         plan._nodes.append(
-                            _plan_node(SCAN_FRAME, offset=len(plan._frames) - 1)
+                            _frame_scan_node(slot=len(plan._frames) - 1)
                         )
                         plan._nodes[operation_nodes[k]].right = (
                             len(plan._nodes) - 1
@@ -533,13 +533,14 @@ def plan_stream_execute(
                                     if operations[k].kind != JOIN:
                                         continue
                                     plan._frames.append(
-                                        joins[operations[k].offset].copy()
+                                        joins[
+                                            operations[k].join_build_slot()
+                                        ].copy()
                                     )
                                     plan._schemas.append(Optional[CsvSchema]())
                                     plan._nodes.append(
-                                        _plan_node(
-                                            SCAN_FRAME,
-                                            offset=len(plan._frames) - 1,
+                                        _frame_scan_node(
+                                            slot=len(plan._frames) - 1
                                         )
                                     )
                                     plan._nodes[operation_nodes[k]].right = (
@@ -558,8 +559,8 @@ def plan_stream_execute(
                         var plan = self.copy()
                         plan._frames.append(joined^)
                         plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes[cursor] = _plan_node(
-                            SCAN_FRAME, offset=len(plan._frames) - 1
+                        plan._nodes[cursor] = _frame_scan_node(
+                            slot=len(plan._frames) - 1
                         )
                         return plan._execute(index, False, True, batch_size)
             if (
@@ -588,20 +589,20 @@ def plan_stream_execute(
                     )
                     plan._frames.append(joined^)
                     plan._schemas.append(Optional[CsvSchema]())
-                    plan._nodes[cursor] = _plan_node(
-                        SCAN_FRAME, offset=len(plan._frames) - 1
+                    plan._nodes[cursor] = _frame_scan_node(
+                        slot=len(plan._frames) - 1
                     )
                 else:
                     plan._frames.append(left_frame^)
                     plan._schemas.append(Optional[CsvSchema]())
                     plan._nodes.append(
-                        _plan_node(SCAN_FRAME, offset=len(plan._frames) - 1)
+                        _frame_scan_node(slot=len(plan._frames) - 1)
                     )
                     plan._nodes[cursor].left = len(plan._nodes) - 1
                     plan._frames.append(built^)
                     plan._schemas.append(Optional[CsvSchema]())
                     plan._nodes.append(
-                        _plan_node(SCAN_FRAME, offset=len(plan._frames) - 1)
+                        _frame_scan_node(slot=len(plan._frames) - 1)
                     )
                     plan._nodes[cursor].right = len(plan._nodes) - 1
                 return plan._execute(index, False, True, batch_size)
@@ -693,7 +694,9 @@ def plan_stream_execute(
         and not grouping
         and self._nodes[cursor].kind == SCAN_FRAME
     ):
-        var source_columns = self._frames[self._nodes[cursor].offset].columns()
+        var source_columns = self._frames[
+            self._nodes[cursor].source_slot()
+        ].columns()
         for name in keys:
             var b = _late_key_build(
                 name, source_columns, joins, operations, expressions
@@ -720,7 +723,7 @@ def plan_stream_execute(
     if consider_inline_table(
         eligibility, len(keys), len(expressions), ordered, distinct
     ):
-        var empty = self._frames[self._nodes[cursor].offset].clear()
+        var empty = self._frames[self._nodes[cursor].source_slot()].clear()
         var empty_joins = ArcPointer(joins.copy())
         var empty_indexes = ArcPointer(indexes.copy())
         for operation in operations:
@@ -828,9 +831,9 @@ def plan_stream_execute(
         csv.append(
             _CsvBatches(
                 mapping^,
-                self._schemas[source.offset],
+                self._schemas[source.source_slot()],
                 source.names,
-                source.length,
+                source.scan_row_limit(),
                 batch_size,
                 _scan_options(source),
             )
@@ -851,10 +854,10 @@ def plan_stream_execute(
             _NdjsonBatches(
                 source.text,
                 source.json_schema,
-                Int(source.names2[0]),
-                source.flags[0],
+                Int(source.ndjson_infer_schema_length()),
+                source.ndjson_ignore_errors(),
                 source.names,
-                source.length,
+                source.scan_row_limit(),
                 batch_size,
             )
         )
@@ -864,16 +867,16 @@ def plan_stream_execute(
             _IpcBatches(
                 source.text,
                 source.names,
-                source.flags[1],
-                source.flags[0],
-                Int(source.names2[0]),
-                source.length,
+                source.ipc_has_projection(),
+                source.ipc_memory_map(),
+                Int(source.ipc_row_offset()),
+                source.scan_row_limit(),
                 batch_size,
             )
         )
     elif source.kind == SCAN_FRAME:
         source._record_execution()
-        input = self._frames[source.offset].copy()
+        input = self._frames[source.source_slot()].copy()
         if len(source.names):
             input = input.select(source.names)
         # A first filter whose parts a column stored in ascending order
@@ -1619,7 +1622,7 @@ def plan_reduce_by_probe_keys(
     var plan = self.copy()
     plan._frames.append(probed^)
     plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     plan._nodes[lowest].left = len(plan._nodes) - 1
     var key_frame = len(plan._frames)
     # Each probe key's distinct values, and each source column's span,
@@ -1661,17 +1664,16 @@ def plan_reduce_by_probe_keys(
             pays = pays or 2 * distinct[i] <= spans[named]
         if not pays:
             continue
-        plan._nodes.append(_plan_node(SCAN_FRAME, offset=key_frame))
-        var semi = _plan_node(
-            JOIN,
-            input,
-            len(plan._nodes) - 1,
-            names=grouped.copy(),
-            text="semi",
-            how=JOIN_SEMI,
+        plan._nodes.append(_frame_scan_node(slot=key_frame))
+        var semi = _join_node(
+            left=input,
+            right=len(plan._nodes) - 1,
+            left_keys=grouped.copy(),
+            join_type="semi",
+            type_code=JOIN_SEMI,
             right_keys=key.copy(),
+            suffix="_right",
         )
-        semi.names2 = ["_right"]
         plan._nodes.append(semi^)
         plan._nodes[aggregate].left = len(plan._nodes) - 1
     return plan._execute(index, False, True, batch_size)

@@ -118,6 +118,301 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var source_failure: String
     var json_schema: Optional[DataType]
 
+    # These views borrow the stored lists: reading a payload does not add a
+    # copy-on-write owner. String elements share their list's element origin
+    # (the index in the return origin is not a runtime read). Operation dispatch
+    # remains the caller's responsibility.
+
+    def scan_projection(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def csv_settings(self) -> ref[self.names2] List[String]:
+        return self.names2
+
+    def csv_switches(self) -> ref[self.flags] List[Bool]:
+        return self.flags
+
+    def csv_null_values(self) -> ref[self.right_keys] List[String]:
+        return self.right_keys
+
+    def sort_keys(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def sort_options(self) -> ref[self.flags] List[Bool]:
+        return self.flags
+
+    def group_keys(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def grouping_membership(self) -> ref[self.flags] List[Bool]:
+        return self.flags
+
+    def join_left_keys(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def join_right_keys(self) -> ref[self.right_keys] List[String]:
+        return self.right_keys
+
+    def unpivot_columns(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def unpivot_index(self) -> ref[self.names2] List[String]:
+        return self.names2
+
+    def unpivot_output_names(self) -> ref[self.right_keys] List[String]:
+        return self.right_keys
+
+    def window_columns(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def window_settings(self) -> ref[self.names2] List[String]:
+        return self.names2
+
+    def pivot_columns(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def pivot_output_columns(self) -> ref[self.right_keys] List[String]:
+        return self.right_keys
+
+    def selected_columns(self) -> ref[self.names] List[String]:
+        return self.names
+
+    def source_slot(self) -> Int:
+        return self.offset
+
+    def scan_row_limit(self) -> Int:
+        return self.length
+
+    def ipc_row_offset(self) -> ref[self.names2[0]] String:
+        return self.names2[0]
+
+    def ipc_memory_map(self) -> Bool:
+        return self.flags[0]
+
+    def ipc_has_projection(self) -> Bool:
+        return self.flags[1]
+
+    def ndjson_infer_schema_length(self) -> ref[self.names2[0]] String:
+        return self.names2[0]
+
+    def ndjson_ignore_errors(self) -> Bool:
+        return self.flags[0]
+
+    def join_suffix(self) -> ref[self.names2[0]] String:
+        return self.names2[0]
+
+    def join_build_slot(self) -> Int:
+        return self.offset
+
+    def asof_allow_exact_matches(self) -> Bool:
+        return self.flags[0]
+
+    def sort_limit(self) -> Int:
+        return self.length
+
+    def slice_offset(self) -> Int:
+        return self.offset
+
+    def slice_length(self) -> Int:
+        return self.length
+
+    def tail_count(self) -> Int:
+        return self.offset
+
+    def shift_count(self) -> Int:
+        return self.offset
+
+    def gather_stride(self) -> Int:
+        return self.length
+
+    def gather_offset(self) -> Int:
+        return self.offset
+
+    def insert_position(self) -> Int:
+        return self.offset
+
+    def gather_null_on_oob(self) -> Bool:
+        return self.flags[0]
+
+    def row_index_name(self) -> ref[self.names[0]] String:
+        return self.names[0]
+
+    def row_index_offset(self) -> Int:
+        return self.offset
+
+    def fill_limit(self) -> Int:
+        return self.length
+
+    def window_batch_size(self) -> Int:
+        return self.length
+
+    def pivot_index_count(self) -> Int:
+        return self.offset
+
+    def pivot_on(self) -> ref[self.names[0]] String:
+        return self.names[self.offset]
+
+    def pivot_values(self) -> ref[self.names[0]] String:
+        return self.names[self.offset + 1]
+
+    def filter_is_pinned(self) -> Bool:
+        return len(self.flags) > 0 and self.flags[0]
+
+    def sort_descending(self, key: Int) -> Bool:
+        return self.flags[key]
+
+    def sort_nulls_last(self, key: Int) -> Bool:
+        return self.flags[len(self.names) + key]
+
+    def asof_group_count(self) -> Int:
+        return len(self.names2) - 1
+
+    def asof_group(self, index: Int) -> ref[self.names2[0]] String:
+        return self.names2[index + 1]
+
+    def window_every(self) -> ref[self.names2[0]] String:
+        return self.names2[0]
+
+    def window_period(self) -> ref[self.names2[0]] String:
+        return self.names2[1]
+
+    def window_offset(self) -> ref[self.names2[0]] String:
+        return self.names2[2]
+
+    def window_closed(self) -> ref[self.names2[0]] String:
+        return self.names2[3]
+
+    def window_label(self) -> ref[self.names2[0]] String:
+        return self.names2[4]
+
+    def set_source_slot(mut self, slot: Int):
+        self.offset = slot
+
+    def set_scan_projection(mut self, var columns: List[String]):
+        self.names = columns^
+        if self.kind == SCAN_IPC:
+            self.flags[1] = True
+
+    def set_scan_row_limit(mut self, limit: Int):
+        self.length = limit
+
+    def set_ipc_slice(mut self, row_offset: String, row_limit: Int):
+        self.names2 = [row_offset]
+        self.length = row_limit
+
+    def set_sort_limit(mut self, limit: Int):
+        self.length = limit
+
+    def set_join_build_slot(mut self, slot: Int):
+        self.offset = slot
+
+    def pin_filter(mut self):
+        self.flags = [True]
+
+    def set_window_aggregations(
+        mut self, var exprs: List[Expr], batch_size: Int
+    ):
+        self.exprs = exprs^
+        self.length = batch_size
+
+    def set_asof_options(
+        mut self,
+        strategy: String,
+        allow_exact_matches: Bool,
+        tolerance: Optional[AnyValue],
+        groups: List[String],
+    ):
+        # Convert the already connected join while retaining its suffix and keys.
+        self.kind = ASOF
+        self.text = strategy
+        self.flags = [allow_exact_matches]
+        self.asof_tolerance = tolerance.copy()
+        for name in groups:
+            self.names2.append(name)
+        debug_assert(self.payload_layout_valid(), "invalid asof payload layout")
+
+    def csv_separator(self) -> ref[self.names2[0]] String:
+        return self.names2[0]
+
+    def csv_quote_char(self) -> ref[self.names2[0]] String:
+        return self.names2[1]
+
+    def csv_comment_prefix(self) -> ref[self.names2[0]] String:
+        return self.names2[2]
+
+    def csv_encoding(self) -> ref[self.names2[0]] String:
+        return self.names2[3]
+
+    def csv_skip_rows(self) -> ref[self.names2[0]] String:
+        return self.names2[4]
+
+    def csv_infer_schema_length(self) -> ref[self.names2[0]] String:
+        return self.names2[5]
+
+    def csv_has_header(self) -> Bool:
+        return self.flags[0]
+
+    def csv_ignore_errors(self) -> Bool:
+        return self.flags[1]
+
+    def csv_truncate_ragged_lines(self) -> Bool:
+        return self.flags[2]
+
+    def csv_try_parse_dates(self) -> Bool:
+        return self.flags[3]
+
+    def csv_has_options(self) -> Bool:
+        return len(self.names2) >= 6
+
+    def csv_override_count(self) -> Int:
+        return max(0, (len(self.names2) - 6) // 2)
+
+    def csv_override_name(self, index: Int) -> ref[self.names2[0]] String:
+        return self.names2[6 + 2 * index]
+
+    def csv_override_dtype(self, index: Int) -> ref[self.names2[0]] String:
+        return self.names2[7 + 2 * index]
+
+    def payload_layout_valid(self) -> Bool:
+        """Check storage shape only, leaving user-option validation where it was.
+
+        Legacy _plan_node intentionally permits partially built nodes. Named
+        builders use this check once their operation payload is complete.
+        """
+        if self.kind == SCAN_CSV:
+            if len(self.names2) == 0:
+                return len(self.flags) == 0
+            return (
+                len(self.names2) >= 6
+                and (len(self.names2) - 6) % 2 == 0
+                and len(self.flags) == 4
+            )
+        if self.kind == SCAN_IPC:
+            return len(self.names2) == 1 and len(self.flags) == 2
+        if self.kind == SCAN_NDJSON:
+            return len(self.names2) == 1 and len(self.flags) == 1
+        if self.kind == SORT:
+            return len(self.flags) == 2 * len(self.names)
+        if self.kind == JOIN:
+            return len(self.names2) == 1
+        if self.kind == ASOF:
+            return len(self.names2) >= 1 and len(self.flags) == 1
+        if self.kind == GATHER:
+            return len(self.flags) == 1
+        if self.kind == ROW_INDEX:
+            return len(self.names) == 1
+        if self.kind == PIVOT:
+            return self.offset >= 0 and len(self.names) == self.offset + 2
+        if self.kind == UNPIVOT:
+            return len(self.right_keys) == 2
+        if self.kind == GROUP_BY_DYNAMIC or self.kind == ROLLING:
+            return len(self.names) >= 1 and len(self.names2) == 5
+        if self.kind == GROUPING_SETS:
+            return (
+                len(self.names) > 0 and len(self.flags) % len(self.names) == 0
+            )
+        return True
+
     def _record_execution(self):
         if self._executions:
             var counter = self._executions.value()

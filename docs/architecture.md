@@ -70,8 +70,16 @@ frames and schemas. Graph rewrites restore that ordering through `plan_reorder`.
 - `lazy_api.mojo` owns query construction, public collection/profiling/explain
   entry points, and accelerator provider dispatch. A `LazyFrame` owns one
   internal `QueryContext`; private plan storage is accessed through `_plan`.
-- `planning/model.mojo` defines `PlanNode` and operation tags. It imports
-  neither optimizer passes nor execution code.
+- `planning/model.mojo` defines `PlanNode`, operation tags, and named payload
+  views/setters. It imports neither optimizer passes nor execution code.
+- `planning/node_builders.mojo` constructs operation-specific payloads. Scans,
+  joins, sorting, row operations, reshapes, grouping sets, and time windows
+  encode their overloaded fields here; CSV option normalization stays in
+  `planning/scans.mojo`. Builders check storage shape with debug assertions,
+  while public option validation and deferred execution errors stay at their
+  existing call sites. The flat fields, operation tags, fieldwise initializer,
+  and compatibility `_plan_node` factory remain available. List and string
+  views borrow their stored values instead of adding copies.
 - `planning/context.mojo` holds nodes, source frames, schemas, and per-run
   caches/counters. Execution and provider ports are supplied by the public
   API when a context is constructed and retained when it is copied.
@@ -100,7 +108,10 @@ settings and execution-report behavior. Provider adapters stay in `lazy_api`;
 the executor receives only provider-neutral context ports.
 
 `scripts/check_lazy_boundaries.py` checks these import directions and rejects
-cycles among the lazy implementation modules. The existing eager
+cycles among the lazy implementation modules. It also keeps raw payload
+construction in the builders and packed-field reads/writes in the model,
+except for graph hashing/equality/canonicalization, which deliberately inspect
+raw storage. The existing eager
 `DataFrame`/`LazyFrame` type relationship remains at the public integration
 boundary; this check does not impose a new dependency model on eager operators.
 
