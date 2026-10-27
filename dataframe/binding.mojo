@@ -5,6 +5,10 @@ from .regex_kernels import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,
     COL,
+    _SCALAR_SOURCE,
+    DROP_NULLS,
+    DROP_NANS,
+    is_drop,
     LIT_INT,
     UNTYPED,
     Node,
@@ -67,6 +71,7 @@ from .expr import (
     FIRST,
     LAST,
     N_UNIQUE,
+    APPROX_N_UNIQUE,
     STD,
     VAR,
     MEDIAN,
@@ -78,6 +83,11 @@ from .expr import (
     split_names,
     CUM_SUM,
     CUM_COUNT,
+    IS_DUPLICATED,
+    IS_UNIQUE,
+    IS_FIRST_DISTINCT,
+    IS_LAST_DISTINCT,
+    is_distinct_flag,
     RANK,
     ROLLING_SUM,
     ROLLING_STD,
@@ -321,6 +331,21 @@ def _check_pattern(node: Node) raises -> Optional[Regex]:
 
 
 def op_name(op: Int) -> String:
+    if op == IS_DUPLICATED:
+        return "is_duplicated"
+    if op == IS_UNIQUE:
+        return "is_unique"
+    if op == IS_FIRST_DISTINCT:
+        return "is_first_distinct"
+    if op == IS_LAST_DISTINCT:
+        return "is_last_distinct"
+    if op == APPROX_N_UNIQUE:
+        return "approx_n_unique"
+
+    if op == DROP_NULLS:
+        return "drop_nulls"
+    if op == DROP_NANS:
+        return "drop_nans"
     if op == EQ_MISSING:
         return "eq_missing"
     if op == NE_MISSING:
@@ -688,6 +713,8 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
     if op == IMPLODE:
         return DataType.list(input)
+    if op == COUNT or op == NULL_COUNT or op == LEN:
+        return DataType.INT64
     if input.is_nested():
         raise Error(
             op_name(op)
@@ -712,7 +739,9 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
                 "product requires a numeric expression, found " + input.name()
             )
         return input.product_type()
-    if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
+    if op == APPROX_N_UNIQUE:
+        return DataType.UINT32
+    if op == N_UNIQUE:
         return DataType.INT64
     if op == ANY or op == ALL:
         if input != DataType.BOOL:
@@ -1283,7 +1312,7 @@ def bind(
         var shape = SCALAR
         var has_aggregate = False
         var source = -1
-        if node.op == COL:
+        if node.op == COL or node.op == _SCALAR_SOURCE:
             for j in range(len(columns)):
                 if columns[j].name() == node.text:
                     source = j
@@ -1295,7 +1324,7 @@ def bind(
             # column keeps its type, since evaluate returns it as is.
             if dtype.is_categorical() and len(nodes) > 1:
                 dtype = DataType.STRING
-            shape = ROWS
+            shape = SCALAR if node.op == _SCALAR_SOURCE else ROWS
         elif node.op == LIT_INT:
             if node.text == UNTYPED:
                 dtype = DataType.UNTYPED_INT
@@ -1424,11 +1453,24 @@ def bind(
         elif is_window(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid window input")
-            if shapes[node.left] != ROWS:
+            if shapes[node.left] != ROWS and not is_drop(node.op):
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
-            if (
+            if is_distinct_flag(node.op):
+                if input.is_list():
+                    raise Error(
+                        op_name(node.op) + " does not support list values"
+                    )
+                if input.is_struct():
+                    for field in input.field_dtypes():
+                        if field.is_nested():
+                            raise Error(
+                                op_name(node.op)
+                                + " requires scalar struct fields"
+                            )
+            elif (
                 input.is_nested()
+                and not is_drop(node.op)
                 and node.op != FORWARD_FILL
                 and node.op != BACKWARD_FILL
             ):
@@ -1438,6 +1480,8 @@ def bind(
                     + input.name()
                 )
             dtype = input
+            if is_distinct_flag(node.op):
+                dtype = DataType.BOOL
             if node.op == INTERPOLATE_BY:
                 if node.right < 0 or node.right >= i:
                     raise Error("Invalid interpolate_by input")

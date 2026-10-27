@@ -352,6 +352,21 @@ comptime DT_IS_BUSINESS_DAY = 277
 comptime DT_ADD_BUSINESS_DAYS = 278
 comptime DT_BUSINESS_DAY_COUNT = 279
 
+# Whole-column distinct predicates, evaluated once per partition.
+comptime IS_DUPLICATED = 280
+comptime IS_UNIQUE = 281
+comptime IS_FIRST_DISTINCT = 282
+comptime IS_LAST_DISTINCT = 283
+
+# Approximate count of all distinct values, including null.
+comptime APPROX_N_UNIQUE = 284
+
+# Whole-input sequence filters. The private scalar source is introduced
+# only during execution, after length-changing boundaries are materialized.
+comptime DROP_NULLS = 285
+comptime DROP_NANS = 286
+comptime _SCALAR_SOURCE = 287
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -423,6 +438,7 @@ def is_reduction(op: Int) -> Bool:
         or is_pair_reduction(op)
         or op == VALUE_COUNTS
         or op == PRODUCT
+        or op == APPROX_N_UNIQUE
     )
 
 
@@ -473,9 +489,32 @@ def is_dt_op(op: Int) -> Bool:
     )
 
 
+def is_distinct_flag(op: Int) -> Bool:
+    return op >= IS_DUPLICATED and op <= IS_LAST_DISTINCT
+
+
+def is_drop(op: Int) -> Bool:
+    return op == DROP_NULLS or op == DROP_NANS
+
+
+def changes_length(expr: Expr) -> Bool:
+    """Whether the output's row axis can differ from the input's."""
+    var changing = List[Bool]()
+    for node in expr._nodes:
+        var changed = is_drop(node.op)
+        if not is_reduction(node.op) and node.op != OVER:
+            for child in node_children(node):
+                changed = changed or changing[child]
+        changing.append(changed)
+    return len(changing) > 0 and changing[len(changing) - 1]
+
+
 def is_window(op: Int) -> Bool:
-    return (op >= CUM_SUM and op <= CUM_PROD and op != OVER) or (
-        op >= ROLLING_STD and op <= ROLLING_VAR_BY
+    return (
+        (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
+        or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
+        or is_distinct_flag(op)
+        or is_drop(op)
     )
 
 
@@ -1377,6 +1416,33 @@ struct Expr(Copyable):
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
 
+    def approx_n_unique(self) -> Self:
+        """Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+
+        Expected relative standard error is about 6.5%; this is a
+        statistical estimate, with no hard error bound. Null counts as one
+        value, NaNs as one value, and signed zeros as equal. Empty input
+        returns zero. Uses 256 bytes of sketch state per group, independent
+        of cardinality, and saturates at UInt32.MAX.
+        """
+        return self._unary(APPROX_N_UNIQUE)
+
+    def drop_nulls(self) -> Self:
+        """Remove null values, preserving the order of the remaining values.
+
+        This changes length: select siblings must return the same number
+        of rows, or be scalars. In a grouped aggregation this returns a
+        list per group; reduce it to obtain a scalar per group.
+        """
+        return self._unary(DROP_NULLS)
+
+    def drop_nans(self) -> Self:
+        """Remove NaNs while retaining nulls; a no-op for non-float values.
+
+        The length and grouped aggregation rules are those of drop_nulls.
+        """
+        return self._unary(DROP_NANS)
+
     def has_nulls(self) -> Self:
         """Whether any value is null, as one Bool; false for empty input."""
         return self.null_count() > 0
@@ -1459,6 +1525,27 @@ struct Expr(Copyable):
     def cum_count(self, reverse: Bool = False) -> Self:
         """Running count of non-null values, as Int64 (never null)."""
         return self._window(CUM_COUNT, reverse=reverse)
+
+    def is_duplicated(self) -> Self:
+        """Whether a value occurs more than once, including its first row.
+
+        Nulls are one value, all NaNs are one value, and signed zeros are
+        equal. Returns non-null Bool flags, restarted within over() groups.
+        Supports scalar columns and structs with scalar fields.
+        """
+        return self._window(IS_DUPLICATED)
+
+    def is_unique(self) -> Self:
+        """Whether a value occurs exactly once; see is_duplicated."""
+        return self._window(IS_UNIQUE)
+
+    def is_first_distinct(self) -> Self:
+        """True at each value's first row; see is_duplicated for equality."""
+        return self._window(IS_FIRST_DISTINCT)
+
+    def is_last_distinct(self) -> Self:
+        """True at each value's last row; see is_duplicated for equality."""
+        return self._window(IS_LAST_DISTINCT)
 
     def shift(self, n: Int = 1) -> Self:
         """Move values n rows later (earlier when negative); vacated rows

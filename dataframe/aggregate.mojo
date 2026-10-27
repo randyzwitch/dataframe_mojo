@@ -9,6 +9,7 @@ median/quantile keep every valid value of a group.
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
+from .approx_distinct import CardinalitySketch, update_sketches
 from .bool_column import BoolColumn, true_count
 from .column import Column, _validity_at
 from .column import _count_valid as _valid_count
@@ -28,6 +29,7 @@ from .expr import (
     FIRST,
     LAST,
     N_UNIQUE,
+    APPROX_N_UNIQUE,
     STD,
     VAR,
     MEDIAN,
@@ -1014,6 +1016,7 @@ struct Reducer(Movable):
     # (DuckDB's FinalizeStates): `finish` returns it, and no state above
     # is held.
     var finished: Optional[Series]
+    var sketches: List[CardinalitySketch]
 
     def __init__(
         out self,
@@ -1169,6 +1172,10 @@ struct Reducer(Movable):
             length=n if op == PRODUCT and not exact else 0, fill=1
         )
         self.finished = None
+        self.sketches = List[CardinalitySketch]()
+        if op == APPROX_N_UNIQUE:
+            for _ in range(n):
+                self.sketches.append(CardinalitySketch())
 
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
@@ -1181,6 +1188,30 @@ struct Reducer(Movable):
             for part in chunk.chunks():
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
+            return
+        if chunk.dtype().is_nested() and self.op in [COUNT, NULL_COUNT, LEN]:
+            if not grouped:
+                var n = len(chunk)
+                var nulls = chunk.null_count()
+                self.counts[0] += Int64(
+                    n if self.op
+                    == LEN else nulls if self.op
+                    == NULL_COUNT else n - nulls
+                )
+            else:
+                for row in range(len(chunk)):
+                    var valid = (
+                        chunk._data[ListColumn]
+                        ._valid(row) if chunk._data.isa[
+                            ListColumn
+                        ]() else chunk._data[StructColumn]
+                        ._valid(row)
+                    )
+                    if self.op == LEN or valid == (self.op == COUNT):
+                        self.counts[groups[offset + row]] += 1
+            return
+        if self.op == APPROX_N_UNIQUE:
+            update_sketches(self.sketches, chunk, offset, grouped, groups)
             return
         if self.op == PRODUCT:
             self._update_product(chunk, offset, grouped, groups)
@@ -1899,7 +1930,9 @@ struct Reducer(Movable):
             var g = step if len(sources) else (
                 groups[source] if len(groups) else source
             )
-            if op == COUNT or op == NULL_COUNT or op == LEN:
+            if op == APPROX_N_UNIQUE:
+                self.sketches[g].merge(other.sketches[source])
+            elif op == COUNT or op == NULL_COUNT or op == LEN:
                 self.counts[g] += other.counts[source]
             elif op == PRODUCT:
                 if len(self.int_products) > 0:
@@ -2087,6 +2120,7 @@ struct Reducer(Movable):
             self.text,
             self.logical,
         )
+        self.sketches.extend(added.sketches.copy())
         self.counts.extend(added.counts.copy())
         self.int_sums.extend(added.int_sums.copy())
         self.float_sums.extend(added.float_sums.copy())
@@ -2126,6 +2160,11 @@ struct Reducer(Movable):
         if self.finished:
             return self.finished.value().copy()
         var op = self.op
+        if op == APPROX_N_UNIQUE:
+            var counts = List[UInt32](capacity=self.group_count)
+            for sketch in self.sketches:
+                counts.append(UInt32(min(Int(UInt32.MAX), sketch.estimate())))
+            return Series("", Column[UInt32](counts^))
         if op == PRODUCT:
             # Never null: an empty or all-null group's product is 1.
             var dtype = self.logical.product_type()

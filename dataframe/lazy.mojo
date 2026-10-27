@@ -137,6 +137,7 @@ from .expr import (
     lit,
     is_reduction,
     is_window,
+    changes_length,
     subtree,
 )
 from .aggregate_table import reduction_supported
@@ -2422,6 +2423,65 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         node.right = len(result._nodes) - 1
         result._nodes.append(node^)
         return result^
+
+    def sum(self) raises -> Self:
+        """Sum each numeric column; unsupported columns are null."""
+        return self._reduce_frame("sum")
+
+    def mean(self) raises -> Self:
+        """Mean each numeric column; unsupported columns are null."""
+        return self._reduce_frame("mean")
+
+    def min(self) raises -> Self:
+        """Minimum of each ordered column; nested columns are null."""
+        return self._reduce_frame("min")
+
+    def max(self) raises -> Self:
+        """Maximum of each ordered column; nested columns are null."""
+        return self._reduce_frame("max")
+
+    def median(self) raises -> Self:
+        """Median of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("median")
+
+    def count(self) raises -> Self:
+        """Count non-null values in every column, as UInt32."""
+        return self._reduce_frame("count")
+
+    def product(self) raises -> Self:
+        """Product of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("product")
+
+    def std(self, ddof: Int = 1) raises -> Self:
+        """Column-wise standard deviation, with nonnegative ddof."""
+        return self._reduce_frame("std", ddof=ddof)
+
+    def var(self, ddof: Int = 1) raises -> Self:
+        """Column-wise variance, with nonnegative ddof."""
+        return self._reduce_frame("var", ddof=ddof)
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> Self:
+        """Numeric column quantiles; interpolation defaults to nearest."""
+        return self._reduce_frame(
+            "quantile", quantile=quantile, interpolation=interpolation
+        )
+
+    def _reduce_frame(
+        self,
+        reduction: String,
+        *,
+        ddof: Int = 1,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> Self:
+        var expressions = self._input_schema()._frame_reduction_exprs(
+            reduction, ddof, quantile, interpolation
+        )
+        if len(expressions) == 0:
+            return DataFrame(List[Series](), height=1).lazy()
+        return self.select_exprs(expressions)
 
     def describe(
         self,
@@ -10507,10 +10567,17 @@ struct LazyGroupBy(Copyable):
             else:
                 every_column = True
         var grouped = self._grouped(reads, every_column)
+        var prepared = List[Expr](capacity=len(exprs))
+        for expression in exprs:
+            prepared.append(
+                expression.implode() if changes_length(
+                    expression
+                ) else expression.copy()
+            )
         var plan = grouped[0]._push(
             _plan_node(
                 AGG,
-                exprs=exprs,
+                exprs=prepared,
                 names=grouped[1],
                 maintain_order=self._maintain_order,
             )

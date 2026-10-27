@@ -364,6 +364,26 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def select(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
 - `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
+- `def sum(self) -> Self`
+  Sum each numeric column; unsupported columns are null.
+- `def mean(self) -> Self`
+  Mean each numeric column; unsupported columns are null.
+- `def min(self) -> Self`
+  Minimum of each ordered column; nested columns are null.
+- `def max(self) -> Self`
+  Maximum of each ordered column; nested columns are null.
+- `def median(self) -> Self`
+  Median of each numeric column; unsupported columns are null.
+- `def count(self) -> Self`
+  Count non-null values in every column, as UInt32.
+- `def product(self) -> Self`
+  Product of each numeric column; unsupported columns are null.
+- `def std(self, ddof: Int = Int(1)) -> Self`
+  Column-wise standard deviation, with nonnegative ddof.
+- `def var(self, ddof: Int = Int(1)) -> Self`
+  Column-wise variance, with nonnegative ddof.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> Self`
+  Numeric column quantiles; interpolation defaults to nearest.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
   Summary statistics per column.
 - `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
@@ -917,6 +937,12 @@ A flat, topologically ordered tree; composition never evaluates data.
   All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
 - `def null_count(self) -> Self`
   Number of null values, as Int64.
+- `def approx_n_unique(self) -> Self`
+  Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+- `def drop_nulls(self) -> Self`
+  Remove null values, preserving the order of the remaining values.
+- `def drop_nans(self) -> Self`
+  Remove NaNs while retaining nulls; a no-op for non-float values.
 - `def has_nulls(self) -> Self`
   Whether any value is null, as one Bool; false for empty input.
 - `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
@@ -931,6 +957,14 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def cum_max(self, reverse: Bool = False) -> Self`
 - `def cum_count(self, reverse: Bool = False) -> Self`
   Running count of non-null values, as Int64 (never null).
+- `def is_duplicated(self) -> Self`
+  Whether a value occurs more than once, including its first row.
+- `def is_unique(self) -> Self`
+  Whether a value occurs exactly once; see is_duplicated.
+- `def is_first_distinct(self) -> Self`
+  True at each value's first row; see is_duplicated for equality.
+- `def is_last_distinct(self) -> Self`
+  True at each value's last row; see is_duplicated for equality.
 - `def shift(self, n: Int = Int(1)) -> Self`
   Move values n rows later (earlier when negative); vacated rows are null.
 - `def diff(self, n: Int = Int(1)) -> Self`
@@ -1234,6 +1268,26 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+- `def sum(self) -> Self`
+  Sum each numeric column; unsupported columns are null.
+- `def mean(self) -> Self`
+  Mean each numeric column; unsupported columns are null.
+- `def min(self) -> Self`
+  Minimum of each ordered column; nested columns are null.
+- `def max(self) -> Self`
+  Maximum of each ordered column; nested columns are null.
+- `def median(self) -> Self`
+  Median of each numeric column; unsupported columns are null.
+- `def count(self) -> Self`
+  Count non-null values in every column, as UInt32.
+- `def product(self) -> Self`
+  Product of each numeric column; unsupported columns are null.
+- `def std(self, ddof: Int = Int(1)) -> Self`
+  Column-wise standard deviation, with nonnegative ddof.
+- `def var(self, ddof: Int = Int(1)) -> Self`
+  Column-wise variance, with nonnegative ddof.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> Self`
+  Numeric column quantiles; interpolation defaults to nearest.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> DataFrame`
   DataFrame.describe's summary of this plan's result: one select of the summary reductions over the plan, collected without materializing all rows.
 - `def clear(self, n: Int = Int(0)) -> Self`

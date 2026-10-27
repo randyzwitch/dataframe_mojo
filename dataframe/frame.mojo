@@ -44,6 +44,7 @@ from .expr import (
     PRODUCT,
     is_reduction,
     is_window,
+    changes_length,
     subtree,
     node_children,
     conjuncts,
@@ -752,6 +753,137 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.take(
             sample_indices(self._height, count, with_replacement, shuffle, seed)
         )
+
+    def sum(self) raises -> Self:
+        """Sum each numeric column; unsupported columns are null."""
+        return self._reduce_frame("sum")
+
+    def mean(self) raises -> Self:
+        """Mean each numeric column; unsupported columns are null."""
+        return self._reduce_frame("mean")
+
+    def min(self) raises -> Self:
+        """Minimum of each ordered column; nested columns are null."""
+        return self._reduce_frame("min")
+
+    def max(self) raises -> Self:
+        """Maximum of each ordered column; nested columns are null."""
+        return self._reduce_frame("max")
+
+    def median(self) raises -> Self:
+        """Median of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("median")
+
+    def count(self) raises -> Self:
+        """Count non-null values in every column, as UInt32."""
+        return self._reduce_frame("count")
+
+    def product(self) raises -> Self:
+        """Product of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("product")
+
+    def std(self, ddof: Int = 1) raises -> Self:
+        """Column-wise standard deviation, with nonnegative ddof."""
+        return self._reduce_frame("std", ddof=ddof)
+
+    def var(self, ddof: Int = 1) raises -> Self:
+        """Column-wise variance, with nonnegative ddof."""
+        return self._reduce_frame("var", ddof=ddof)
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> Self:
+        """Numeric column quantiles; interpolation defaults to nearest."""
+        return self._reduce_frame(
+            "quantile", quantile=quantile, interpolation=interpolation
+        )
+
+    def _reduce_frame(
+        self,
+        reduction: String,
+        *,
+        ddof: Int = 1,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> Self:
+        var expressions = self._frame_reduction_exprs(
+            reduction, ddof, quantile, interpolation
+        )
+        if len(expressions) == 0:
+            return Self(List[Series](), height=1)
+        return self.select_exprs(expressions)
+
+    def _frame_reduction_exprs(
+        self,
+        reduction: String,
+        ddof: Int,
+        quantile: Float64,
+        interpolation: String,
+    ) raises -> List[Expr]:
+        """Choose frame reductions from schema alone, shared with LazyFrame."""
+        if (reduction == "std" or reduction == "var") and ddof < 0:
+            raise Error("ddof must be nonnegative")
+        if reduction == "quantile":
+            if not (quantile >= 0 and quantile <= 1):
+                raise Error("quantile must be between 0 and 1")
+            if interpolation not in [
+                String("linear"),
+                "lower",
+                "higher",
+                "nearest",
+                "midpoint",
+            ]:
+                raise Error("Invalid quantile interpolation")
+        var expressions = List[Expr](capacity=self.width())
+        for column in self._columns:
+            var dtype = column.dtype()
+            var c = col(column.name())
+            var numeric = dtype.is_numeric() or dtype == DataType.BOOL
+            var expression: Expr
+            if reduction == "count":
+                expression = c.is_not_null().sum()
+            elif reduction == "min" or reduction == "max":
+                expression = (
+                    null(dtype) if dtype.is_nested()
+                    or dtype
+                    == DataType.NULL else c.min() if reduction
+                    == "min" else c.max()
+                )
+                if dtype.is_categorical():
+                    expression = expression.cast(dtype)
+            elif reduction == "sum":
+                expression = (
+                    c.sum() if numeric or dtype.is_duration() else null(dtype)
+                )
+            elif reduction == "product":
+                expression = c.product() if numeric else null(DataType.NULL)
+            elif reduction == "mean":
+                expression = c.mean() if numeric else null(dtype)
+            elif numeric:
+                var input = (
+                    c.cast(DataType.FLOAT64) if dtype == DataType.BOOL
+                    or dtype.is_decimal() else c.copy()
+                )
+                if reduction == "std":
+                    expression = input.std(ddof)
+                elif reduction == "var":
+                    expression = input.var(ddof)
+                elif reduction == "median":
+                    expression = input.median()
+                else:
+                    expression = input.quantile(quantile, interpolation)
+            else:
+                expression = null(dtype)
+            if dtype == DataType.FLOAT32 and reduction in [
+                String("mean"),
+                "std",
+                "var",
+                "median",
+                "quantile",
+            ]:
+                expression = expression.cast(DataType.FLOAT32)
+            expressions.append(expression.alias(column.name()))
+        return expressions^
 
     def describe(
         self,
@@ -2736,10 +2868,19 @@ struct DataFrame(Copyable, Sized, Writable):
                 batch_size=batch_size,
                 layouts=Int(Pointer(to=layouts)),
             )
-            if expression.shape() != ROWS and has_rows:
-                result = result._broadcast(height)
             columns.append(result^)
         _ = layouts^
+        var row_height = -1
+        for k in range(len(bound)):
+            if bound[k].shape() == ROWS:
+                if row_height >= 0 and len(columns[k]) != row_height:
+                    raise Error("Selected expressions have different lengths")
+                row_height = len(columns[k])
+        if row_height >= 0:
+            height = row_height
+        for k in range(len(bound)):
+            if bound[k].shape() != ROWS and has_rows:
+                columns[k] = columns[k]._broadcast(height)
         var frame = Self(columns^, height=height)
         if len(modes) > 0:
             # An empty input has no modes: zero rows, not one null row.
@@ -6470,6 +6611,16 @@ struct GroupBy(Copyable):
     def agg(
         self, expressions: List[Expr], *, batch_size: Int = 1024
     ) raises -> DataFrame:
+        var prepared = List[Expr](capacity=len(expressions))
+        var changed = False
+        for expression in expressions:
+            if changes_length(expression):
+                prepared.append(expression.implode())
+                changed = True
+            else:
+                prepared.append(expression.copy())
+        if changed:
+            return self.agg(prepared, batch_size=batch_size)
         # String keys that carry their source's dictionary codes (a Parquet
         # scan) group by the codes, as categorical keys do, and come back as
         # strings: H2O q2's two string keys 102 -> 49 ms.

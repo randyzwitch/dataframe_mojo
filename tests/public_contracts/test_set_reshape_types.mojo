@@ -459,7 +459,7 @@ def test_pivot_nested_reductions_reject_explicitly_before_execution() raises:
                     selection_column(kind, n, 7, 1).renamed("value"),
                 ]
             )
-            for function in ["first", "last", "count", "len"]:
+            for function in ["first", "last"]:
                 with assert_raises(
                     contains="does not support list or struct expressions yet"
                 ):
@@ -469,6 +469,40 @@ def test_pivot_nested_reductions_reject_explicitly_before_execution() raises:
                         values="value",
                         aggregate_function=function,
                     )
+
+
+def test_pivot_nested_counts_use_parent_validity_and_lengths() raises:
+    for kind in [26, 27]:
+        for n in [0, 9]:
+            var source = DataFrame(
+                [
+                    Series(
+                        "label",
+                        Column[String](List[String](length=n, fill="a")),
+                    ),
+                    selection_column(kind, n, 7, 1).renamed("value"),
+                ]
+            )
+            for function in [String("count"), "len"]:
+                var result = source.pivot(
+                    "label",
+                    index=List[String](),
+                    values="value",
+                    aggregate_function=function,
+                    batch_size=1,
+                )
+                if n == 0:
+                    assert_equal(result.height(), 0)
+                    assert_equal(result.width(), 0)
+                else:
+                    var expected = 0
+                    for row in range(n):
+                        if function == "len" or selection_valid(row + 7, 1):
+                            expected += 1
+                    assert_equal(result.columns(), [String("a")])
+                    assert_equal(result.height(), 1)
+                    assert_equal(result.column("a").dtype(), DataType.INT64)
+                    assert_equal(result.item(0, "a").int64(), Int64(expected))
 
 
 def dictionary_series(
