@@ -16,7 +16,7 @@ The boundary is checked in CI by `scripts/check_accelerator_boundary.sh`.
 ## The provider interface
 
 `dataframe/_accel_provider.mojo` is the only module the core calls to reach a
-backend. Only `dataframe/lazy.mojo` and `dataframe/execution_backend.mojo`
+backend. Only `dataframe/lazy_api.mojo` and `dataframe/execution_backend.mojo`
 import it. A provider is a module with these nine functions: six for whole
 plans and three for hand-off. Their signatures mention only core types:
 `LazyFrame`, `DataFrame`, `String`, `Bool`, `Int` and `Float64`.
@@ -164,4 +164,4 @@ CPU tests never depend on a backend.
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
 | Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs inside the CPU executor through hand-off ([Apple Metal](../apple-metal.md)); accepts filtered sums of Int32, Int64 and Float32 columns. Implements all nine provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Operators beyond the filtered sum; pipeline-level hand-off. A trait-checked registry: the functions are checked where the core imports them, not in the backend package. |
-| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but `lazy.mojo` on main also imports `select_auto` and `execute_auto`, so it cannot build against current main without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |
+| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but the lazy API also imports `select_auto` and `execute_auto`, so it cannot build against the current core without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |

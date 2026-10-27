@@ -17,12 +17,12 @@ struct _LegacySettingsBackend(AcceleratorBackend):
         return ("accel", "settings test provider")
 
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-        assert_true(Bool(plan._accelerator_settings))
-        self.observed[].append(plan._accelerator_settings.value().copy())
-        return (plan._frames[0].copy(), DataFrame(List[Series]()))
+        assert_true(Bool(plan._plan._accelerator_settings))
+        self.observed[].append(plan._plan._accelerator_settings.value().copy())
+        return (plan._plan._frames[0].copy(), DataFrame(List[Series]()))
 
     def describe(self, plan: LazyFrame) -> String:
-        self.observed[].append(plan._accelerator_settings.value().copy())
+        self.observed[].append(plan._plan._accelerator_settings.value().copy())
         return "ENGINE accel: legacy settings provider\n"
 
 
@@ -63,9 +63,9 @@ def test_accelerator_settings_preserve_legacy_provider_dispatch_and_plan_copy() 
         assert_equal(observed[][at].batch_size, batches[at])
         assert_equal(observed[][at].optimize, optimize[at])
         assert_equal(observed[][at].streaming, streaming[at])
-    assert_false(Bool(query._accelerator_settings))
+    assert_false(Bool(query._plan._accelerator_settings))
     var copied = query._with_accelerator_settings(False, False, 2).copy()
-    assert_equal(copied._accelerator_settings.value().batch_size, 2)
+    assert_equal(copied._plan._accelerator_settings.value().batch_size, 2)
     # New fields do not require legacy providers to implement new methods.
     assert_true(
         "legacy settings provider" in query.explain(accelerator=backend)

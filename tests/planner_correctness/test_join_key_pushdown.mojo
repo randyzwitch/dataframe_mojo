@@ -253,14 +253,16 @@ def _assert_materialized_stock(
     var rewritten = plan._optimized()
     rewritten._push_join_key_sets(False, 29)
     var seen = False
-    for node in rewritten._nodes:
+    for node in rewritten._plan._nodes:
         if node.kind != JOIN or not node.names or node.names[0] != "item":
             continue
         seen = True
         assert_equal(len(node.names), 2 if compound else 1)
-        assert_equal(rewritten._nodes[node.left].kind, SCAN_FRAME)
-        assert_equal(rewritten._nodes[node.right].kind, SCAN_FRAME)
-        ref narrowed = rewritten._frames[rewritten._nodes[node.right].offset]
+        assert_equal(rewritten._plan._nodes[node.left].kind, SCAN_FRAME)
+        assert_equal(rewritten._plan._nodes[node.right].kind, SCAN_FRAME)
+        ref narrowed = rewritten._plan._frames[
+            rewritten._plan._nodes[node.right].offset
+        ]
         # Assert the actual cached right-side execution, before the final
         # join. Range false positives must still be present here.
         var canonical_names: List[String] = [

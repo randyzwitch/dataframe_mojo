@@ -72,7 +72,7 @@ def test_join_rerooting_restores_coalesced_key_names_and_respects_order_sensitiv
             )
             for streaming in [False, True]:
                 var planned = query._optimized()
-                var root = len(planned._nodes) - 1
+                var root = len(planned._plan._nodes) - 1
                 assert_equal(
                     planned._probe_largest_inputs(root, streaming, 7),
                     not first and not ordered,
@@ -116,7 +116,7 @@ def test_a_renamed_progression_key_is_still_looked_up_by_position() raises:
             col("v"),
         ]
     )
-    var top = len(plan._nodes) - 1
+    var top = len(plan._plan._nodes) - 1
     assert_true(plan._progression_key(top, ["key"]))
     assert_true(not plan._progression_key(top, ["doubled"]))
     assert_true(not plan._progression_key(top, ["v"]))
@@ -138,7 +138,9 @@ def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_pl
     )
     var planned = query._optimized()
     assert_true(
-        not planned._probe_largest_inputs(len(planned._nodes) - 1, True, 7)
+        not planned._probe_largest_inputs(
+            len(planned._plan._nodes) - 1, True, 7
+        )
     )
     var actual = query.collect(engine="cpu")
     _check_groups(actual, False, False)
@@ -168,7 +170,9 @@ def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_pl
     )
     planned = direct._optimized()
     assert_true(
-        not planned._probe_largest_inputs(len(planned._nodes) - 1, True, 7)
+        not planned._probe_largest_inputs(
+            len(planned._plan._nodes) - 1, True, 7
+        )
     )
     actual = direct.collect(engine="cpu").sort("a")
     assert_equal(actual.height(), 3)
@@ -198,11 +202,11 @@ def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression
     var joined = source.lazy().join(build.lazy(), "k", how="left")
     var operations = List[PlanNode]()
     var join_index = -1
-    for index in range(len(joined._nodes)):
-        if joined._nodes[index].kind == JOIN:
+    for index in range(len(joined._plan._nodes)):
+        if joined._plan._nodes[index].kind == JOIN:
             join_index = index
     assert_true(join_index >= 0)
-    var operation = joined._nodes[join_index].copy()
+    var operation = joined._plan._nodes[join_index].copy()
     operation.offset = 0
     operations.append(operation^)
     var builds: List[DataFrame] = [build.copy()]
@@ -247,11 +251,11 @@ def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression
 
 def _join_below(plan: LazyFrame) raises -> Tuple[Int, List[Int]]:
     """The topmost join of `plan` and every node's parent."""
-    var root = len(plan._nodes) - 1
+    var root = len(plan._plan._nodes) - 1
     var parents = plan._live_parents(root)
     var top = -1
-    for i in range(len(plan._nodes)):
-        if parents[i] != -2 and plan._nodes[i].kind == JOIN:
+    for i in range(len(plan._plan._nodes)):
+        if parents[i] != -2 and plan._plan._nodes[i].kind == JOIN:
             if top < 0 or i > top:
                 top = i
     return (top, parents^)

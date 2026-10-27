@@ -48,7 +48,7 @@ def _buckets() -> List[Expr]:
 def _shared(plan: LazyFrame) -> List[String]:
     """The names each with_columns of the optimized plan computes."""
     var names = List[String]()
-    for node in plan._nodes:
+    for node in plan._plan._nodes:
         if node.kind == WITH_COLUMNS:
             for e in node.exprs:
                 names.append(e._name)

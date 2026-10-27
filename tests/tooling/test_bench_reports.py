@@ -217,6 +217,33 @@ class BenchmarkReports(unittest.TestCase):
         self.assertIn("lazy.join_order", paths)
         self.assertIn("rank.one_sort", paths)
 
+    def test_nested_library_changes_invalidate_runner_binaries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            nested = root / "dataframe/planning/model.mojo"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("comptime SCAN_FRAME = 0\n")
+            suites = root / "benchmarks/suites"
+            suites.mkdir(parents=True)
+            suite = suites / "example.mojo"
+            suite.write_text("def main(): pass\n")
+            binary = root / "build/suites/suite_example"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            os.utime(nested, (10, 10))
+            os.utime(suite, (10, 10))
+            os.utime(binary, (20, 20))
+            with patch.object(bench, "ROOT", root), patch.object(
+                bench, "SUITES_DIR", suites
+            ), patch.object(bench, "_build") as build:
+                self.assertEqual(
+                    bench.build_runners(["example"]), {"example": binary}
+                )
+                build.assert_not_called()
+                os.utime(nested, (30, 30))
+                bench.build_runners(["example"])
+                build.assert_called_once_with(root, "example", binary)
+
     def test_reference_cache_is_invalidated_by_query_source(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

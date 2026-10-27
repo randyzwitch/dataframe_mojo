@@ -26,7 +26,7 @@ cd "$(dirname "$0")/.."
 # Core files allowed to import _accel_provider. Both dispatch to the provider;
 # nothing else in core should know a provider exists.
 provider_importers=(
-  dataframe/lazy.mojo               # execute, describe, select_auto, ...
+  dataframe/lazy_api.mojo           # public query dispatch and runtime port adapters
   dataframe/execution_backend.mojo  # installed(), for engine="accel"
 )
 

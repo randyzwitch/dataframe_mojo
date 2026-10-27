@@ -54,3 +54,61 @@ Optional GPU execution on Apple silicon is covered in
 [Apple Metal](apple-metal.md). Distributed execution, arbitrary Python-object
 columns, pandas index compatibility, and cross-engine adapters are outside the
 scope.
+
+## Lazy query layers
+
+`dataframe.lazy` remains the import surface for `LazyFrame`, its grouped
+builders, scan functions, and existing plan-inspection symbols. It re-exports
+the implementations below. `dataframe.__init__` continues to expose the same
+public query API.
+
+The plan is a flat, topologically ordered node list: children precede their
+parents, and a scan's offset selects matching slots in the context's source
+frames and schemas. Graph rewrites restore that ordering through `plan_reorder`.
+
+- `lazy_api.mojo` owns query construction, public collection/profiling/explain
+  entry points, and accelerator provider dispatch. A `LazyFrame` owns one
+  internal `QueryContext`; private plan storage is accessed through `_plan`.
+- `planning/model.mojo` defines `PlanNode` and operation tags. It imports
+  neither optimizer passes nor execution code.
+- `planning/context.mojo` holds nodes, source frames, schemas, and per-run
+  caches/counters. Execution and provider ports are supplied by the public
+  API when a context is constructed and retained when it is copied.
+- `planning/graph.mojo`, `properties.mojo`, and `scans.mojo` implement graph
+  traversal, identity, schema queries, expression properties, and scan-node
+  encoding. `strategies.mojo` holds shared sampling and memory-budget rules;
+  `explain.mojo` describes nodes and their streaming capabilities.
+- `optimizer/expressions.mojo` and `optimizer/passes.mojo` own expression
+  folding and logical rewrites, including predicate, projection, and slice
+  pushdown, common subexpressions, and shared-subplan filter handling.
+- `planning/physical.mojo` chooses CPU strategies and join order, including
+  decisions informed by sampled or measured inputs.
+- `query_execution/` interprets the plan, lowers and runs streaming pipelines,
+  materializes shared inputs, records observed execution, and offers regions
+  for accelerator placement. This namespace is distinct from
+  `execution.mojo`, which evaluates bounded expressions over columns.
+
+Dependencies within these layers point from the public API to execution and
+physical planning, then to logical optimization and shared plan analysis, and
+finally to the node model. Lower layers never import `lazy`, `lazy_api`, or
+`query_execution`. Some planning operations require a schema or measured input:
+they request it through the context's execution port instead of importing the
+executor. Independent-input jobs use that same port. Shared-subplan execution
+requests collection through a separate port, preserving the public collection
+settings and execution-report behavior. Provider adapters stay in `lazy_api`;
+the executor receives only provider-neutral context ports.
+
+`scripts/check_lazy_boundaries.py` checks these import directions and rejects
+cycles among the lazy implementation modules. The existing eager
+`DataFrame`/`LazyFrame` type relationship remains at the public integration
+boundary; this check does not impose a new dependency model on eager operators.
+
+The public class retains private method delegates used by planner tests and
+provider integrations. Algorithm bodies live in their owning modules; delegates
+do not implement a second planner or executor. Plan copying still shares the
+existing reference-counted column storage and observed counters, while worker
+jobs retain their own prefetch dictionaries.
+
+Benchmark runner freshness, trace discovery, and query-diagram source
+fingerprints traverse the implementation recursively so moving code into
+subpackages preserves those checks.

@@ -339,22 +339,22 @@ def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
     var left = t[0].join(
         t[1], left_on=["f_product"], right_on=["p_id"], how="left"
     )
-    assert_equal(left._relation_estimate(len(left._nodes) - 1), 40_000)
+    assert_equal(left._relation_estimate(len(left._plan._nodes) - 1), 40_000)
     var full = t[1].join(
         t[0], left_on=["p_id"], right_on=["f_product"], how="full"
     )
-    assert_equal(full._relation_estimate(len(full._nodes) - 1), 40_000)
+    assert_equal(full._relation_estimate(len(full._plan._nodes) - 1), 40_000)
     var semi = t[1].join(
         t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
     )
-    assert_equal(semi._relation_estimate(len(semi._nodes) - 1), 2000)
+    assert_equal(semi._relation_estimate(len(semi._plan._nodes) - 1), 2000)
     var anti = t[3].join(
         t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
     )
-    assert_equal(anti._relation_estimate(len(anti._nodes) - 1), 4000)
+    assert_equal(anti._relation_estimate(len(anti._plan._nodes) - 1), 4000)
     # An inner join is part of the graph itself: no estimate here.
     var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
-    assert_equal(inner._relation_estimate(len(inner._nodes) - 1), -1)
+    assert_equal(inner._relation_estimate(len(inner._plan._nodes) - 1), -1)
 
 
 def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:

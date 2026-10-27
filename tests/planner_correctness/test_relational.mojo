@@ -358,13 +358,13 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
             .filter(col("i") > 0)
             ._optimized()
         )
-        ref root = plan._nodes[len(plan._nodes) - 1]
+        ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
         if how in ["inner", "left", "semi", "anti"]:
             assert_equal(root.kind, JOIN)
-            assert_equal(plan._nodes[root.left].kind, FILTER)
+            assert_equal(plan._plan._nodes[root.left].kind, FILTER)
         else:
             assert_equal(root.kind, FILTER)
-            assert_equal(plan._nodes[root.left].kind, JOIN)
+            assert_equal(plan._plan._nodes[root.left].kind, JOIN)
     for how in ["inner", "left"]:
         var plan = (
             source.lazy()
@@ -372,24 +372,24 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
             .filter(col("right_value") > 0)
             ._optimized()
         )
-        ref root = plan._nodes[len(plan._nodes) - 1]
+        ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
         assert_equal(root.kind, JOIN if how == "inner" else FILTER)
         if how == "inner":
-            assert_equal(plan._nodes[root.right].kind, FILTER)
+            assert_equal(plan._plan._nodes[root.right].kind, FILTER)
     var grouped = (
         source.lazy()
         .group_by("b", maintain_order=True)
         .agg(col("i").sum().alias("total"))
     )
     var keys = grouped.filter(col("b"))._optimized()
-    assert_equal(keys._nodes[len(keys._nodes) - 1].kind, AGG)
+    assert_equal(keys._plan._nodes[len(keys._plan._nodes) - 1].kind, AGG)
     var totals = grouped.filter(col("total") > 0)._optimized()
-    assert_equal(totals._nodes[len(totals._nodes) - 1].kind, FILTER)
+    assert_equal(totals._plan._nodes[len(totals._plan._nodes) - 1].kind, FILTER)
 
 
 def _casts(plan: LazyFrame) -> Int:
     var found = 0
-    for node in plan._nodes:
+    for node in plan._plan._nodes:
         for expr in node.exprs:
             for n in expr._nodes:
                 if n.op == CAST:
@@ -411,7 +411,7 @@ def test_casts_of_constants_fold_to_typed_literals_once() raises:
     var folded = cheap._optimized()
     assert_equal(_casts(folded) <= 1, True)
     var literal = False
-    for node in folded._nodes:
+    for node in folded._plan._nodes:
         for expr in node.exprs:
             for n in expr._nodes:
                 literal = literal or (

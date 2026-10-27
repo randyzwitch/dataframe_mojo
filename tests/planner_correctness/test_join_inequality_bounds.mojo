@@ -90,12 +90,12 @@ def test_an_inequality_bounds_the_large_side_by_the_small_sides_extreme() raises
         var plan = query._optimized()
         plan._push_join_key_sets(False, 29)
         var bounded = False
-        for node in plan._nodes:
+        for node in plan._plan._nodes:
             if node.kind != JOIN or len(node.names) != 2:
                 continue
-            ref right = plan._nodes[node.right]
+            ref right = plan._plan._nodes[node.right]
             assert_true(right.kind == SCAN_FRAME)
-            ref stock = plan._frames[right.offset]
+            ref stock = plan._plan._frames[right.offset]
             # The largest quantity ordered is 50.
             var most = stock.column("on_hand").max().int64()
             assert_true(most < 50, "the stock was not bounded")

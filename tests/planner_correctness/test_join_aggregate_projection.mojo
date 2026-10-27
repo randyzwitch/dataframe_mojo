@@ -146,7 +146,7 @@ def _assert_input_projection(
 ) raises:
     var optimized = query._optimized()
     var scans = 0
-    for node in optimized._nodes:
+    for node in optimized._plan._nodes:
         if node.kind != SCAN_FRAME:
             continue
         scans += 1
@@ -156,7 +156,7 @@ def _assert_input_projection(
             "unused_left" not in node.names and "unused_right" not in node.names
         )
         var needs_payload = payloads and (
-            not semi or "lp" in optimized._frames[node.offset].columns()
+            not semi or "lp" in optimized._plan._frames[node.offset].columns()
         )
         assert_equal(len(node.names), len(keys) + Int(needs_payload))
     assert_equal(scans, 2)
@@ -293,7 +293,7 @@ def _csv_projection(query: LazyFrame, count_only: Bool) raises:
     var optimized = query._optimized()
     var left_seen = False
     var right_seen = False
-    for node in optimized._nodes:
+    for node in optimized._plan._nodes:
         if node.kind != SCAN_CSV:
             continue
         assert_true("unused" not in node.names and "other" not in node.names)

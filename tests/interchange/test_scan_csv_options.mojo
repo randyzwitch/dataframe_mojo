@@ -147,5 +147,5 @@ def test_invalid_options_raise_when_scanning() raises:
         _ = scan_csv(path, encoding="latin1")
     # Defaults build the plan they always did.
     var plan = scan_csv(path)
-    assert_equal(len(plan._nodes[0].names2), 0)
+    assert_equal(len(plan._plan._nodes[0].names2), 0)
     check(plan, read_csv(path))

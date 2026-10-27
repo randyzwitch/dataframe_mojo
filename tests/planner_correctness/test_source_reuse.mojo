@@ -8,10 +8,10 @@ from dataframe.lazy import SCAN_FRAME
 
 def _counters(mut plan: LazyFrame) -> List[ArcPointer[Int]]:
     var counters = List[ArcPointer[Int]]()
-    for index in range(len(plan._nodes)):
-        if plan._nodes[index].kind == SCAN_FRAME:
+    for index in range(len(plan._plan._nodes)):
+        if plan._plan._nodes[index].kind == SCAN_FRAME:
             var count = ArcPointer(Int(0))
-            plan._nodes[index]._executions = count.copy()
+            plan._plan._nodes[index]._executions = count.copy()
             counters.append(count^)
     return counters^
 
@@ -93,10 +93,12 @@ def test_join_measurements_are_reused_when_dimension_order_changes_or_stays_fixe
             assert_equal(counts[0][], 0)
             assert_equal(counts[1][], 1)
             assert_equal(counts[2][], 1)
-            assert_equal(len(planned._frames), 3)
-            assert_equal(len(planned._schemas), 3)
+            assert_equal(len(planned._plan._frames), 3)
+            assert_equal(len(planned._plan._schemas), 3)
             _assert_members(
-                planned._execute(len(planned._nodes) - 1, False, streaming, 7),
+                planned._execute(
+                    len(planned._plan._nodes) - 1, False, streaming, 7
+                ),
                 61,
                 20,
                 7,
@@ -104,7 +106,7 @@ def test_join_measurements_are_reused_when_dimension_order_changes_or_stays_fixe
                 limits[1],
             )
             planned._order_joins(streaming, 7)
-            assert_equal(len(planned._frames), 3)
+            assert_equal(len(planned._plan._frames), 3)
             for count in counts:
                 assert_equal(count[], 1)
 
@@ -130,7 +132,7 @@ def test_rejected_measured_push_candidate_still_executes_its_source_once() raise
         assert_equal(counts[1][], 0)
         assert_equal(counts[2][], 1)
         var actual = planned._execute(
-            len(planned._nodes) - 1, False, streaming, 7
+            len(planned._plan._nodes) - 1, False, streaming, 7
         ).sort("id")
         var position = 0
         for row in range(140):
@@ -159,7 +161,7 @@ def test_profiles_count_rows_and_single_join_builds_across_batches_without_retai
         kept += Int(row % 13 < 7)
     for streaming in [False, True]:
         for batch in [1, 7, 64, 257]:
-            assert_true(not query._report)
+            assert_true(not query._plan._report)
             var profiled = query.profile(
                 optimize=False,
                 streaming=streaming,
@@ -203,7 +205,7 @@ def test_profiles_count_rows_and_single_join_builds_across_batches_without_retai
             assert_equal(joins, 2)
             assert_equal(filters, 1)
             assert_equal(scan_rows, 1031 + 17 + 13)
-            assert_true(not query._report)
+            assert_true(not query._plan._report)
             _assert_members(
                 query.collect(
                     optimize=False,
@@ -217,4 +219,4 @@ def test_profiles_count_rows_and_single_join_builds_across_batches_without_retai
                 17,
                 7,
             )
-            assert_true(not query._report)
+            assert_true(not query._plan._report)
