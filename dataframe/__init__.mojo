@@ -5,6 +5,7 @@ from .string_column import StringColumn, StringBuilder
 from .nested_column import ListColumn, StructColumn
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, GroupingSets, TimeGroupBy, concat
+from .frame_iter import RowView, RowIterator, ColumnIterator, SliceIterator
 from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType

@@ -167,6 +167,8 @@ from .packed_sort import (
 # A head of a sort at least 1/this of the rows sorts fully (#332).
 comptime _TOP_K_FRACTION = 10
 from .value import AnyValue
+from .frame_iter import RowIterator, ColumnIterator, SliceIterator
+from .frame_size import frame_size
 from .asof import asof_rows
 from .hashing import (
     RowKeys,
@@ -533,6 +535,56 @@ struct DataFrame(Copyable, Sized, Writable):
         for i in range(self._height):
             result.append(self.row(i))
         return result^
+
+    def to_dict(self) -> Dict[String, Series]:
+        """Map column names to owned Series sharing their immutable buffers."""
+        var result = Dict[String, Series]()
+        for column in self._columns:
+            result[column.name()] = column.copy()
+        return result^
+
+    def to_dicts(self) raises -> List[Dict[String, AnyValue]]:
+        """Materialize every row as a name-to-value dictionary."""
+        var result = List[Dict[String, AnyValue]](capacity=self._height)
+        for row in range(self._height):
+            var values = Dict[String, AnyValue]()
+            for column in self._columns:
+                values[column.name()] = column.get(row)
+            result.append(values^)
+        return result^
+
+    def iter_rows(self) -> RowIterator:
+        """Iterate owned row views, converting cells only when accessed.
+
+        row[index] and row[name] return AnyValue and may raise a conversion
+        error. row.to_list() materializes just that row. Views retain the
+        source buffers, including after this frame or iterator is released.
+        """
+        return RowIterator(self)
+
+    def iter_columns(self) -> ColumnIterator:
+        """Yield one owned Series at a time, sharing immutable buffers."""
+        return ColumnIterator(self)
+
+    def iter_slices(self, n: Int = 10000) raises -> SliceIterator:
+        """Yield frames of at most n rows without materializing all slices.
+
+        n must be positive. Each slice shares the input's column buffers;
+        the final slice may be shorter, and an empty input yields none.
+        """
+        return SliceIterator(self, n)
+
+    def estimated_size(self, unit: String = "b") raises -> Float64:
+        """Estimate visible data-buffer bytes in b/kb/mb/gb/tb (powers of 1024).
+
+        Includes validity, chunks, nested children, and foreign buffers;
+        excludes capacity, object metadata, caches, and categorical mappings.
+        Shared buffers may be counted more than once. Binary-view strings
+        count visible non-null value bytes, following Polars' estimate.
+        Slices count their visible ranges, not retained allocations. Storage
+        layouts differ from Polars, so estimates can differ for equal data.
+        """
+        return frame_size(self, unit)
 
     def item(self) raises -> AnyValue:
         """Return the only cell of a 1x1 dataframe."""

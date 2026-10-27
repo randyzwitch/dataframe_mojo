@@ -1481,6 +1481,89 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         result._field_metadata = self._field_metadata
         return result^
 
+    def _slice_validated(self, offset: Int, length: Int) -> Self:
+        """Slice a range already checked against this series' length.
+
+        Iterators have StopIteration as their only error type. Their
+        ranges are valid by construction, and immutable chunks already
+        share dtype and metadata, so no fallible validation is needed.
+        """
+        assert offset >= 0 and length >= 0 and offset <= len(self) - length
+        if self.is_chunked():
+            ref source = self._chunked.value()[]
+            if length == 0:
+                var first = Self(
+                    self._name,
+                    source.arrays[0].copy(),
+                    self._dtype,
+                    self._field_metadata,
+                )
+                return first._slice_validated(0, 0)
+            var lo = 0
+            var hi = len(source.ends)
+            while lo < hi:
+                var mid = lo + (hi - lo) // 2
+                if offset < source.ends[mid]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            var arrays = List[Storage]()
+            var ends = List[Int]()
+            var total = 0
+            var end = offset + length
+            while lo < len(source.arrays):
+                var start = 0 if lo == 0 else source.ends[lo - 1]
+                if start >= end:
+                    break
+                var first = max(offset, start)
+                var last = min(end, source.ends[lo])
+                var part = Self(
+                    self._name,
+                    source.arrays[lo].copy(),
+                    self._dtype,
+                    self._field_metadata,
+                )
+                var window = part._slice_validated(first - start, last - first)
+                arrays.append(window._data.copy())
+                total += last - first
+                ends.append(total)
+                lo += 1
+            var result = self.copy()
+            result._data = arrays[0].copy()
+            result._chunked = None
+            if len(arrays) > 1:
+                result._chunked = ArcPointer(_SeriesChunks(arrays^, ends^))
+            return result^
+        var result = self.copy()
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if result._data.isa[Column[E]]():
+                ref column = result._data[Column[E]]
+                column._offset += offset
+                column._length = length
+                return result^
+        if result._data.isa[BoolColumn]():
+            ref column = result._data[BoolColumn]
+            column._offset += offset
+            column._length = length
+            return result^
+        if result._data.isa[StringColumn]():
+            ref column = result._data[StringColumn]
+            column._offset += offset
+            column._length = length
+            return result^
+        if result._data.isa[ListColumn]():
+            ref column = result._data[ListColumn]
+            column._offset += offset
+            column._length = length
+            return result^
+        if result._data.isa[StructColumn]():
+            ref column = result._data[StructColumn]
+            column._offset += offset
+            column._length = length
+            return result^
+        return result^
+
     def _slice_storage(self, offset: Int, length: Int) raises -> Self:
         comptime for i in range(len(FixedElements.Ts)):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
