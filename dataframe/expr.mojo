@@ -352,6 +352,12 @@ comptime DT_IS_BUSINESS_DAY = 277
 comptime DT_ADD_BUSINESS_DAYS = 278
 comptime DT_BUSINESS_DAY_COUNT = 279
 
+# Whole-column distinct predicates, evaluated once per partition.
+comptime IS_DUPLICATED = 280
+comptime IS_UNIQUE = 281
+comptime IS_FIRST_DISTINCT = 282
+comptime IS_LAST_DISTINCT = 283
+
 # Whole-input sequence filters. The private scalar source is introduced
 # only during execution, after length-changing boundaries are materialized.
 comptime DROP_NULLS = 285
@@ -479,6 +485,10 @@ def is_dt_op(op: Int) -> Bool:
     )
 
 
+def is_distinct_flag(op: Int) -> Bool:
+    return op >= IS_DUPLICATED and op <= IS_LAST_DISTINCT
+
+
 def is_drop(op: Int) -> Bool:
     return op == DROP_NULLS or op == DROP_NANS
 
@@ -499,6 +509,7 @@ def is_window(op: Int) -> Bool:
     return (
         (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
+        or is_distinct_flag(op)
         or is_drop(op)
     )
 
@@ -1499,6 +1510,27 @@ struct Expr(Copyable):
     def cum_count(self, reverse: Bool = False) -> Self:
         """Running count of non-null values, as Int64 (never null)."""
         return self._window(CUM_COUNT, reverse=reverse)
+
+    def is_duplicated(self) -> Self:
+        """Whether a value occurs more than once, including its first row.
+
+        Nulls are one value, all NaNs are one value, and signed zeros are
+        equal. Returns non-null Bool flags, restarted within over() groups.
+        Supports scalar columns and structs with scalar fields.
+        """
+        return self._window(IS_DUPLICATED)
+
+    def is_unique(self) -> Self:
+        """Whether a value occurs exactly once; see is_duplicated."""
+        return self._window(IS_UNIQUE)
+
+    def is_first_distinct(self) -> Self:
+        """True at each value's first row; see is_duplicated for equality."""
+        return self._window(IS_FIRST_DISTINCT)
+
+    def is_last_distinct(self) -> Self:
+        """True at each value's last row; see is_duplicated for equality."""
+        return self._window(IS_LAST_DISTINCT)
 
     def shift(self, n: Int = 1) -> Self:
         """Move values n rows later (earlier when negative); vacated rows

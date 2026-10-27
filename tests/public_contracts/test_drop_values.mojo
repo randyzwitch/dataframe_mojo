@@ -398,3 +398,27 @@ def test_drop_nested_counts_and_null_predicates_use_parent_validity() raises:
                     ]
                 ),
             )
+
+
+def test_drop_sequences_compose_with_distinct_flags_after_compaction() raises:
+    var frame = DataFrame(
+        [
+            Series(
+                "x", Column[Int64]([1, 99, 1, 2], [True, False, True, True])
+            ),
+            Series("g", Column[Int64]([0, 0, 0, 0])),
+        ]
+    )
+    var first = col("x").drop_nulls().is_first_distinct().alias("first")
+    var expected = DataFrame(
+        [Series("first", Column[Bool]([True, False, True]))]
+    )
+    assert_frame(frame.select(first), expected)
+    assert_frame(
+        frame.lazy().select(first).collect(engine="cpu", batch_size=1), expected
+    )
+    var counts = first.sum().over("g").alias("n")
+    assert_frame(
+        frame.select(counts),
+        DataFrame([Series("n", Column[UInt32]([2, 2, 2, 2]))]),
+    )

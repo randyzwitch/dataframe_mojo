@@ -929,6 +929,14 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def cum_max(self, reverse: Bool = False) -> Self`
 - `def cum_count(self, reverse: Bool = False) -> Self`
   Running count of non-null values, as Int64 (never null).
+- `def is_duplicated(self) -> Self`
+  Whether a value occurs more than once, including its first row.
+- `def is_unique(self) -> Self`
+  Whether a value occurs exactly once; see is_duplicated.
+- `def is_first_distinct(self) -> Self`
+  True at each value's first row; see is_duplicated for equality.
+- `def is_last_distinct(self) -> Self`
+  True at each value's last row; see is_duplicated for equality.
 - `def shift(self, n: Int = Int(1)) -> Self`
   Move values n rows later (earlier when negative); vacated rows are null.
 - `def diff(self, n: Int = Int(1)) -> Self`
