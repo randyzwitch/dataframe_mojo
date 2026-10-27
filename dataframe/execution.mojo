@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from ._buffer import _Buffer, _BufferData
+from .expr_kernels import validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .identity_metadata import identity_column_source
 from .expr import INT_IS_IN, is_replace
@@ -12,6 +13,12 @@ from .expr import (
     Node,
     Expr,
     COL,
+    _SCALAR_SOURCE,
+    DROP_NULLS,
+    DROP_NANS,
+    is_drop,
+    _node,
+    _set_node_children,
     LIT_INT,
     LIT_FLOAT,
     LIT_BOOL,
@@ -423,6 +430,12 @@ def _eval[
     conditional branches narrow it so unselected rows never raise.
     """
     ref node = bound.expr._nodes[index]
+    if node.op == _SCALAR_SOURCE:
+        var value = columns[bound.sources[index]].copy()
+        return (
+            value.cast(bound.dtypes[index]) if value.dtype()
+            != bound.dtypes[index] else value^
+        )
     if node.op == COL:
         return columns[bound.sources[index]].slice(offset, length)
     if node.op == LIT_INT or node.op == LIT_FLOAT:
@@ -1362,6 +1375,18 @@ def _direct_grouped_count_part(
         return
     if part._data.isa[BoolColumn]():
         ref column = part._data[BoolColumn]
+        for i in range(start, end):
+            if column._valid(i):
+                reducer.counts[groups[offset + i]] += 1
+        return
+    if part._data.isa[ListColumn]():
+        ref column = part._data[ListColumn]
+        for i in range(start, end):
+            if column._valid(i):
+                reducer.counts[groups[offset + i]] += 1
+        return
+    if part._data.isa[StructColumn]():
+        ref column = part._data[StructColumn]
         for i in range(start, end):
             if column._valid(i):
                 reducer.counts[groups[offset + i]] += 1
@@ -3049,6 +3074,172 @@ def _over[
     return result.take(ids)
 
 
+def _sequence_emit[
+    width: Int
+](
+    bound: BoundExpr,
+    source_columns: List[Series],
+    index: Int,
+    root: Int,
+    mut columns: List[Series],
+    mut nodes: List[Node],
+    height: Int,
+    batch_size: Int,
+) raises -> Int:
+    """Keep row-wise nodes in the guarded evaluator; materialize sequence
+    boundaries at their own height, with the original source columns."""
+    var node = bound.expr._nodes[index].copy()
+    if index != root and (
+        is_drop(node.op)
+        or is_reduction(node.op)
+        or is_window(node.op)
+        or node.op == OVER
+    ):
+        var value = _sequence_value[width](
+            bound, source_columns, index, height, batch_size
+        )
+        var name = String("\x1fsequence:") + String(len(columns))
+        var collision = True
+        while collision:
+            collision = False
+            for column in columns:
+                collision = collision or column.name() == name
+            if collision:
+                name += ":"
+        columns.append(value.renamed(name))
+        nodes.append(
+            _node(
+                COL if bound.shapes[index] == ROWS else _SCALAR_SOURCE,
+                text=name,
+            )
+        )
+    else:
+        var children = node_children(node)
+        for k in range(len(children)):
+            children[k] = _sequence_emit[width](
+                bound,
+                source_columns,
+                children[k],
+                root,
+                columns,
+                nodes,
+                height,
+                batch_size,
+            )
+        _set_node_children(node, children)
+        nodes.append(node^)
+    return len(nodes) - 1
+
+
+def _sequence_value[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+) raises -> Series:
+    ref node = bound.expr._nodes[index]
+    if node.op == OVER:
+        return _over[width](bound, columns, index, height, batch_size, 0)
+    if is_drop(node.op):
+        var input = _sequence_value[width](
+            bound, columns, node.left, height, batch_size
+        )
+        if input.dtype() != bound.dtypes[index]:
+            input = input.cast(bound.dtypes[index])
+        if node.op == DROP_NANS and not input.dtype().is_float():
+            return input.renamed(bound.expr._name)
+        var valid = validity(input)
+        var picks = List[Int](capacity=len(input))
+        if node.op == DROP_NULLS:
+            for row in range(len(input)):
+                if valid[row]:
+                    picks.append(row)
+        else:
+            var contiguous = (
+                input.rechunk() if input.is_chunked() else input.copy()
+            )
+            if contiguous._data.isa[Column[Float32]]():
+                ref values = contiguous._data[Column[Float32]]
+                for row in range(len(input)):
+                    if not valid[row] or not isnan(values._get(row)):
+                        picks.append(row)
+            else:
+                ref values = contiguous._data[Column[Float64]]
+                for row in range(len(input)):
+                    if not valid[row] or not isnan(values._get(row)):
+                        picks.append(row)
+        return input.take(picks).renamed(bound.expr._name)
+    var prepared = columns.copy()
+    var nodes = List[Node]()
+    _ = _sequence_emit[width](
+        bound, columns, index, index, prepared, nodes, height, batch_size
+    )
+    var lowered = bind(Expr(nodes^, bound.expr._name), prepared)
+    var length = -1
+    for k in range(len(lowered.expr._nodes)):
+        if lowered.expr._nodes[k].op != COL:
+            continue
+        var n = len(prepared[lowered.sources[k]])
+        if length < 0 or length == 1:
+            length = n
+        elif n != length and n != 1:
+            raise Error(
+                "Expression operands have different lengths after dropping values"
+            )
+    length = max(0, length) if length >= 0 else 1
+    for k in range(len(lowered.expr._nodes)):
+        if lowered.expr._nodes[k].op == COL:
+            var source = lowered.sources[k]
+            if len(prepared[source]) == 1 and length != 1:
+                prepared[source] = prepared[source]._broadcast(length)
+    return evaluate[width](lowered, prepared, length, batch_size=batch_size)
+
+
+def _sequence_grouped[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    height: Int,
+    batch_size: Int,
+    ids: List[Int],
+    count: Int,
+) raises -> Series:
+    var rows = List[List[Int]](length=count, fill=List[Int]())
+    for row in range(height):
+        rows[ids[row]].append(row)
+    var parts = List[Series](capacity=count)
+    var order = List[Int](length=height if bound.shape() == ROWS else 0, fill=0)
+    var start = 0
+    for group in rows:
+        var input = List[Series](capacity=len(columns))
+        for column in columns:
+            input.append(column.take(group))
+        var value = _sequence_value[width](
+            bound, input, len(bound.expr._nodes) - 1, len(group), batch_size
+        )
+        if bound.shape() == ROWS:
+            if len(value) != len(group):
+                raise Error(
+                    "Window expression has a different length from its group after dropping values"
+                )
+            for k in range(len(group)):
+                order[group[k]] = start + k
+            start += len(value)
+        elif len(value) != 1:
+            raise Error("Grouped aggregate must return one value per group")
+        parts.append(value^)
+    if len(parts) == 0:
+        return _empty(bound.dtypes[len(bound.dtypes) - 1]).renamed(
+            bound.expr._name
+        )
+    var result = Series._from_chunks(parts).rechunk()
+    return result.take(order) if bound.shape() == ROWS else result^
+
+
 # Eight lanes amortize expression-step dispatch across two AVX2 vectors and
 # align fused comparisons with their packed output byte.
 def evaluate[
@@ -3082,6 +3273,15 @@ def evaluate[
         raise Error("Invalid group mapping")
     var count = len(bound.expr._nodes)
     var root = count - 1
+    var sequence = False
+    for node in bound.expr._nodes:
+        sequence = sequence or is_drop(node.op)
+    if sequence:
+        return _sequence_grouped[width](
+            bound, columns, height, batch_size, groups, group_count
+        ) if grouped else _sequence_value[width](
+            bound, columns, root, height, batch_size
+        )
     # A bare column is itself, categoricals included; any other expression
     # reads a categorical as its strings (#106).
     if count == 1 and bound.expr._nodes[0].op == COL and bound.sources[0] >= 0:

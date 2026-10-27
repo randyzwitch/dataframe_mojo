@@ -5,6 +5,10 @@ from .regex_kernels import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,
     COL,
+    _SCALAR_SOURCE,
+    DROP_NULLS,
+    DROP_NANS,
+    is_drop,
     LIT_INT,
     UNTYPED,
     Node,
@@ -321,6 +325,10 @@ def _check_pattern(node: Node) raises -> Optional[Regex]:
 
 
 def op_name(op: Int) -> String:
+    if op == DROP_NULLS:
+        return "drop_nulls"
+    if op == DROP_NANS:
+        return "drop_nans"
     if op == EQ_MISSING:
         return "eq_missing"
     if op == NE_MISSING:
@@ -688,6 +696,8 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
     if op == IMPLODE:
         return DataType.list(input)
+    if op == COUNT or op == NULL_COUNT or op == LEN:
+        return DataType.INT64
     if input.is_nested():
         raise Error(
             op_name(op)
@@ -712,7 +722,7 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
                 "product requires a numeric expression, found " + input.name()
             )
         return input.product_type()
-    if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
+    if op == N_UNIQUE:
         return DataType.INT64
     if op == ANY or op == ALL:
         if input != DataType.BOOL:
@@ -1283,7 +1293,7 @@ def bind(
         var shape = SCALAR
         var has_aggregate = False
         var source = -1
-        if node.op == COL:
+        if node.op == COL or node.op == _SCALAR_SOURCE:
             for j in range(len(columns)):
                 if columns[j].name() == node.text:
                     source = j
@@ -1295,7 +1305,7 @@ def bind(
             # column keeps its type, since evaluate returns it as is.
             if dtype.is_categorical() and len(nodes) > 1:
                 dtype = DataType.STRING
-            shape = ROWS
+            shape = SCALAR if node.op == _SCALAR_SOURCE else ROWS
         elif node.op == LIT_INT:
             if node.text == UNTYPED:
                 dtype = DataType.UNTYPED_INT
@@ -1424,10 +1434,10 @@ def bind(
         elif is_window(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid window input")
-            if shapes[node.left] != ROWS:
+            if shapes[node.left] != ROWS and not is_drop(node.op):
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
-            if input.is_nested():
+            if input.is_nested() and not is_drop(node.op):
                 raise Error(
                     op_name(node.op)
                     + " does not support list or struct expressions, found "

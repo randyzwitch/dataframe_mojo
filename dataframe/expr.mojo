@@ -352,6 +352,12 @@ comptime DT_IS_BUSINESS_DAY = 277
 comptime DT_ADD_BUSINESS_DAYS = 278
 comptime DT_BUSINESS_DAY_COUNT = 279
 
+# Whole-input sequence filters. The private scalar source is introduced
+# only during execution, after length-changing boundaries are materialized.
+comptime DROP_NULLS = 285
+comptime DROP_NANS = 286
+comptime _SCALAR_SOURCE = 287
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -473,9 +479,27 @@ def is_dt_op(op: Int) -> Bool:
     )
 
 
+def is_drop(op: Int) -> Bool:
+    return op == DROP_NULLS or op == DROP_NANS
+
+
+def changes_length(expr: Expr) -> Bool:
+    """Whether the output's row axis can differ from the input's."""
+    var changing = List[Bool]()
+    for node in expr._nodes:
+        var changed = is_drop(node.op)
+        if not is_reduction(node.op) and node.op != OVER:
+            for child in node_children(node):
+                changed = changed or changing[child]
+        changing.append(changed)
+    return len(changing) > 0 and changing[len(changing) - 1]
+
+
 def is_window(op: Int) -> Bool:
-    return (op >= CUM_SUM and op <= CUM_PROD and op != OVER) or (
-        op >= ROLLING_STD and op <= ROLLING_VAR_BY
+    return (
+        (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
+        or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
+        or is_drop(op)
     )
 
 
@@ -1376,6 +1400,22 @@ struct Expr(Copyable):
     def null_count(self) -> Self:
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
+
+    def drop_nulls(self) -> Self:
+        """Remove null values, preserving the order of the remaining values.
+
+        This changes length: select siblings must return the same number
+        of rows, or be scalars. In a grouped aggregation this returns a
+        list per group; reduce it to obtain a scalar per group.
+        """
+        return self._unary(DROP_NULLS)
+
+    def drop_nans(self) -> Self:
+        """Remove NaNs while retaining nulls; a no-op for non-float values.
+
+        The length and grouped aggregation rules are those of drop_nulls.
+        """
+        return self._unary(DROP_NANS)
 
     def has_nulls(self) -> Self:
         """Whether any value is null, as one Bool; false for empty input."""

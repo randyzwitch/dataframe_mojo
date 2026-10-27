@@ -911,6 +911,10 @@ A flat, topologically ordered tree; composition never evaluates data.
   All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
 - `def null_count(self) -> Self`
   Number of null values, as Int64.
+- `def drop_nulls(self) -> Self`
+  Remove null values, preserving the order of the remaining values.
+- `def drop_nans(self) -> Self`
+  Remove NaNs while retaining nulls; a no-op for non-float values.
 - `def has_nulls(self) -> Self`
   Whether any value is null, as one Bool; false for empty input.
 - `def cast(self, dtype: DataType, strict: Bool = True) -> Self`

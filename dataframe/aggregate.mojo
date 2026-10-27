@@ -1182,6 +1182,27 @@ struct Reducer(Movable):
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
             return
+        if chunk.dtype().is_nested() and self.op in [COUNT, NULL_COUNT, LEN]:
+            if not grouped:
+                var n = len(chunk)
+                var nulls = chunk.null_count()
+                self.counts[0] += Int64(
+                    n if self.op
+                    == LEN else nulls if self.op
+                    == NULL_COUNT else n - nulls
+                )
+            else:
+                for row in range(len(chunk)):
+                    var valid = (
+                        chunk._data[ListColumn]
+                        ._valid(row) if chunk._data.isa[
+                            ListColumn
+                        ]() else chunk._data[StructColumn]
+                        ._valid(row)
+                    )
+                    if self.op == LEN or valid == (self.op == COUNT):
+                        self.counts[groups[offset + row]] += 1
+            return
         if self.op == PRODUCT:
             self._update_product(chunk, offset, grouped, groups)
             return
