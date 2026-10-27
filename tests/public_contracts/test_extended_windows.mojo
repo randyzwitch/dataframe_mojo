@@ -528,8 +528,6 @@ def test_extended_windows_reject_nested_and_non_numeric_operations_even_when_emp
             var frame = extended_frame(kind, n, 7, 1)
             var expressions: List[Expr] = [
                 col("x").shift(),
-                col("x").forward_fill(),
-                col("x").backward_fill(),
                 col("x").cum_count(),
                 col("x").cum_min(),
                 col("x").cum_max(),

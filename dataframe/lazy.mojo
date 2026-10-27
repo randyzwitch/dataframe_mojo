@@ -206,6 +206,8 @@ comptime SCAN_PARQUET = 11
 # length is the row limit; flags hold mapped input and explicit projection.
 comptime SCAN_IPC = 44
 comptime SCAN_NDJSON = 45
+# A whole-frame strategy fill; text is strategy, length its optional limit.
+comptime FILL_NULL_STRATEGY = 46
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
@@ -2758,6 +2760,35 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if len(fills) == 0:
             return self.copy()
         return self.with_columns(fills)
+
+    def fill_null(
+        self,
+        *,
+        strategy: String,
+        limit: Optional[Int] = None,
+        subset: List[String] = List[String](),
+    ) raises -> Self:
+        """Fill nulls by strategy over the whole input; see DataFrame.fill_null."""
+        var run_limit = self._input_schema()._fill_strategy_limit(
+            strategy, limit, subset
+        )
+        return self._push(
+            _plan_node(
+                FILL_NULL_STRATEGY,
+                text=strategy,
+                length=run_limit,
+                names=subset,
+            )
+        )
+
+    def fill_nan(self, value: Expr) raises -> Self:
+        """Replace NaNs in floating columns; see DataFrame.fill_nan."""
+        return self.with_columns(self._input_schema()._fill_nan_exprs(value))
+
+    def drop_nans(self, subset: List[String] = List[String]()) raises -> Self:
+        """Remove NaN rows, retaining nulls; see DataFrame.drop_nans."""
+        var predicate = self._input_schema()._drop_nan_predicate(subset)
+        return self.filter(predicate.value()) if predicate else self.copy()
 
     def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
         """Keep rows with no null in subset (default: every column), using
@@ -6357,6 +6388,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return input.gather_every(node.length, node.offset)
         if node.kind == ROW_INDEX:
             return input.with_row_index(node.names[0], Int64(node.offset))
+        if node.kind == FILL_NULL_STRATEGY:
+            var limit: Optional[Int] = None
+            if node.length >= 0:
+                limit = node.length
+            return input.fill_null(
+                strategy=node.text, limit=limit, subset=node.names
+            )
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -9686,6 +9724,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SORT " + _joined(node.names)
         elif node.kind == SLICE:
             label = "SLICE " + String(node.offset) + " " + String(node.length)
+        elif node.kind == FILL_NULL_STRATEGY:
+            label = "FILL_NULL strategy=" + node.text
         elif node.kind == UNIQUE:
             label = "UNIQUE " + _joined(node.names)
         elif node.kind == PIVOT:
@@ -10196,6 +10236,7 @@ def _row_order_step(kind: Int) -> Bool:
         or kind == ROW_INDEX
         or kind == GATHER_EVERY
         or kind == INSERT_COLUMN
+        or kind == FILL_NULL_STRATEGY
     )
 
 

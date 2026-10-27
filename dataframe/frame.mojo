@@ -11,7 +11,8 @@ from .time_windows import (
 )
 from .temporal import zone_of, parse_interval
 from .window import partitions as window_partitions
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
+from .decimal import pow10
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
 from std.memory import ArcPointer, Pointer
@@ -64,6 +65,7 @@ from .expr import (
     col,
     lit,
     null,
+    when,
     COL,
     SELECTOR,
     LIT_INT,
@@ -3725,6 +3727,173 @@ struct DataFrame(Copyable, Sized, Writable):
         column), range-checked per column.
         """
         return self.with_columns(self._fill_null_exprs(value, subset))
+
+    def fill_null(
+        self,
+        *,
+        strategy: String,
+        limit: Optional[Int] = None,
+        subset: List[String] = List[String](),
+    ) raises -> Self:
+        """Fill nulls with forward/backward, min/max/mean, zero, or one.
+
+        limit bounds each forward/backward null run. Integer means truncate
+        toward zero, preserving dtype. Columns with no nulls are unchanged;
+        all-null columns stay null for forward/backward/min/max/mean.
+        """
+        var run_limit = self._fill_strategy_limit(strategy, limit, subset)
+        var fills = List[Expr]()
+        for column in self._columns:
+            var name = column.name()
+            if len(subset) > 0 and name not in subset:
+                continue
+            var nulls = column.null_count()
+            if nulls == 0 or (
+                nulls == len(column) and strategy not in [String("zero"), "one"]
+            ):
+                continue
+            var dtype = column.dtype()
+            var c = col(name)
+            var expression: Expr
+            if strategy == "forward":
+                expression = c.forward_fill(run_limit)
+            elif strategy == "backward":
+                expression = c.backward_fill(run_limit)
+            elif dtype.is_nested():
+                raise Error(
+                    "fill_null strategy "
+                    + strategy
+                    + " is not supported for "
+                    + dtype.name()
+                )
+            elif strategy == "min" or strategy == "max":
+                expression = c.fill_null(
+                    c.min() if strategy == "min" else c.max()
+                )
+            elif strategy == "mean":
+                if not dtype.is_numeric() and not dtype.is_temporal():
+                    raise Error(
+                        "fill_null mean is not supported for " + dtype.name()
+                    )
+                expression = c.fill_null(self._mean_fill(c, dtype))
+            else:
+                var value: Expr
+                if dtype.physical() == DataType.STRING:
+                    if strategy != "zero":
+                        raise Error(
+                            "fill_null one is not supported for " + dtype.name()
+                        )
+                    value = lit("").cast(dtype)
+                elif (
+                    dtype.is_numeric()
+                    or dtype.is_temporal()
+                    or dtype == DataType.BOOL
+                ):
+                    value = lit(Int64(1 if strategy == "one" else 0)).cast(
+                        dtype
+                    )
+                else:
+                    raise Error(
+                        "fill_null "
+                        + strategy
+                        + " is not supported for "
+                        + dtype.name()
+                    )
+                expression = c.fill_null(value)
+            if dtype.is_categorical():
+                expression = expression.cast(dtype)
+            fills.append(expression.alias(name))
+        return self.with_columns(fills)
+
+    def _fill_strategy_limit(
+        self, strategy: String, limit: Optional[Int], subset: List[String]
+    ) raises -> Int:
+        if strategy not in [
+            String("forward"),
+            "backward",
+            "min",
+            "max",
+            "mean",
+            "zero",
+            "one",
+        ]:
+            raise Error("Unknown fill_null strategy: " + strategy)
+        if limit and (strategy != "forward" and strategy != "backward"):
+            raise Error("limit is only valid for forward/backward fill")
+        var run_limit = limit.value() if limit else -1
+        if run_limit < -1 or (limit and run_limit < 0):
+            raise Error("fill limit must be nonnegative")
+        var seen = Dict[String, Bool]()
+        for name in subset:
+            _ = self._index(name)
+            if name in seen:
+                raise Error("Column listed twice in subset: " + name)
+            seen[name] = True
+        return run_limit
+
+    def _mean_fill(self, c: Expr, dtype: DataType) raises -> Expr:
+        var work = c.cast(DataType.INT64) if dtype.is_temporal() else c.copy()
+        var mean = lit(self.select(work.mean()).item().float64())
+        if dtype.is_decimal():
+            var scale = lit(Float64(pow10(dtype.scale())))
+            return ((mean * scale).truncate() / scale).cast(dtype)
+        var physical = DataType.INT64 if dtype.is_temporal() else dtype
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if D.is_integral():
+                if physical == DataType.of(D):
+                    var low = lit(Scalar[D].MIN)
+                    var high = lit(Scalar[D].MAX)
+                    var value = (
+                        when(mean >= high.cast(DataType.FLOAT64))
+                        .then(high)
+                        .otherwise(
+                            when(mean <= low.cast(DataType.FLOAT64))
+                            .then(low)
+                            .otherwise(mean.cast(physical))
+                        )
+                    )
+                    return value.cast(dtype) if dtype.is_temporal() else value^
+        return mean.cast(dtype)
+
+    def fill_nan(self, value: Expr) raises -> Self:
+        """Replace NaNs in floating columns; nulls and other columns stay.
+
+        value is cast to each floating dtype and may be a scalar or a
+        row-valued expression.
+        """
+        return self.with_columns(self._fill_nan_exprs(value))
+
+    def _fill_nan_exprs(self, value: Expr) -> List[Expr]:
+        var expressions = List[Expr]()
+        for column in self._columns:
+            if column.dtype().is_float():
+                expressions.append(
+                    col(column.name())
+                    .fill_nan(value.cast(column.dtype()))
+                    .alias(column.name())
+                )
+        return expressions^
+
+    def drop_nans(self, subset: List[String] = List[String]()) raises -> Self:
+        """Remove rows with a NaN in subset's floating columns; keep nulls."""
+        var predicate = self._drop_nan_predicate(subset)
+        return self.filter(predicate.value()) if predicate else self.copy()
+
+    def _drop_nan_predicate(
+        self, subset: List[String]
+    ) raises -> Optional[Expr]:
+        for name in subset:
+            _ = self._index(name)
+        var predicate: Optional[Expr] = None
+        for column in self._columns:
+            if not column.dtype().is_float() or (
+                len(subset) > 0 and column.name() not in subset
+            ):
+                continue
+            var keep = col(column.name()).is_not_nan().fill_null(lit(True))
+            predicate = predicate.value() & keep if predicate else keep^
+        return predicate^
 
     def _fill_null_exprs(
         self, value: Expr, subset: List[String]

@@ -460,6 +460,12 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Fill nulls in string columns with a string.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value.
+- `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
+  Fill nulls with forward/backward, min/max/mean, zero, or one.
+- `def fill_nan(self, value: Expr) -> Self`
+  Replace NaNs in floating columns; nulls and other columns stay.
+- `def drop_nans(self, subset: List[String] = List()) -> Self`
+  Remove rows with a NaN in subset's floating columns; keep nulls.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> TimeGroupBy`
   Group sorted temporal rows into calendar-aligned, possibly overlapping windows.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
@@ -1315,6 +1321,12 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Fill nulls in string columns with a string; see the Expr overload.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value, choosing columns from this plan's schema: a with_columns of `col(c).fill_null(value)` for each selected column. Unknown subset names raise here, while the plan is built.
+- `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
+  Fill nulls by strategy over the whole input; see DataFrame.fill_null.
+- `def fill_nan(self, value: Expr) -> Self`
+  Replace NaNs in floating columns; see DataFrame.fill_nan.
+- `def drop_nans(self, subset: List[String] = List()) -> Self`
+  Remove NaN rows, retaining nulls; see DataFrame.drop_nans.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
   Keep rows with no null in subset (default: every column), using each column's `is_not_null` predicate.
 - `def null_count(self) -> Self`

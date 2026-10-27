@@ -1468,7 +1468,12 @@ def bind(
                                 op_name(node.op)
                                 + " requires scalar struct fields"
                             )
-            elif input.is_nested() and not is_drop(node.op):
+            elif (
+                input.is_nested()
+                and not is_drop(node.op)
+                and node.op != FORWARD_FILL
+                and node.op != BACKWARD_FILL
+            ):
                 raise Error(
                     op_name(node.op)
                     + " does not support list or struct expressions, found "
