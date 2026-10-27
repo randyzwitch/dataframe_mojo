@@ -86,10 +86,12 @@ from dataframe.planning.properties import (
     _plain_or_constant,
     _produced_at,
     _reads_input,
-    _references,
     _row_order_step,
     _through_projection,
     _time_window_reads,
+)
+from dataframe.planning.expression_inputs import (
+    _references,
 )
 from std.collections import (
     Dict,
