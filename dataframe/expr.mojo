@@ -358,6 +358,9 @@ comptime IS_UNIQUE = 281
 comptime IS_FIRST_DISTINCT = 282
 comptime IS_LAST_DISTINCT = 283
 
+# Approximate count of all distinct values, including null.
+comptime APPROX_N_UNIQUE = 284
+
 # Whole-input sequence filters. The private scalar source is introduced
 # only during execution, after length-changing boundaries are materialized.
 comptime DROP_NULLS = 285
@@ -435,6 +438,7 @@ def is_reduction(op: Int) -> Bool:
         or is_pair_reduction(op)
         or op == VALUE_COUNTS
         or op == PRODUCT
+        or op == APPROX_N_UNIQUE
     )
 
 
@@ -1411,6 +1415,17 @@ struct Expr(Copyable):
     def null_count(self) -> Self:
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
+
+    def approx_n_unique(self) -> Self:
+        """Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+
+        Expected relative standard error is about 6.5%; this is a
+        statistical estimate, with no hard error bound. Null counts as one
+        value, NaNs as one value, and signed zeros as equal. Empty input
+        returns zero. Uses 256 bytes of sketch state per group, independent
+        of cardinality, and saturates at UInt32.MAX.
+        """
+        return self._unary(APPROX_N_UNIQUE)
 
     def drop_nulls(self) -> Self:
         """Remove null values, preserving the order of the remaining values.

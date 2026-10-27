@@ -911,6 +911,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
 - `def null_count(self) -> Self`
   Number of null values, as Int64.
+- `def approx_n_unique(self) -> Self`
+  Estimate distinct values as UInt32 using 256 HyperLogLog registers.
 - `def drop_nulls(self) -> Self`
   Remove null values, preserving the order of the remaining values.
 - `def drop_nans(self) -> Self`

@@ -422,3 +422,28 @@ def test_drop_sequences_compose_with_distinct_flags_after_compaction() raises:
         frame.select(counts),
         DataFrame([Series("n", Column[UInt32]([2, 2, 2, 2]))]),
     )
+
+
+def test_drop_sequences_compose_with_approximate_distinct_reductions() raises:
+    var frame = DataFrame(
+        [
+            Series(
+                "x", Column[Int64]([1, 99, 1, 2], [True, False, True, True])
+            ),
+            Series("g", Column[Int64]([0, 0, 0, 0])),
+        ]
+    )
+    var distinct = col("x").drop_nulls().approx_n_unique().alias("n")
+    var expected = DataFrame([Series("n", Column[UInt32]([2]))])
+    assert_frame(frame.select(distinct), expected)
+    assert_frame(
+        frame.lazy().select(distinct).collect(engine="cpu", batch_size=1),
+        expected,
+    )
+    var window = distinct.over("g")
+    var window_expected = DataFrame([Series("n", Column[UInt32]([2, 2, 2, 2]))])
+    assert_frame(frame.select(window), window_expected)
+    assert_frame(
+        frame.lazy().select(window).collect(engine="cpu", batch_size=1),
+        window_expected,
+    )
