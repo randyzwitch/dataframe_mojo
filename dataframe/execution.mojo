@@ -445,7 +445,10 @@ def _eval[
     if node.op == LIT_STRING:
         return Series("", StringColumn([node.text]))
     if node.op == LIT_NULL:
-        return Series.full_null("", node.dtypes[0].value(), 1)
+        var dtype = node.dtypes[0].value()
+        return Series.full_null(
+            "", DataType.STRING if dtype.is_categorical() else dtype, 1
+        )
     if is_window(node.op) or node.op == OVER:
         return aggregates[index].slice(offset, length)
     if is_reduction(node.op):
@@ -1154,6 +1157,11 @@ def _feed[
         chunk = _batch[width](
             bound, columns, states, node.left, offset, length, False
         )
+    if (
+        chunk.dtype().is_categorical()
+        and bound.dtypes[node.left] == DataType.STRING
+    ):
+        chunk = decode(chunk)
     if is_pair_reduction(node.op):
         var other = _batch[width](
             bound, columns, states, node.right, offset, length, False
@@ -2159,6 +2167,9 @@ def _direct_numeric_part(
     end: Int,
 ) -> Bool:
     """Dispatch an interval inside one physical numeric array."""
+    if part.dtype().is_categorical() and op != COUNT:
+        # Categorical extrema compare labels; count needs only validity.
+        return False
     if part.dtype().is_decimal():
         # A decimal32 or decimal64 array is stored in Int32 or Int64, but
         # its states are decimal ones: the reducer widens and sums it.

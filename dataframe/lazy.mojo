@@ -206,6 +206,8 @@ comptime SCAN_PARQUET = 11
 # length is the row limit; flags hold mapped input and explicit projection.
 comptime SCAN_IPC = 44
 comptime SCAN_NDJSON = 45
+# A whole-frame strategy fill; text is strategy, length its optional limit.
+comptime FILL_NULL_STRATEGY = 46
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
@@ -245,6 +247,10 @@ comptime HCONCAT = 40
 # The left input's rows at the positions the right input's one integer
 # column lists (Polars' Gather); `flags[0]` is null_on_oob.
 comptime GATHER = 41
+# Whole-input row selection: offset is the first row, length is the stride.
+comptime GATHER_EVERY = 47
+# Insert the right input's one column at offset in the left schema.
+comptime INSERT_COLUMN = 48
 # Grouping sets (`group_by_rollup`, `group_by_cube`,
 # `group_by_grouping_sets`, then `agg`). `names` holds every key any set
 # names, `flags` which keys each set groups by (one row of flags per set,
@@ -2263,6 +2269,96 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ) -> Self:
         return self.sort([by], descending, maintain_order=maintain_order)
 
+    def sort(
+        self,
+        by: Expr,
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by an expression, evaluated once before sorting."""
+        return self.sort(
+            [by.copy()], descending, nulls_last, maintain_order=maintain_order
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with common direction and null placement."""
+        var keys = self._input_schema()._sort_key_exprs(by)
+        return self._sort_by_keys(
+            keys,
+            List[Bool](length=len(keys), fill=descending),
+            List[Bool](length=len(keys), fill=nulls_last),
+            maintain_order,
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with a direction and null placement each."""
+        return self._sort_by_keys(
+            self._input_schema()._sort_key_exprs(by),
+            descending,
+            nulls_last,
+            maintain_order,
+        )
+
+    def _sort_by_keys(
+        self,
+        keys: List[Expr],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+    ) raises -> Self:
+        if len(descending) != len(keys) or len(nulls_last) != len(keys):
+            raise Error("sort needs one descending and nulls_last flag per key")
+        if len(keys) == 0:
+            return self.copy()
+        var names = List[String](capacity=len(keys))
+        for key in keys:
+            names.append(key._name)
+        return (
+            self.with_columns(keys)
+            .sort(
+                names,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=maintain_order,
+            )
+            .drop(names)
+        )
+
+    def gather_every(self, n: Int, offset: Int = 0) raises -> Self:
+        """Take every nth row from a nonnegative offset; n must be positive."""
+        if n <= 0 or offset < 0:
+            raise Error("gather_every needs positive n and nonnegative offset")
+        return self._push(_plan_node(GATHER_EVERY, offset=offset, length=n))
+
+    def insert_column(self, index: Int, column: Series) raises -> Self:
+        """Insert a column by position; validate its height when collecting."""
+        var schema = self._input_schema()
+        var position = index + schema.width() if index < 0 else index
+        if position < 0 or position > schema.width():
+            raise Error("Column insertion index out of bounds")
+        if column.name() in schema.columns():
+            raise Error("Duplicate column name: " + column.name())
+        return self._binary(
+            DataFrame([column.copy()]).lazy(),
+            _plan_node(INSERT_COLUMN, offset=position),
+        )
+
     def slice(self, offset: Int, length: Int = -1) -> Self:
         return self._push(_plan_node(SLICE, offset=offset, length=length))
 
@@ -2375,6 +2471,22 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return self.copy()
         return self.select_exprs(exprs)
 
+    def rename(
+        self, function: def(String) raises thin -> String
+    ) raises -> Self:
+        """Rename every column using a Mojo function, resolving only schema."""
+        var mapping = Dict[String, String]()
+        for name in self._input_schema().columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
+    def rename(self, function: def(String) thin -> String) raises -> Self:
+        """Rename every column using a Mojo function, resolving only schema."""
+        var mapping = Dict[String, String]()
+        for name in self._input_schema().columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
     def cast(
         self, dtypes: Dict[String, String], *, strict: Bool = True
     ) -> Self:
@@ -2421,6 +2533,65 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         node.right = len(result._nodes) - 1
         result._nodes.append(node^)
         return result^
+
+    def sum(self) raises -> Self:
+        """Sum each numeric column; unsupported columns are null."""
+        return self._reduce_frame("sum")
+
+    def mean(self) raises -> Self:
+        """Mean each numeric column; unsupported columns are null."""
+        return self._reduce_frame("mean")
+
+    def min(self) raises -> Self:
+        """Minimum of each ordered column; nested columns are null."""
+        return self._reduce_frame("min")
+
+    def max(self) raises -> Self:
+        """Maximum of each ordered column; nested columns are null."""
+        return self._reduce_frame("max")
+
+    def median(self) raises -> Self:
+        """Median of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("median")
+
+    def count(self) raises -> Self:
+        """Count non-null values in every column, as UInt32."""
+        return self._reduce_frame("count")
+
+    def product(self) raises -> Self:
+        """Product of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("product")
+
+    def std(self, ddof: Int = 1) raises -> Self:
+        """Column-wise standard deviation, with nonnegative ddof."""
+        return self._reduce_frame("std", ddof=ddof)
+
+    def var(self, ddof: Int = 1) raises -> Self:
+        """Column-wise variance, with nonnegative ddof."""
+        return self._reduce_frame("var", ddof=ddof)
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> Self:
+        """Numeric column quantiles; interpolation defaults to nearest."""
+        return self._reduce_frame(
+            "quantile", quantile=quantile, interpolation=interpolation
+        )
+
+    def _reduce_frame(
+        self,
+        reduction: String,
+        *,
+        ddof: Int = 1,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> Self:
+        var expressions = self._input_schema()._frame_reduction_exprs(
+            reduction, ddof, quantile, interpolation
+        )
+        if len(expressions) == 0:
+            return DataFrame(List[Series](), height=1).lazy()
+        return self.select_exprs(expressions)
 
     def describe(
         self,
@@ -2589,6 +2760,39 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if len(fills) == 0:
             return self.copy()
         return self.with_columns(fills)
+
+    def fill_null(
+        self,
+        *,
+        strategy: String,
+        limit: Optional[Int] = None,
+        subset: List[String] = List[String](),
+    ) raises -> Self:
+        """Fill nulls by strategy over the whole input; see DataFrame.fill_null."""
+        var run_limit = self._input_schema()._fill_strategy_limit(
+            strategy, limit, subset
+        )
+        return self._push(
+            _plan_node(
+                FILL_NULL_STRATEGY,
+                text=strategy,
+                length=run_limit,
+                names=subset,
+            )
+        )
+
+    def fill_nan(self, value: Float64) raises -> Self:
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        return self.fill_nan(lit(value))
+
+    def fill_nan(self, value: Expr) raises -> Self:
+        """Replace NaNs in floating columns; see DataFrame.fill_nan."""
+        return self.with_columns(self._input_schema()._fill_nan_exprs(value))
+
+    def drop_nans(self, subset: List[String] = List[String]()) raises -> Self:
+        """Remove NaN rows, retaining nulls; see DataFrame.drop_nans."""
+        var predicate = self._input_schema()._drop_nan_predicate(subset)
+        return self.filter(predicate.value()) if predicate else self.copy()
 
     def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
         """Keep rows with no null in subset (default: every column), using
@@ -6074,7 +6278,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 )
         if node.kind == CONCAT:
             return self._concat(index, empty, streaming, batch_size)
-        if node.kind == HCONCAT or node.kind == GATHER:
+        if (
+            node.kind == HCONCAT
+            or node.kind == GATHER
+            or node.kind == INSERT_COLUMN
+        ):
             var both = self._both_inputs(index, empty, streaming, batch_size)
             var left = both[0].copy()
             var right = both[1].copy()
@@ -6083,6 +6291,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 # row, which would not line up with the other's none.
                 left = left.clear()
                 right = right.clear()
+            if node.kind == INSERT_COLUMN:
+                return left.insert_column(node.offset, right._columns[0])
             if node.kind == HCONCAT:
                 return concat([left^, right^], "horizontal")
             return _gathered(left, right, node.flags[0])
@@ -6178,8 +6388,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if len(node.exprs) > 0:
                 return input.shift(node.offset, fill_value=node.exprs[0].copy())
             return input.shift(node.offset)
+        if node.kind == GATHER_EVERY:
+            return input.gather_every(node.length, node.offset)
         if node.kind == ROW_INDEX:
             return input.with_row_index(node.names[0], Int64(node.offset))
+        if node.kind == FILL_NULL_STRATEGY:
+            var limit: Optional[Int] = None
+            if node.length >= 0:
+                limit = node.length
+            return input.fill_null(
+                strategy=node.text, limit=limit, subset=node.names
+            )
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -9207,6 +9426,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     reads_all
                     or node.kind == JOIN
                     or node.kind == ASOF
+                    or node.kind == INSERT_COLUMN
                     or (node.kind == GATHER and child == node.right)
                 ):
                     all_needed[child] = True
@@ -9508,6 +9728,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label = "SORT " + _joined(node.names)
         elif node.kind == SLICE:
             label = "SLICE " + String(node.offset) + " " + String(node.length)
+        elif node.kind == FILL_NULL_STRATEGY:
+            label = "FILL_NULL strategy=" + node.text
         elif node.kind == UNIQUE:
             label = "UNIQUE " + _joined(node.names)
         elif node.kind == PIVOT:
@@ -9572,6 +9794,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             label += " AGG " + _joined(_output_names(node.exprs))
         elif node.kind == TAIL:
             label = "TAIL " + String(node.offset)
+        elif node.kind == GATHER_EVERY:
+            label = (
+                "GATHER_EVERY "
+                + String(node.length)
+                + " from "
+                + String(node.offset)
+            )
+        elif node.kind == INSERT_COLUMN:
+            label = "INSERT_COLUMN at " + String(node.offset)
         elif node.kind == REVERSE:
             label = "REVERSE"
         elif node.kind == SHIFT:
@@ -10002,7 +10233,15 @@ def _chain_member(node: PlanNode) -> Bool:
 def _row_order_step(kind: Int) -> Bool:
     """Whether `kind` is a row-order operator (tail, reverse, shift,
     with_row_index): run whole, in input order, by its eager method."""
-    return kind == TAIL or kind == REVERSE or kind == SHIFT or kind == ROW_INDEX
+    return (
+        kind == TAIL
+        or kind == REVERSE
+        or kind == SHIFT
+        or kind == ROW_INDEX
+        or kind == GATHER_EVERY
+        or kind == INSERT_COLUMN
+        or kind == FILL_NULL_STRATEGY
+    )
 
 
 def _merge_copy_needs(

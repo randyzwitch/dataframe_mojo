@@ -212,6 +212,15 @@ no mutable buffers or implicit negative indexing are exposed.
 - `def slice(self, offset: Int, length: Int) -> Self`
   A zero-copy window sharing this column's buffers.
 
+## `ColumnIterator`
+
+Yield owned Series in schema order, with no value-buffer copies.
+
+- `def __init__(out self, frame: DataFrame)`
+- `def __iter__(var self) -> Self`
+- `def __next__(mut self) -> Series`
+- `def bounds(self) -> Tuple[Int, Optional[Int]]`
+
 ## `columns`
 
 Columns matching a regular expression, in schema order.
@@ -331,6 +340,18 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Return one row as tagged values, in schema order.
 - `def rows(self) -> List[List[AnyValue]]`
   Materialize every row; intended for small frames and tests.
+- `def to_dict(self) -> Dict[String, Series]`
+  Map column names to owned Series sharing their immutable buffers.
+- `def to_dicts(self) -> List[Dict[String, AnyValue]]`
+  Materialize every row as a name-to-value dictionary.
+- `def iter_rows(self) -> RowIterator`
+  Iterate owned row views, converting cells only when accessed.
+- `def iter_columns(self) -> ColumnIterator`
+  Yield one owned Series at a time, sharing immutable buffers.
+- `def iter_slices(self, n: Int = Int(10000)) -> SliceIterator`
+  Yield frames of at most n rows without materializing all slices.
+- `def estimated_size(self, unit: String = "b") -> Float64`
+  Estimate visible data-buffer bytes in b/kb/mb/gb/tb (powers of 1024).
 - `def item(self) -> AnyValue`
   Return the only cell of a 1x1 dataframe.
 - `def item(self, row: Int, column: String) -> AnyValue`
@@ -358,12 +379,40 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Remove columns; every name must exist and appear once.
 - `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
   Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored.
+- `def rename(self, function: def(String) raises thin -> String) -> Self`
+  Rename every column using a Mojo function; reject duplicate outputs.
+- `def rename(self, function: def(String) thin -> String) -> Self`
+  Rename every column using a Mojo function; reject duplicate outputs.
+- `def insert_column(self, index: Int, column: Series) -> Self`
+  Insert a column by position, returning a frame with shared buffers.
+- `def gather_every(self, n: Int, offset: Int = Int(0)) -> Self`
+  Take every nth row from a nonnegative offset; n must be positive.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row index starting at offset.
 - `def select(self, names: List[String]) -> Self`
 - `def select(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
 - `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
+- `def sum(self) -> Self`
+  Sum each numeric column; unsupported columns are null.
+- `def mean(self) -> Self`
+  Mean each numeric column; unsupported columns are null.
+- `def min(self) -> Self`
+  Minimum of each ordered column; nested columns are null.
+- `def max(self) -> Self`
+  Maximum of each ordered column; nested columns are null.
+- `def median(self) -> Self`
+  Median of each numeric column; unsupported columns are null.
+- `def count(self) -> Self`
+  Count non-null values in every column, as UInt32.
+- `def product(self) -> Self`
+  Product of each numeric column; unsupported columns are null.
+- `def std(self, ddof: Int = Int(1)) -> Self`
+  Column-wise standard deviation, with nonnegative ddof.
+- `def var(self, ddof: Int = Int(1)) -> Self`
+  Column-wise variance, with nonnegative ddof.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> Self`
+  Numeric column quantiles; interpolation defaults to nearest.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
   Summary statistics per column.
 - `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
@@ -390,6 +439,12 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Lexicographic sort by several columns, one direction; equal keys in no particular order unless `maintain_order`.
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
   Per-column direction and null placement; list lengths match by. Equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: Expr, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by an expression, evaluated once before sorting.
+- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by expression keys with common direction and null placement.
+- `def sort(self, by: List[Expr], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Sort by expression keys with a direction and null placement each.
 - `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
   Row order of a stable sort; equal keys keep input order.
@@ -440,6 +495,14 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Fill nulls in string columns with a string.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value.
+- `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
+  Fill nulls with forward/backward, min/max/mean, zero, or one.
+- `def fill_nan(self, value: Float64) -> Self`
+  Replace floating NaNs with a numeric scalar, preserving column dtypes.
+- `def fill_nan(self, value: Expr) -> Self`
+  Replace NaNs in floating columns; nulls and other columns stay.
+- `def drop_nans(self, subset: List[String] = List()) -> Self`
+  Remove rows with a NaN in subset's floating columns; keep nulls.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> TimeGroupBy`
   Group sorted temporal rows into calendar-aligned, possibly overlapping windows.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
@@ -1227,6 +1290,16 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
   Sort with a direction and null placement per key, as the eager DataFrame.sort takes them; equal keys in no particular order unless `maintain_order`.
 - `def sort(self, by: String, descending: Bool = False, *, maintain_order: Bool = False) -> Self`
+- `def sort(self, by: Expr, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by an expression, evaluated once before sorting.
+- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by expression keys with common direction and null placement.
+- `def sort(self, by: List[Expr], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Sort by expression keys with a direction and null placement each.
+- `def gather_every(self, n: Int, offset: Int = Int(0)) -> Self`
+  Take every nth row from a nonnegative offset; n must be positive.
+- `def insert_column(self, index: Int, column: Series) -> Self`
+  Insert a column by position; validate its height when collecting.
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
 - `def head(self, n: Int = Int(5)) -> Self`
 - `def limit(self, n: Int = Int(5)) -> Self`
@@ -1238,10 +1311,34 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def drop(self, names: List[String]) -> Self`
 - `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
   Rename columns by old name, with the result and errors of DataFrame.rename. This is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
+- `def rename(self, function: def(String) raises thin -> String) -> Self`
+  Rename every column using a Mojo function, resolving only schema.
+- `def rename(self, function: def(String) thin -> String) -> Self`
+  Rename every column using a Mojo function, resolving only schema.
 - `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
   This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+- `def sum(self) -> Self`
+  Sum each numeric column; unsupported columns are null.
+- `def mean(self) -> Self`
+  Mean each numeric column; unsupported columns are null.
+- `def min(self) -> Self`
+  Minimum of each ordered column; nested columns are null.
+- `def max(self) -> Self`
+  Maximum of each ordered column; nested columns are null.
+- `def median(self) -> Self`
+  Median of each numeric column; unsupported columns are null.
+- `def count(self) -> Self`
+  Count non-null values in every column, as UInt32.
+- `def product(self) -> Self`
+  Product of each numeric column; unsupported columns are null.
+- `def std(self, ddof: Int = Int(1)) -> Self`
+  Column-wise standard deviation, with nonnegative ddof.
+- `def var(self, ddof: Int = Int(1)) -> Self`
+  Column-wise variance, with nonnegative ddof.
+- `def quantile(self, quantile: Float64, interpolation: String = "nearest") -> Self`
+  Numeric column quantiles; interpolation defaults to nearest.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> DataFrame`
   DataFrame.describe's summary of this plan's result: one select of the summary reductions over the plan, collected without materializing all rows.
 - `def clear(self, n: Int = Int(0)) -> Self`
@@ -1275,6 +1372,14 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Fill nulls in string columns with a string; see the Expr overload.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value, choosing columns from this plan's schema: a with_columns of `col(c).fill_null(value)` for each selected column. Unknown subset names raise here, while the plan is built.
+- `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
+  Fill nulls by strategy over the whole input; see DataFrame.fill_null.
+- `def fill_nan(self, value: Float64) -> Self`
+  Replace floating NaNs with a numeric scalar, preserving column dtypes.
+- `def fill_nan(self, value: Expr) -> Self`
+  Replace NaNs in floating columns; see DataFrame.fill_nan.
+- `def drop_nans(self, subset: List[String] = List()) -> Self`
+  Remove NaN rows, retaining nulls; see DataFrame.drop_nans.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
   Keep rows with no null in subset (default: every column), using each column's `is_not_null` predicate.
 - `def null_count(self) -> Self`
@@ -1646,6 +1751,27 @@ Read SHP/DBF with optional validated SHX and verbatim WKT PRJ.
 def read_shapefile(path: String, *, geometry_name: String = "geometry", encoding: String = "utf-8") -> DataFrame
 ```
 
+## `RowIterator`
+
+Yield owned row views without converting unvisited cells.
+
+- `def __init__(out self, frame: DataFrame)`
+- `def __iter__(var self) -> Self`
+- `def __next__(mut self) -> RowView`
+- `def bounds(self) -> Tuple[Int, Optional[Int]]`
+
+## `RowView`
+
+An owned row reference; cells convert to AnyValue when accessed.
+
+- `def __getitem__(self, index: Int) -> AnyValue`
+  Read a cell in schema order; reject an out-of-range index.
+- `def __getitem__(self, name: String) -> AnyValue`
+  Read a cell by column name.
+- `def __len__(self) -> Int`
+- `def to_list(self) -> List[AnyValue]`
+  Materialize this row in schema order, propagating conversion errors.
+
 ## `scan_csv`
 
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
@@ -1829,6 +1955,15 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def append(self, other: Self) -> Self`
   Return a new series with other's rows after this one's.
 - `def reverse(self) -> Self`
+
+## `SliceIterator`
+
+Yield zero-copy frame slices lazily; retain buffers after iteration.
+
+- `def __init__(out self, frame: DataFrame, n: Int)`
+- `def __iter__(var self) -> Self`
+- `def __next__(mut self) -> DataFrame`
+- `def bounds(self) -> Tuple[Int, Optional[Int]]`
 
 ## `StringBuilder`
 

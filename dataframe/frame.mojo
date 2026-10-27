@@ -11,7 +11,8 @@ from .time_windows import (
 )
 from .temporal import zone_of, parse_interval
 from .window import partitions as window_partitions
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
+from .decimal import pow10
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
 from std.memory import ArcPointer, Pointer
@@ -64,6 +65,7 @@ from .expr import (
     col,
     lit,
     null,
+    when,
     COL,
     SELECTOR,
     LIT_INT,
@@ -165,6 +167,8 @@ from .packed_sort import (
 # A head of a sort at least 1/this of the rows sorts fully (#332).
 comptime _TOP_K_FRACTION = 10
 from .value import AnyValue
+from .frame_iter import RowIterator, ColumnIterator, SliceIterator
+from .frame_size import frame_size
 from .asof import asof_rows
 from .hashing import (
     RowKeys,
@@ -532,6 +536,56 @@ struct DataFrame(Copyable, Sized, Writable):
             result.append(self.row(i))
         return result^
 
+    def to_dict(self) -> Dict[String, Series]:
+        """Map column names to owned Series sharing their immutable buffers."""
+        var result = Dict[String, Series]()
+        for column in self._columns:
+            result[column.name()] = column.copy()
+        return result^
+
+    def to_dicts(self) raises -> List[Dict[String, AnyValue]]:
+        """Materialize every row as a name-to-value dictionary."""
+        var result = List[Dict[String, AnyValue]](capacity=self._height)
+        for row in range(self._height):
+            var values = Dict[String, AnyValue]()
+            for column in self._columns:
+                values[column.name()] = column.get(row)
+            result.append(values^)
+        return result^
+
+    def iter_rows(self) -> RowIterator:
+        """Iterate owned row views, converting cells only when accessed.
+
+        row[index] and row[name] return AnyValue and may raise a conversion
+        error. row.to_list() materializes just that row. Views retain the
+        source buffers, including after this frame or iterator is released.
+        """
+        return RowIterator(self)
+
+    def iter_columns(self) -> ColumnIterator:
+        """Yield one owned Series at a time, sharing immutable buffers."""
+        return ColumnIterator(self)
+
+    def iter_slices(self, n: Int = 10000) raises -> SliceIterator:
+        """Yield frames of at most n rows without materializing all slices.
+
+        n must be positive. Each slice shares the input's column buffers;
+        the final slice may be shorter, and an empty input yields none.
+        """
+        return SliceIterator(self, n)
+
+    def estimated_size(self, unit: String = "b") raises -> Float64:
+        """Estimate visible data-buffer bytes in b/kb/mb/gb/tb (powers of 1024).
+
+        Includes validity, chunks, nested children, and foreign buffers;
+        excludes capacity, object metadata, caches, and categorical mappings.
+        Shared buffers may be counted more than once. Binary-view strings
+        count visible non-null value bytes, following Polars' estimate.
+        Slices count their visible ranges, not retained allocations. Storage
+        layouts differ from Polars, so estimates can differ for equal data.
+        """
+        return frame_size(self, unit)
+
     def item(self) raises -> AnyValue:
         """Return the only cell of a 1x1 dataframe."""
         if self._height != 1 or self.width() != 1:
@@ -707,6 +761,57 @@ struct DataFrame(Copyable, Sized, Writable):
             columns.append(column.renamed(name))
         return Self(columns^, height=self._height)
 
+    def rename(
+        self, function: def(String) raises thin -> String
+    ) raises -> Self:
+        """Rename every column using a Mojo function; reject duplicate outputs."""
+        var mapping = Dict[String, String]()
+        for name in self.columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
+    def rename(self, function: def(String) thin -> String) raises -> Self:
+        """Rename every column using a Mojo function; reject duplicate outputs."""
+        var mapping = Dict[String, String]()
+        for name in self.columns():
+            mapping[name] = function(name)
+        return self.rename(mapping)
+
+    def insert_column(self, index: Int, column: Series) raises -> Self:
+        """Insert a column by position, returning a frame with shared buffers.
+
+        Negative positions count from the end. Names must be unique and
+        heights must match; a 0x0 frame takes its first column's height.
+        """
+        var position = index + self.width() if index < 0 else index
+        if position < 0 or position > self.width():
+            raise Error("Column insertion index out of bounds")
+        var height = self._height
+        if height == 0 and self.width() == 0:
+            height = len(column)
+        if len(column) != height:
+            raise Error("Inserted column must match dataframe height")
+        var columns = List[Series](capacity=self.width() + 1)
+        for i in range(self.width() + 1):
+            if i == position:
+                columns.append(column.copy())
+            if i < self.width():
+                columns.append(self._columns[i].copy())
+        return Self(columns^, height=height)
+
+    def gather_every(self, n: Int, offset: Int = 0) raises -> Self:
+        """Take every nth row from a nonnegative offset; n must be positive."""
+        if n <= 0 or offset < 0:
+            raise Error("gather_every needs positive n and nonnegative offset")
+        var indices = List[Int]()
+        var row = offset
+        while row < self._height:
+            indices.append(row)
+            if n >= self._height - row:
+                break
+            row += n
+        return self.take(indices)
+
     def with_row_index(
         self, name: String = "index", offset: Int64 = 0
     ) raises -> Self:
@@ -751,6 +856,137 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.take(
             sample_indices(self._height, count, with_replacement, shuffle, seed)
         )
+
+    def sum(self) raises -> Self:
+        """Sum each numeric column; unsupported columns are null."""
+        return self._reduce_frame("sum")
+
+    def mean(self) raises -> Self:
+        """Mean each numeric column; unsupported columns are null."""
+        return self._reduce_frame("mean")
+
+    def min(self) raises -> Self:
+        """Minimum of each ordered column; nested columns are null."""
+        return self._reduce_frame("min")
+
+    def max(self) raises -> Self:
+        """Maximum of each ordered column; nested columns are null."""
+        return self._reduce_frame("max")
+
+    def median(self) raises -> Self:
+        """Median of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("median")
+
+    def count(self) raises -> Self:
+        """Count non-null values in every column, as UInt32."""
+        return self._reduce_frame("count")
+
+    def product(self) raises -> Self:
+        """Product of each numeric column; unsupported columns are null."""
+        return self._reduce_frame("product")
+
+    def std(self, ddof: Int = 1) raises -> Self:
+        """Column-wise standard deviation, with nonnegative ddof."""
+        return self._reduce_frame("std", ddof=ddof)
+
+    def var(self, ddof: Int = 1) raises -> Self:
+        """Column-wise variance, with nonnegative ddof."""
+        return self._reduce_frame("var", ddof=ddof)
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "nearest"
+    ) raises -> Self:
+        """Numeric column quantiles; interpolation defaults to nearest."""
+        return self._reduce_frame(
+            "quantile", quantile=quantile, interpolation=interpolation
+        )
+
+    def _reduce_frame(
+        self,
+        reduction: String,
+        *,
+        ddof: Int = 1,
+        quantile: Float64 = 0.5,
+        interpolation: String = "nearest",
+    ) raises -> Self:
+        var expressions = self._frame_reduction_exprs(
+            reduction, ddof, quantile, interpolation
+        )
+        if len(expressions) == 0:
+            return Self(List[Series](), height=1)
+        return self.select_exprs(expressions)
+
+    def _frame_reduction_exprs(
+        self,
+        reduction: String,
+        ddof: Int,
+        quantile: Float64,
+        interpolation: String,
+    ) raises -> List[Expr]:
+        """Choose frame reductions from schema alone, shared with LazyFrame."""
+        if (reduction == "std" or reduction == "var") and ddof < 0:
+            raise Error("ddof must be nonnegative")
+        if reduction == "quantile":
+            if not (quantile >= 0 and quantile <= 1):
+                raise Error("quantile must be between 0 and 1")
+            if interpolation not in [
+                String("linear"),
+                "lower",
+                "higher",
+                "nearest",
+                "midpoint",
+            ]:
+                raise Error("Invalid quantile interpolation")
+        var expressions = List[Expr](capacity=self.width())
+        for column in self._columns:
+            var dtype = column.dtype()
+            var c = col(column.name())
+            var numeric = dtype.is_numeric() or dtype == DataType.BOOL
+            var expression: Expr
+            if reduction == "count":
+                expression = c.is_not_null().sum()
+            elif reduction == "min" or reduction == "max":
+                expression = (
+                    null(dtype) if dtype.is_nested()
+                    or dtype
+                    == DataType.NULL else c.min() if reduction
+                    == "min" else c.max()
+                )
+                if dtype.is_categorical():
+                    expression = expression.cast(dtype)
+            elif reduction == "sum":
+                expression = (
+                    c.sum() if numeric or dtype.is_duration() else null(dtype)
+                )
+            elif reduction == "product":
+                expression = c.product() if numeric else null(DataType.NULL)
+            elif reduction == "mean":
+                expression = c.mean() if numeric else null(dtype)
+            elif numeric:
+                var input = (
+                    c.cast(DataType.FLOAT64) if dtype == DataType.BOOL
+                    or dtype.is_decimal() else c.copy()
+                )
+                if reduction == "std":
+                    expression = input.std(ddof)
+                elif reduction == "var":
+                    expression = input.var(ddof)
+                elif reduction == "median":
+                    expression = input.median()
+                else:
+                    expression = input.quantile(quantile, interpolation)
+            else:
+                expression = null(dtype)
+            if dtype == DataType.FLOAT32 and reduction in [
+                String("mean"),
+                "std",
+                "var",
+                "median",
+                "quantile",
+            ]:
+                expression = expression.cast(DataType.FLOAT32)
+            expressions.append(expression.alias(column.name()))
+        return expressions^
 
     def describe(
         self,
@@ -1231,6 +1467,82 @@ struct DataFrame(Copyable, Sized, Writable):
         _ = maintain_order
         return self.take(
             self.arg_sort(by, descending=descending, nulls_last=nulls_last)
+        )
+
+    def _sort_key_exprs(self, by: List[Expr]) raises -> List[Expr]:
+        var expressions = expand_all(by, self._columns)
+        var names = self.columns()
+        for i in range(len(expressions)):
+            var name = String("__dataframe_sort_key_") + String(i)
+            while name in names:
+                name += "_"
+            names.append(name)
+            expressions[i] = expressions[i].alias(name)
+        return expressions^
+
+    def sort(
+        self,
+        by: Expr,
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by an expression, evaluated once before sorting."""
+        return self.sort(
+            [by.copy()], descending, nulls_last, maintain_order=maintain_order
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        descending: Bool = False,
+        nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with common direction and null placement."""
+        var keys = self._sort_key_exprs(by)
+        return self._sort_by_keys(
+            keys,
+            List[Bool](length=len(keys), fill=descending),
+            List[Bool](length=len(keys), fill=nulls_last),
+            maintain_order,
+        )
+
+    def sort(
+        self,
+        by: List[Expr],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Sort by expression keys with a direction and null placement each."""
+        return self._sort_by_keys(
+            self._sort_key_exprs(by), descending, nulls_last, maintain_order
+        )
+
+    def _sort_by_keys(
+        self,
+        keys: List[Expr],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+    ) raises -> Self:
+        _ = maintain_order
+        if len(descending) != len(keys) or len(nulls_last) != len(keys):
+            raise Error("sort needs one descending and nulls_last flag per key")
+        if len(keys) == 0:
+            return self.copy()
+        var names = List[String](capacity=len(keys))
+        for key in keys:
+            names.append(key._name)
+        var evaluated = self.with_columns(keys).select(names)
+        return self.take(
+            evaluated.arg_sort(
+                names, descending=descending, nulls_last=nulls_last
+            )
         )
 
     def arg_sort(
@@ -3467,6 +3779,177 @@ struct DataFrame(Copyable, Sized, Writable):
         column), range-checked per column.
         """
         return self.with_columns(self._fill_null_exprs(value, subset))
+
+    def fill_null(
+        self,
+        *,
+        strategy: String,
+        limit: Optional[Int] = None,
+        subset: List[String] = List[String](),
+    ) raises -> Self:
+        """Fill nulls with forward/backward, min/max/mean, zero, or one.
+
+        limit bounds each forward/backward null run. Integer means truncate
+        toward zero, preserving dtype. Columns with no nulls are unchanged;
+        all-null columns stay null for forward/backward/min/max/mean.
+        """
+        var run_limit = self._fill_strategy_limit(strategy, limit, subset)
+        var fills = List[Expr]()
+        for column in self._columns:
+            var name = column.name()
+            if len(subset) > 0 and name not in subset:
+                continue
+            var nulls = column.null_count()
+            if nulls == 0 or (
+                nulls == len(column) and strategy not in [String("zero"), "one"]
+            ):
+                continue
+            var dtype = column.dtype()
+            var c = col(name)
+            var expression: Expr
+            if strategy == "forward":
+                expression = c.forward_fill(run_limit)
+            elif strategy == "backward":
+                expression = c.backward_fill(run_limit)
+            elif dtype.is_nested():
+                raise Error(
+                    "fill_null strategy "
+                    + strategy
+                    + " is not supported for "
+                    + dtype.name()
+                )
+            elif strategy == "min" or strategy == "max":
+                expression = c.fill_null(
+                    c.min() if strategy == "min" else c.max()
+                )
+            elif strategy == "mean":
+                if not dtype.is_numeric() and not dtype.is_temporal():
+                    raise Error(
+                        "fill_null mean is not supported for " + dtype.name()
+                    )
+                expression = c.fill_null(self._mean_fill(c, dtype))
+            else:
+                var value: Expr
+                if dtype.physical() == DataType.STRING:
+                    if strategy != "zero":
+                        raise Error(
+                            "fill_null one is not supported for " + dtype.name()
+                        )
+                    value = lit("").cast(dtype)
+                elif (
+                    dtype.is_numeric()
+                    or dtype.is_temporal()
+                    or dtype == DataType.BOOL
+                ):
+                    value = lit(Int64(1 if strategy == "one" else 0)).cast(
+                        dtype
+                    )
+                else:
+                    raise Error(
+                        "fill_null "
+                        + strategy
+                        + " is not supported for "
+                        + dtype.name()
+                    )
+                expression = c.fill_null(value)
+            if dtype.is_categorical():
+                expression = expression.cast(dtype)
+            fills.append(expression.alias(name))
+        return self.with_columns(fills)
+
+    def _fill_strategy_limit(
+        self, strategy: String, limit: Optional[Int], subset: List[String]
+    ) raises -> Int:
+        if strategy not in [
+            String("forward"),
+            "backward",
+            "min",
+            "max",
+            "mean",
+            "zero",
+            "one",
+        ]:
+            raise Error("Unknown fill_null strategy: " + strategy)
+        if limit and (strategy != "forward" and strategy != "backward"):
+            raise Error("limit is only valid for forward/backward fill")
+        var run_limit = limit.value() if limit else -1
+        if run_limit < -1 or (limit and run_limit < 0):
+            raise Error("fill limit must be nonnegative")
+        var seen = Dict[String, Bool]()
+        for name in subset:
+            _ = self._index(name)
+            if name in seen:
+                raise Error("Column listed twice in subset: " + name)
+            seen[name] = True
+        return run_limit
+
+    def _mean_fill(self, c: Expr, dtype: DataType) raises -> Expr:
+        var work = c.cast(DataType.INT64) if dtype.is_temporal() else c.copy()
+        var mean = lit(self.select(work.mean()).item().float64())
+        if dtype.is_decimal():
+            var scale = lit(Float64(pow10(dtype.scale())))
+            return ((mean * scale).truncate() / scale).cast(dtype)
+        var physical = DataType.INT64 if dtype.is_temporal() else dtype
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if D.is_integral():
+                if physical == DataType.of(D):
+                    var low = lit(Scalar[D].MIN)
+                    var high = lit(Scalar[D].MAX)
+                    var value = (
+                        when(mean >= high.cast(DataType.FLOAT64))
+                        .then(high)
+                        .otherwise(
+                            when(mean <= low.cast(DataType.FLOAT64))
+                            .then(low)
+                            .otherwise(mean.cast(physical))
+                        )
+                    )
+                    return value.cast(dtype) if dtype.is_temporal() else value^
+        return mean.cast(dtype)
+
+    def fill_nan(self, value: Float64) raises -> Self:
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        return self.fill_nan(lit(value))
+
+    def fill_nan(self, value: Expr) raises -> Self:
+        """Replace NaNs in floating columns; nulls and other columns stay.
+
+        value is cast to each floating dtype and may be a scalar or a
+        row-valued expression.
+        """
+        return self.with_columns(self._fill_nan_exprs(value))
+
+    def _fill_nan_exprs(self, value: Expr) -> List[Expr]:
+        var expressions = List[Expr]()
+        for column in self._columns:
+            if column.dtype().is_float():
+                expressions.append(
+                    col(column.name())
+                    .fill_nan(value.cast(column.dtype()))
+                    .alias(column.name())
+                )
+        return expressions^
+
+    def drop_nans(self, subset: List[String] = List[String]()) raises -> Self:
+        """Remove rows with a NaN in subset's floating columns; keep nulls."""
+        var predicate = self._drop_nan_predicate(subset)
+        return self.filter(predicate.value()) if predicate else self.copy()
+
+    def _drop_nan_predicate(
+        self, subset: List[String]
+    ) raises -> Optional[Expr]:
+        for name in subset:
+            _ = self._index(name)
+        var predicate: Optional[Expr] = None
+        for column in self._columns:
+            if not column.dtype().is_float() or (
+                len(subset) > 0 and column.name() not in subset
+            ):
+                continue
+            var keep = col(column.name()).is_not_nan().fill_null(lit(True))
+            predicate = predicate.value() & keep if predicate else keep^
+        return predicate^
 
     def _fill_null_exprs(
         self, value: Expr, subset: List[String]
