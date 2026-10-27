@@ -34,6 +34,9 @@ def _run(query: LazyFrame, expected_reason: String) raises -> DataFrame:
         engine="cpu", streaming=True, optimize=False, batch_size=31
     )
     var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
     assert_true(
         paths.find("dataframe-strategy: " + expected_reason) >= 0, paths
     )
