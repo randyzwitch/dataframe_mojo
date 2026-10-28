@@ -7,12 +7,12 @@ statistics retain their separate sampled 64-register sketch.
 from std.bit import count_leading_zeros
 from std.math import log
 from std.memory import bitcast
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .distinct_statistics import _mix, _hash_bytes, _hash_value
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 
 
 struct CardinalitySketch(Copyable, Movable):

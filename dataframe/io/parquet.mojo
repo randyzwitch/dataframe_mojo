@@ -42,7 +42,7 @@ library's `OwnedDLHandle` closes on destruction, so the library is opened
 with `dlopen` directly and its handle is never closed; repeat opens only
 bump the loader's reference count.
 """
-from .._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from std.collections import Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
@@ -82,10 +82,10 @@ from ..expr import (
 from ..frame import DataFrame, concat
 from ..geospatial_metadata import geoparquet_metadata
 from ..categorical import decode_contiguous
-from ..column import Column
+from dataframe.storage.column import Column
 from ..dtype import DataType
 from ..series import Series
-from ..string_column import StringCodes, StringColumn
+from dataframe.storage.string import StringCodes, StringColumn
 
 comptime PARQUET_LIBRARY_ENV = "DATAFRAME_PARQUET_LIBRARY"
 

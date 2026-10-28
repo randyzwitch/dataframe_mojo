@@ -11,9 +11,9 @@ pair. Dtype dispatch happens once per input, never per row.
 from std.math import isnan
 from std.memory import pack_bits
 from std.sys import size_of
-from .bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from .cast import cast_series
-from .column import Column
+from dataframe.storage.column import Column
 from .decimal import common_decimal, decimal_add_type, decimal_width_for
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (

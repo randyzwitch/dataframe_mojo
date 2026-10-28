@@ -10,10 +10,10 @@ from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from dataframe.approx_distinct import CardinalitySketch, update_sketches
-from dataframe.bool_column import BoolColumn, true_count
-from dataframe.column import Column, _validity_at
-from dataframe.column import _count_valid as _valid_count
-from dataframe.string_column import StringColumn
+from dataframe.storage.boolean import BoolColumn, true_count
+from dataframe.storage.column import Column, _validity_at
+from dataframe.storage.column import _count_valid as _valid_count
+from dataframe.storage.string import StringColumn
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.decimal import check_limit, decimal_mean, precision_limit
 from dataframe.series import Series
@@ -54,7 +54,7 @@ from dataframe.aggregation.scalar_states import (
     MomentState,
     VarState,
 )
-from dataframe.nested_column import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.parallel import Job, Pool, configured_workers
 
 

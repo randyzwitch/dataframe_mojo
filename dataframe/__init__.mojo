@@ -1,8 +1,8 @@
 """Native, eager CPU dataframes for Mojo."""
-from .bool_column import BoolColumn
-from .column import Column
-from .string_column import StringColumn, StringBuilder
-from .nested_column import ListColumn, StructColumn
+from .storage.boolean import BoolColumn
+from .storage.column import Column
+from .storage.string import StringColumn, StringBuilder
+from .storage.nested import ListColumn, StructColumn
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, GroupingSets, TimeGroupBy, concat
 from .frame_iter import RowView, RowIterator, ColumnIterator, SliceIterator

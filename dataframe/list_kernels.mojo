@@ -2,8 +2,8 @@
 and struct field access. Nulls propagate: a null list row gives a null
 result, and a null struct row makes every field null."""
 from std.math import isnan
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     LIST_CONTAINS,
@@ -19,7 +19,7 @@ from .expr import (
     STRUCT_FIELD,
     Node,
 )
-from .nested_column import ListColumn
+from dataframe.storage.nested import ListColumn
 from .regex import Regex
 from .regex_kernels import (
     compile_pattern,
@@ -29,7 +29,7 @@ from .regex_kernels import (
     split_codepoints,
 )
 from .series import Series
-from .string_column import StringBuilder, StringColumn
+from dataframe.storage.string import StringBuilder, StringColumn
 from .string_bytes import _Bytes, _find_bytes
 
 

@@ -13,7 +13,7 @@ where a secondary sort key is in order again.
 """
 from .expr import node_children
 from .binding import bind
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .execution import evaluate
 from .expr import COL, EQ, GE, GT, LE, LT, Expr, subtree

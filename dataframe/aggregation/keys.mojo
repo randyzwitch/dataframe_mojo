@@ -1,11 +1,11 @@
 """Struct and categorical grouping key normalization."""
-from dataframe.bool_column import (
+from dataframe.storage.boolean import (
     BoolColumn,
 )
 from dataframe.canonical_labels import (
     canonical_labels,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     _pack_bits,
 )
 from dataframe.expr import (
@@ -15,7 +15,7 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.nested_column import (
+from dataframe.storage.nested import (
     StructColumn,
 )
 from dataframe.series import (

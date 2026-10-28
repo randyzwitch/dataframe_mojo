@@ -6,7 +6,7 @@ from .unicode_normalization_tables import (
     composition,
 )
 from .series import Series
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_bytes import _Bytes
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]

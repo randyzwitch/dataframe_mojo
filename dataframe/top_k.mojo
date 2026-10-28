@@ -19,8 +19,8 @@ from std.collections import Optional
 from std.memory import Pointer
 
 from .binding import BoundExpr
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .expr import COL, LE, LIT_INT, LT, OVER, RANK, split_names
 from dataframe.aggregation.hash_table import (

@@ -16,10 +16,10 @@ the codes.
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer, bitcast
 
-from .bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from .cast import cast_series
 from .categorical import decode
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     Node,
@@ -32,7 +32,7 @@ from .expr import (
     replace_literals,
 )
 from dataframe.aggregation.reducer import float_key
-from .column import _validity_at
+from dataframe.storage.column import _validity_at
 from .expr_kernels import choose
 from .gather import take_parallel
 from .hashing import encode_rows
@@ -41,8 +41,8 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import _hash_bytes, _mix
 from .series import Series
 from .string_bytes import _Bytes, _same_bytes
-from .string_column import StringBuilder, StringColumn
-from .string_view import (
+from dataframe.storage.string import StringBuilder, StringColumn
+from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
     StringViewStorage,

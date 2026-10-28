@@ -11,7 +11,7 @@ from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from std.utils import Variant
 from dataframe import Column, DataType, Series
-from dataframe.column import _append_bits, _copy_bits
+from dataframe.storage.column import _append_bits, _copy_bits
 from dataframe_metal.accelerator.faults import data_fault
 from .query_scope import Scope, checked_add, checked_mul
 

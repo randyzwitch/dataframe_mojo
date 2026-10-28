@@ -241,3 +241,28 @@ facts module; no payload mutability is exposed.
 imports and requires metadata consumers to use its named methods. Concurrent
 publication, real overlapping cache consumers, foreign windows, copy/slice
 lifetimes, and mutation invalidation have focused contracts.
+
+## Typed storage ownership
+
+`storage/` owns foreign/owned buffer lifetimes (`buffer`), allocation advice
+(`allocation`), packed validity and fixed-width windows (`column`), boolean,
+UTF-8 and view layouts (`boolean`, `string`, `string_view`), recursive values
+(`nested`, `nested_merge`), field metadata, and synchronized buffer facts.
+Storage builders and bitmap helpers stay beside the layouts they construct.
+Bulk fixed-width row gathering lives in `kernels/scalar_gather.mojo`; storage
+does not import that kernel. `Series` calls it directly.
+
+The old root modules re-export their declarations, including private bitmap
+helpers and `_BufferFacts`, preserving type identity and import compatibility.
+Engine/provider consumers import the canonical modules. Tests and examples
+retain legacy imports as compatibility coverage. This extraction changes no
+algorithms, layouts, ownership rules or thresholds.
+
+The storage boundary gate rejects engine imports through old storage facades,
+implementation declarations in those facades, internal storage cycles and
+imports of query, expression, kernel or provider execution. Two existing
+recursive value seams are explicit: nested columns retain child `Series`, and
+categorical child append calls dictionary unification. Logical dtype metadata
+also remains shared. Those representation dependencies predate this extraction;
+they do not permit storage to select or execute a query. `io/` and `regex/`
+remain their existing domains; later PRs organize computational and text code.

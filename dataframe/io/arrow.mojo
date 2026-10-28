@@ -38,22 +38,30 @@ from std.memory import (
     dealloc,
     unsafe_memcpy,
 )
-from ..bool_column import BoolColumn
-from .._buffer import _Buffer, _ForeignOwner, _ReleaseForeign
-from ..column import Column, _copy_bits, _copy_validity, _validity_bit
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.buffer import _Buffer, _ForeignOwner, _ReleaseForeign
+from dataframe.storage.column import (
+    Column,
+    _copy_bits,
+    _copy_validity,
+    _validity_bit,
+)
 from ..categorical import encode
 from ..geometry import from_wkb
-from ..field_metadata import _append_metadata, _has_extension_name
+from dataframe.storage.field_metadata import (
+    _append_metadata,
+    _has_extension_name,
+)
 from ..geospatial_metadata import apply_geoparquet_metadata
 from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from ..hashing import encode_string_rows_parallel
 from ..frame import DataFrame
 from ..parallel import Job, Pool, worker_count
 from std.sys import CompilationTarget
-from ..nested_column import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from ..series import Series
-from ..string_column import StringBuilder, StringColumn
-from ..string_view import StringView, StringViewStorage
+from dataframe.storage.string import StringBuilder, StringColumn
+from dataframe.storage.string_view import StringView, StringViewStorage
 
 
 struct ArrowSchema(Movable):

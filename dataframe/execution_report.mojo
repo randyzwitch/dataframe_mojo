@@ -12,7 +12,7 @@ Without a report attached, the executors only test a flag.
 """
 
 from ._build_identity import CPU_BUILD_ID
-from .column import Column
+from dataframe.storage.column import Column
 from .frame import DataFrame
 from .series import Series
 

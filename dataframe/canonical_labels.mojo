@@ -5,7 +5,7 @@ rather than raw codes. The original dictionary is retained so codes
 round-trip. Before numbering groups, each repeated code is replaced by the
 first code with the same label.
 """
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import CategoricalDictionary
 from .series import Series
 

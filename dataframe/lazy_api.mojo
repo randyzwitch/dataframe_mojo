@@ -42,7 +42,7 @@ from dataframe._accel_provider import (
     installed as _accel_installed,
     select_auto as _select_auto_accel,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.dtype import (

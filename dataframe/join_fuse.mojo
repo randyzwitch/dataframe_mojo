@@ -16,7 +16,7 @@ column's chunks (a column with a single block stays one array).
 """
 from std.memory import ArcPointer
 
-from .huge_pages import HUGE_PAGE_BYTES
+from dataframe.storage.allocation import HUGE_PAGE_BYTES
 from .gather import _RechunkJob, take_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series

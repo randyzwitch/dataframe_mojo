@@ -10,7 +10,7 @@ initialize a device.
 """
 from std.os import getenv
 
-from dataframe.column import Column
+from dataframe.storage.column import Column
 from dataframe.execution_settings import ExecutionSettings
 from dataframe.frame import DataFrame
 from dataframe.lazy import AcceleratorBackend, LazyFrame

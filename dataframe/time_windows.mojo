@@ -1,5 +1,5 @@
 """Calendar-aware bounds shared by rolling expressions and time grouping."""
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import DataType
 from .series import Series
 from .temporal import parse_interval, zone_of, to_local, relocalize

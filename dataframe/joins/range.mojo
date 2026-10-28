@@ -1,5 +1,5 @@
 """Bounded-integer and progression join paths and their existing budgets."""
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.dtype import (
@@ -15,7 +15,7 @@ from dataframe.frame import (
 from dataframe.gather import (
     filter_range_int64_chunks,
 )
-from dataframe.huge_pages import (
+from dataframe.storage.allocation import (
     huge_capacity,
     huge_uninit,
 )

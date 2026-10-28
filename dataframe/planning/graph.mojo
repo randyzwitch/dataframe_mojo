@@ -2,7 +2,7 @@
 from dataframe.planning.node_builders import (
     _frame_scan_node,
 )
-from dataframe.bool_column import (
+from dataframe.storage.boolean import (
     true_count,
 )
 from dataframe.dtype import (

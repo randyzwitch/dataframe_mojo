@@ -28,15 +28,15 @@ from std.sys.intrinsics import prefetch
 from std.collections import Dict
 
 from dataframe.aggregation.reducer import float_key
-from .bool_column import BoolColumn
-from .column import Column, _validity_at
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _validity_at
 from .dtype import NUMERIC_DTYPES
-from .huge_pages import huge_list, huge_uninit
+from dataframe.storage.allocation import huge_list, huge_uninit
 from .gather import take_parallel
 from .hashing import RowKeys, encode_rows
 from .parallel import Job, partitions, run_jobs
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 
 comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
 

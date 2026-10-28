@@ -25,7 +25,7 @@ from dataframe.binding import (
     ROWS,
     bind,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 

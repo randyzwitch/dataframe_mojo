@@ -11,7 +11,7 @@ back to its place, to return results to row order.
 """
 from std.memory import Pointer
 
-from .huge_pages import huge_uninit
+from dataframe.storage.allocation import huge_uninit
 from .parallel import Job, partitions, run_jobs
 from .partition import Partitioner, encode_bucket
 from .series import Series

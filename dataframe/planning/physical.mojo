@@ -11,7 +11,7 @@ from dataframe.planning.cost.aggregation import (
     plan_row_number_shape,
 )
 
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 

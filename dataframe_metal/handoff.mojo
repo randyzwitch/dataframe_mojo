@@ -16,7 +16,7 @@ than the CPU.
 from std.utils.numerics import inf, isnan
 from std.time import perf_counter_ns
 
-from dataframe.column import Column
+from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.expr import (
     AND,

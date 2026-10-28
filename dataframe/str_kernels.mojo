@@ -1,9 +1,9 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
 from .string_bytes import _Bytes
-from .bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from .regex import Regex, escape
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_transform import transform_strings
 from .expr import (
     Node,

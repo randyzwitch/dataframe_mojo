@@ -4,7 +4,7 @@ Reductions are separate passes, not per-row callbacks or per-group dataframes.
 The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
-from ._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from .expr_kernels import validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .identity_metadata import identity_column_source
@@ -109,7 +109,7 @@ from .text_functions import text_function
 from .expr_kernels import integer_is_in
 from .replace import replace_values
 from .list_kernels import nested_op
-from .nested_column import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from .cast import cast_series
 from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
@@ -125,14 +125,14 @@ from .distinct import distinct_counts
 from .window import window_op, interpolate_by_op, rolling_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
-from .bool_column import BoolColumn
-from .column import (
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import (
     Column,
     _append_bits,
     _copy_validity,
     _count_valid,
 )
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_predicates import _flip
 from .series import Series
 from .expr_kernels import (

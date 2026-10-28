@@ -2,7 +2,7 @@
 from .expr import Node, STR_STRIP, STR_REVERSE, STR_PAD
 from .series import Series
 from .string_bytes import _Bytes, _same_bytes
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 

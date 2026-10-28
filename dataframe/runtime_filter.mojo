@@ -10,8 +10,8 @@ drops it before any step reads or gathers its other columns.
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer
 
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import DataType
 from .execution import _valid_lanes
 from .parallel import Job, run_jobs, worker_count

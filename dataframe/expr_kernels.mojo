@@ -1,14 +1,14 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
-from ._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.ffi import external_call
 from std.sys import size_of
 from std.sys.info import simd_width_of
 from std.memory import pack_bits
 from .float_ops import arithmetic, compare
-from .nested_column import ListColumn, StructColumn
-from .bool_column import BoolColumn
-from .column import Column, _bit, _copy_validity, _pack_bits
+from dataframe.storage.nested import ListColumn, StructColumn
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _bit, _copy_validity, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .cast import _decimal_to_float
 from .decimal import (
@@ -20,7 +20,7 @@ from .decimal import (
     divide_half_even,
     pow10,
 )
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .series import Series
 from .string_predicates import compare_with_literal
 from .expr import (

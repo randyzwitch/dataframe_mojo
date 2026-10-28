@@ -15,26 +15,26 @@ Joining or concatenating columns with different dictionaries first moves
 them onto the union of both (`unify`), in which the first dictionary's codes
 are unchanged.
 """
-from ._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from std.collections import Dict
 from std.memory import ArcPointer
 
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .gather import take_parallel
 from .hashing import encode_string_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
-from .string_column import StringColumn
-from .string_view import (
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
     StringViewStorage,
     _external_view,
     _inline_view,
 )
-from .column import _copy_validity
+from dataframe.storage.column import _copy_validity
 
 
 def encode(values: Series) raises -> Series:

@@ -13,8 +13,8 @@ from std.memory import pack_bits
 from .float_ops import arithmetic, compare
 from .dtype import DataType
 from .binding import BoundExpr
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .expr import node_children
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV
 from .series import Series

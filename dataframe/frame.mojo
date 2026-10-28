@@ -15,9 +15,9 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import pow10
 from std.collections import Dict, Optional
 from std.memory import ArcPointer, Pointer
-from .bool_column import BoolColumn, both_true, true_count
-from .column import Column
-from .string_column import StringColumn
+from dataframe.storage.boolean import BoolColumn, both_true, true_count
+from dataframe.storage.column import Column
+from dataframe.storage.string import StringColumn
 from .series import Series, sort_indices
 from .distinct_statistics import TableStatistics
 from .fused_compare import (
@@ -86,7 +86,7 @@ from .join_type import (
     join_code,
     join_type,
 )
-from .nested_column import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import encodable, encode_sort_keys
 from .categorical import (

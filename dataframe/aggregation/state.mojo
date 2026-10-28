@@ -45,7 +45,7 @@ from dataframe.hashing import (
     RowKeys,
     encode_rows,
 )
-from dataframe.huge_pages import (
+from dataframe.storage.allocation import (
     huge_list,
 )
 from dataframe.parallel import (

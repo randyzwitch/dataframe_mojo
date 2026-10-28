@@ -3,7 +3,7 @@ from .json_path import JsonPath, append_json
 from .json_reader import JsonReader, json_bytes
 from .json_number import validate_json_numbers
 from .series import Series
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_bytes import _Bytes
 
 

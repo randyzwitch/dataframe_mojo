@@ -2,10 +2,10 @@
 from std.sys import size_of
 from .frame import DataFrame
 from .series import Series, FixedElements
-from .column import Column
-from .bool_column import BoolColumn
-from .string_column import StringColumn
-from .nested_column import ListColumn, StructColumn
+from dataframe.storage.column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.string import StringColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from .dtype import DataType
 
 

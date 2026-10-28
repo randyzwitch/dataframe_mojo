@@ -49,7 +49,7 @@ A string longer than twelve bytes is compared through the address of its
 bytes in the input, which outlives the aggregation; the input is never
 copied.
 """
-from dataframe._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.collections import Optional
@@ -65,8 +65,13 @@ from dataframe.aggregation.reducer import (
     quantile_in,
 )
 from dataframe.decimal import check_limit, precision_limit
-from dataframe.bool_column import BoolColumn
-from dataframe.column import Column, _count_set, _pack_bits, _validity_at
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import (
+    Column,
+    _count_set,
+    _pack_bits,
+    _validity_at,
+)
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     CORR,
@@ -84,7 +89,7 @@ from dataframe.expr import (
     VAR,
 )
 from dataframe.aggregation.selected_rows import _canonical_int
-from dataframe.huge_pages import huge_list, huge_uninit
+from dataframe.storage.allocation import huge_list, huge_uninit
 from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.rank import _key
 from dataframe.partition import (
@@ -98,8 +103,8 @@ from dataframe.series import Series
 from dataframe.hashing import RowKeys
 from dataframe.trace import trace_path
 from dataframe.string_bytes import _Bytes
-from dataframe.string_column import StringColumn
-from dataframe.string_view import (
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
     StringViewStorage,

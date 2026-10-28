@@ -4,8 +4,8 @@ from std.collections import Optional
 from std.memory import ArcPointer
 
 from .dtype import DataType
-from .nested_column import _Box
-from .string_column import StringColumn, escape_bytes
+from dataframe.storage.nested import _Box
+from dataframe.storage.string import StringColumn, escape_bytes
 from .series import Series
 from .temporal import format as format_temporal
 from .decimal import format_decimal

@@ -2,7 +2,7 @@
 from dataframe.binding import (
     bind,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.dtype import (

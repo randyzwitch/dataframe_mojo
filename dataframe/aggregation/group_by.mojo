@@ -36,7 +36,7 @@ from dataframe.canonical_labels import (
 from dataframe.categorical import (
     decode,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.execution import (
@@ -103,7 +103,7 @@ from dataframe.series import (
     Series,
     sort_indices,
 )
-from dataframe.string_column import (
+from dataframe.storage.string import (
     StringColumn,
 )
 from dataframe.trace import (
