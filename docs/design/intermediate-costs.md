@@ -46,12 +46,27 @@ The existing `DATAFRAME_TRACE_PATHS` setting emits a `dataframe-strategy`
 join-build record with selected side, row estimate, exactness, estimate
 reason, left payload width and observed right payload cost.
 
-## Remaining validation and implementation
+## Materialized join inputs and grouping finish costs
+
+An estimator can receive already-executed join inputs before any estimate
+is requested. Those inputs supply exact observed heights and bounded
+column statistics without executing a subplan again. Observation after a
+request has started is rejected, preventing stale ancestor facts.
+
+The late-key grouping model now uses these observed builds and propagated
+input cardinality. Reached build rows include duplicate-key multiplicity.
+It compares avoided key payload traffic against the row ids that replace
+it, bounded preparation reads, an optional uniqueness proof, final key
+gathering or regrouping, state copies and output assembly. These are work
+estimates in byte-weighted units, not calibrated nanoseconds or allocation
+bounds. A full uniqueness proof is only attempted when its optimistic route
+could repay the proof. The trace includes input rows, finish groups, saved
+work, paid work, the selected key strategy and its reason.
+
+## Remaining validation
 
 - Validate nested joins, filters, aliases, grouping, correlated keys,
   variable string widths, nulls and complete output ordering.
-- Review final regrouping, key gathering, copies and estimation overhead
-  in the existing late-key aggregation cost decision.
 - Retain before/after measurements on independently specified distributions
   at multiple worker counts, including small-input overhead and peak memory.
 - Run complete development-suite SQL validation and affected CPU contracts

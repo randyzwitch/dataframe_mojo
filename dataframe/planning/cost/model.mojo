@@ -37,6 +37,11 @@ struct AggregationDecision(Copyable, Movable):
     var row_names: List[String]
     var row_unique: Bool
     var row_merge: List[Expr]
+    var key_input_rows: Float64
+    var key_finish_groups: Float64
+    var key_saved_work: Float64
+    var key_paid_work: Float64
+    var key_cost_reason: String
 
     def __init__(out self, route: Int, reason: String):
         self.route = route
@@ -51,6 +56,11 @@ struct AggregationDecision(Copyable, Movable):
         self.row_names = List[String]()
         self.row_unique = False
         self.row_merge = List[Expr]()
+        self.key_input_rows = -1.0
+        self.key_finish_groups = -1.0
+        self.key_saved_work = -1.0
+        self.key_paid_work = -1.0
+        self.key_cost_reason = String()
 
     def uses_pipeline(self) -> Bool:
         return (
@@ -94,6 +104,15 @@ struct AggregationDecision(Copyable, Movable):
             out += "; sampled_rows=" + String(self.sample_rows)
         if self.group_bound >= 0:
             out += "; group_bound=" + String(self.group_bound)
+        if self.key_cost_reason != "":
+            out += "; key_cost_reason=" + self.key_cost_reason
+            out += "; key_input_rows=" + String(self.key_input_rows)
+            out += "; key_finish_groups=" + String(self.key_finish_groups)
+            out += "; key_saved_work=" + String(self.key_saved_work)
+            out += "; key_paid_work=" + String(self.key_paid_work)
+            out += "; key_strategy=" + (
+                "row_ids" if self.row_holder >= 0 else "materialized_keys"
+            )
         return out
 
 

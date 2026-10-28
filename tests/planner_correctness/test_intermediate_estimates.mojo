@@ -5,6 +5,7 @@ from dataframe import Column, DataFrame, Series, StringColumn, col
 from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
     _cost_rows,
+    bounded_distinct,
 )
 from dataframe.planning.graph import plan_height_bound, plan_known_height
 from tests.support.coverage_compare import assert_frame
@@ -110,3 +111,54 @@ def test_nested_join_choices_preserve_nulls_duplicates_and_output_order() raises
             query.collect(engine="cpu", optimize=False, batch_size=2), expected
         )
         assert_frame(query.collect(engine="cpu", batch_size=2), expected)
+
+
+def test_periodic_input_is_not_sampled_at_one_fixed_phase() raises:
+    var values = List[Int64]()
+    for row in range(65_536):
+        values.append(Int64(0 if row % 16 == 0 else 1))
+    assert_equal(bounded_distinct(Series("k", Column[Int64](values^))), 2)
+
+
+def test_zero_sampled_rows_is_not_used_as_an_empty_relation_proof() raises:
+    var values = List[Int64](length=65_536, fill=0)
+    var valid = List[Bool](length=65_536, fill=False)
+    # The first stratum's selected offset is 10, so this rare valid key
+    # is deliberately absent from the cost sample.
+    values[0] = 7
+    valid[0] = True
+    var source = DataFrame([Series("k", Column[Int64](values^, valid^))])
+    var build = DataFrame([Series("id", Column[Int64]([7]))])
+    var query = source.lazy().join(build.lazy(), left_on=["k"], right_on=["id"])
+    var index = len(query._plan._nodes) - 1
+    assert_equal(query._estimated_rows(index), 0)
+    assert_equal(plan_known_height(query._plan, index), -1)
+    for optimize in [False, True]:
+        var result = query.collect(engine="cpu", optimize=optimize)
+        assert_equal(result.height(), 1)
+        assert_equal(result.item(0, "k").int64(), Int64(7))
+
+
+def test_observed_intermediate_replaces_only_its_cost_facts() raises:
+    var frame = DataFrame([Series("k", Column[Int64]([1, 2]))])
+    var query = frame.lazy().join(frame.lazy().filter(col("k") > 1), on=["k"])
+    var index = len(query._plan._nodes) - 1
+    var right = query._plan._nodes[index].right
+    var estimates = IntermediateEstimates(len(query._plan._nodes))
+    estimates.observe(right, frame.filter(col("k") > 1))
+    assert_equal(estimates.rows(query._plan, index), 1)
+    assert_true(estimates.facts[right].exact)
+    assert_equal(estimates.facts[right].reason, "observed_intermediate")
+    assert_equal(plan_known_height(query._plan, index), -1)
+    var rejected = False
+    try:
+        estimates.observe(right, frame)
+    except:
+        rejected = True
+    assert_true(rejected)
+
+
+def test_extreme_negative_slice_offset_does_not_overflow_estimation() raises:
+    var frame = DataFrame([Series("k", Column[Int64]([1, 2]))])
+    var query = frame.lazy().slice(Int.MIN, 1)
+    assert_equal(query._estimated_rows(len(query._plan._nodes) - 1), 1)

@@ -3,9 +3,6 @@ from dataframe.aggregation.group_by import (
     group_by_workers,
     range_states,
 )
-from dataframe.kernels.distinct_statistics import (
-    distinct_estimate,
-)
 from dataframe.dtype import (
     DataType,
 )
@@ -21,6 +18,10 @@ from dataframe.kernels.hashing import (
 from dataframe.join_type import (
     JOIN_INNER,
     JOIN_RIGHT,
+)
+from dataframe.planning.cost.intermediate import (
+    IntermediateEstimates,
+    frame_column_width,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -44,6 +45,7 @@ from dataframe.planning.expression_inputs import (
     _references,
 )
 from dataframe.planning.model import (
+    AGG,
     JOIN,
     PlanNode,
     SCAN_FRAME,
@@ -142,60 +144,73 @@ def plan_row_number_shape(
     holder: Int,
     joins: List[DataFrame],
     operations: List[PlanNode],
+    input_index: Int = -1,
 ) raises -> Tuple[Float64, Float64]:
-    """The rows the joins leave for the sink and the groups of the
-    first pass if it groups by the holder build's row number instead of
-    the `carried` string keys, estimated from the planner's statistics
-    as the join order estimates them; (-1, -1) when a key has none.
+    """Estimate input rows and first-pass groups using observed join builds.
 
-    - Rows: the source rows times, for each inner join whose probe key
-      is a source column, the share of probe keys its build holds,
-      min(1, distinct build keys / distinct probe keys) (DuckDB's join
-      cardinality estimate); a join with no statistics for its probe key
-      leaves the rows as they are.
-    - Groups: min(rows, R * O), with R the build rows the probe reaches
-      (the build's rows, or fewer when the holder join's probe key has
-      fewer distinct values) and O the product of the other keys'
-      distinct counts."""
-    ref table = self._frames[source]
-    var rows = Float64(table.height())
-    var holder_probe = String("")
+    A build's actual result replaces only cost facts; no source is executed
+    to obtain statistics. Duplicate build keys can multiply input rows.
+    Reached holder rows include those duplicates, rather than equating the
+    number of reached keys with the number of reached build rows.
+    """
+    var input = input_index
+    if (
+        input < 0
+        and len(self._nodes) > 0
+        and self._nodes[len(self._nodes) - 1].kind == AGG
+    ):
+        input = self._nodes[len(self._nodes) - 1].left
+    if input < 0:
+        return (-1.0, -1.0)
+    var estimates = IntermediateEstimates(len(self._nodes))
     for op in operations:
-        if op.kind != JOIN:
-            continue
-        if op.join_build_slot() == holder:
-            holder_probe = op.names[0]
-        if op.how != JOIN_INNER or len(op.names) == 0:
-            continue
-        if op.names[0] not in table.columns():
-            continue
-        var probe = table._distinct_count(op.names[0])
-        var build = distinct_estimate(
-            joins[op.join_build_slot()].column(op.right_keys[0])
-        )
-        if probe > 0 and build > 0:
-            rows *= min(1.0, Float64(build) / Float64(probe))
+        if op.kind == JOIN:
+            estimates.observe(op.right, joins[op.join_build_slot()])
+    var estimated_rows = estimates.rows(self, input)
+    if estimated_rows < 0:
+        return (-1.0, -1.0)
+    var rows = Float64(estimated_rows)
     var reached = Float64(joins[holder].height())
-    if holder_probe in table.columns():
-        var probe = table._distinct_count(holder_probe)
-        if probe > 0:
-            reached = min(reached, Float64(probe))
-    var others = 1.0
+    for op in operations:
+        if op.kind != JOIN or op.join_build_slot() != holder:
+            continue
+        var probe = -1
+        var build = -1
+        for k in range(len(op.names)):
+            probe = max(probe, estimates.column(self, op.left, op.names[k])[0])
+            build = max(
+                build, estimates.column(self, op.right, op.right_keys[k])[0]
+            )
+        if probe == 0 or build == 0:
+            reached = 0.0
+        elif probe > 0 and build > 0:
+            reached *= min(1.0, Float64(probe) / Float64(build))
+    var groups = reached
     for key in keys:
         if key in carried:
             continue
-        var count = -1
-        if key in table.columns():
-            count = table._distinct_count(key)
+        var count = estimates.column(self, input, key)[0]
+        if count < 0:
+            return (-1.0, -1.0)
+        groups = min(rows, groups * Float64(max(1, count)))
+    return (rows, min(rows, groups))
+
+
+def _key_payload_bytes(
+    source: DataFrame, joins: List[DataFrame], names: List[String]
+) raises -> Float64:
+    var bytes = 0.0
+    for name in names:
+        var width = -1.0
+        if name in source.columns():
+            width = frame_column_width(source, name)
         else:
             for build in joins:
-                if key in build.columns():
-                    count = distinct_estimate(build.column(key))
+                if name in build.columns():
+                    width = frame_column_width(build, name)
                     break
-        if count <= 0:
-            return (-1.0, -1.0)
-        others *= Float64(count)
-    return (rows, min(rows, reached * others))
+        bytes += width if width >= 0 else 16.0
+    return bytes
 
 
 def select_aggregation_strategy(
@@ -214,6 +229,7 @@ def select_aggregation_strategy(
     late_builds: List[Int],
     eligibility: PipelineEligibility,
     inline_table_eligible: Bool,
+    input_index: Int = -1,
 ) raises -> AggregationDecision:
     """Choose one route, retaining the original preference and sampling order.
 
@@ -391,34 +407,58 @@ def select_aggregation_strategy(
                     best,
                     joins,
                     operations,
+                    input_index,
                 )
                 var merge = _row_merge_reductions(expressions)
-                var unique = _unique_key_column(joins[best], carried)
                 var rows = shape[0]
                 var groups = shape[1]
-                var width = Float64(len(carried))
+                ref source_frame = self._frames[
+                    self._nodes[cursor].source_slot()
+                ]
+                var carried_bytes = _key_payload_bytes(
+                    joins[best], joins, carried
+                )
+                var key_bytes = _key_payload_bytes(source_frame, joins, keys)
                 var build = Float64(joins[best].height())
+                # A row id still has to be carried through the first pass.
+                var saved = rows * max(0.0, carried_bytes - 8.0)
+                # Bound the preparation read separately from output work.
+                var setup = Float64(min(source_frame.height(), 4096)) * 8.0
+                var proof = 2.0 * build * carried_bytes
+                var finish_unique = groups * (carried_bytes + 8.0)
+                var unique = False
+                # Avoid a full uniqueness proof when even the optimistic
+                # no-regroup route cannot repay it.
+                if rows >= 0 and saved > setup + proof + finish_unique:
+                    unique = _unique_key_column(joins[best], carried)
+                    setup += proof
+                choice.key_input_rows = rows
+                choice.key_finish_groups = groups
+                choice.key_saved_work = saved
                 if rows >= 0 and unique:
-                    # Unique values per build row: no two row numbers
-                    # hold equal values, so the first pass's groups are
-                    # final (any reduction) and only their key values
-                    # are read. Paid: the uniqueness check (hash and
-                    # insert one key per build row, 2 units each) and
-                    # reading the k keys of the G groups (k units).
-                    if rows * width > 2.0 * build + groups * width:
+                    choice.key_paid_work = setup + finish_unique
+                    choice.key_cost_reason = "unique_key_gather"
+                    if saved > choice.key_paid_work:
                         choice.row_holder = best
                         choice.row_unique = True
                         choice.row_names = carried^
                 elif rows >= 0 and merge:
-                    # Paid: the regroup of the G groups by all K keys,
-                    # 4 units a key (read from the build, hashed and
-                    # partitioned, inserted and compared, written out)
-                    # and 4 for the group (slot, states' merge, row).
-                    var paid = groups * Float64(4 * len(keys) + 4)
-                    if rows * width > paid:
+                    # Read/hash/partition/compare output keys; copy and merge
+                    # states; carry row ids and assemble the final output.
+                    var state_bytes = Float64(max(1, len(expressions)) * 8)
+                    var finish = groups * (
+                        4.0 * key_bytes + 2.0 * state_bytes + 16.0
+                    )
+                    choice.key_paid_work = setup + finish
+                    choice.key_cost_reason = "final_regroup_and_state_copy"
+                    if saved > choice.key_paid_work:
                         choice.row_holder = best
                         choice.row_merge = merge.take()
                         choice.row_names = carried^
+                else:
+                    choice.key_cost_reason = (
+                        "unknown_shape_or_unmergeable_states"
+                    )
 
     # Right joins require their unmatched build rows to be emitted by a
     # morsel pipeline. A row-only in-memory fallback may prefer eager work.

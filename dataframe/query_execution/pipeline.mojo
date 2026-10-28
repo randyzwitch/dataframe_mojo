@@ -14,6 +14,7 @@ from dataframe.planning.cost.eligibility import (
 from dataframe.planning.cost.model import trace_decision
 from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
+    RowEstimate,
     frame_payload_width,
     trace_join_cost,
 )
@@ -354,14 +355,22 @@ def plan_stream_execute(
             # few hundred parts its filter keeps.
             var bound = plan_height_bound(self, node.left)
             var right_rows = plan_known_height(self, node.right)
-            # A left input made by another join has no bound; how many
-            # rows it holds is known only once it has run.
+            # A join-produced left has no semantic row bound, but may
+            # have a cost estimate before it executes.
             var unbounded = bound < 0 and plan_joins_below(self, node.left)
+            var nested_rows = -1
+            if unbounded and right_rows >= 524288:
+                var estimates = IntermediateEstimates(len(self._nodes))
+                nested_rows = estimates.rows(self, node.left)
+            var small_nested = unbounded and (
+                nested_rows < 0
+                or 4.0 * Float64(nested_rows) <= Float64(right_rows)
+            )
             if (
                 (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                 and plan_known_height(self, node.left) < 0
                 and right_rows >= 524288
-                and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
+                and (small_nested or (bound >= 0 and 4 * bound <= right_rows))
             ):
                 # Under an unordered aggregation into the aggregate
                 # table the join's row order is free: build on the
@@ -419,12 +428,19 @@ def plan_stream_execute(
                 # prepared probe of this one's output, so it takes a
                 # wider margin: PDS-H q16 (200K parts at most, 800K
                 # partsupp rows) was 10% slower leaving it. A left input
-                # made by other joins has no bound and leaves too: PDS-H
+                # made by other joins leaves when estimated small or still
+                # unknown: PDS-H
                 # q5 hashed 6M lineitem rows for about 45K orders, and
                 # q18, q11, q7 and q2 gained 15-44%. Where that input is
                 # large, streaming was faster: q9's partsupp and orders
                 # joins (about 320K rows on the left) are 14% slower.
-                if unbounded or 8 * bound <= right_rows:
+                if (
+                    small_nested
+                    and (
+                        nested_rows < 0
+                        or 8.0 * Float64(nested_rows) <= Float64(right_rows)
+                    )
+                ) or (bound >= 0 and 8 * bound <= right_rows):
                     break
             if (
                 plan_known_height(self, node.left) <= batch_size
@@ -579,6 +595,13 @@ def plan_stream_execute(
                             slot=len(plan._frames) - 1
                         )
                         return plan._execute(index, False, True, batch_size)
+                else:
+                    trace_join_cost(
+                        RowEstimate(known, "known_height", True),
+                        left_width,
+                        right_cost,
+                        False,
+                    )
             if (
                 (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
                 and built.height() >= 524288
@@ -761,6 +784,7 @@ def plan_stream_execute(
         late_builds,
         eligibility,
         inline_table_eligible,
+        terminal.left if terminal.kind == AGG else -1,
     )
     if decision.is_eager():
         trace_decision(decision)

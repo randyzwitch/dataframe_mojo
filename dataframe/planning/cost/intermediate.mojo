@@ -143,6 +143,8 @@ struct IntermediateEstimates(Movable):
     var facts: List[RowEstimate]
     var columns: Dict[String, Tuple[Int, Float64]]
     var widths: Dict[String, Float64]
+    var observed: Dict[Int, DataFrame]
+    var used: Bool
 
     def __init__(out self, count: Int):
         self.facts = List[RowEstimate]()
@@ -150,6 +152,17 @@ struct IntermediateEstimates(Movable):
             self.facts.append(RowEstimate(-2, "not_estimated", False))
         self.columns = Dict[String, Tuple[Int, Float64]]()
         self.widths = Dict[String, Float64]()
+        self.observed = Dict[Int, DataFrame]()
+        self.used = False
+
+    def observe(mut self, index: Int, frame: DataFrame) raises:
+        """Supply an already-executed input before requesting any estimates."""
+        if self.used:
+            raise Error("Observed inputs must be supplied before estimation")
+        self.observed[index] = frame.copy()
+        self.facts[index] = RowEstimate(
+            frame.height(), "observed_intermediate", True
+        )
 
     def _set(
         mut self, index: Int, rows: Int, reason: String, exact: Bool = False
@@ -162,6 +175,7 @@ struct IntermediateEstimates(Movable):
     ) raises -> Tuple[Int, Float64]:
         """Estimated NDV and bytes/value; -1 means no usable lineage."""
         var key = String(index) + "/" + name
+        self.used = True
         if key in self.columns:
             return self.columns[key]
         var result = self._column(plan, index, name)
@@ -172,6 +186,17 @@ struct IntermediateEstimates(Movable):
         mut self, plan: QueryContext, index: Int, name: String
     ) raises -> Tuple[Int, Float64]:
         ref node = plan._nodes[index]
+        if index in self.observed:
+            ref frame = self.observed[index]
+            if (
+                name not in frame.columns()
+                or frame.column(name).dtype().is_nested()
+            ):
+                return (-1, -1.0)
+            return (
+                bounded_distinct(frame.column(name)),
+                frame_column_width(frame, name),
+            )
         if node.kind == SCAN_FRAME:
             ref frame = plan._frames[node.source_slot()]
             if name not in frame.columns():
@@ -237,6 +262,7 @@ struct IntermediateEstimates(Movable):
         return (-1, -1.0)
 
     def rows(mut self, plan: QueryContext, index: Int) raises -> Int:
+        self.used = True
         if self.facts[index].rows != -2:
             return self.facts[index].rows
         ref node = plan._nodes[index]
@@ -260,9 +286,10 @@ struct IntermediateEstimates(Movable):
             var rows = self.rows(plan, node.left)
             if rows >= 0:
                 var offset = node.slice_offset()
-                rows = max(0, rows - offset) if offset >= 0 else min(
-                    rows, -offset
-                )
+                if offset >= 0:
+                    rows = max(0, rows - offset)
+                elif offset > -rows:
+                    rows = -offset
                 if node.slice_length() >= 0:
                     rows = min(rows, node.slice_length())
             return self._set(index, rows, "slice", self.facts[node.left].exact)
@@ -277,7 +304,7 @@ struct IntermediateEstimates(Movable):
                 )
         if node.kind == FILTER and _row_local(node.exprs):
             ref source = plan._nodes[node.left]
-            if source.kind == SCAN_FRAME:
+            if source.kind == SCAN_FRAME or node.left in self.observed:
                 var height = self.rows(plan, node.left)
                 var reads = _references(node.exprs[0])
                 if reads:
@@ -285,14 +312,16 @@ struct IntermediateEstimates(Movable):
                     for name in reads.value():
                         if name not in names:
                             names.append(name)
-                    var sample = plan._frames[source.source_slot()].select(
-                        names
+                    var frame = (
+                        self.observed[node.left].copy() if node.left
+                        in self.observed else plan._frames[
+                            source.source_slot()
+                        ].copy()
                     )
+                    var sample = frame.select(names)
                     var budget = 64 * 1024
                     if height > budget:
-                        sample = plan._frames[source.source_slot()]._sampled(
-                            names, 64, 1024
-                        )
+                        sample = frame._sampled(names, 64, 1024)
                     var kept = true_count(
                         sample._selection(node.exprs[0], 8192)
                     )
@@ -337,9 +366,11 @@ struct IntermediateEstimates(Movable):
                 )
             var domain = 1
             var known = False
+            var empty_domain = False
             for k in range(len(node.names)):
                 var a = self.column(plan, node.left, node.names[k])[0]
                 var b = self.column(plan, node.right, node.right_keys[k])[0]
+                empty_domain = empty_domain or a == 0 or b == 0
                 if a > 0 and b > 0:
                     domain = max(domain, max(a, b))
                     known = True
@@ -348,7 +379,7 @@ struct IntermediateEstimates(Movable):
                 * Float64(right)
                 / Float64(domain) if known else Float64(max(left, right))
             )
-            if left == 0 or right == 0:
+            if left == 0 or right == 0 or empty_domain:
                 matched = 0.0
             if node.how == JOIN_SEMI:
                 matched = min(Float64(left), matched)
@@ -382,6 +413,7 @@ struct IntermediateEstimates(Movable):
         mut self, plan: QueryContext, index: Int, name: String
     ) raises -> Float64:
         var key = String(index) + "/" + name
+        self.used = True
         if key in self.widths:
             return self.widths[key]
         var width = self._column_width(plan, index, name)
@@ -392,6 +424,12 @@ struct IntermediateEstimates(Movable):
         mut self, plan: QueryContext, index: Int, name: String
     ) raises -> Float64:
         ref node = plan._nodes[index]
+        if index in self.observed:
+            ref frame = self.observed[index]
+            return (
+                frame_column_width(frame, name) if name
+                in frame.columns() else -1.0
+            )
         if node.kind == SCAN_FRAME:
             ref frame = plan._frames[node.source_slot()]
             return (
