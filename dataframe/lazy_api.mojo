@@ -126,6 +126,7 @@ from dataframe.parallel import (
 from dataframe.placement import (
     calibration_path,
 )
+from dataframe.devices import DeviceInfo, PipelineFeatures, TransferModel
 from dataframe.plan_types import (
     PlanEstimate,
 )
@@ -2525,6 +2526,26 @@ trait AcceleratorBackend(Copyable):
     ) raises -> Tuple[DataFrame, DataFrame]:
         """Optional measured execution; providers may retain the base report."""
         return self.execute(plan)
+
+    def devices(self) -> List[DeviceInfo]:
+        """Devices this runtime runs pipelines on; none by default."""
+        return List[DeviceInfo]()
+
+    def transfer_model(self, device: Int) -> TransferModel:
+        return TransferModel.unmeasured()
+
+    def pipeline_supports(self, pipeline: LazyFrame, device: Int) -> Bool:
+        return False
+
+    def pipeline_estimate(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Float64:
+        return Float64(-1)
+
+    def run_pipeline(
+        self, pipeline: LazyFrame, device: Int
+    ) raises -> DataFrame:
+        raise Error("provider does not run pipelines")
 
 
 @fieldwise_init
