@@ -24,10 +24,7 @@ from dataframe.binding import (
 from dataframe.dtype import (
     DataType,
 )
-from dataframe.execution import (
-    _ColumnStats,
-    _ReduceJob,
-)
+from dataframe.execution import _ColumnStats, _ReduceJob
 from dataframe.expr import (
     COL,
     CORR,
@@ -41,7 +38,7 @@ from dataframe.frame import (
     DataFrame,
     concat,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
 )
@@ -53,12 +50,12 @@ from dataframe.parallel import (
     run_jobs,
     worker_count,
 )
-from dataframe.partition import (
+from dataframe.kernels.partition import (
     Partitioner,
     encode_partitioned,
     low_cardinality,
 )
-from dataframe.row_encode import (
+from dataframe.kernels.row_encode import (
     STRING_PREFIX_BYTES,
     encodable,
     encode_sort_keys,

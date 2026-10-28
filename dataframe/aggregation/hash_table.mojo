@@ -91,8 +91,8 @@ from dataframe.expr import (
 from dataframe.aggregation.selected_rows import _canonical_int
 from dataframe.storage.allocation import huge_list, huge_uninit
 from dataframe.parallel import Job, configured_workers, run_jobs
-from dataframe.rank import _key
-from dataframe.partition import (
+from dataframe.kernels.rank import _key
+from dataframe.kernels.partition import (
     _NULL_KEY,
     _combine as _hash_combine,
     _hash_bytes,
@@ -100,7 +100,7 @@ from dataframe.partition import (
     _mix,
 )
 from dataframe.series import Series
-from dataframe.hashing import RowKeys
+from dataframe.kernels.hashing import RowKeys
 from dataframe.trace import trace_path
 from dataframe.string_bytes import _Bytes
 from dataframe.storage.string import StringColumn

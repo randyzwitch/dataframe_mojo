@@ -13,7 +13,7 @@ from std.memory import Pointer
 
 from dataframe.storage.allocation import huge_uninit
 from .parallel import Job, partitions, run_jobs
-from .partition import Partitioner, encode_bucket
+from dataframe.kernels.partition import Partitioner, encode_bucket
 from .series import Series
 
 # Id ranges the first pass scatters rows into (DuckDB's window sink uses

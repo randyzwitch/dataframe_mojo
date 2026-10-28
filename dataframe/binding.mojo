@@ -225,11 +225,11 @@ from .expr import (
     PRODUCT,
     CUM_PROD,
 )
-from .replace import values_dtype, replace_supertype
+from dataframe.kernels.replace import values_dtype, replace_supertype
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
-from .horizontal import (
+from dataframe.kernels.horizontal import (
     horizontal_input,
     horizontal_result,
     horizontal_supertype,

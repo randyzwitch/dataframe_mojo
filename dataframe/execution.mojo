@@ -4,8 +4,9 @@ Reductions are separate passes, not per-row callbacks or per-group dataframes.
 The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
+from dataframe.kernels.validity import _valid_lanes
 from dataframe.storage.buffer import _Buffer, _BufferData
-from .expr_kernels import validity
+from dataframe.kernels.binary import validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .identity_metadata import identity_column_source
 from .expr import INT_IS_IN, is_replace
@@ -103,28 +104,28 @@ from .expr import (
     HORIZONTAL_ARGS,
     horizontal_inputs,
 )
-from .horizontal import horizontal
+from dataframe.kernels.horizontal import horizontal
 from .str_kernels import string_op, concat_strings
 from .text_functions import text_function
-from .expr_kernels import integer_is_in
-from .replace import replace_values
-from .list_kernels import nested_op
+from dataframe.kernels.binary import integer_is_in
+from dataframe.kernels.replace import replace_values
+from dataframe.kernels.list import nested_op
 from dataframe.storage.nested import ListColumn, StructColumn
-from .cast import cast_series
+from dataframe.kernels.cast import cast_series
 from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from .hashing import (
+from dataframe.kernels.hashing import (
     RowKeys,
     _encode_dense,
     _encode_dense_chunks,
     encode_rows,
     encode_rows_parallel,
 )
-from .partition import encode_partitioned, low_cardinality
-from .distinct import distinct_counts
+from dataframe.kernels.partition import encode_partitioned, low_cardinality
+from dataframe.kernels.distinct import distinct_counts
 from .window import window_op, interpolate_by_op, rolling_by_op
-from .fusion import fused
-from .temporal_kernels import dt_op, temporal_binary
+from dataframe.kernels.fusion import fused
+from dataframe.kernels.temporal import dt_op, temporal_binary
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import (
     Column,
@@ -135,7 +136,7 @@ from dataframe.storage.column import (
 from dataframe.storage.string import StringColumn, StringBuilder
 from .string_predicates import _flip
 from .series import Series
-from .expr_kernels import (
+from dataframe.kernels.binary import (
     binary,
     unary,
     choose,
@@ -1589,20 +1590,6 @@ def _direct_float_sum(
     return False
 
 
-@always_inline
-def _valid_lanes(
-    bits: Pointer[UInt8, MutAnyOrigin], bit: Int
-) -> SIMD[DType.bool, 8]:
-    """Validity of the 8 rows starting at bitmap position `bit`."""
-    var mask = UInt16(bits.unsafe_load(bit // 8)) >> UInt16(bit % 8)
-    if bit % 8 > 0:
-        mask |= UInt16(bits.unsafe_load(bit // 8 + 1)) << UInt16(8 - bit % 8)
-    return (
-        SIMD[DType.uint16, 8](mask)
-        & SIMD[DType.uint16, 8](1, 2, 4, 8, 16, 32, 64, 128)
-    ).ne(SIMD[DType.uint16, 8](0))
-
-
 # Rows summed in Int64 lanes before folding into the 128-bit total. Each of
 # 8 lanes adds at most 2**27 values below 2**32 in magnitude (narrow values
 # whole, 64-bit ones as 32-bit halves), so no lane can overflow.
@@ -2793,7 +2780,7 @@ def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
 # Imported here, not with the others: a recorded process-failure diagnostic
 # in tests/tooling/suite_policy.mojo names a line number above.
 from dataframe.aggregation.hash_table import key_supported, table_row_keys
-from .gather import take_parallel
+from dataframe.kernels.gather import take_parallel
 from .parallel import configured_workers
 from .window_layout import PartitionLayout, keyed_layout, partition_layout
 

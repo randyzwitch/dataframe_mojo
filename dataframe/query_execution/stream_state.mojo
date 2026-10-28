@@ -22,7 +22,7 @@ from dataframe.io.csv_reader import (
 from dataframe.io.json_parallel import (
     _DecodeJob as _JsonDecodeJob,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
 )
 from dataframe.join_type import (

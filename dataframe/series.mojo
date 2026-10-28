@@ -26,11 +26,11 @@ from .parallel import (
 )
 from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
-from .cast import cast_series
+from dataframe.kernels.cast import cast_series
 from .expr import Expr, col
 from .frame import DataFrame
 from .trace import trace_path
-from .comparison_sort import KeyOrder, comparison_arg_sort
+from dataframe.kernels.comparison_sort import KeyOrder, comparison_arg_sort
 
 # Storage holds Column[Scalar[D]] for each D in NUMERIC_DTYPES, BoolColumn
 # (bit-packed values),
@@ -1330,7 +1330,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     ) raises -> List[Int]:
         """Stable sort order: ranks are resolved once, then merged by Int."""
         from .categorical import sort_ranks
-        from .packed_sort import packed_arg_sort
+        from dataframe.kernels.packed_sort import packed_arg_sort
 
         if self._dtype.is_categorical():
             return sort_ranks(self).argsort(descending, nulls_last)

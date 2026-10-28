@@ -2,7 +2,7 @@
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     encode_rows,
 )
 from dataframe.joins.range import (
@@ -11,7 +11,7 @@ from dataframe.joins.range import (
 from dataframe.parallel import (
     worker_count,
 )
-from dataframe.partition import (
+from dataframe.kernels.partition import (
     encode_partitioned,
     low_cardinality,
 )

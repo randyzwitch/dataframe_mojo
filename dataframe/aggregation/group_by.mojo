@@ -30,7 +30,7 @@ from dataframe.binding import (
     BoundExpr,
     bind,
 )
-from dataframe.canonical_labels import (
+from dataframe.kernels.canonical_labels import (
     canonical_labels,
 )
 from dataframe.categorical import (
@@ -58,7 +58,7 @@ from dataframe.frame import (
     DataFrame,
     concat,
 )
-from dataframe.gather import (
+from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
     take_parallel,
     take_sorted_chunked,
@@ -67,7 +67,7 @@ from dataframe.aggregation.hash_reduce import (
     hash_agg_eligible,
     hash_aggregate,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
     encode_rows_parallel,
@@ -88,7 +88,7 @@ from dataframe.parallel import (
     run_jobs,
     worker_count,
 )
-from dataframe.partition import (
+from dataframe.kernels.partition import (
     Partitioner,
     encode_bucket,
     low_cardinality,

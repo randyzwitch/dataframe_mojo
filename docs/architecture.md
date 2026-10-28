@@ -266,3 +266,29 @@ categorical child append calls dictionary unification. Logical dtype metadata
 also remains shared. Those representation dependencies predate this extraction;
 they do not permit storage to select or execute a query. `io/` and `regex/`
 remain their existing domains; later PRs organize computational and text code.
+
+## Computational kernels
+
+`kernels/` owns work over typed in-memory columns: binary/float arithmetic,
+casts and temporal/list operations; gather and mask selection; key hashing,
+partitioning, joins, distinct sketches and code remapping; row encoding,
+sorting, top-k and rank; fused comparisons, sorted search and validity decoding.
+Legacy root modules re-export their declarations. Engine and provider imports
+use the canonical modules. Existing tests continue exercising legacy imports.
+
+Expression preparation remains above this boundary. `fused_compare.mojo`
+binds/evaluates constants and prepares comparisons and selection trees, then
+calls the comparison kernel. `sorted_range.mojo` binds/evaluates filter bounds
+and combines them before calling typed sorted-search kernels. Neither kernel
+imports its adapter or the expression evaluator. The shared eight-lane bitmap
+primitive lives in `kernels/validity.mojo`; execution re-exports it for existing
+consumers. Existing bound-expression value models and operation tags can be
+inputs to a kernel, but binding or query execution cannot run from a kernel.
+
+The kernel gate rejects query/expression execution, provider dispatch, and
+legacy kernel facade imports from engine code. It distinguishes the
+`BoundExpr` representation from binding behavior. Existing dependencies on
+storage, Series/dtype representations, aggregation, text primitives and typed
+expression descriptions remain; this PR does not claim an acyclic graph among
+all value representations and computational helpers. No route order,
+threshold, algorithm, expression timing, layout or ownership rule changes.

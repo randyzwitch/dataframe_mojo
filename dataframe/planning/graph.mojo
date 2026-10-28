@@ -21,7 +21,7 @@ from dataframe.aggregation.expressions import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     int64_progression,
 )
 from dataframe.join_order import (

@@ -54,7 +54,7 @@ from dataframe.storage.field_metadata import (
 )
 from ..geospatial_metadata import apply_geoparquet_metadata
 from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
-from ..hashing import encode_string_rows_parallel
+from dataframe.kernels.hashing import encode_string_rows_parallel
 from ..frame import DataFrame
 from ..parallel import Job, Pool, worker_count
 from std.sys import CompilationTarget

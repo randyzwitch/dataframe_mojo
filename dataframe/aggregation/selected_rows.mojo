@@ -20,7 +20,7 @@ from std.memory import Pointer, bitcast
 from dataframe.aggregation.reducer import Reducer, float_key, quantile_in
 from dataframe.binding import BoundExpr, bind
 from dataframe.storage.column import Column
-from dataframe.partition import _mix
+from dataframe.kernels.partition import _mix
 from dataframe.execution import _new_reducer, _batch, evaluate
 from dataframe.expr import (
     COUNT,

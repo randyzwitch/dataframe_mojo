@@ -23,7 +23,7 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
 )
 from dataframe.join_type import (

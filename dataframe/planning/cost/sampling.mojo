@@ -5,7 +5,7 @@ from dataframe.aggregation.expressions import (
 from dataframe.aggregation.state import (
     _StreamReduction,
 )
-from dataframe.distinct_statistics import (
+from dataframe.kernels.distinct_statistics import (
     distinct_estimate,
 )
 from dataframe.expr import (
@@ -15,7 +15,7 @@ from dataframe.frame import (
     DataFrame,
     concat,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     encode_rows,
 )
 from dataframe.planning.expression_inputs import (

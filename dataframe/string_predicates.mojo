@@ -15,7 +15,7 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import _copy_validity
 from .expr import EQ, GE, GT, LE, LT, NE
 from .parallel import Job, run_jobs, worker_count
-from .partition import _hash_bytes
+from dataframe.kernels.partition import _hash_bytes
 from .series import Series
 from .string_bytes import (
     _Bytes,
