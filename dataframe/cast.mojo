@@ -7,7 +7,8 @@ infinities, and out-of-range values.
 """
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
-from .bool_column import BoolColumn
+from std.bit import count_trailing_zeros
+from .bool_column import BoolColumn, _bits64
 from .column import Column, _copy_validity
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
@@ -534,9 +535,29 @@ def _cast_exact(input: Series, target: DataType) raises -> Optional[Series]:
                                 T
                             ]()
                         if nulls:
-                            for i in range(n):
-                                if not column._valid(i):
-                                    to[unsafe_offset=i] = 0
+                            # Null slots to zero, 64 rows a word: a word of
+                            # valid rows is skipped whole rather than read
+                            # bit by bit.
+                            var i = 0
+                            while i < n:
+                                var word = _bits64(
+                                    column._bits[],
+                                    column._offset + i,
+                                    column._offset + n,
+                                )
+                                var rows = min(64, n - i)
+                                var full = (
+                                    UInt64(0xFFFFFFFFFFFFFFFF) if (
+                                        rows == 64
+                                    ) else (UInt64(1) << UInt64(rows))
+                                    - 1
+                                )
+                                var missing = ~word & full
+                                while missing != 0:
+                                    var j = Int(count_trailing_zeros(missing))
+                                    to[unsafe_offset=i + j] = 0
+                                    missing &= missing - 1
+                                i += 64
                         return Series(
                             input.name(),
                             Column[Scalar[T]](

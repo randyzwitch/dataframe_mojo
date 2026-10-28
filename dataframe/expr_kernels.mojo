@@ -251,6 +251,25 @@ def _binary_validity[
     if len(right._bits[]) == 0:
         return bits^
     var scalar = len(right) == 1
+    if not scalar and right._offset % 8 == 0:
+        # Both bitmaps now start on a byte (the left was copied to row 0):
+        # AND them a vector of bytes at a time.
+        var dst = bits.unsafe_ptr()
+        var src = right._bits[].unsafe_ptr().unsafe_offset(right._offset // 8)
+        var count = min(len(bits), len(right._bits[]) - right._offset // 8)
+        var k = 0
+        while k + 32 <= count:
+            dst.unsafe_offset(k).unsafe_store(
+                dst.unsafe_offset(k).unsafe_load[width=32]()
+                & src.unsafe_offset(k).unsafe_load[width=32]()
+            )
+            k += 32
+        while k < count:
+            dst.unsafe_offset(k)[] &= src.unsafe_offset(k)[]
+            k += 1
+        for rest in range(count, len(bits)):
+            bits[rest] = 0
+        return bits^
     var fill = UInt8(255) if scalar and right._valid(0) else UInt8(0)
     for k in range(len(bits)):
         bits[k] &= fill if scalar else _window_byte(

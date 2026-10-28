@@ -294,6 +294,20 @@ def _bits64(bits: Span[UInt8, _], bit: Int, length: Int) -> UInt64:
         return _FULL if left >= 64 else (UInt64(1) << UInt64(max(left, 0))) - 1
     var byte = bit >> 3
     var shift = UInt64(bit & 7)
+    if byte + 9 <= len(bits):
+        # Room for all nine bytes: one unaligned eight-byte load and the
+        # ninth byte's spill, not a bounds-checked read per byte (the
+        # filter's compaction reads every morsel word's validity here).
+        var at = bits.unsafe_ptr().unsafe_offset(byte)
+        var loaded = bitcast[DType.uint64, 1](at.unsafe_load[width=8]())
+        var spill = UInt64(at.unsafe_offset(8)[])
+        var fast = loaded >> shift
+        if shift > 0:
+            fast |= spill << (64 - shift)
+        var remaining = length - bit
+        if remaining < 64:
+            fast &= (UInt64(1) << UInt64(max(remaining, 0))) - 1
+        return fast
     var word = UInt64(0)
     var last = min(byte + 9, len(bits))
     var k = 0
