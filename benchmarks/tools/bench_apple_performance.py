@@ -2,7 +2,7 @@
 
 Preparation/building and measurement are separate invocations. Run only after
 feature work on a quiet Mac. Strict CPU/GPU coverage and the external DuckDB
-summary policy are separate evidence; neither changes the other's outcome.
+complete-result checks are separate evidence; neither changes the other's outcome.
 """
 import argparse
 import datetime
@@ -27,6 +27,7 @@ import metal_query_report as coverage
 
 ENGINES = ("cpu", "metal")
 FORMAT = "dataframe-apple-query-performance-v1"
+ANSWER_POLICY = "suite-complete-selection-v1"
 
 
 def sha(path):
@@ -94,12 +95,44 @@ def schedule(cases, rounds):
     return result
 
 
-def parse(output, repetitions, warmups, allow_incomplete=False):
+def parse(
+    output,
+    repetitions,
+    warmups,
+    allow_incomplete=False,
+    answer_directory=None,
+    query=None,
+):
     samples = {}
     outcomes = []
     for line in output.splitlines():
         fields = line.split("\t")
-        if fields[0] == "outcome":
+        if fields[0] == "complete_answer":
+            if (
+                len(fields) != 3
+                or fields[1] != query
+                or answer_directory is None
+            ):
+                raise ValueError("Malformed complete answer identity")
+            receipt = suites.suite_answers.pin_export(
+                json.loads(fields[2]), answer_directory, query
+            )
+            ordinal = receipt["repetition"]
+            if ordinal == 0:
+                phase, index = "cold", 0
+            elif ordinal <= warmups:
+                phase, index = "warmup", ordinal - 1
+            elif ordinal < 1 + warmups + repetitions:
+                phase, index = "warm", ordinal - warmups - 1
+            else:
+                raise ValueError("Unexpected complete answer repetition")
+            sample = samples.setdefault(
+                (phase, index), dict(phase=phase, index=index)
+            )
+            if "complete_answer" in sample:
+                raise ValueError("Duplicate complete answer")
+            sample["complete_answer"] = receipt
+        elif fields[0] == "outcome":
             if len(fields) != 3 or fields[1] not in {
                 "ok",
                 "unsupported",
@@ -116,7 +149,9 @@ def parse(output, repetitions, warmups, allow_incomplete=False):
             limits = {"cold": 1, "warmup": warmups, "warm": repetitions}
             if phase not in limits or not 0 <= index < limits[phase]:
                 raise ValueError("Unexpected sample phase or index")
-            sample = samples.setdefault((phase, index), dict(phase=phase, index=index))
+            sample = samples.setdefault(
+                (phase, index), dict(phase=phase, index=index)
+            )
             name = "ns" if fields[0] == "sample" else "summary"
             if name in sample:
                 raise ValueError("Duplicate performance sample")
@@ -126,7 +161,9 @@ def parse(output, repetitions, warmups, allow_incomplete=False):
                     raise ValueError("Negative query duration")
                 sample[name] = value
             else:
-                values = [float(v) for v in fields[4].split(",")] if fields[4] else []
+                values = [float(v) for v in fields[4].split(",")] if fields[
+                    4
+                ] else []
                 names = fields[5].split(",") if fields[5] else []
                 height = int(fields[3])
                 if height < 0 or len(values) != len(names):
@@ -138,7 +175,9 @@ def parse(output, repetitions, warmups, allow_incomplete=False):
                     names=names,
                 )
     if not outcomes and allow_incomplete:
-        return dict(status="uncompleted_protocol", samples=list(samples.values()))
+        return dict(
+            status="uncompleted_protocol", samples=list(samples.values())
+        )
     if len(outcomes) != 1:
         raise ValueError("Missing or ambiguous performance outcome")
     outcome = outcomes[0]
@@ -223,23 +262,47 @@ def oracle_checks(run, reference):
     if reference.get("status") != "ok":
         return dict(status=reference.get("status", "unavailable"), samples=[])
     checks = []
-    for sample in run.get("samples", []):
-        if "summary" not in sample:
-            continue
-        got = dict(
-            sample["summary"], values=[float(v) for v in sample["summary"]["values"]]
+    try:
+        if (
+            reference.get("answer_error")
+            or reference.get("oracle_error")
+            or len(reference.get("oracles", [])) != 1
+        ):
+            raise ValueError("missing independent full relation")
+        suite, query = run["suite"], run["query"]
+        record = reference["oracles"][0]
+        if record.get("query") != query:
+            raise ValueError("independent oracle query identity differs")
+        oracle = suites.suite_schema.normalize(
+            suites.suite_answers.load_answer(record), suite, query
         )
-        checks.append(
-            dict(
-                phase=sample["phase"],
-                index=sample["index"],
-                equal=suites.same_answer(
-                    run["suite"], run["query"], got, reference["summary"]
-                ),
+        tolerant = suites.suite_answers.tolerant_columns(suite, query, oracle)
+        for sample in run.get("samples", []):
+            record = sample.get("complete_answer")
+            if record is None or record.get("query") != query:
+                raise ValueError("missing complete timed answer")
+            actual = suites.suite_schema.normalize(
+                suites.suite_answers.load_answer(record), suite, query
             )
-        )
+            comparison = suites.suite_answers.compare_selection(
+                actual, oracle, tolerant_columns=tolerant
+            )
+            if comparison["status"] == "unverified":
+                raise ValueError(comparison["reason"])
+            checks.append(
+                dict(
+                    phase=sample["phase"],
+                    index=sample["index"],
+                    equal=comparison["status"] == "equal",
+                    reason=comparison["reason"],
+                )
+            )
+    except (OSError, ValueError, TypeError, KeyError, ImportError) as error:
+        return dict(status="unverified", reason=str(error), samples=checks)
     return dict(
-        status="matches" if checks and all(c["equal"] for c in checks) else "differs",
+        status="matches" if checks
+        and all(c["equal"] for c in checks) else "differs",
+        format=ANSWER_POLICY,
         samples=checks,
     )
 
@@ -248,14 +311,19 @@ def ratio_basis(runs, strict, rounds, repetitions):
     """Conservative admission only; HTML and aggregate ratios are a later step."""
     if not strict.get("runtime_audit_verified"):
         return "runtime_adjudication_unverified"
-    if not strict.get("verified") or strict.get("execution_boundary") != "gpu_collects":
+    if (
+        not strict.get("verified")
+        or strict.get("execution_boundary") != "gpu_collects"
+    ):
         return "unverified_or_hybrid_exact_basis"
     runtime = strict.get("runtime_adjudication", {})
     if runtime.get("cpu_adjudicated_calls", 0) > 0:
         return "cpu_data_fault_adjudication_observed"
     for engine in ENGINES:
         values = [r for r in runs if r["engine"] == engine]
-        if len(values) != rounds or {r["round"] for r in values} != set(range(rounds)):
+        if len(values) != rounds or {r["round"] for r in values} != set(
+            range(rounds)
+        ):
             return "incomplete_rounds"
         for run in values:
             if (
@@ -264,7 +332,10 @@ def ratio_basis(runs, strict, rounds, repetitions):
                 or run.get("busy_host")
             ):
                 return "failed_or_contaminated_run"
-            if run.get("oracle", {}).get("status") != "matches":
+            if (
+                run.get("oracle", {}).get("status") != "matches"
+                or run["oracle"].get("format") != ANSWER_POLICY
+            ):
                 return "external_answer_policy_not_verified"
             if (
                 len(
@@ -277,7 +348,7 @@ def ratio_basis(runs, strict, rounds, repetitions):
                 != repetitions
             ):
                 return "incomplete_warm_samples"
-    return "eligible_separate_exact_and_external_summary_evidence"
+    return "eligible_separate_exact_and_external_complete_evidence"
 
 
 def input_plan(selected, wanted, scale):
@@ -377,15 +448,22 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--prepare-inputs", action="store_true")
-    parser.add_argument("--strict-coverage", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--strict-coverage", type=Path, action="append", default=[]
+    )
     parser.add_argument(
         "--case-metadata", type=Path, default=TOOLS / "metal_case_metadata.json"
     )
     args = parser.parse_args()
     selected = args.suites.split(",")
-    if not set(selected) <= set(suites.SUITES) or len(set(selected)) != len(selected):
+    if not set(selected) <= set(suites.SUITES) or len(set(selected)) != len(
+        selected
+    ):
         parser.error("Unknown or duplicate suite")
-    if min(args.rounds, args.reps, args.warmups, args.threads, args.timeout) < 1:
+    if (
+        min(args.rounds, args.reps, args.warmups, args.threads, args.timeout)
+        < 1
+    ):
         parser.error("Execution settings must be positive")
     if sum((args.prepare_only, args.build_only, args.prepare_inputs)) > 1:
         parser.error(
@@ -410,7 +488,8 @@ def main():
     binaries = {name: directory / ("performance_" + name) for name in runners}
     if args.prepare_inputs:
         (directory / "performance-inputs.json").write_text(
-            json.dumps(input_plan(selected, wanted, args.scale), indent=2) + "\n"
+            json.dumps(input_plan(selected, wanted, args.scale), indent=2)
+            + "\n"
         )
         return
     if args.prepare_only:
@@ -482,7 +561,9 @@ def main():
     result = dict(
         format=FORMAT,
         provenance=dict(
-            recorded_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            recorded_at_utc=datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
             engine=engine,
             harness_revision=command(["git", "rev-parse", "HEAD"]),
             harness_status=command(
@@ -521,7 +602,7 @@ def main():
             case_metadata_sha256=sha(args.case_metadata),
             input_manifest_sha256=sha(directory / "performance-inputs.json"),
             evaluation=bench_policy.record(ROOT, selected, suites.SUITES),
-            oracle_policy="Independent DuckDB upstream SQL summary via existing bench_suites.same_answer/CHECKS. Separate from exact CPU/GPU multiset comparison; cannot excuse strict differences.",
+            oracle_policy="Complete typed answers outside timing, checked against independent DuckDB full relations, multiplicities and ordered LIMIT/OFFSET selections. Explicit suite numerical/schema policies apply. Separate exact CPU/GPU coverage remains required.",
             oracle_worker_sha256=sha(ROOT / "benchmarks/suites/engines.py"),
             oracle_runtime=oracle_runtime_identity(),
             exposure_note="Existing development/heldout policy retained. These runs measure correctness and complete collection; heldout timing results are not a tuning license.",
@@ -579,11 +660,24 @@ def main():
                 planned["query"],
                 "0",
             ] + [n + "=" + v["path"] for n, v in planned["inputs"].items()]
-            reference = execute(argv, env, args.timeout)
+            reference_directory = (
+                directory / "oracle-answers" / key.replace("/", "-")
+            )
+            reference_directory.mkdir(parents=True, exist_ok=True)
+            reference = execute(
+                argv,
+                dict(
+                    env,
+                    DATAFRAME_SUITE_ANSWER_DIR=str(
+                        reference_directory.resolve()
+                    ),
+                ),
+                args.timeout,
+            )
             if reference["status"] == "completed":
-                parsed = suites.parse(reference["stdout"], [planned["query"]])[
-                    planned["query"]
-                ]
+                parsed = suites.parse(
+                    reference["stdout"], [planned["query"]], reference_directory
+                )[planned["query"]]
                 # Store finite/nonfinite summary values as strings in strict JSON.
                 if "summary" in parsed:
                     # The workers' answer lines carry no neighbouring-column
@@ -609,8 +703,16 @@ def main():
             str(args.reps),
             str(args.warmups),
         ] + [n + "=" + v["path"] for n, v in planned["inputs"].items()]
-        raw = execute(argv, env, args.timeout)
         label = f"{planned['suite']}-{planned['variant']}-{planned['query']}-{planned['engine']}-{planned['round']}"
+        answer_directory = directory / "answers" / label
+        answer_directory.mkdir(parents=True, exist_ok=True)
+        raw = execute(
+            argv,
+            dict(
+                env, DATAFRAME_SUITE_ANSWER_DIR=str(answer_directory.resolve())
+            ),
+            args.timeout,
+        )
         log = logs / (label + ".txt")
         log.write_text(raw["stdout"] + "\nSTDERR\n" + raw["stderr"])
         run = dict(
@@ -632,16 +734,20 @@ def main():
                 args.reps,
                 args.warmups,
                 allow_incomplete=raw["status"] != "completed",
+                answer_directory=answer_directory,
+                query=planned["query"],
             )
             if raw["status"] == "completed":
                 run.update(parsed)
             else:
                 run["samples"] = parsed["samples"]
-        except ValueError as error:
+        except (OSError, ValueError, TypeError, KeyError) as error:
             run["protocol_error"] = str(error)
             if raw["status"] == "completed":
                 run.update(status="protocol_failed", reason=str(error))
-        reference = result["oracle"][key].get("answer", dict(status="unavailable"))
+        reference = result["oracle"][key].get(
+            "answer", dict(status="unavailable")
+        )
         if "summary" in reference:
             reference = dict(
                 reference,
@@ -655,7 +761,9 @@ def main():
         save()
         print(label, run["status"], flush=True)
     for case in cases:
-        runs = [r for r in result["runs"] if coverage.key(r) == coverage.key(case)]
+        runs = [
+            r for r in result["runs"] if coverage.key(r) == coverage.key(case)
+        ]
         case["ratio_basis"] = ratio_basis(
             runs, case["strict_basis"], args.rounds, args.reps
         )
@@ -664,7 +772,10 @@ def main():
     )
     result["engine_unchanged_after"] = engine_identity(tree) == engine
     result["inputs_unchanged_after"] = inputs_unchanged(cases)
-    if not result["engine_unchanged_after"] or not result["inputs_unchanged_after"]:
+    if (
+        not result["engine_unchanged_after"]
+        or not result["inputs_unchanged_after"]
+    ):
         for case in cases:
             case["ratio_basis"] = "engine_or_inputs_changed_during_measurement"
     save()

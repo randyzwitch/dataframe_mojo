@@ -1,4 +1,4 @@
-"""Complete-collection samples; answer summaries and table loading are untimed.
+"""Complete-collection samples; answer exports and table loading are untimed.
 
 A fresh process handles one query, engine and round. 'cold' is its first
 query invocation after loading; it does not claim cold filesystem caches.
@@ -8,6 +8,7 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from dataframe import DataFrame, read_parquet
 from suite_common import summary_value
+from answer_exports import export_answer
 
 
 def _clean(value: String) -> String:
@@ -17,13 +18,18 @@ def _clean(value: String) -> String:
 def _invoke[
     query: def(String, Dict[String, DataFrame]) raises thin -> DataFrame
 ](
-    name: String, tables: Dict[String, DataFrame], phase: String, index: Int
+    name: String,
+    tables: Dict[String, DataFrame],
+    phase: String,
+    index: Int,
+    answer_index: Int,
 ) raises:
     var started = perf_counter_ns()
     var result = query(name, tables)
     var elapsed = perf_counter_ns() - started
     print("sample\t" + phase + "\t" + String(index) + "\t" + String(elapsed))
     try:
+        export_answer(result, name, answer_index, "complete_answer")
         var values = String()
         var columns = String()
         for i in range(result.width()):
@@ -69,11 +75,11 @@ def run[
         print("outcome\tinput_failed\t" + _clean(String(error)))
         return
     try:
-        _invoke[query](name, tables, "cold", 0)
+        _invoke[query](name, tables, "cold", 0, 0)
         for i in range(warmups):
-            _invoke[query](name, tables, "warmup", i)
+            _invoke[query](name, tables, "warmup", i, 1 + i)
         for i in range(repetitions):
-            _invoke[query](name, tables, "warm", i)
+            _invoke[query](name, tables, "warm", i, 1 + warmups + i)
     except error:
         var reason = _clean(String(error))
         var status = "answer_failed" if reason.startswith(

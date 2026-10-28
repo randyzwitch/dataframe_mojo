@@ -572,10 +572,6 @@ def legacy_summary_agrees(suite, query, got, want, variant=None):
     return True
 
 
-# Compatibility for the Apple collector, migrated in the next stacked PR.
-# CPU correctness evaluation never calls this legacy summary comparator.
-same_answer = legacy_summary_agrees
-
 # --- measurement -------------------------------------------------------------
 
 

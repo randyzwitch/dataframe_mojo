@@ -15,6 +15,7 @@ spec = importlib.util.spec_from_file_location(
 )
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
+from suite_answer_fixture import export_fixture  # suite_answer_fixture.py
 
 
 def fixture():
@@ -107,7 +108,9 @@ def fixture():
         data["oracle"]["/".join(report.coverage.key(case))] = dict(
             status="completed",
             answer=dict(
-                status="ok", summary=dict(height=2, values=["3.0"], names=["value"])
+                status="ok",
+                summary=dict(height=2, values=["3.0"], names=["value"]),
+                oracles=[export_fixture(oracle=True)],
             ),
         )
         for round_index in range(3):
@@ -120,10 +123,16 @@ def fixture():
                     dict(phase="warmup", index=0, ns=base * 2),
                 ]
                 samples += [
-                    dict(phase="warm", index=i, ns=base + i * 10) for i in range(3)
+                    dict(phase="warm", index=i, ns=base + i * 10)
+                    for i in range(3)
                 ]
-                for sample in samples:
-                    sample["summary"] = dict(height=2, values=["3.0"], names=["value"])
+                for ordinal, sample in enumerate(samples):
+                    sample["summary"] = dict(
+                        height=2, values=["3.0"], names=["value"]
+                    )
+                    sample["complete_answer"] = export_fixture(
+                        repetition=ordinal
+                    )
                 data["runs"].append(
                     dict(
                         case,
@@ -134,8 +143,12 @@ def fixture():
                         oracle=dict(status="matches"),
                         compiler_overlap=False,
                         busy_host=False,
-                        host_before=dict(compilers=[], load_average=[0.1, 0.1, 0.1]),
-                        host_after=dict(compilers=[], load_average=[0.2, 0.2, 0.2]),
+                        host_before=dict(
+                            compilers=[], load_average=[0.1, 0.1, 0.1]
+                        ),
+                        host_after=dict(
+                            compilers=[], load_average=[0.2, 0.2, 0.2]
+                        ),
                     )
                 )
     return data, strict
@@ -229,13 +242,21 @@ class ApplePerformanceHTML(unittest.TestCase):
         data, strict = fixture()
         self.assertEqual(report.analyze(data, [], {})["admitted_cases"], 0)
 
-    def test_rechecks_individual_sample_summaries_not_cached_oracle_status(self):
+    def test_rechecks_individual_complete_answers_not_cached_oracle_status(
+        self,
+    ):
         data, strict = fixture()
-        data["runs"][0]["samples"][0]["summary"]["values"] = ["9999"]
-        self.assertIsNone(report.analyze(data, [strict], {})["rows"][0]["ratio"])
+        data["runs"][0]["samples"][0]["complete_answer"] = export_fixture(
+            {"id1": ["a", "b"], "v1": [9999, 2]}
+        )
+        self.assertIsNone(
+            report.analyze(data, [strict], {})["rows"][0]["ratio"]
+        )
         data, strict = fixture()
         data["oracle"].clear()
-        self.assertEqual(report.analyze(data, [strict], {})["admitted_cases"], 0)
+        self.assertEqual(
+            report.analyze(data, [strict], {})["admitted_cases"], 0
+        )
 
     def test_missing_failure_busy_or_changed_identity_stays_visible_without_ratio(self):
         for mode in (

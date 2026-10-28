@@ -22,8 +22,7 @@ selects one successful answer per engine, leaving later rounds unchecked and
 potentially hiding failed rounds behind a successful one. None of these
 summaries proves equality, even when all summary fields agree. That behavior
 now survives only as `legacy_summary_agrees`, a diagnostic regression witness
-which CPU performance admission does not call. The existing Apple collector
-retains its legacy comparator until the next stacked change.
+which neither CPU nor Apple performance admission calls.
 
 Regression cases in `tests/tooling/test_answer_checks.py` preserve concrete
 counterexamples. These tests initially document false acceptance by the
@@ -101,8 +100,8 @@ checked for all ordered/limited queries, including q24's hidden EventTime
 and TPC-DS base q67's rank column. Queries without output ordering use
 multisets. Approximate field matching reuses the Metal comparator, while the
 reference relation always comes from independent SQL, not another execution
-of the native engine. Complete-result adoption by the Apple timing collector
-is the next stacked change.
+of the native engine. Apple performance collection also exports complete
+cold, warmup and timed answers; its renderer rechecks the retained evidence.
 
 `suite_schema.py` records intentional translation aliases and narrow integer
 transport equivalences. Decimal storage width and string offset width are
