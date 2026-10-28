@@ -7,9 +7,9 @@ value so far, and is NaN only before the first number (#816). A
 rolling_min or rolling_max window holding a NaN is NaN.
 """
 from dataframe.storage.boolean import BoolColumn
-from .canonical_labels import canonical_labels
-from .hashing import encode_rows
-from .partition import encode_partitioned, low_cardinality
+from dataframe.kernels.canonical_labels import canonical_labels
+from dataframe.kernels.hashing import encode_rows
+from dataframe.kernels.partition import encode_partitioned, low_cardinality
 from .parallel import worker_count
 from dataframe.storage.column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
@@ -46,7 +46,7 @@ from .expr import (
     QCUT,
     SEP,
 )
-from .expr_kernels import checked_add, validity
+from dataframe.kernels.binary import checked_add, validity
 from dataframe.storage.string import StringColumn
 from dataframe.storage.nested import StructColumn
 from .parse import parse_float64
@@ -54,8 +54,8 @@ from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt
 from .series import Series, sort_indices
-from .rank import rank_numeric
-from .packed_sort import packed_arg_sort
+from dataframe.kernels.rank import rank_numeric
+from dataframe.kernels.packed_sort import packed_arg_sort
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 

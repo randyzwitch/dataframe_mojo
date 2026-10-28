@@ -12,20 +12,20 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.gather import (
+from dataframe.kernels.gather import (
     filter_range_int64_chunks,
 )
 from dataframe.storage.allocation import (
     huge_capacity,
     huge_uninit,
 )
-from dataframe.join_fuse import (
+from dataframe.kernels.join_fuse import (
     FusedJoin,
     MatchJob,
     fused_gather,
     probe_blocks,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     RowsCopyJob,
     int64_progression,
 )

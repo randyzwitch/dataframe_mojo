@@ -9,9 +9,7 @@ from dataframe.dtype import (
     DataType,
     NUMERIC_DTYPES,
 )
-from dataframe.execution import (
-    evaluate,
-)
+from dataframe.execution import evaluate
 from dataframe.expr import (
     AND,
     CAST,

@@ -2,7 +2,7 @@
 from dataframe.storage.boolean import (
     BoolColumn,
 )
-from dataframe.canonical_labels import (
+from dataframe.kernels.canonical_labels import (
     canonical_labels,
 )
 from dataframe.storage.column import (

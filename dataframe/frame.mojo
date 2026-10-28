@@ -19,14 +19,10 @@ from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from .series import Series, sort_indices
-from .distinct_statistics import TableStatistics
-from .fused_compare import (
-    SelectionTree,
-    fused_comparisons,
-    fused_mask,
-    selection_tree,
-)
-from .sorted_range import sorted_window
+from dataframe.kernels.distinct_statistics import TableStatistics
+from dataframe.kernels.fused_compare import SelectionTree, fused_mask
+from dataframe.fused_compare import fused_comparisons, selection_tree
+from dataframe.sorted_range import sorted_window
 from .expr import (
     Expr,
     MODE,
@@ -54,13 +50,10 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .execution import (
-    WindowLayouts,
-    evaluate,
-)
-from .sampling import sample_size, sample_indices
-from .mask_filter import filter_columns
-from .gather import (
+from dataframe.execution import WindowLayouts, evaluate
+from dataframe.kernels.sampling import sample_size, sample_indices
+from dataframe.kernels.mask_filter import filter_columns
+from dataframe.kernels.gather import (
     _RechunkJob,
     take_parallel,
     take_sorted_chunked,
@@ -73,11 +66,11 @@ from .parallel import (
     run_jobs,
     worker_count,
 )
-from .partition import (
+from dataframe.kernels.partition import (
     encode_partitioned,
     low_cardinality,
 )
-from .join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
 )
 from .join_type import (
@@ -88,7 +81,7 @@ from .join_type import (
 )
 from dataframe.storage.nested import ListColumn, StructColumn
 from .trace import trace_path
-from .row_encode import encodable, encode_sort_keys
+from dataframe.kernels.row_encode import encodable, encode_sort_keys
 from .categorical import (
     recode,
     sort_ranks,
@@ -96,7 +89,7 @@ from .categorical import (
     unify,
     union_of,
 )
-from .packed_sort import (
+from dataframe.kernels.packed_sort import (
     chunked_top_rows,
     packed_arg_sort,
     packed_top_rows,
@@ -108,14 +101,14 @@ from .value import AnyValue
 from .frame_iter import RowIterator, ColumnIterator, SliceIterator
 from .frame_size import frame_size
 from .asof import asof_rows
-from .hashing import (
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
 )
 from .groups import GroupIndices
-from .top_k import top_k_mask
-from .row_sort import row_arg_sort, row_top_rows
-from .expr_kernels import validity
+from dataframe.kernels.top_k import top_k_mask
+from dataframe.kernels.row_sort import row_arg_sort, row_top_rows
+from dataframe.kernels.binary import validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame, _concat_plans
 from .display import render_frame, render_glimpse

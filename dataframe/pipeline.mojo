@@ -18,14 +18,15 @@ from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from std.time import perf_counter_ns
 
-from .canonical_labels import canonical_labels
+from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
-from .execution import _ReduceJob, _new_reducer, _valid_lanes
+from dataframe.execution import _ReduceJob, _new_reducer
+from dataframe.kernels.validity import _valid_lanes
 from .expr import (
     CORR,
     COUNT,
@@ -72,26 +73,30 @@ from dataframe.aggregation.keys import (
     _group_keys,
 )
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
-from .join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
 from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
-from .row_encode import encodable
-from .runtime_filter import (
+from dataframe.kernels.row_encode import encodable
+from dataframe.kernels.runtime_filter import (
     KeyBloom,
     LOPSIDED_FACTOR,
     MAX_BUILD_PROBE_DISTINCT_RATIO,
     bloom_mask,
     build_bloom,
 )
-from .gather import can_filter_aligned_chunks, take_parallel, true_rows
+from dataframe.kernels.gather import (
+    can_filter_aligned_chunks,
+    take_parallel,
+    true_rows,
+)
 from dataframe.storage.allocation import huge_list
-from .mask_filter import filter_columns
+from dataframe.kernels.mask_filter import filter_columns
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
-from .hashing import encode_rows
+from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
 

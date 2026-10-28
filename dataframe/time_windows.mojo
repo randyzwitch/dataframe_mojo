@@ -3,7 +3,7 @@ from dataframe.storage.column import Column
 from .dtype import DataType
 from .series import Series
 from .temporal import parse_interval, zone_of, to_local, relocalize
-from .temporal_kernels import _offset, _offset_in, _truncate
+from dataframe.kernels.temporal import _offset, _offset_in, _truncate
 from .timezone import TimeZone
 
 

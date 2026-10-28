@@ -9,7 +9,7 @@ median/quantile keep every valid value of a group.
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
-from dataframe.approx_distinct import CardinalitySketch, update_sketches
+from dataframe.kernels.approx_distinct import CardinalitySketch, update_sketches
 from dataframe.storage.boolean import BoolColumn, true_count
 from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.column import _count_valid as _valid_count

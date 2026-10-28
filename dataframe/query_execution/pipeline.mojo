@@ -22,9 +22,7 @@ from dataframe.storage.column import (
 from dataframe.dtype import (
     DataType,
 )
-from dataframe.execution import (
-    direct_reductions,
-)
+from dataframe.execution import direct_reductions
 from dataframe.expr import (
     COL,
     Expr,
@@ -44,7 +42,7 @@ from dataframe.aggregation.expressions import (
 from dataframe.aggregation.state import (
     table_supported,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     encode_rows,
 )
 from dataframe.io.csv import (
@@ -71,7 +69,7 @@ from dataframe.io.parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
     prefer_left_build,
     prepare_hash_index,
@@ -192,9 +190,7 @@ from dataframe.planning.cost.eligibility import (
 from dataframe.series import (
     Series,
 )
-from dataframe.sorted_range import (
-    sorted_window,
-)
+from dataframe.sorted_range import sorted_window
 from dataframe.aggregation.state import (
     _StreamReduction,
     _finish_parts,

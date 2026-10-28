@@ -22,8 +22,8 @@ from std.memory import ArcPointer
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
-from .gather import take_parallel
-from .hashing import encode_string_rows_parallel
+from dataframe.kernels.gather import take_parallel
+from dataframe.kernels.hashing import encode_string_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
 from dataframe.storage.string import StringColumn

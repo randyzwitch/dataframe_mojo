@@ -3,7 +3,7 @@ from dataframe.aggregation.group_by import (
     group_by_workers,
     range_states,
 )
-from dataframe.distinct_statistics import (
+from dataframe.kernels.distinct_statistics import (
     distinct_estimate,
 )
 from dataframe.dtype import (
@@ -15,7 +15,7 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.hashing import (
+from dataframe.kernels.hashing import (
     encode_rows,
 )
 from dataframe.join_type import (

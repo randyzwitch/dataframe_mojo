@@ -61,6 +61,8 @@ jobs:
         run: bash scripts/check_accelerator_boundary.sh
       - name: Check storage boundaries
         run: python3 scripts/check_storage_boundaries.py
+      - name: Check computational kernel boundaries
+        run: python3 scripts/check_kernel_boundaries.py
       - name: Check lazy query boundaries
         run: python3 scripts/check_lazy_boundaries.py
       - name: Check aggregation boundaries

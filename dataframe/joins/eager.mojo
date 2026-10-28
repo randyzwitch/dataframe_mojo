@@ -11,22 +11,22 @@ from dataframe.dtype import (
 from dataframe.expr import (
     MAX,
 )
-from dataframe.expr_kernels import (
+from dataframe.kernels.binary import (
     choose,
 )
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.gather import (
+from dataframe.kernels.gather import (
     SORTED_GATHER_MIN_CHUNKS,
     can_filter_aligned_chunks,
     take_parallel,
     take_sorted_chunked,
 )
-from dataframe.join_fuse import (
+from dataframe.kernels.join_fuse import (
     FusedJoin,
 )
-from dataframe.join_hash import (
+from dataframe.kernels.join_hash import (
     PreparedHashIndex,
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
@@ -67,7 +67,7 @@ from dataframe.joins.rows import (
 from dataframe.parallel import (
     worker_count,
 )
-from dataframe.partition import (
+from dataframe.kernels.partition import (
     low_cardinality,
 )
 from dataframe.series import (

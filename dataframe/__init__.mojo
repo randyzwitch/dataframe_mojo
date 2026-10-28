@@ -9,7 +9,7 @@ from .frame_iter import RowView, RowIterator, ColumnIterator, SliceIterator
 from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType
-from .temporal_kernels import date_range, datetime_range
+from .kernels.temporal import date_range, datetime_range
 from .lazy import (
     LazyFrame,
     LazyGroupBy,

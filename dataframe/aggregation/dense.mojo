@@ -12,7 +12,7 @@ from std.memory import Pointer
 
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
-from dataframe.execution import _valid_lanes
+from dataframe.kernels.validity import _valid_lanes
 from dataframe.pipeline import _ensure_zones, _range_key, _window_bounds
 from dataframe.series import Series
 

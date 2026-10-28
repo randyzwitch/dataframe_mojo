@@ -25,7 +25,7 @@ from dataframe.dtype import DataType
 from dataframe.execution import _new_reducer
 from dataframe.expr import COL, COUNT, LEN, MAX, MEAN, MIN, SUM
 from dataframe.parallel import Job, partitions, run_jobs
-from dataframe.partition import _mix
+from dataframe.kernels.partition import _mix
 from dataframe.series import Series
 
 
