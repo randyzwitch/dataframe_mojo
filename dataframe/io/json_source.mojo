@@ -4,7 +4,7 @@ from std.collections import Optional
 from std.memory import Pointer
 from .csv_bits import _mask64
 from .csv_types import _Mapping, _map_file
-from ..json_reader import JsonBytes, JsonReader
+from dataframe.json.reader import JsonBytes, JsonReader
 
 
 struct JsonInput(Movable):

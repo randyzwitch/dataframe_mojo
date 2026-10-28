@@ -50,8 +50,8 @@ from dataframe.text.bytes import _Bytes, _find_bytes, _same_bytes
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.predicates import decode_values
 from dataframe.storage.string_view import StringView, StringViewStorage
-from dataframe.json_decode import decode_json
-from dataframe.json_strings import json_path_match
+from dataframe.json.decode import decode_json
+from dataframe.json.strings import json_path_match
 from dataframe.unicode_normalization import normalize_series
 from dataframe.unicode_alphabetic import alphabetic_ranges, is_alphabetic
 

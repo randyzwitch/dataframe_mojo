@@ -3,9 +3,9 @@ from std.memory import ArcPointer, Pointer
 from ..dtype import DataType
 from ..frame import DataFrame, concat
 from ..series import Series
-from ..json_decode import JsonDecoder, JsonDecodeOptions
-from ..json_reader import JsonReader, JsonBytes
-from ..json_number import validate_json_numbers
+from dataframe.json.decode import JsonDecoder, JsonDecodeOptions
+from dataframe.json.reader import JsonReader, JsonBytes
+from dataframe.json.number import validate_json_numbers
 from ..parallel import Job, Pool, _ProducedJobs, configured_workers
 from .csv_scan import CountLines, chunk_size
 from .json_source import JsonInput, JsonLines

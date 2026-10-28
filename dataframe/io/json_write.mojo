@@ -11,13 +11,13 @@ from ..series import Series
 from dataframe.storage.string import StringColumn
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.nested import ListColumn, StructColumn
-from ..json_decode import validate_json_dtype
-from ..json_value import json_quote
-from ..json_number import float_text
+from dataframe.json.decode import validate_json_dtype
+from dataframe.json.value import json_quote
+from dataframe.json.number import float_text
 from ..decimal import format_decimal
 from ..temporal import PreparedFormat, default_format, format_prepared_in
 from ..timezone import TimeZone
-from .json_wire import duration_text
+from dataframe.json.wire import duration_text
 
 comptime _Number = def(Int, Int) thin -> String
 

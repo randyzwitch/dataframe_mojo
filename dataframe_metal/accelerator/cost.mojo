@@ -5,7 +5,7 @@ or provider implementation is imported here. Calibration uses complete caller
 wall times and independently validated lower/upper residual envelopes.
 """
 from std.math import isfinite
-from dataframe.json_value import JsonValue
+from dataframe.json.value import JsonValue
 from dataframe.plan_types import PlanEstimate
 
 comptime COST_FORMAT = "dataframe-analytical-cost-v1"

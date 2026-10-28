@@ -316,3 +316,17 @@ the same functions, constants and types; existing tests retain compatibility
 coverage. This is an ownership extraction: error timing, regex caching and
 locking, UTF-8 handling, binary encoding, number conversion, null propagation
 and specialized route choices retain their implementations.
+
+## JSON values and typed conversion
+
+`json/` owns token readers/UTF-8 escapes, JSON values, paths, strict numeric
+semantics, string-column operations and typed decoding. Shared duration wire
+forms live in `json/wire.mojo`. Table JSON/NDJSON readers and writers stay in
+`io/`; the old `io.json_wire` module re-exports the same wire functions. Root
+`json_*` imports also remain aliases. Engine consumers use canonical modules.
+
+The JSON gate prevents table I/O, binding, query execution and provider imports
+from this shared value domain, and prevents engine imports through old facades.
+The extraction retains exact implementations, including duplicate/object order,
+JSONPath number behavior, Unicode escapes, temporal/duration conversion,
+null/empty rules, and error timing. No parser or wire format changes here.

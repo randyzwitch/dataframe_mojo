@@ -29,7 +29,7 @@ from std.memory import Pointer
 from std.memory.alloc import Layout, alloc
 from std.os import getenv
 
-from .json_value import JsonValue
+from dataframe.json.value import JsonValue
 
 
 struct LinearCost(Copyable, Movable):

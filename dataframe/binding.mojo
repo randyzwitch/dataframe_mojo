@@ -268,8 +268,8 @@ struct BoundExpr(Copyable):
         return self.shapes[len(self.shapes) - 1]
 
 
-from .json_decode import validate_json_dtype
-from .json_path import JsonPath
+from dataframe.json.decode import validate_json_dtype
+from dataframe.json.path import JsonPath
 
 
 def _text_function_name(op: Int) -> String:

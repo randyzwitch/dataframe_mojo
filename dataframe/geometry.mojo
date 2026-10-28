@@ -7,7 +7,7 @@ from dataframe.storage.string import StringColumn
 from .wkb import GeometryBounds, _WKBInfo, _wkb_info, validate_wkb
 from dataframe.storage.column import Column
 from .frame import DataFrame
-from .json_value import JsonValue
+from dataframe.json.value import JsonValue
 
 
 def from_wkb(binary: Series, metadata: String = "{}") raises -> Series:
