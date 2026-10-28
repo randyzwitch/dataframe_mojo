@@ -76,7 +76,10 @@ def _pipeline_steps(
                     return False
             elif node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
                 return False
-            if node.offset >= len(indexes) or not indexes[node.offset]:
+            if (
+                node.join_build_slot() >= len(indexes)
+                or not indexes[node.join_build_slot()]
+            ):
                 return False
         elif node.kind != DROP:
             return False
@@ -234,7 +237,7 @@ def _late_key_build(
         if operation.kind == JOIN:
             if name in operation.names:
                 return -1
-            if operation.offset == holder:
+            if operation.join_build_slot() == holder:
                 if operation.how != JOIN_INNER and operation.how != JOIN_LEFT:
                     return -1
                 if name in operation.right_keys:

@@ -1,4 +1,7 @@
 """Plan traversal, identity, schemas, and cardinality properties."""
+from dataframe.planning.node_builders import (
+    _frame_scan_node,
+)
 from dataframe.bool_column import (
     true_count,
 )
@@ -53,7 +56,6 @@ from dataframe.planning.model import (
     UNIQUE,
     UNNEST,
     WITH_COLUMNS,
-    _plan_node,
 )
 from dataframe.planning.properties import (
     _chain_member,
@@ -91,7 +93,7 @@ def plan_height_bound(self: QueryContext, index: Int) -> Int:
     rows; -1 when unknown (joins, aggregations, file scans)."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
-        return self._frames[node.offset].height()
+        return self._frames[node.source_slot()].height()
     if (
         node.kind == FILTER
         or node.kind == DROP
@@ -103,8 +105,8 @@ def plan_height_bound(self: QueryContext, index: Int) -> Int:
         return plan_height_bound(self, node.left)
     if node.kind == SLICE:
         var height = plan_height_bound(self, node.left)
-        if height >= 0 and node.length >= 0:
-            return min(height, node.length)
+        if height >= 0 and node.slice_length() >= 0:
+            return min(height, node.slice_length())
         return height
     return -1
 
@@ -198,7 +200,7 @@ def plan_key_source(
     while at >= 0:
         ref node = self._nodes[at]
         if node.kind == SCAN_FRAME:
-            ref frame = self._frames[node.offset]
+            ref frame = self._frames[node.source_slot()]
             if key in frame.columns():
                 return frame.column(key)
             return None
@@ -250,7 +252,7 @@ def plan_known_height(self: QueryContext, index: Int) -> Int:
     """Exact cheap cardinalities only; -1 means execution is required."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
-        return self._frames[node.offset].height()
+        return self._frames[node.source_slot()].height()
     if (
         node.kind == DROP
         or node.kind == UNNEST
@@ -260,11 +262,14 @@ def plan_known_height(self: QueryContext, index: Int) -> Int:
         )
     ):
         return plan_known_height(self, node.left)
-    if node.kind == SLICE and node.offset >= 0:
+    if node.kind == SLICE and node.slice_offset() >= 0:
         var height = plan_known_height(self, node.left)
         if height >= 0:
-            height = max(0, height - node.offset)
-            return min(height, node.length) if node.length >= 0 else height
+            height = max(0, height - node.slice_offset())
+            return (
+                min(height, node.slice_length()) if node.slice_length()
+                >= 0 else height
+            )
     return -1
 
 
@@ -391,11 +396,11 @@ def plan_repeats_a_scan(self: QueryContext) -> Bool:
     for node in self._nodes:
         if node.kind == SCAN_FRAME:
             for f in seen:
-                if f == node.offset or self._frames[f]._shares_buffers_with(
-                    self._frames[node.offset]
-                ):
+                if f == node.source_slot() or self._frames[
+                    f
+                ]._shares_buffers_with(self._frames[node.source_slot()]):
                     return True
-            seen.append(node.offset)
+            seen.append(node.source_slot())
         elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC, SCAN_NDJSON]:
             if node.text in files:
                 return True
@@ -576,7 +581,7 @@ def plan_provider_scan(
         var wanted = top[1]
         ref node = self._nodes[i]
         if node.kind == SCAN_FRAME:
-            if wanted in self._frames[node.offset].columns():
+            if wanted in self._frames[node.source_slot()].columns():
                 return (i, wanted)
             continue
         if node.kind == AGG and wanted not in node.names:
@@ -660,7 +665,7 @@ def plan_largest_scan(self: QueryContext, index: Int) -> Int:
         var i = stack.pop()
         ref node = self._nodes[i]
         if node.kind == SCAN_FRAME:
-            largest = max(largest, self._frames[node.offset].height())
+            largest = max(largest, self._frames[node.source_slot()].height())
         if node.left >= 0:
             stack.append(node.left)
         if node.right >= 0:
@@ -746,7 +751,7 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     prefix would misjudge."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
-        return self._frames[node.offset].height()
+        return self._frames[node.source_slot()].height()
     if node.kind == DROP or (
         (node.kind == SELECT or node.kind == WITH_COLUMNS)
         and _stream_rows(node)
@@ -757,7 +762,7 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     ref source = self._nodes[node.left]
     if source.kind != SCAN_FRAME:
         return -1
-    var height = self._frames[source.offset].height()
+    var height = self._frames[source.source_slot()].height()
     var runs = 64
     var run = 1024
     # Only the columns the filter reads.
@@ -771,9 +776,9 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     # A large table's runs are copied end to end (zero-copy slices
     # merged into one array), not gathered row by row, once for the
     # table: its statistics keep them.
-    var sample = self._frames[source.offset].select(names)
+    var sample = self._frames[source.source_slot()].select(names)
     if height > runs * run:
-        sample = self._frames[source.offset]._sampled(names, runs, run)
+        sample = self._frames[source.source_slot()]._sampled(names, runs, run)
     # Only the matches are counted: the predicate's mask, as DuckDB
     # counts a selection vector, with no filtered frame built.
     var kept = true_count(sample._selection(node.exprs[0], 8192))
@@ -795,7 +800,7 @@ def plan_progression_key(
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == SCAN_FRAME:
-            ref frame = self._frames[node.offset]
+            ref frame = self._frames[node.source_slot()]
             if column not in frame.columns():
                 return False
             var key = frame[column]
@@ -932,7 +937,7 @@ def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == SCAN_FRAME:
-            return Optional(self._frames[node.offset].copy())
+            return Optional(self._frames[node.source_slot()].copy())
         if (
             node.kind == FILTER
             or node.kind == DROP
@@ -985,10 +990,10 @@ def plan_spine_rows(self: QueryContext, index: Int) -> Int:
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == SCAN_FRAME:
-            var origin = self._origin_rows.get(node.offset, -1)
+            var origin = self._origin_rows.get(node.source_slot(), -1)
             if origin > 0:
                 return origin
-            return self._frames[node.offset].height()
+            return self._frames[node.source_slot()].height()
         if (
             node.kind == FILTER
             or node.kind == DROP
@@ -1010,7 +1015,7 @@ def plan_measurable(self: QueryContext, index: Int) -> Bool:
     knows the table it narrowed."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
-        return node.offset in self._origin_rows
+        return node.source_slot() in self._origin_rows
     return plan_spine_rows(self, index) > 0
 
 
@@ -1022,12 +1027,12 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for i in range(len(self._nodes)):
         if not _is_scan(self._nodes[i].kind):
             continue
-        var old = self._nodes[i].offset
+        var old = self._nodes[i].source_slot()
         if slots[old] < 0:
             slots[old] = len(frames)
             frames.append(self._frames[old].copy())
             schemas.append(self._schemas[old].copy())
-        self._nodes[i].offset = slots[old]
+        self._nodes[i].set_source_slot(slots[old])
     var origins = Dict[Int, Int]()
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
@@ -1084,7 +1089,7 @@ def plan_reorder(mut self: QueryContext, root: Int = -1):
     var nodes = List[PlanNode](capacity=len(order))
     for k in range(len(order)):
         # Each node is reached once, so it is taken, not copied.
-        var node = _plan_node(SCAN_FRAME)
+        var node = _frame_scan_node()
         swap(node, self._nodes[order[k]])
         if node.left >= 0:
             node.left = position[node.left]

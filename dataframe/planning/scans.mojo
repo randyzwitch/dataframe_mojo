@@ -1,11 +1,13 @@
 """Scan-node encoding and CSV options, independent of query execution."""
+from dataframe.planning.node_builders import (
+    _csv_source_node,
+)
 from dataframe.io.csv_types import (
     _CsvScanOptions,
 )
 from dataframe.planning.model import (
     PlanNode,
     SCAN_CSV,
-    _plan_node,
 )
 from dataframe.planning.properties import (
     _same_flags,
@@ -59,35 +61,34 @@ def _csv_scan_node(path: String, options: _CsvScanOptions) raises -> PlanNode:
         and len(overrides) == 0
         and len(options.null_values) == 0
     ):
-        return _plan_node(SCAN_CSV, text=path, offset=0)
-    return _plan_node(
-        SCAN_CSV,
-        text=path,
-        offset=0,
-        names2=settings + overrides^,
-        flags=flags,
-        right_keys=options.null_values,
+        return _csv_source_node(path=path, slot=0)
+    return _csv_source_node(
+        path=path,
+        slot=0,
+        settings=settings + overrides^,
+        switches=flags,
+        null_values=options.null_values,
     )
 
 
 def _scan_options(node: PlanNode) raises -> _CsvScanOptions:
     """The reader options a CSV scan node holds (see `_csv_scan_node`)."""
     var options = _CsvScanOptions.defaults()
-    if len(node.names2) < 6:
+    if not node.csv_has_options():
         return options^
-    options.separator = node.names2[0]
-    options.quote_char = node.names2[1]
-    options.comment_prefix = node.names2[2]
-    options.encoding = node.names2[3]
-    options.skip_rows = Int(node.names2[4])
-    options.infer_schema_length = Int(node.names2[5])
-    var k = 6
-    while k + 1 < len(node.names2):
-        options.schema_overrides[node.names2[k]] = node.names2[k + 1]
-        k += 2
-    options.has_header = node.flags[0]
-    options.ignore_errors = node.flags[1]
-    options.truncate_ragged_lines = node.flags[2]
-    options.try_parse_dates = node.flags[3]
-    options.null_values = node.right_keys.copy()
+    options.separator = node.csv_separator()
+    options.quote_char = node.csv_quote_char()
+    options.comment_prefix = node.csv_comment_prefix()
+    options.encoding = node.csv_encoding()
+    options.skip_rows = Int(node.csv_skip_rows())
+    options.infer_schema_length = Int(node.csv_infer_schema_length())
+    for k in range(node.csv_override_count()):
+        options.schema_overrides[
+            node.csv_override_name(k)
+        ] = node.csv_override_dtype(k)
+    options.has_header = node.csv_has_header()
+    options.ignore_errors = node.csv_ignore_errors()
+    options.truncate_ragged_lines = node.csv_truncate_ragged_lines()
+    options.try_parse_dates = node.csv_try_parse_dates()
+    options.null_values = node.csv_null_values().copy()
     return options^

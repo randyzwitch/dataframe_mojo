@@ -1,4 +1,10 @@
 """CPU strategy selection, join ordering, and measured input planning."""
+from dataframe.planning.node_builders import (
+    _filter_node,
+    _frame_scan_node,
+    _join_node,
+    _select_node,
+)
 from dataframe.planning.cost.aggregation import (
     plan_sampled_groups,
     plan_batch_states_win,
@@ -95,7 +101,6 @@ from dataframe.planning.model import (
     PlanNode,
     SCAN_FRAME,
     SELECT,
-    _plan_node,
 )
 from dataframe.planning.properties import (
     _bound_filter,
@@ -143,7 +148,7 @@ def plan_direct_key(
     var found = plan_provider_scan(self, index, names[0])
     if found[0] < 0:
         return False
-    var key = self._frames[self._nodes[found[0]].offset].column(found[1])
+    var key = self._frames[self._nodes[found[0]].source_slot()].column(found[1])
     if key.dtype().physical() != DataType.INT64 or key.null_count() > 0:
         return False
     # More rows than the span allows cannot all differ: no pass needed.
@@ -214,11 +219,11 @@ def plan_swap_join_sides(
     var plan = self.copy()
     plan._frames.append(built.copy())
     plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     var probe = len(plan._nodes) - 1
     plan._frames.append(left_frame^)
     plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     var build = len(plan._nodes) - 1
     var join = node.copy()
     join.left = probe
@@ -226,7 +231,7 @@ def plan_swap_join_sides(
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
     plan._nodes.append(join^)
-    plan._nodes[at] = _plan_node(SELECT, left=len(plan._nodes) - 1, exprs=exprs)
+    plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_join_sides")
     return Optional(plan^)
 
@@ -277,11 +282,11 @@ def plan_swap_left_join_sides(
     var plan = self.copy()
     plan._frames.append(built.copy())
     plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     var probe = len(plan._nodes) - 1
     plan._frames.append(left_frame^)
     plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     var build = len(plan._nodes) - 1
     var join = node.copy()
     join.left = probe
@@ -292,7 +297,7 @@ def plan_swap_left_join_sides(
     join.text = "right"
     join.coalesce = False
     plan._nodes.append(join^)
-    plan._nodes[at] = _plan_node(SELECT, left=len(plan._nodes) - 1, exprs=exprs)
+    plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_left_join_sides")
     return Optional(plan^)
 
@@ -490,7 +495,7 @@ def plan_key_set_side(
         trace_path("lazy.key_set_right")
     self._frames.append(result.copy())
     self._schemas.append(Optional[CsvSchema]())
-    self._nodes.append(_plan_node(SCAN_FRAME, offset=len(self._frames) - 1))
+    self._nodes.append(_frame_scan_node(slot=len(self._frames) - 1))
     if small_left:
         self._nodes[j].left = len(self._nodes) - 1
     else:
@@ -502,14 +507,16 @@ def plan_key_set_side(
         if scan < 0:
             continue
         var base = providers[k][1]
-        var dtype = self._frames[self._nodes[scan].offset].column(base).dtype()
+        var dtype = (
+            self._frames[self._nodes[scan].source_slot()].column(base).dtype()
+        )
         var keys = result.column(small_keys[k])
         var sampled = _key_set_filter(keys, base, dtype)
         if not sampled or not plan_selective_on(self, scan, sampled.value()):
             continue
         var pushed = _key_set_filter(keys, large_keys[k], dtype)
         var target = self._nodes[j].right if small_left else self._nodes[j].left
-        self._nodes.append(_plan_node(FILTER, target, exprs=[pushed.take()]))
+        self._nodes.append(_filter_node(left=target, exprs=[pushed.take()]))
         if small_left:
             self._nodes[j].right = len(self._nodes) - 1
         else:
@@ -526,7 +533,7 @@ def plan_key_set_side(
         var found = plan_provider_scan(self, large, name)
         if found[0] < 0:
             continue
-        ref source = self._frames[self._nodes[found[0]].offset]
+        ref source = self._frames[self._nodes[found[0]].source_slot()]
         var dtype = source.column(found[1]).dtype()
         var other = result.column(comparison[2])
         if (
@@ -546,10 +553,8 @@ def plan_key_set_side(
             continue
         var target = self._nodes[j].right if small_left else self._nodes[j].left
         self._nodes.append(
-            _plan_node(
-                FILTER,
-                target,
-                exprs=[_bound_filter(name, op, bound, dtype)],
+            _filter_node(
+                left=target, exprs=[_bound_filter(name, op, bound, dtype)]
             )
         )
         if small_left:
@@ -576,16 +581,14 @@ def plan_key_set_side(
                 joined.kind == JOIN
                 and joined.left >= 0
                 and self._nodes[joined.left].kind == SCAN_FRAME
-                and self._nodes[joined.left].offset == marker
+                and self._nodes[joined.left].source_slot() == marker
             ):
                 var right = self._execute(
                     joined.right, False, streaming, batch_size
                 )
                 self._frames.append(right^)
                 self._schemas.append(Optional[CsvSchema]())
-                self._nodes.append(
-                    _plan_node(SCAN_FRAME, offset=len(self._frames) - 1)
-                )
+                self._nodes.append(_frame_scan_node(slot=len(self._frames) - 1))
                 self._nodes[at].right = len(self._nodes) - 1
                 break
         plan_reorder(self)
@@ -662,8 +665,8 @@ def plan_selective_on(
     (`_estimated_rows`). A key set spanning most of the right side's
     keys filters nothing and only moves the join off its better
     build side."""
-    var height = self._frames[self._nodes[scan].offset].height()
-    self._nodes.append(_plan_node(FILTER, scan, exprs=[keys.copy()]))
+    var height = self._frames[self._nodes[scan].source_slot()].height()
+    self._nodes.append(_filter_node(left=scan, exprs=[keys.copy()]))
     var estimated = plan_estimated_rows(self, len(self._nodes) - 1)
     _ = self._nodes.pop()
     return estimated >= 0 and 8 * estimated <= height
@@ -682,7 +685,9 @@ def plan_any_selective(
         if scan < 0:
             continue
         var base = providers[k][1]
-        var dtype = self._frames[self._nodes[scan].offset].column(base).dtype()
+        var dtype = (
+            self._frames[self._nodes[scan].source_slot()].column(base).dtype()
+        )
         var sampled = _key_set_filter(result.column(keys[k]), base, dtype)
         if sampled and plan_selective_on(self, scan, sampled.value()):
             return True
@@ -826,8 +831,8 @@ def plan_cost_order_joins(
                 else:
                     self._frames.append(jobs[k].result.copy())
                 self._schemas.append(Optional[CsvSchema]())
-                self._nodes[relations[r]] = _plan_node(
-                    SCAN_FRAME, offset=len(self._frames) - 1
+                self._nodes[relations[r]] = _frame_scan_node(
+                    slot=len(self._frames) - 1
                 )
         for r in range(n):
             var table = tables[r]
@@ -935,16 +940,15 @@ def plan_cost_order_joins(
             for i in range(len(right_keys)):
                 if right_keys[i] != left_keys[i]:
                     renamed[right_keys[i]] = left_keys[i]
-            var join = _plan_node(
-                JOIN,
-                node_of[left],
-                node_of[right],
-                names=left_keys,
-                text="inner",
-                how=JOIN_INNER,
+            var join = _join_node(
+                left=node_of[left],
+                right=node_of[right],
+                left_keys=left_keys,
+                join_type="inner",
+                type_code=JOIN_INNER,
                 right_keys=right_keys,
+                suffix="_right",
             )
-            join.names2 = ["_right"]
             added.append(join^)
             var current = base + len(added) - 1
             # Filters whose relations this join completes, while their
@@ -976,7 +980,7 @@ def plan_cost_order_joins(
             keep.append(
                 col(source) if source == name else col(source).alias(name)
             )
-        var restore = _plan_node(SELECT, node_of[entries - 1], exprs=keep)
+        var restore = _select_node(left=node_of[entries - 1], exprs=keep)
         # Filters left: read names a join dropped; they run on the
         # restored columns.
         var last = restore^
@@ -1225,7 +1229,7 @@ def plan_probe_largest_input(
         while source in renamed:
             source = renamed[source]
         keep.append(col(source) if source == name else col(source).alias(name))
-    self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
+    self._nodes[top] = _select_node(left=current, exprs=keep)
     trace_path("lazy.probe_largest")
     return True
 
@@ -1238,16 +1242,18 @@ def plan_selectivity(
     no table is known."""
     var table = plan_spine_rows(self, index)
     ref node = self._nodes[index]
-    if node.kind == SCAN_FRAME and node.offset in self._origin_rows:
+    if node.kind == SCAN_FRAME and node.source_slot() in self._origin_rows:
         # A shared subplan's result: the share of its table it kept.
-        return Float64(self._frames[node.offset].height()) / Float64(table)
+        return Float64(self._frames[node.source_slot()].height()) / Float64(
+            table
+        )
     if table <= 0 or node.kind == SCAN_FRAME:
         return 1.0
     var frame = self._execute(index, False, streaming, batch_size)
     var rows = frame.height()
     self._frames.append(frame^)
     self._schemas.append(Optional[CsvSchema]())
-    self._nodes[index] = _plan_node(SCAN_FRAME, offset=len(self._frames) - 1)
+    self._nodes[index] = _frame_scan_node(slot=len(self._frames) - 1)
     return Float64(rows) / Float64(table)
 
 
@@ -1454,7 +1460,7 @@ def plan_order_chain(
     var keep = List[Expr]()
     for name in top_columns:
         keep.append(col(name))
-    self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
+    self._nodes[top] = _select_node(left=current, exprs=keep)
     trace_path("lazy.join_order")
     return True
 

@@ -1,4 +1,11 @@
 """Logical optimizer passes; runtime evaluation enters through QueryContext ports."""
+from dataframe.planning.node_builders import (
+    _aggregate_node,
+    _filter_node,
+    _frame_scan_node,
+    _select_node,
+    _with_columns_node,
+)
 from dataframe.expr import (
     AND,
     COL,
@@ -70,7 +77,6 @@ from dataframe.planning.model import (
     UNNEST,
     UNPIVOT,
     WITH_COLUMNS,
-    _plan_node,
 )
 from dataframe.planning.properties import (
     _boolean_parts,
@@ -183,7 +189,7 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
             continue
         self._nodes[i].exprs = rewritten^
         self._nodes.append(
-            _plan_node(WITH_COLUMNS, self._nodes[i].left, exprs=shared)
+            _with_columns_node(left=self._nodes[i].left, exprs=shared)
         )
         self._nodes[i].left = len(self._nodes) - 1
         plan_forget_schema(self, i)
@@ -244,18 +250,17 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
         while counted in columns:
             counted += "_"
         self._nodes.append(
-            _plan_node(
-                AGG,
-                node.left,
+            _aggregate_node(
+                left=node.left,
                 exprs=[col(columns[0]).len().alias(counted)],
-                names=columns,
+                keys=columns,
                 maintain_order=node.maintain_order,
             )
         )
         var shown = List[Expr]()
         for c in columns:
             shown.append(col(c))
-        self._nodes[i] = _plan_node(SELECT, len(self._nodes) - 1, exprs=shown)
+        self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=shown)
         changed = True
     if owned:
         self._schema_memo = None
@@ -369,10 +374,8 @@ def plan_filter_shared_subplans(mut self: QueryContext):
         for c in range(len(copies)):
             ref run = readers[c]
             for r in run:
-                self._nodes[r].flags = [True]
-            self._nodes.append(
-                _plan_node(FILTER, copies[c], exprs=[any.copy()])
-            )
+                self._nodes[r].pin_filter()
+            self._nodes.append(_filter_node(left=copies[c], exprs=[any.copy()]))
             self._nodes[run[0]].left = len(self._nodes) - 1
     if len(self._nodes) > count:
         plan_split_filters(self, count)
@@ -401,13 +404,11 @@ def plan_split_filters(mut self: QueryContext, first: Int = 0):
             continue
         var below = self._nodes[i].left
         for implied in extra:
-            self._nodes.append(
-                _plan_node(FILTER, below, exprs=[implied.copy()])
-            )
+            self._nodes.append(_filter_node(left=below, exprs=[implied.copy()]))
             below = len(self._nodes) - 1
         for k in range(len(parts) - 1, 0, -1):
             self._nodes.append(
-                _plan_node(FILTER, below, exprs=[parts[k].copy()])
+                _filter_node(left=below, exprs=[parts[k].copy()])
             )
             below = len(self._nodes) - 1
         self._nodes[i].left = below
@@ -489,9 +490,7 @@ def plan_drop_constant_filters(mut self: QueryContext) raises:
             var empty = self._execute(i, True)
             self._frames.append(empty^)
             self._schemas.append(Optional[CsvSchema]())
-            self._nodes[i] = _plan_node(
-                SCAN_FRAME, offset=len(self._frames) - 1
-            )
+            self._nodes[i] = _frame_scan_node(slot=len(self._frames) - 1)
         changed = True
     if changed:
         plan_reorder(self)
@@ -544,9 +543,8 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                         # A copy filters the second input; the filter
                         # itself moves above the first.
                         self._nodes.append(
-                            _plan_node(
-                                FILTER,
-                                below.right,
+                            _filter_node(
+                                left=below.right,
                                 exprs=self._nodes[i].exprs.copy(),
                             )
                         )
@@ -671,7 +669,10 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
     if (
         below.kind == PIVOT
         and _row_local(self._nodes[filter].exprs)
-        and _covers(List[String](below.names[: below.offset]), reads.value())
+        and _covers(
+            List[String](below.pivot_columns()[: below.pivot_index_count()]),
+            reads.value(),
+        )
     ):
         # As for a group_by's keys: each output row is one index key,
         # so a filter on index columns keeps the same rows before it.
@@ -735,7 +736,7 @@ def plan_transfer_key_filter(
             return
         predicate._nodes[k].text = other[at]
     var target = node.left if right_side else node.right
-    self._nodes.append(_plan_node(FILTER, target, exprs=[predicate^]))
+    self._nodes.append(_filter_node(left=target, exprs=[predicate^]))
     if right_side:
         self._nodes[join].left = len(self._nodes) - 1
     else:
@@ -789,10 +790,14 @@ def plan_push_slices(mut self: QueryContext) raises:
         changed = False
         for i in range(len(self._nodes)):
             ref node = self._nodes[i]
-            if node.kind != SLICE or node.offset < 0 or node.length < -1:
+            if (
+                node.kind != SLICE
+                or node.slice_offset() < 0
+                or node.slice_length() < -1
+            ):
                 continue
             if (
-                node.offset != 0 or node.length < 0
+                node.slice_offset() != 0 or node.slice_length() < 0
             ) and not plan_slice_over_ipc(self, node.left):
                 continue
             ref below = self._nodes[node.left]
@@ -817,40 +822,48 @@ def plan_push_slices(mut self: QueryContext) raises:
     var pushed = False
     for i in range(len(self._nodes)):
         ref node = self._nodes[i]
-        if node.kind != SLICE or node.offset < 0 or node.length < -1:
+        if (
+            node.kind != SLICE
+            or node.slice_offset() < 0
+            or node.slice_length() < -1
+        ):
             continue
         ref scan = self._nodes[node.left]
         if scan.kind == SCAN_IPC:
             var replacement = scan.copy()
-            var start = Int(scan.names2[0])
+            var start = Int(scan.ipc_row_offset())
             var advance = (
-                min(node.offset, scan.length) if scan.length
-                >= 0 else node.offset
+                min(
+                    node.slice_offset(), scan.scan_row_limit()
+                ) if scan.scan_row_limit()
+                >= 0 else node.slice_offset()
             )
             var remaining = (
-                max(0, scan.length - advance) if scan.length >= 0 else -1
+                max(0, scan.scan_row_limit() - advance) if scan.scan_row_limit()
+                >= 0 else -1
             )
-            if node.length >= 0:
+            if node.slice_length() >= 0:
                 remaining = (
-                    min(remaining, node.length) if remaining
-                    >= 0 else node.length
+                    min(remaining, node.slice_length()) if remaining
+                    >= 0 else node.slice_length()
                 )
             # An offset beyond Int.MAX is necessarily beyond every file.
             if start > Int.MAX - advance:
-                replacement.names2 = ["0"]
-                replacement.length = 0
+                replacement.set_ipc_slice("0", 0)
             else:
-                replacement.names2 = [String(start + advance)]
-                replacement.length = remaining
+                replacement.set_ipc_slice(String(start + advance), remaining)
             self._nodes[i] = replacement^
             pushed = True
         elif (
             scan.kind in [SCAN_CSV, SCAN_NDJSON]
-            and node.offset == 0
-            and node.length >= 0
-            and (scan.length < 0 or scan.length > node.length)
+            and node.slice_offset() == 0
+            and node.slice_length() >= 0
+            and (
+                scan.scan_row_limit() < 0
+                or scan.scan_row_limit() > node.slice_length()
+            )
         ):
-            self._nodes[node.left].length = node.length
+            self._nodes[node.left].set_scan_row_limit(node.slice_length())
     if pushed:
         plan_reorder(self)
 
@@ -870,14 +883,18 @@ def plan_fuse_top_k(mut self: QueryContext):
     in `length`, which it otherwise leaves at -1."""
     for i in range(len(self._nodes)):
         ref node = self._nodes[i]
-        if node.kind != SLICE or node.offset < 0 or node.length < 0:
+        if (
+            node.kind != SLICE
+            or node.slice_offset() < 0
+            or node.slice_length() < 0
+        ):
             continue
         ref below = self._nodes[node.left]
         if below.kind != SORT:
             continue
-        var limit = node.offset + node.length
-        if below.length < 0 or limit < below.length:
-            self._nodes[node.left].length = limit
+        var limit = node.slice_offset() + node.slice_length()
+        if below.sort_limit() < 0 or limit < below.sort_limit():
+            self._nodes[node.left].set_sort_limit(limit)
 
 
 def plan_push_projections(mut self: QueryContext) raises:
@@ -940,9 +957,7 @@ def plan_push_projections(mut self: QueryContext) raises:
                 if (len(keep) > 0 or node.kind == SCAN_IPC) and len(keep) < len(
                     columns
                 ):
-                    self._nodes[i].names = keep^
-                    if node.kind == SCAN_IPC:
-                        self._nodes[i].flags[1] = True
+                    self._nodes[i].set_scan_projection(keep^)
                     # Only this scan's schema changes among the nodes
                     # still to visit: they come before it, and none
                     # reads it (children precede their parents).
@@ -977,7 +992,7 @@ def plan_push_projections(mut self: QueryContext) raises:
             # values, whatever is read above it; with no `on`, every
             # column is a value column.
             reads_all = len(node.names) == 0
-            reads = node.names + node.names2.copy()
+            reads = node.unpivot_columns() + node.unpivot_index().copy()
         elif _is_time_window(node.kind):
             # Only what the windows read, whatever is wanted above:
             # their outputs are new columns.
@@ -1062,7 +1077,7 @@ def plan_align_union_inputs(
             var exprs = List[Expr]()
             for name in keep:
                 exprs.append(col(name))
-            self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+            self._nodes.append(_select_node(left=child, exprs=exprs))
             if side == 1:
                 self._nodes[union].right = len(self._nodes) - 1
             else:
@@ -1118,7 +1133,7 @@ def plan_join_input_columns(
     ref node = self._nodes[index]
     var left_cols = plan_columns_of(self, node.left)
     var right_cols = plan_columns_of(self, node.right)
-    var suffix = node.names2[0]
+    var suffix = node.join_suffix()
     var membership = node.how == JOIN_SEMI or node.how == JOIN_ANTI
     var outputs = Dict[String, Bool]()
     for c in left_cols:
@@ -1192,7 +1207,7 @@ def plan_narrow_join_inputs(
         var exprs = List[Expr]()
         for name in columns[k]:
             exprs.append(col(name))
-        self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+        self._nodes.append(_select_node(left=child, exprs=exprs))
         # The join and the nodes above it may now produce fewer
         # columns.
         plan_forget_schemas_above(self, join, parents)
