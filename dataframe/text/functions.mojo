@@ -52,8 +52,8 @@ from dataframe.text.predicates import decode_values
 from dataframe.storage.string_view import StringView, StringViewStorage
 from dataframe.json.decode import decode_json
 from dataframe.json.strings import json_path_match
-from dataframe.unicode_normalization import normalize_series
-from dataframe.unicode_alphabetic import alphabetic_ranges, is_alphabetic
+from dataframe.text.unicode.normalization import normalize_series
+from dataframe.text.unicode.alphabetic import alphabetic_ranges, is_alphabetic
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 
