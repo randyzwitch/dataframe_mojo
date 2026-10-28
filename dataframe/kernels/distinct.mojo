@@ -29,7 +29,7 @@ from dataframe.parallel import Job, Pool, configured_workers
 from dataframe.kernels.partition import _combine, _hash_bytes, _mix
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
-from dataframe.string_bytes import _Bytes, _same_bytes
+from dataframe.text.bytes import _Bytes, _same_bytes
 
 # Rows per partition to aim for: a table of twice that many 16-byte keys and
 # 8-byte hashes stays within a core's L2.

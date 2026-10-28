@@ -12,7 +12,7 @@ from dataframe.storage.boolean import BoolColumn, _bits64
 from dataframe.storage.column import Column, _copy_validity
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.parse import parse_bool, parse_float64, parse_integer
+from dataframe.text.parse import parse_bool, parse_float64, parse_integer
 from dataframe.decimal import (
     check_limit,
     check_precision,

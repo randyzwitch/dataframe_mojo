@@ -1,6 +1,6 @@
 """Lossless JSON wire forms for durations and opaque byte columns."""
 from ..dtype import DataType
-from ..parse import parse_integer
+from dataframe.text.parse import parse_integer
 
 
 def duration_text(value: Int64, dtype: DataType) -> String:

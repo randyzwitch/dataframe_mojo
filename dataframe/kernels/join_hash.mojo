@@ -31,7 +31,7 @@ from dataframe.kernels.partition import (
     _short_hash,
 )
 from dataframe.series import Series
-from dataframe.string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import StringView
 from dataframe.trace import trace_path

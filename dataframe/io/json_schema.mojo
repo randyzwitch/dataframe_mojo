@@ -6,7 +6,7 @@ from ..json_number import (
     is_json_fraction,
     validate_json_numbers,
 )
-from ..parse import parse_int64
+from dataframe.text.parse import parse_int64
 
 
 def _scalar(dtype: DataType) -> Bool:

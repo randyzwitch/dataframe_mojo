@@ -292,3 +292,27 @@ storage, Series/dtype representations, aggregation, text primitives and typed
 expression descriptions remain; this PR does not claim an acyclic graph among
 all value representations and computational helpers. No route order,
 threshold, algorithm, expression timing, layout or ownership rule changes.
+
+## Text and byte processing
+
+`text/` owns byte spans and literal scans (`bytes`), length/predicate and
+transform kernels, higher string functions, byte codecs, strict numeric parsing,
+and column adapters around the existing `regex/` engine. The bounded compiled
+pattern cache is shared by those adapters. Typed UTF-8/Arrow string layouts,
+view blocks and builders remain in `storage/`; categorical code remapping and
+value replacement remain computational kernels. `regex/` retains its parser,
+automata, matchers and Unicode property tables.
+
+The text gate rejects query/expression evaluation, providers and file readers
+or writers. The strict number parser retains one existing shared primitive,
+`io.csv_numeric._pow10_f64`, so CSV conversion and legacy cast conversion keep
+their distinct numerical behavior. Expression operation tags and Series/dtype
+representations remain data inputs. JSON value/path/decode helpers and general
+Unicode normalization/alphabetic tables are unchanged in this extraction and
+can be organized in focused follow-ups.
+
+Engine consumers import canonical text modules. The old root imports re-export
+the same functions, constants and types; existing tests retain compatibility
+coverage. This is an ownership extraction: error timing, regex caching and
+locking, UTF-8 handling, binary encoding, number conversion, null propagation
+and specialized route choices retain their implementations.

@@ -105,8 +105,8 @@ from .expr import (
     horizontal_inputs,
 )
 from dataframe.kernels.horizontal import horizontal
-from .str_kernels import string_op, concat_strings
-from .text_functions import text_function
+from dataframe.text.kernels import string_op, concat_strings
+from dataframe.text.functions import text_function
 from dataframe.kernels.binary import integer_is_in
 from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
@@ -134,7 +134,7 @@ from dataframe.storage.column import (
     _count_valid,
 )
 from dataframe.storage.string import StringColumn, StringBuilder
-from .string_predicates import _flip
+from dataframe.text.predicates import _flip
 from .series import Series
 from dataframe.kernels.binary import (
     binary,

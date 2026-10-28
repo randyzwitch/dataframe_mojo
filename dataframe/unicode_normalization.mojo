@@ -7,7 +7,7 @@ from .unicode_normalization_tables import (
 )
 from .series import Series
 from dataframe.storage.string import StringColumn, StringBuilder
-from .string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 

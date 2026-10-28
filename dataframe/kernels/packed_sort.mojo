@@ -41,7 +41,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.parallel import Job, Pool, configured_workers
 from dataframe.series import Series
-from dataframe.string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
 
 # Tier codes as stored: a key with nulls or NaN orders tiers first. Values

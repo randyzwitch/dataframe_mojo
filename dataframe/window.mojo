@@ -49,7 +49,7 @@ from .expr import (
 from dataframe.kernels.binary import checked_add, validity
 from dataframe.storage.string import StringColumn
 from dataframe.storage.nested import StructColumn
-from .parse import parse_float64
+from dataframe.text.parse import parse_float64
 from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt

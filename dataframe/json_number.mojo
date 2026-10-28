@@ -1,7 +1,7 @@
 """JSON numeric validation and distinct decode/JSONPath text formatting."""
 from std.memory import bitcast
 from .json_reader import JsonReader
-from .parse import parse_float64, parse_integer
+from dataframe.text.parse import parse_float64, parse_integer
 from .json_path_number import parse_jsonpath_float
 
 

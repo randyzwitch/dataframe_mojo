@@ -102,7 +102,7 @@ from dataframe.kernels.partition import (
 from dataframe.series import Series
 from dataframe.kernels.hashing import RowKeys
 from dataframe.trace import trace_path
-from dataframe.string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,

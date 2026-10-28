@@ -1,7 +1,7 @@
 """Compiled JSONPath selectors and predicates over the shared JSON tape."""
 from .json_reader import JsonReader, json_bytes, _utf8
 from .json_number import is_json_number, json_number_text
-from .parse import parse_float64
+from dataframe.text.parse import parse_float64
 from .json_path_number import parse_jsonpath_float
 
 # Selector kinds: field,index,wildcard,index union,name union,slice,filter.

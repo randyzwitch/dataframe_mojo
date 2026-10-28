@@ -4,7 +4,7 @@ from ..series import Series
 from dataframe.storage.column import Column
 from dataframe.storage.boolean import BoolColumn
 from ..dtype import DataType
-from ..parse import parse_integer, parse_float64
+from dataframe.text.parse import parse_integer, parse_float64
 from ..temporal import parse
 
 
