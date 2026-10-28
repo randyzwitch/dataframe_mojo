@@ -2,7 +2,7 @@
 from std.collections import Optional
 from std.memory import ArcPointer
 from ..dtype import DataType
-from ..json_decode import JsonDecodeOptions
+from dataframe.json.decode import JsonDecodeOptions
 from .json import _options, _ndjson_schema
 from .json_source import JsonInput, JsonLines
 from .json_parallel import _Context, _DecodeJob

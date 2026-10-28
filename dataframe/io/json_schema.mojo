@@ -1,7 +1,7 @@
 """Sample JSON objects into one ordered, recursively promoted schema."""
 from ..dtype import DataType
-from ..json_reader import JsonReader
-from ..json_number import (
+from dataframe.json.reader import JsonReader
+from dataframe.json.number import (
     is_json_number,
     is_json_fraction,
     validate_json_numbers,

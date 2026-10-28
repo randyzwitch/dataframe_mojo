@@ -3,9 +3,13 @@ from std.collections import Optional
 from ..dtype import DataType
 from ..frame import DataFrame, concat
 from ..series import Series
-from ..json_reader import JsonReader, json_bytes
-from ..json_decode import JsonDecoder, JsonDecodeOptions, validate_json_dtype
-from ..json_number import validate_json_numbers
+from dataframe.json.reader import JsonReader, json_bytes
+from dataframe.json.decode import (
+    JsonDecoder,
+    JsonDecodeOptions,
+    validate_json_dtype,
+)
+from dataframe.json.number import validate_json_numbers
 from .json_schema import JsonSchema
 from .json_source import JsonInput, JsonLines, JsonArrayRows
 from .json_parallel import json_frame as _frame, read_parallel

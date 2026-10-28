@@ -1,5 +1,5 @@
 """Translate GeoParquet 1.x metadata to and from geometry column metadata."""
-from .json_value import JsonValue, json_quote
+from dataframe.json.value import JsonValue, json_quote
 from .frame import DataFrame
 from .series import Series
 from .dtype import DataType

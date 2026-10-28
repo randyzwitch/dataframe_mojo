@@ -17,7 +17,7 @@ from std.memory import ArcPointer
 from std.sys import size_of
 
 from .timezone import canonical_zone
-from .json_value import JsonValue, json_quote
+from dataframe.json.value import JsonValue, json_quote
 
 # Every numeric type shares one code; its DType tells them apart.
 comptime _NUMERIC = 0
