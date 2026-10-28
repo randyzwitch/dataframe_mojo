@@ -15,7 +15,7 @@ from dataframe.planning.cost.model import trace_decision
 from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
     RowEstimate,
-    frame_payload_width,
+    frame_column_width,
     trace_join_cost,
 )
 
@@ -476,11 +476,41 @@ def plan_stream_execute(
             )
             var built = self._execute(node.right, False, True, batch_size)
             if (
+                not built._statistics
+                and self._nodes[node.right].kind == SCAN_FRAME
+            ):
+                ref original = self._frames[
+                    self._nodes[node.right].source_slot()
+                ]
+                if original._statistics:
+                    built._statistics = Optional(original._statistics.value())
+            if not built._statistics:
+                built = built^._with_statistics()
+            if (
+                not prepared
+                and len(node.right_keys) == 1
+                and node.how in [JOIN_INNER, JOIN_LEFT]
+            ):
+                prepared = prepare_progression_index(
+                    [built.column(node.right_keys[0])]
+                )
+                if prepared:
+                    algorithm = "progression"
+                    trace_join_cost(
+                        RowEstimate(-1, "observed_progression_index", False),
+                        0.0,
+                        0.0,
+                        False,
+                        0.0,
+                        0.0,
+                    )
+            if (
                 node.how == JOIN_INNER
                 and not ordered
                 and bound >= 0
                 and built.height() > bound
                 and _order_free_reductions(keys, expressions)
+                and not prepared
                 and not plan_progression_key(self, node.right, node.right_keys)
             ):
                 # The built right side holds more rows than the left
@@ -515,38 +545,68 @@ def plan_stream_execute(
                         )
                     return plan._execute(index, False, True, batch_size)
             if (
-                node.how == JOIN_INNER or node.how == JOIN_LEFT
-            ) and node.coalesce:
+                (node.how == JOIN_INNER or node.how == JOIN_LEFT)
+                and node.coalesce
+                and not prepared
+            ):
                 # DuckDB's build side (`BuildProbeSideOptimizer`): the
-                # side with fewer estimated payload bytes builds. The right
-                # side has run; when the left one, estimated, is the
-                # smaller, the join runs here on both, building on the
+                # index hashes key bytes and retains row references. The right
+                # side has run; when the left index plus materialization
+                # is estimated cheaper, the join runs here, building on the
                 # left and restoring its row order (`DataFrame.join`),
                 # and the stream goes on from its result, rather than
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. Exact heights can avoid sampling; upper bounds
                 # cannot establish that a filtered left is too large.
-                var right_cost = Float64(built.height()) * frame_payload_width(
-                    built
+                var right_key_width = 0.0
+                for name in node.right_keys:
+                    right_key_width += max(1.0, frame_column_width(built, name))
+                # The index hashes keys and stores row references. Non-key
+                # string payload already belongs to the build frame.
+                var right_cost = Float64(built.height()) * (
+                    right_key_width + 16.0
                 )
                 var estimates = IntermediateEstimates(len(self._nodes))
+                estimates.observe(node.right, built)
                 var left_width = estimates.payload_width(
-                    self, node.left, plan_columns_of(self, node.left)
+                    self, node.left, node.names
                 )
-                # An upper bound cannot rule out a small filtered input.
-                # Only exact known heights can skip the statistics request.
                 var known = plan_known_height(self, node.left)
-                if known < 0 or Float64(known) * left_width < right_cost:
+                if (
+                    known < 0
+                    or Float64(known) * (left_width + 16.0) < right_cost
+                ):
                     var rows = estimates.rows(self, node.left)
-                    var prefer_left = (
-                        rows >= 0 and Float64(rows) * left_width < right_cost
-                    )
+                    var joined_rows = estimates.rows(self, cursor)
+                    var finish = 0.0
+                    if rows >= 0:
+                        var output_rows = Float64(
+                            joined_rows if joined_rows >= 0 else rows
+                        )
+                        # The reversible unordered left join streams its
+                        # output; other swaps materialize the joined frame.
+                        if not (node.how == JOIN_LEFT and order_free):
+                            finish = output_rows * estimates.payload_copy_width(
+                                self, cursor, plan_columns_of(self, cursor)
+                            )
+                        if known < 0:
+                            finish += Float64(
+                                rows
+                            ) * estimates.payload_copy_width(
+                                self,
+                                node.left,
+                                plan_columns_of(self, node.left),
+                            )
+                    var left_work = Float64(rows) * (left_width + 16.0) + finish
+                    var prefer_left = rows >= 0 and left_work < right_cost
                     trace_join_cost(
                         estimates.facts[node.left],
                         left_width,
                         right_cost,
                         prefer_left,
+                        left_work,
+                        finish,
                     )
                     if prefer_left:
                         # A left join under a consumer that ignores row

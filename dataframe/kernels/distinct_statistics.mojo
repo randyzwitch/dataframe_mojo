@@ -246,6 +246,53 @@ struct _ColumnSample(Copyable, Movable):
     var sample: Series
 
 
+@fieldwise_init
+struct _CostColumnCount(Copyable, Movable):
+    var policy: String
+    var source: Series
+    var count: Int
+
+
+def _same_cost_view(left: Series, right: Series) -> Bool:
+    if len(left) != len(right) or left.is_chunked() != right.is_chunked():
+        return False
+    var a_type = left.dtype()
+    var b_type = right.dtype()
+    if a_type.has_dictionary() != b_type.has_dictionary():
+        return False
+    if (
+        a_type.has_dictionary()
+        and a_type.dictionary().ptr() != b_type.dictionary().ptr()
+    ):
+        return False
+    if a_type != b_type:
+        return False
+    if left.is_chunked():
+        return left._chunked.value().ptr() == right._chunked.value().ptr()
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if (
+            left._data.isa[Column[Scalar[D]]]()
+            and right._data.isa[Column[Scalar[D]]]()
+        ):
+            ref a = left._data[Column[Scalar[D]]]
+            ref b = right._data[Column[Scalar[D]]]
+            return a._offset == b._offset and a._shares_buffers_with(b)
+    if left._data.isa[Column[Int128]]() and right._data.isa[Column[Int128]]():
+        ref a = left._data[Column[Int128]]
+        ref b = right._data[Column[Int128]]
+        return a._offset == b._offset and a._shares_buffers_with(b)
+    if left._data.isa[StringColumn]() and right._data.isa[StringColumn]():
+        ref a = left._data[StringColumn]
+        ref b = right._data[StringColumn]
+        return a._offset == b._offset and a._shares_buffers_with(b)
+    if left._data.isa[BoolColumn]() and right._data.isa[BoolColumn]():
+        ref a = left._data[BoolColumn]
+        ref b = right._data[BoolColumn]
+        return a._offset == b._offset and a._shares_buffers_with(b)
+    return False
+
+
 struct TableStatistics(Movable):
     """Distinct counts and row samples of one loaded table's columns,
     shared by every copy of the table and filled on first request
@@ -256,11 +303,57 @@ struct TableStatistics(Movable):
     var lock: Atomic[Int64]
     var counts: List[_ColumnCount]
     var samples: List[_ColumnSample]
+    var cost_counts: List[_CostColumnCount]
 
     def __init__(out self):
         self.lock = Atomic[Int64](0)
         self.counts = List[_ColumnCount]()
         self.samples = List[_ColumnSample]()
+        self.cost_counts = List[_CostColumnCount]()
+
+    def cost_distinct(
+        mut self,
+        series: Series,
+        policy: String,
+        estimate: def(Series) raises thin -> Int,
+    ) raises -> Int:
+        """Reuse a caller's pure cost estimate for the identical immutable view.
+
+        At most 128 entries per loaded table; replacing a named column
+        replaces its cached owner. Retained shallow views prevent pointer
+        reuse from producing hits, while validity, offsets, dtype and
+        dictionary identity are checked independently of the payload.
+        """
+        self._acquire()
+        for entry in self.cost_counts:
+            if (
+                entry.policy == policy
+                and entry.source.name() == series.name()
+                and _same_cost_view(entry.source, series)
+            ):
+                var count = entry.count
+                self._release()
+                return count
+        self._release()
+        var count = estimate(series)
+        self._acquire()
+        var replaced = False
+        for i in range(len(self.cost_counts)):
+            if (
+                self.cost_counts[i].policy == policy
+                and self.cost_counts[i].source.name() == series.name()
+            ):
+                self.cost_counts[i] = _CostColumnCount(
+                    policy.copy(), series.copy(), count
+                )
+                replaced = True
+                break
+        if not replaced and len(self.cost_counts) < 128:
+            self.cost_counts.append(
+                _CostColumnCount(policy.copy(), series.copy(), count)
+            )
+        self._release()
+        return count
 
     def _acquire(mut self):
         while True:

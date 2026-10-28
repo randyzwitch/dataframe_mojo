@@ -299,6 +299,18 @@ struct DataFrame(Copyable, Sized, Writable):
                 return box[].distinct(column)
         return -1
 
+    def _cost_distinct_count(
+        self,
+        name: String,
+        policy: String,
+        estimate: def(Series) raises thin -> Int,
+    ) raises -> Int:
+        var column = self.column(name)
+        if not self._statistics:
+            return estimate(column)
+        var box = self._statistics.value()
+        return box[].cost_distinct(column, policy, estimate)
+
     def _sampled(self, names: List[String], runs: Int, run: Int) raises -> Self:
         """The named columns' rows at `runs` evenly spaced runs of `run`
         rows. A loaded table keeps each column's merged runs with its

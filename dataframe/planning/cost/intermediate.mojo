@@ -156,6 +156,8 @@ def trace_join_cost(
     left_width: Float64,
     right_bytes: Float64,
     prefer_left: Bool,
+    left_work: Float64 = -1.0,
+    finish_work: Float64 = -1.0,
 ):
     if getenv("DATAFRAME_TRACE_PATHS"):
         print(
@@ -167,10 +169,14 @@ def trace_join_cost(
             + fact.reason
             + "; exact_rows="
             + String(fact.exact)
-            + "; left_width="
+            + "; left_key_width="
             + String(left_width)
             + "; right_bytes="
-            + String(right_bytes),
+            + String(right_bytes)
+            + "; left_work="
+            + String(left_work)
+            + "; finish_work="
+            + String(finish_work),
             file=RawFileDescriptor(2),
         )
 
@@ -232,7 +238,9 @@ struct IntermediateEstimates(Movable):
             ):
                 return (-1, -1.0)
             return (
-                bounded_distinct(frame.column(name)),
+                frame._cost_distinct_count(
+                    name, "bounded-chao1-jitter4096-v1", bounded_distinct
+                ),
                 frame_column_width(frame, name),
             )
         if node.kind == SCAN_FRAME:
@@ -242,7 +250,9 @@ struct IntermediateEstimates(Movable):
             if frame.column(name).dtype().is_nested():
                 return (-1, -1.0)
             return (
-                bounded_distinct(frame.column(name)),
+                frame._cost_distinct_count(
+                    name, "bounded-chao1-jitter4096-v1", bounded_distinct
+                ),
                 frame_column_width(frame, name),
             )
         if node.kind == DROP and name in node.names:
@@ -360,9 +370,18 @@ struct IntermediateEstimates(Movable):
                     var budget = 64 * 1024
                     if height > budget:
                         sample = frame._sampled(names, 64, 1024)
-                    var kept = true_count(
-                        sample._selection(node.exprs[0], 8192)
-                    )
+                    var kept = 0
+                    try:
+                        kept = true_count(
+                            sample._selection(node.exprs[0], 8192)
+                        )
+                    except:
+                        # Cost preparation must not decide which row errors
+                        # are observed. Execution still validates its actual
+                        # input and reports any relevant failure normally.
+                        return self._set(
+                            index, height, "unavailable_filter_sample"
+                        )
                     return self._set(
                         index,
                         _cost_rows(
@@ -445,6 +464,16 @@ struct IntermediateEstimates(Movable):
         for name in names:
             var bytes = self.column_width(plan, index, name)
             width += bytes if bytes >= 0 else 16.0
+        return max(width, 1.0)
+
+    def payload_copy_width(
+        mut self, plan: QueryContext, index: Int, names: List[String]
+    ) raises -> Float64:
+        """Bytes moved by a gather: string views carry descriptors, not bytes."""
+        var width = 0.0
+        for name in names:
+            var bytes = self.column_width(plan, index, name)
+            width += min(16.0, bytes) if bytes >= 0 else 16.0
         return max(width, 1.0)
 
     def column_width(

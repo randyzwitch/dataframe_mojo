@@ -31,6 +31,15 @@ slices and concatenations propagate it. The existing bounded filter sample
 is retained directly over frame scans. A filter over an intermediate with
 unknown selectivity retains an explicitly inexact input estimate. Unknown
 computed-column distributions are not discovered by executing expressions.
+If evaluating a filter sample fails, preparation retains the input estimate;
+execution still evaluates its actual rows and reports relevant errors.
+
+Loaded tables retain at most 128 bounded distinct estimates, keyed by policy,
+column name and the identical immutable buffer view (including validity,
+offset, dtype and dictionary identity). Repeated preparation reuses these
+counts without resampling. Entries retain shallow owners to prevent pointer
+reuse from causing false hits. A changed view replaces its named entry;
+failed preparations are not cached.
 
 Payload widths use source buffer metadata, including average string bytes,
 and preserve plain-column aliases. Width lookup does not sample distinct
@@ -39,16 +48,22 @@ fallback, rather than inventing a physical layout guarantee.
 
 ## Join build decisions
 
-Once a join's right input has executed, its actual height and payload width
-are available. The left input is compared using propagated row estimates
-and payload width. Only an exact known height may skip the statistics
+Once a join's right input has executed, its actual height and key width
+are available. An observed progression can reuse its compact index. Other
+builds compare estimated key bytes and row references, since non-key payload
+already belongs to the build frame. A reversal also pays for materializing
+an unavailable left input and, when required, gathering the joined output.
+String gathers move view descriptors; they do not copy all referenced bytes.
+An unordered left-join reversal streams its output and avoids that gather.
+Only an exact known height may skip the statistics
 request: a large upper bound cannot establish that a filtered result is
 large. Existing runtime joins still operate on actual frames and preserve
 their output-order contracts.
 
 The existing `DATAFRAME_TRACE_PATHS` setting emits a `dataframe-strategy`
 join-build record with selected side, row estimate, exactness, estimate
-reason, left payload width and observed right payload cost.
+reason, left key width, observed right index cost, estimated left work and
+materialization cost.
 
 ## Materialized join inputs and grouping finish costs
 

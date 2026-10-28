@@ -1,13 +1,14 @@
 """Intermediate cost estimates are independent from exact heights and bounds."""
 # contract-group: planner.estimates
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, Series, StringColumn, col
+from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
     _cost_rows,
     bounded_distinct,
 )
 from dataframe.planning.graph import plan_height_bound, plan_known_height
+from dataframe.kernels.distinct_statistics import TableStatistics
 from tests.support.coverage_compare import assert_frame
 
 
@@ -190,3 +191,79 @@ def test_bounded_sampling_preserves_fragmented_and_sliced_input_domains() raises
     assert_true(series.is_chunked())
     assert_true(sliced.is_chunked())
     assert_equal(len(series), 85_000)
+
+
+def _unknown_estimate(series: Series) raises -> Int:
+    return -1
+
+
+def _failed_estimate(series: Series) raises -> Int:
+    raise Error("statistics preparation failed")
+
+
+def test_cost_statistics_cache_distinguishes_equal_length_views_and_validity() raises:
+    var column = Column[Int64]([1, 1, 1, 2, 3, 4])
+    var table = DataFrame([Series("k", column.slice(0, 3))])._with_statistics()
+    assert_equal(
+        table._cost_distinct_count("k", "test-v1", bounded_distinct), 1
+    )
+    var other = table.copy()
+    other._columns[0] = Series("k", column.slice(3, 3))
+    assert_equal(
+        other._cost_distinct_count("k", "test-v1", bounded_distinct), 3
+    )
+    assert_equal(
+        table._cost_distinct_count("k", "test-v1", bounded_distinct), 1
+    )
+    assert_equal(
+        other._cost_distinct_count("k", "test-v1", bounded_distinct), 3
+    )
+    # The bitmap uses the same offset convention as the shared data.
+    var mask_owner = Column[Int64](
+        [0, 0, 0, 0, 0, 0], [False, False, False, True, False, False]
+    )
+    var masked = Column[Int64]._from_buffers(
+        column._data, mask_owner._bits, 3, 3
+    )
+    other._columns[0] = Series("k", masked^)
+    assert_equal(
+        other._cost_distinct_count("k", "test-v1", bounded_distinct), 1
+    )
+    assert_equal(len(table._statistics.value()[].cost_counts), 1)
+
+
+def test_cost_statistics_policy_errors_and_entry_limit_remain_explicit() raises:
+    var stats = TableStatistics()
+    var source = Series("k", Column[Int64]([1, 2, 3]))
+    assert_equal(stats.cost_distinct(source, "known", bounded_distinct), 3)
+    assert_equal(stats.cost_distinct(source, "unknown", _unknown_estimate), -1)
+    var raised = False
+    try:
+        _ = stats.cost_distinct(source, "failed", _failed_estimate)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_equal(stats.cost_distinct(source, "failed", bounded_distinct), 3)
+    for key in range(150):
+        var next = Series("k" + String(key), Column[Int64]([1, 2]))
+        assert_equal(stats.cost_distinct(next, "known", bounded_distinct), 2)
+    assert_true(len(stats.cost_counts) <= 128)
+
+
+def test_failed_filter_sample_is_unknown_and_execution_still_reports_errors() raises:
+    var query = (
+        DataFrame([Series("s", StringColumn(["1", "bad"]))])
+        .lazy()
+        .filter(col("s").cast(DataType.INT64) > 0)
+    )
+    var index = len(query._plan._nodes) - 1
+    var estimates = IntermediateEstimates(len(query._plan._nodes))
+    assert_equal(estimates.rows(query._plan, index), 2)
+    assert_equal(estimates.facts[index].reason, "unavailable_filter_sample")
+    assert_true(not estimates.facts[index].exact)
+    var failed = False
+    try:
+        _ = query.collect(engine="cpu")
+    except:
+        failed = True
+    assert_true(failed)
