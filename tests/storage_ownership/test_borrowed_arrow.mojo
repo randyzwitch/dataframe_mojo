@@ -531,12 +531,12 @@ def exercise_declared_window_facts(mut foreign: ForeignArrow) raises:
     )
     ref column = series._data[Column[Int64]]
     assert_true(column._data.is_borrowed())
-    assert_equal(column._facts[].first, 2)
-    assert_equal(column._facts[].last, 5)
+    assert_equal(column._facts[].first(), 2)
+    assert_equal(column._facts[].last(0), 5)
     assert_true(_ascending_cached[DType.int64](column))
-    assert_equal(column._facts[].order, 1)
+    assert_equal(column._facts[].order_state(), 1)
     _fill_zones(column)
-    assert_equal(column._facts[].zones, List[Int64]([Int64(10), Int64(30)]))
+    assert_equal(column._facts[].zones(), List[Int64]([Int64(10), Int64(30)]))
     assert_true(_ascending_cached[DType.int64](column.slice(1, 2)))
     _ = series^
 

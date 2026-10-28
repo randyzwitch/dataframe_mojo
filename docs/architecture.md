@@ -214,3 +214,30 @@ The old planning/stream helper imports remain available through re-exports.
 The lazy boundary gate enforces eligibility/observation/policy direction and
 prevents execution from reintroducing separate `piped`, `insert`, `table` and
 `eager` choice variables. Join graph rewriting remains in physical orchestration.
+
+## Shared buffer facts
+
+`storage/facts.mojo` owns the metadata shared by every window onto a typed
+column buffer. Order and integer-progression caches use atomic loads/stores;
+concurrent checks may compute the same immutable-buffer fact, without holding a
+lock across worker jobs. No consumer reads metadata through an address cast or
+assumes a field offset. The order cell is deliberately not the first field.
+
+Zone maps publish a private list once through an atomic empty/publishing/ready
+state. Readers acquire ready before borrowing the immutable list; a reader that
+sees initialization in progress uses the ordinary bounds scan. Losing
+initializers discard their private candidate. The existing pipeline-wide
+initialization lock still avoids duplicate map construction during normal setup.
+
+The declared foreign-array range is initialized while the fresh facts cell has
+one owner, before sharing. Cache readers use that range rather than undefined
+backing-allocation prefix/suffix values. Column copies/slices retain the same
+cell; reserve/append retain their existing detach-and-replace behavior. The
+metadata stays in the existing single Arc allocation per column. Typed field
+pointer mutability conversions are confined to atomic cache publication in the
+facts module; no payload mutability is exposed.
+
+`scripts/check_storage_boundaries.py` checks the facts module's low-level
+imports and requires metadata consumers to use its named methods. Concurrent
+publication, real overlapping cache consumers, foreign windows, copy/slice
+lifetimes, and mutation invalidation have focused contracts.

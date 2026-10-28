@@ -265,12 +265,12 @@ def test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descend
         col("x") >= lit(Int64(3)),
         col("x") <= lit(Int64(9)),
     ]
-    assert_equal(source._data[Column[Int64]]._facts[].order, 0)
+    assert_equal(source._data[Column[Int64]]._facts[].order_state(), 0)
     var first = sorted_window([source.copy()], n, parts)
     assert_equal(first.used, List[Bool]([True, True]))
     assert_equal(first.low, 9)
     assert_equal(first.high, 30)
-    assert_equal(source._data[Column[Int64]]._facts[].order, 1)
+    assert_equal(source._data[Column[Int64]]._facts[].order_state(), 1)
     var view = source.slice(7, 65)
     assert_equal(
         Int(view._data[Column[Int64]]._facts.ptr()),
@@ -286,7 +286,8 @@ def test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descend
         if rechunked:
             joined = joined.rechunk()
             assert_equal(
-                joined.column("x")._data[Column[Int64]]._facts[].order, 0
+                joined.column("x")._data[Column[Int64]]._facts[].order_state(),
+                0,
             )
         var found = sorted_window([joined.column("x")], 2 * n, parts)
         assert_equal(found.used, List[Bool]([False, False]))

@@ -9,41 +9,10 @@ batch reassembly in `_append_column`, first takes a private copy unless the
 column already owns its buffers outright.
 """
 from ._buffer import _Buffer, _BufferData, _ForeignOwner
+from .storage.facts import _BufferFacts
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, pack_bits, unsafe_memcpy
 from std.sys import Endian
-
-
-struct _BufferFacts(Movable):
-    """What is known about a column's whole value buffer. Buffers are
-    immutable while shared, so a fact holds until a mutation, which starts
-    a new cell. `order` stays the first field: `sorted_range` reads and
-    sets it through this cell's address."""
-
-    # Whether the buffer is in ascending order: 0 not yet known, 1
-    # ascending, 2 not (`sorted_range`).
-    var order: Int
-    # The least and greatest valid value of each block of `_ZONE_ROWS`
-    # slots, as pairs (Int64.MAX and Int64.MIN for a block with none), for
-    # integer columns: a zone map, found once before a pipeline reads the
-    # buffer (`pipeline._ensure_zones`). Empty until then.
-    var zones: List[Int64]
-    # Whether every slot of the buffer is valid and each value exceeds the
-    # one before by the same positive step, for 64-bit integer columns: 0
-    # not yet known, 1 a progression, 2 not (`join_hash.int64_progression`).
-    var progression: Int
-    # Only this range belongs to a foreign array. Prefix/suffix slots in
-    # its backing allocation may be undefined even when its rows are valid.
-    # last == -1 uses the complete owned buffer.
-    var first: Int
-    var last: Int
-
-    def __init__(out self):
-        self.order = 0
-        self.zones = List[Int64]()
-        self.progression = 0
-        self.first = 0
-        self.last = -1
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
@@ -113,8 +82,8 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         result._bits = bits.copy()
         result._offset = offset
         result._length = length
-        result._facts[].first = offset
-        result._facts[].last = offset + length
+        debug_assert(result._facts.count() == 1)
+        result._facts[].initialize_window(offset, offset + length)
         return result^
 
     def __len__(self) -> Int:
