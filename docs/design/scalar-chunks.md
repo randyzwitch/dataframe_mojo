@@ -39,3 +39,12 @@ dictionary semantics, error-row numbering and inactive conditional rows.
 Use independent expectations and the existing contiguous path as a
 differential control. Keep generated inputs, binaries and profiles outside
 the repository.
+
+## Initial numeric cast path
+
+Unmasked numeric conversions that cannot fail read each input chunk into one
+owned output allocation and append its sliced validity bits. Null payloads
+are zeroed as in the contiguous path. Input merge caches remain untouched.
+The contiguous path, checked casts, masks, categorical dictionaries, temporal
+units and decimal rules keep their existing converters. Other consumers
+remain under measurement; this initial change does not complete #1003.

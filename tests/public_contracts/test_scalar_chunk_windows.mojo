@@ -162,3 +162,45 @@ def test_empty_chunked_slices_retain_result_types_and_names() raises:
     assert_equal(result.columns(), ["a32", "sum"])
     assert_true(result.column("a32").dtype() == DataType.FLOAT32)
     assert_true(result.column("sum").dtype() == DataType.INT64)
+
+
+def test_direct_widening_casts_own_their_output_without_populating_input_merge_cache() raises:
+    var input = source().column("a")
+    var result = input.cast(DataType.FLOAT32)
+    assert_equal(input.n_chunks(), 2)
+    assert_equal(input._chunked.value()[].cache[].state.load(), 0)
+    assert_equal(result.n_chunks(), 1)
+    _ = input^
+    assert_frame(
+        DataFrame([result^]),
+        DataFrame(
+            [
+                Series(
+                    "a",
+                    Column[Float32](
+                        [-1, 0, 9, 16, 25], [True, False, True, True, True]
+                    ),
+                )
+            ]
+        ),
+    )
+    var high = UInt64.MAX // 2 + 1
+    var unsigned = pieces(
+        Series("u", Column[UInt64]([0, high, UInt64.MAX])), [1, 2]
+    )
+    var floats = unsigned.cast(DataType.FLOAT64)
+    assert_equal(unsigned._chunked.value()[].cache[].state.load(), 0)
+    _ = unsigned^
+    assert_frame(
+        DataFrame([floats^]),
+        DataFrame(
+            [
+                Series(
+                    "u",
+                    Column[Float64](
+                        [0.0, 9223372036854775808.0, 18446744073709551616.0]
+                    ),
+                )
+            ]
+        ),
+    )
