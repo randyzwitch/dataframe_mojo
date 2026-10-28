@@ -162,3 +162,31 @@ def test_extreme_negative_slice_offset_does_not_overflow_estimation() raises:
     var frame = DataFrame([Series("k", Column[Int64]([1, 2]))])
     var query = frame.lazy().slice(Int.MIN, 1)
     assert_equal(query._estimated_rows(len(query._plan._nodes) - 1), 1)
+
+
+def test_bounded_domain_estimates_do_not_grow_with_repeated_population_rows() raises:
+    # A fixed domain remains a fixed domain when more rows repeat it. The
+    # former distinct-fraction extrapolation estimated 498K for 8,192 keys.
+    for n in [100_000, 1_000_000]:
+        for domain in [32, 512, 8192]:
+            var values = List[Int64](capacity=n)
+            for row in range(n):
+                values.append(Int64(row % domain))
+            var estimate = bounded_distinct(Series("k", Column[Int64](values^)))
+            assert_true(estimate >= domain // 2 and estimate <= domain * 2)
+
+
+def test_bounded_sampling_preserves_fragmented_and_sliced_input_domains() raises:
+    var chunks = List[Series]()
+    for part in range(17):
+        var values = List[Int64]()
+        for row in range(5000):
+            values.append(Int64((part * 5000 + row) % 512))
+        chunks.append(Series("k", Column[Int64](values^)))
+    var series = Series._from_chunks(chunks)
+    var sliced = series.slice(13, 80_003)
+    var estimate = bounded_distinct(sliced)
+    assert_true(estimate >= 256 and estimate <= 1024)
+    assert_true(series.is_chunked())
+    assert_true(sliced.is_chunked())
+    assert_equal(len(series), 85_000)

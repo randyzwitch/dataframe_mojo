@@ -15,8 +15,12 @@ absence of output rows. Existing `plan_known_height` and
 
 A request memo visits a shared logical node once. Source column distinct
 counts observe at most 4,096 rows, using one deterministically jittered row
-per stratum for larger inputs. Exact sample codes feed the existing
-unseen-distinct correction. This remains an estimate on large inputs,
+per stratum for larger inputs. Exact sample-code frequencies feed a
+bias-corrected singleton/doubleton correction, following the
+[Chao1 formula](https://scikit.bio/docs/latest/generated/skbio.diversity.alpha.chao1.html).
+This is adapted as a cost heuristic: stratified finite-population sampling
+does not establish a semantic lower or upper bound. A sample with no
+repeated valid values extrapolates its valid fraction. This remains an estimate on large inputs,
 including skewed or correlated data. A grouping estimate caps the product
 of available key domains by its input estimate. Multi-key joins use the
 largest available key domain, avoiding multiplication of correlated

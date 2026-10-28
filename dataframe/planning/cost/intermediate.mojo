@@ -72,8 +72,9 @@ def bounded_distinct(column: Series) raises -> Int:
     """At most 4,096 observations, including frames without table statistics.
 
     One deterministically jittered row per stratum avoids locking every
-    observation to the same offset in periodic data. The existing distinct
-    estimator's unseen-value correction is applied to exact sample codes.
+    observation to the same offset in periodic data. Singleton/doubleton
+    frequencies estimate unseen values, rather than scaling the observed
+    distinct fraction by the entire population.
     This is a cost estimate, never a uniqueness or capacity proof.
     """
     var height = len(column)
@@ -93,16 +94,53 @@ def bounded_distinct(column: Series) raises -> Int:
             hash *= UInt64(0xBF58476D1CE4E5B9)
             hash ^= hash >> 27
             rows.append(first + Int(hash % UInt64(width)))
-        sample = column.take(rows)
+        if column.is_chunked():
+            # Series.take currently rechunks its entire input. Borrow only
+            # the sampled windows so estimate preparation does not copy the
+            # full payload of a fragmented intermediate.
+            var chunks = column.chunks()
+            var parts = List[Series](capacity=count)
+            var chunk = 0
+            var first = 0
+            for row in rows:
+                while chunk < len(chunks) and row >= first + len(chunks[chunk]):
+                    first += len(chunks[chunk])
+                    chunk += 1
+                parts.append(chunks[chunk].slice(row - first, 1))
+            sample = Series._from_chunks(parts)
+        else:
+            sample = column.take(rows)
     var codes = encode_rows([sample^], nulls_equal=False)
-    var unique = Float64(codes.count())
-    var fraction = unique / Float64(count)
-    return min(
-        height,
-        _cost_rows(
-            unique + fraction * fraction * fraction * Float64(height - count)
-        ),
+    var unique = codes.count()
+    if height == count:
+        return unique
+    var frequencies = List[Int](length=unique, fill=0)
+    var valid = 0
+    for code in codes.ids:
+        if code >= 0:
+            frequencies[code] += 1
+            valid += 1
+    var singletons = 0
+    var doubletons = 0
+    for frequency in frequencies:
+        singletons += 1 if frequency == 1 else 0
+        doubletons += 1 if frequency == 2 else 0
+    if singletons == valid:
+        # No repeated non-null value was observed. Extrapolate the valid
+        # fraction, without treating this as a uniqueness proof.
+        return min(
+            height,
+            _cost_rows(Float64(height) * Float64(valid) / Float64(count)),
+        )
+    # Bias-corrected Chao1, adapted as a bounded-sample cost heuristic.
+    # Stratification and finite populations do not make this a semantic
+    # lower/upper bound. All decisions still validate actual inputs.
+    var unseen = (
+        Float64(singletons)
+        * Float64(singletons - 1)
+        / (2.0 * Float64(doubletons + 1))
     )
+    return min(height, _cost_rows(Float64(unique) + unseen))
 
 
 def frame_payload_width(frame: DataFrame) raises -> Float64:
