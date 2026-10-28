@@ -1,4 +1,5 @@
 """Plan traversal, identity, schemas, and cardinality properties."""
+from dataframe.planning.cost.intermediate import IntermediateEstimates
 from dataframe.planning.node_builders import (
     _frame_scan_node,
 )
@@ -743,48 +744,13 @@ def plan_order_free_above(
 
 
 def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
-    """Rows node `index` yields, without running it: exact for a table,
-    estimated for one row-local filter over a table by applying the
-    filter to 64 evenly spaced runs of 1,024 rows (every row of a table
-    that small). -1 for anything else. Evenly spaced runs, not a
-    prefix: tables are often stored in date or key order, which a
-    prefix would misjudge."""
-    ref node = self._nodes[index]
-    if node.kind == SCAN_FRAME:
-        return self._frames[node.source_slot()].height()
-    if node.kind == DROP or (
-        (node.kind == SELECT or node.kind == WITH_COLUMNS)
-        and _stream_rows(node)
-    ):
-        return plan_estimated_rows(self, node.left)
-    if node.kind != FILTER or not _row_local(node.exprs):
-        return -1
-    ref source = self._nodes[node.left]
-    if source.kind != SCAN_FRAME:
-        return -1
-    var height = self._frames[source.source_slot()].height()
-    var runs = 64
-    var run = 1024
-    # Only the columns the filter reads.
-    var reads = _references(node.exprs[0])
-    if not reads:
-        return -1
-    var names = List[String]()
-    for name in reads.value():
-        if name not in names:
-            names.append(name)
-    # A large table's runs are copied end to end (zero-copy slices
-    # merged into one array), not gathered row by row, once for the
-    # table: its statistics keep them.
-    var sample = self._frames[source.source_slot()].select(names)
-    if height > runs * run:
-        sample = self._frames[source.source_slot()]._sampled(names, runs, run)
-    # Only the matches are counted: the predicate's mask, as DuckDB
-    # counts a selection vector, with no filtered frame built.
-    var kept = true_count(sample._selection(node.exprs[0], 8192))
-    if height <= runs * run:
-        return kept
-    return Int(Float64(kept) / Float64(runs * run) * Float64(height))
+    """Cost-only rows propagated through intermediate operators.
+
+    These estimates never replace plan_known_height or plan_height_bound.
+    The request memo prevents repeated evaluation of shared subplans.
+    """
+    var estimates = IntermediateEstimates(len(self._nodes))
+    return estimates.rows(self, index)
 
 
 def plan_progression_key(
@@ -893,13 +859,12 @@ def plan_indexed_relation(
 
 
 def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
-    """Rows a join-graph relation yields, estimated without running it:
-    `_estimated_rows`, else, for a join the order cannot reorder,
-    combine its inputs' estimates: a semi or anti join keeps its left
-    input's rows; other joins use the larger input's estimate. A UNION
-    ALL yields its inputs' rows together, as DuckDB's estimate of a set
-    operation (`RelationStatisticsHelper`). -1 when an input has no
-    estimate."""
+    """Cost-only rows for a join-graph relation, without executing it.
+
+    Use memoized intermediate statistics first. Where a child has no usable
+    statistics, preserve the previous conservative outer/semi/anti and
+    UNION ALL fallbacks. These estimates are never semantic bounds.
+    """
     var known = plan_estimated_rows(self, index)
     if known >= 0:
         return known

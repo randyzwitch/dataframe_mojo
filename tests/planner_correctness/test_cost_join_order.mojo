@@ -332,9 +332,9 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
 
 
 def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
-    # DuckDB's estimate for an input the join order cannot reorder: a
-    # left, right or full join yields its larger input's rows, a semi or
-    # anti join its left input's.
+    # Outer joins retain their preserved side's cardinality. The semi and
+    # anti estimates account for available key domains, without treating
+    # the point estimate as a proof of membership.
     var t = tables()
     var left = t[0].join(
         t[1], left_on=["f_product"], right_on=["p_id"], how="left"
@@ -351,10 +351,10 @@ def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
     var anti = t[3].join(
         t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
     )
-    assert_equal(anti._relation_estimate(len(anti._plan._nodes) - 1), 4000)
-    # An inner join is part of the graph itself: no estimate here.
+    assert_equal(anti._relation_estimate(len(anti._plan._nodes) - 1), 0)
+    # Inner intermediates now carry key-domain cost estimates as well.
     var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
-    assert_equal(inner._relation_estimate(len(inner._plan._nodes) - 1), -1)
+    assert_true(inner._relation_estimate(len(inner._plan._nodes) - 1) > 0)
 
 
 def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:
@@ -371,7 +371,7 @@ def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:
             query.collect(optimize=False, engine="cpu").height(),
         )
     var unknown = left.concat(left.select(col("k").sum()))
-    assert_equal(unknown._relation_estimate(len(unknown._plan._nodes) - 1), -1)
+    assert_equal(unknown._relation_estimate(len(unknown._plan._nodes) - 1), 3)
 
 
 def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:

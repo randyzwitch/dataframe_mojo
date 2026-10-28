@@ -12,6 +12,11 @@ from dataframe.planning.cost.eligibility import (
     consider_inline_table,
 )
 from dataframe.planning.cost.model import trace_decision
+from dataframe.planning.cost.intermediate import (
+    IntermediateEstimates,
+    frame_payload_width,
+    trace_join_cost,
+)
 
 from dataframe.categorical import (
     decode,
@@ -99,7 +104,6 @@ from dataframe.planning.context import (
 )
 from dataframe.planning.graph import (
     plan_columns_of,
-    plan_estimated_rows,
     plan_filters_rows,
     plan_grouped_on,
     plan_height_bound,
@@ -498,21 +502,37 @@ def plan_stream_execute(
                 node.how == JOIN_INNER or node.how == JOIN_LEFT
             ) and node.coalesce:
                 # DuckDB's build side (`BuildProbeSideOptimizer`): the
-                # side of fewer rows times columns builds. The right
+                # side with fewer estimated payload bytes builds. The right
                 # side has run; when the left one, estimated, is the
                 # smaller, the join runs here on both, building on the
                 # left and restoring its row order (`DataFrame.join`),
                 # and the stream goes on from its result, rather than
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
-                # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
-                var right_cost = built.height() * max(built.width(), 1)
-                var columns = len(plan_columns_of(self, node.left))
-                var most = plan_height_bound(self, node.left)
-                if most < 0 or most * columns < right_cost:
-                    var rows = plan_estimated_rows(self, node.left)
-                    if rows >= 0 and rows * columns < right_cost:
+                # parts. Exact heights can avoid sampling; upper bounds
+                # cannot establish that a filtered left is too large.
+                var right_cost = Float64(built.height()) * frame_payload_width(
+                    built
+                )
+                var estimates = IntermediateEstimates(len(self._nodes))
+                var left_width = estimates.payload_width(
+                    self, node.left, plan_columns_of(self, node.left)
+                )
+                # An upper bound cannot rule out a small filtered input.
+                # Only exact known heights can skip the statistics request.
+                var known = plan_known_height(self, node.left)
+                if known < 0 or Float64(known) * left_width < right_cost:
+                    var rows = estimates.rows(self, node.left)
+                    var prefer_left = (
+                        rows >= 0 and Float64(rows) * left_width < right_cost
+                    )
+                    trace_join_cost(
+                        estimates.facts[node.left],
+                        left_width,
+                        right_cost,
+                        prefer_left,
+                    )
+                    if prefer_left:
                         # A left join under a consumer that ignores row
                         # order builds on the smaller left inside the
                         # pipeline: the right streams through the left's
