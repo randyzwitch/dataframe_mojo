@@ -4,7 +4,7 @@ from .json_reader import JsonReader, json_bytes
 from .json_number import validate_json_numbers
 from .series import Series
 from dataframe.storage.string import StringColumn, StringBuilder
-from .string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 
 
 def json_path_match(input: Series, text: String) raises -> Series:

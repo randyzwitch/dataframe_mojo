@@ -22,7 +22,7 @@ from dataframe.decimal import (
 )
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.series import Series
-from dataframe.string_predicates import compare_with_literal
+from dataframe.text.predicates import compare_with_literal
 from dataframe.expr import (
     ADD,
     SUB,

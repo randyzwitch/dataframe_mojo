@@ -8,14 +8,14 @@ from .dtype import DataType
 from dataframe.storage.column import Column, SCALAR_DTYPES
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.string import StringBuilder, StringColumn
-from .string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 from dataframe.storage.nested import ListColumn, StructColumn
 from .series import Series
-from .parse import parse_integer, parse_float64
+from dataframe.text.parse import parse_integer, parse_float64
 from .temporal import parse_in, zone_of, has_offset
 from .timezone import TimeZone
 from .decimal import check_precision, pow10
-from .byte_encoding import decode_bytes as _decode_row
+from dataframe.text.byte_encoding import decode_bytes as _decode_row
 from .io.json_wire import parse_duration
 
 from .json_number import (

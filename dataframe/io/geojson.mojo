@@ -5,7 +5,7 @@ from dataframe.storage.column import Column
 from ..series import Series
 from ..frame import DataFrame
 from ..geometry import from_wkb
-from ..parse import parse_integer
+from dataframe.text.parse import parse_integer
 
 
 def _uint(mut out: List[UInt8], value: Int):

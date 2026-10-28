@@ -40,7 +40,7 @@ from dataframe.kernels.join_hash import _perfect_slots
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes, _mix
 from dataframe.series import Series
-from dataframe.string_bytes import _Bytes, _same_bytes
+from dataframe.text.bytes import _Bytes, _same_bytes
 from dataframe.storage.string import StringBuilder, StringColumn
 from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,

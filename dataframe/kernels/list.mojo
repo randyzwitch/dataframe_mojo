@@ -21,7 +21,7 @@ from dataframe.expr import (
 )
 from dataframe.storage.nested import ListColumn
 from dataframe.regex import Regex
-from dataframe.regex_kernels import (
+from dataframe.text.regex_adapter import (
     compile_pattern,
     regex_extract_all,
     regex_extract_groups,
@@ -30,7 +30,7 @@ from dataframe.regex_kernels import (
 )
 from dataframe.series import Series
 from dataframe.storage.string import StringBuilder, StringColumn
-from dataframe.string_bytes import _Bytes, _find_bytes
+from dataframe.text.bytes import _Bytes, _find_bytes
 
 
 def nested_op(

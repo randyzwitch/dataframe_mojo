@@ -2,14 +2,14 @@
 from std.collections import Optional
 from std.math import isnan, isinf
 from std.memory import Pointer
-from ..byte_encoding import encode_bytes
+from dataframe.text.byte_encoding import encode_bytes
 from dataframe.storage.column import Column, SCALAR_DTYPES, _bit
 from dataframe.storage.boolean import BoolColumn
 from ..dtype import DataType
 from ..frame import DataFrame
 from ..series import Series
 from dataframe.storage.string import StringColumn
-from ..string_bytes import _Bytes
+from dataframe.text.bytes import _Bytes
 from dataframe.storage.nested import ListColumn, StructColumn
 from ..json_decode import validate_json_dtype
 from ..json_value import json_quote
