@@ -54,7 +54,7 @@ def _invoke[
     except error:
         raise Error("untimed answer summary: " + String(error))
     # Release the completed answer before the next invocation starts.
-    _ = result ^
+    _ = result^
 
 
 def run[

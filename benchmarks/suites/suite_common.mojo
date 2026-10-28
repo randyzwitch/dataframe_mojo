@@ -48,7 +48,7 @@ def load_tables() raises -> Dict[String, DataFrame]:
         if len(parts) != 2:
             raise Error("expected name=path, found " + arg)
         tables[String(parts[0])] = read_parquet(String(parts[1]))
-    return tables ^
+    return tables^
 
 
 def row_number(frame: DataFrame, name: String) raises -> Expr:
@@ -129,8 +129,8 @@ def run[
                 # Explicit replacement avoids retaining overwritten results
                 # with the pinned compiler. Keep the previous result alive
                 # during the query and include its cleanup in the timing.
-                _ = result ^
-                result = next ^
+                _ = result^
+                result = next^
                 print("time\t" + name + "\t" + String(monotonic() - start))
                 export_answer(result, name, repetition)
             var values = String()
