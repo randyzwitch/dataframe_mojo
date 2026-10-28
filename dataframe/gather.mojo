@@ -762,17 +762,36 @@ struct _GatherJob(Job):
                                 1
                             ) << UInt8(k % 8)
                     return
+                # Validity eight rows at a time: each output byte is built
+                # from the source bitmap in a register and stored once, as
+                # Arrow's take and DuckDB's gather do. Setting one bit at a
+                # time chained every row's store on the row before through
+                # the same byte (TPC-DS q14's item payload with nulls,
+                # 1.6M rows a run). A job's range starts on a byte, so it
+                # owns the bytes it stores.
                 var or_null = self.or_null
-                for k in range(self.start, self.end):
-                    var row = positions.unsafe_offset(k)[]
-                    if or_null and row < 0:
-                        out.unsafe_offset(k)[] = 0
-                        continue
-                    out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
-                    if column._valid(row):
-                        out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(
-                            k % 8
-                        )
+                var source_bits = column.unsafe_validity()
+                var first = column.validity_offset()
+                var k = self.start
+                while k < self.end:
+                    var stop = min(k + 8, self.end)
+                    var byte = UInt8(0)
+                    for j in range(k, stop):
+                        var row = positions.unsafe_offset(j)[]
+                        if or_null and row < 0:
+                            out.unsafe_offset(j)[] = 0
+                            continue
+                        out.unsafe_offset(j)[] = input.unsafe_offset(row)[]
+                        var bit = first + row
+                        byte |= (
+                            (
+                                source_bits.unsafe_offset(bit >> 3)[]
+                                >> UInt8(bit & 7)
+                            )
+                            & 1
+                        ) << UInt8(j - k)
+                    out_bits.unsafe_offset(k // 8)[] = byte
+                    k = stop
 
 
 struct _RechunkJob(Job):
