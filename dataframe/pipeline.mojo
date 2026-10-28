@@ -524,12 +524,10 @@ def _ensure_zones(series: Series):
 
 
 def _fill_zones[D: DType](column: Column[Scalar[D]]):
-    if len(column._facts[].zones) > 0:
+    if column._facts[].zones_ready():
         return
-    var first_row = column._facts[].first
-    var last_row = column._facts[].last
-    if last_row < 0:
-        last_row = len(column._data[])
+    var first_row = column._facts[].first()
+    var last_row = column._facts[].last(len(column._data[]))
     var blocks = (last_row + _ZONE_ROWS - 1) // _ZONE_ROWS
     var zones = List[Int64](capacity=2 * blocks)
     for b in range(blocks):
@@ -545,7 +543,7 @@ def _fill_zones[D: DType](column: Column[Scalar[D]]):
         else:
             zones.append(Int64.MAX)
             zones.append(Int64.MIN)
-    column._facts[].zones = zones^
+    column._facts[].publish_zones(zones^)
 
 
 def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
@@ -573,9 +571,9 @@ def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
 def _zoned_bounds[
     D: DType
 ](column: Column[Scalar[D]]) -> Tuple[Bool, Int64, Int64]:
-    ref zones = column._facts[].zones
-    if len(zones) == 0:
+    if not column._facts[].zones_ready():
         return _column_bounds(column)
+    ref zones = column._facts[].zones()
     if len(column) == 0:
         return (False, Int64.MAX, Int64.MIN)
     var least = Int64.MAX

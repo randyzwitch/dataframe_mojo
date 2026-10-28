@@ -99,7 +99,7 @@ def test_progression_found_once_per_buffer_holds_for_its_windows() raises:
     assert_true(found[0])
     assert_equal(found[1], Int64(100))
     assert_equal(found[2], UInt64(3))
-    assert_equal(key._data[Column[Int64]]._facts[].progression, 1)
+    assert_equal(key._data[Column[Int64]]._facts[].progression_state(), 1)
     # A window onto the buffer starts at its own first value.
     var window = int64_progression(key.slice(2, 5))
     assert_true(window[0])
@@ -121,7 +121,7 @@ def test_progression_found_once_per_buffer_holds_for_its_windows() raises:
     # one is still checked on its own rows.
     var irregular = Series("k", Column[Int64]([1, 2, 4, 5]))
     assert_true(not int64_progression(irregular)[0])
-    assert_equal(irregular._data[Column[Int64]]._facts[].progression, 2)
+    assert_equal(irregular._data[Column[Int64]]._facts[].progression_state(), 2)
     assert_true(int64_progression(irregular.slice(0, 2))[0])
     assert_true(not int64_progression(irregular.slice(1, 3))[0])
     # A null anywhere in the buffer: never a progression.

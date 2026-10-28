@@ -196,21 +196,19 @@ def _ascending_cached[D: DType](column: Column[Scalar[D]]) raises -> Bool:
     whole buffer is valid and ascending, found by one pass the first time
     it is asked; a window onto any other buffer is checked on its own
     rows."""
-    var cell = Pointer[Int, MutAnyOrigin](
-        unsafe_from_address=Int(column._facts.ptr())
-    )
-    if cell[] == 0:
+    var known = column._facts[].order_state()
+    if known == 0:
         var whole = column.copy()
-        whole._offset = column._facts[].first
-        var last = column._facts[].last
+        whole._offset = column._facts[].first()
         whole._length = (
-            len(column._data[]) if last < 0 else last
-        ) - whole._offset
-        # Two threads may race to fill it; both write the same answer.
-        cell[] = 1 if (
-            whole.null_count() == 0 and _ascending_parallel[D](whole)
-        ) else 2
-    if cell[] == 1:
+            column._facts[].last(len(column._data[])) - whole._offset
+        )
+        var ascending = whole.null_count() == 0 and _ascending_parallel[D](
+            whole
+        )
+        column._facts[].publish_order(ascending)
+        known = 1 if ascending else 2
+    if known == 1:
         return True
     # A window onto an unordered buffer: a secondary sort key is ordered
     # again within a run of the first (EventDate within one CounterID).

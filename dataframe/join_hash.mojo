@@ -1358,7 +1358,7 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
         var n = len(column)
         if n == 0:
             continue
-        var known = column._facts[].progression
+        var known = column._facts[].progression_state()
         if (
             known == 0
             and column._offset == 0
@@ -1367,7 +1367,7 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
             # The window is the whole buffer: what it finds holds for
             # every later window onto it.
             known = 1 if _progression_scan(column)[0] else 2
-            column._facts[].progression = known
+            column._facts[].publish_progression(known == 1)
             if known == 2:
                 return (False, Int64(0), UInt64(1))
         if known != 1 and len(column._bits[]) > 0 and column.null_count() > 0:
