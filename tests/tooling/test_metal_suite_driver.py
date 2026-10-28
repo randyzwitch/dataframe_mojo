@@ -45,7 +45,8 @@ class MetalSuiteDriver(unittest.TestCase):
                     (ROOT / "benchmarks/suites" / (name + ".mojo")).read_text(),
                     text,
                 )
-            self.assertEqual(len(manifest["derived_source_sha256"]), 17)
+            self.assertEqual(len(manifest["derived_source_sha256"]), 18)
+            self.assertIn("answer_exports.mojo", manifest["derived_source_sha256"])
             self.assertIn("metal_coverage_audit.mojo", manifest["derived_source_sha256"])
             self.assertIn(
                 "benchmarks/metal_coverage_audit.mojo",

@@ -19,7 +19,9 @@ unsupported, not dropped.
 """
 
 from datetime import date
+import json
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -68,6 +70,7 @@ def summary(frame) -> tuple:
         value = frame.select(product).item()
         pairs.append(float(value or 0))
     return frame.height, values, pairs
+
 
 # --- H2O.ai db-benchmark ------------------------------------------------
 
@@ -2301,10 +2304,10 @@ def tpcds_polars(t, q):
             .select(
                 "w_substr",
                 "sm_type",
-                col("cc_name").str.to_lowercase().alias("cc_name_lower"),
+                col("cc_name"),
                 "30 days", "31-60 days", "61-90 days", "91-120 days", ">120 days",
             )  # fmt: skip
-            .sort(["w_substr", "sm_type", "cc_name_lower"], nulls_last=False)
+            .sort(["w_substr", "sm_type", "cc_name"], nulls_last=False)
             .head(100)
         )
     elif q == "q6":
@@ -4606,6 +4609,47 @@ def _report(query, times, result):
     )
 
 
+def export_answer(result, query, repetition, oracle=None):
+    directory = os.environ.get("DATAFRAME_SUITE_ANSWER_DIR")
+    if not directory:
+        return
+    directory = Path(directory)
+    if oracle is not None:
+        directory /= "oracle"
+        directory.mkdir(exist_ok=True)
+    stem = directory / f"{query}-{repetition}"
+    path, schema_path = str(stem) + ".parquet", str(stem) + ".schema.json"
+    table = result.to_arrow()
+    import pyarrow.parquet as pq
+
+    pq.write_table(table, path)
+    descriptor = {
+        "format": "suite-answer-v1",
+        "query": query,
+        "repetition": repetition,
+        "rows": table.num_rows,
+        "columns": [
+            {"name": field.name, "arrow": str(field.type)}
+            for field in table.schema
+        ],
+    }
+    if oracle is not None:
+        descriptor["oracle"] = oracle
+    Path(schema_path).write_text(json.dumps(descriptor))
+    kind = "oracle" if oracle is not None else "answer"
+    print(
+        f"{kind}\t{query}\t"
+        + json.dumps(
+            {
+                "path": path,
+                "schema_path": schema_path,
+                "repetition": repetition,
+            }
+        ),
+        flush=True,
+    )
+
+
 def main():
     engine, suite, queries, reps = sys.argv[1:5]
     reps = int(reps)
@@ -4618,11 +4662,14 @@ def main():
 
         def execute(query):
             result = run(frames, query)
+            if reps == 0:
+                export_answer(result, query, 0)
             times = []
-            for _ in range(reps):
+            for repetition in range(reps):
                 start = time.perf_counter_ns()
                 result = run(frames, query)
                 times.append(time.perf_counter_ns() - start)
+                export_answer(result, query, repetition)
             return times, result
 
     elif engine == "duckdb":
@@ -4645,11 +4692,20 @@ def main():
         def execute(query):
             sql = duckdb_sql(suite, query, con)
             con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
+            if reps == 0:
+                export_answer(
+                    pl.from_arrow(con.table("ans").to_arrow_table()), query, 0
+                )
             times = []
-            for _ in range(reps):
+            for repetition in range(reps):
                 start = time.perf_counter_ns()
                 con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
                 times.append(time.perf_counter_ns() - start)
+                export_answer(
+                    pl.from_arrow(con.table("ans").to_arrow_table()),
+                    query,
+                    repetition,
+                )
             return times, pl.from_arrow(con.table("ans").to_arrow_table())
 
     else:
@@ -4665,6 +4721,24 @@ def main():
                 print(f"failed\t{query}\t{message}")
             continue
         _report(query, times, result)
+        if engine == "duckdb" and os.environ.get("DATAFRAME_SUITE_ANSWER_DIR"):
+            try:
+                from oracle_sql import full_relation
+                import hashlib
+
+                sql = duckdb_sql(suite, query, con)
+                full_sql, selection = full_relation(sql, result.columns)
+                selection.update(
+                    width=result.width,
+                    sql_sha256=hashlib.sha256(sql.encode()).hexdigest(),
+                )
+                # Match the timed worker's CTAS materialization, including
+                # DuckDB's deterministic disambiguation of SELECT * names.
+                con.execute("CREATE OR REPLACE TEMP TABLE __suite_oracle AS " + full_sql)
+                full = pl.from_arrow(con.table("__suite_oracle").to_arrow_table())
+                export_answer(full, query, 0, oracle=selection)
+            except Exception as error:
+                print(f"oracle_error\t{query}\t" + " ".join(str(error).split()))
         sys.stdout.flush()
 
 

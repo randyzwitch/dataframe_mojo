@@ -6,106 +6,106 @@
       "execution_boundary": "hybrid",
       "audit_reason": "After the explicit ssales collect, DataFrame.select(mean).item executes an eager CPU aggregate before the final LazyFrame collect. Applies to both data variants, including empty outputs.",
       "source_path": "benchmarks/suites/tpcds.mojo",
-      "source_sha256": "461f91f5a20f32c06d98ee81210390ca15b605665c087b7d614fa4f9e1b557ee",
-      "metal_derived_source_sha256": "2921f700a8ebe79a09e25f06d9b99389cb2cc71f19954a910ca90eb803fd8562"
+      "source_sha256": "9b7495c65df82028e0086bf4e86f0414c7571071084e4a00ca837135167605d0",
+      "metal_derived_source_sha256": "793ecec8e10fff175a2765a9a7b393ded8f3089dcdc6ba79472efd4981ede69e"
     },
     "h2o_groupby/q1": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id1"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q2": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id1",
         "id2"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q3": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id3"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q4": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id4"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q5": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id6"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q6": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id4",
         "id5"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q7": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id3"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q9": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id2",
         "id4"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "h2o_groupby/q10": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/h2o.mojo",
-      "source_sha256": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
+      "source_sha256": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
       "alignment_keys": [
         "id1",
         "id2",
@@ -114,66 +114,66 @@
         "id5",
         "id6"
       ],
-      "metal_derived_source_sha256": "517e310eb5d32178e0a81a59f50b4b89820808d948b2332226dcf03b4cb643e6"
+      "metal_derived_source_sha256": "591b3deb3b83ac619646c2c87359ee7b57f0fffa0600edd7a84dede070c58014"
     },
     "pdsh/q1": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/pdsh.mojo",
-      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "source_sha256": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
       "alignment_keys": [
         "l_returnflag",
         "l_linestatus"
       ],
-      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
+      "metal_derived_source_sha256": "fd564cca0e69a099fdfe044139c69111665cf4468c06544d74d1d8e4461f0a3d"
     },
     "pdsh/q5": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/pdsh.mojo",
-      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "source_sha256": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
       "alignment_keys": [
         "n_name"
       ],
-      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
+      "metal_derived_source_sha256": "fd564cca0e69a099fdfe044139c69111665cf4468c06544d74d1d8e4461f0a3d"
     },
     "pdsh/q7": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/pdsh.mojo",
-      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "source_sha256": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
       "alignment_keys": [
         "supp_nation",
         "cust_nation",
         "l_year"
       ],
-      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
+      "metal_derived_source_sha256": "fd564cca0e69a099fdfe044139c69111665cf4468c06544d74d1d8e4461f0a3d"
     },
     "pdsh/q9": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/pdsh.mojo",
-      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "source_sha256": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
       "alignment_keys": [
         "nation",
         "o_year"
       ],
-      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
+      "metal_derived_source_sha256": "fd564cca0e69a099fdfe044139c69111665cf4468c06544d74d1d8e4461f0a3d"
     },
     "pdsh/q15": {
       "workload_kind": "canonical",
       "execution_boundary": "gpu_collects",
       "audit_reason": "Declared output group keys from the retained query source; runtime diagnostics independently verify uniqueness and exact key membership. Does not certify all eager operations or tie order.",
       "source_path": "benchmarks/suites/pdsh.mojo",
-      "source_sha256": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
+      "source_sha256": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
       "alignment_keys": [
         "s_suppkey"
       ],
-      "metal_derived_source_sha256": "01518af001c49e872a6c07afe19c398d9ea2c7d5d6b00cd7454be6d70ca7381a"
+      "metal_derived_source_sha256": "fd564cca0e69a099fdfe044139c69111665cf4468c06544d74d1d8e4461f0a3d"
     }
   }
 }

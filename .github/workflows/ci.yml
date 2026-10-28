@@ -226,6 +226,12 @@ jobs:
           pixi run -e oracle python3 benchmarks/tools/bench_suites.py
           --suites "$SUITES" --scale smoke --correctness-only
           --engines mojo,duckdb --threads 4
+      - name: Query translation edge cases
+        env:
+          SUITES: ${{ matrix.suites }}
+        run: >-
+          pixi run -e oracle python3 tests/tooling/check_suite_translation_answers.py
+          --suites "$SUITES"
       - name: Upload query answers
         if: always()
         uses: actions/upload-artifact@v6

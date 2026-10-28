@@ -251,6 +251,7 @@ class BenchmarkReports(unittest.TestCase):
             data.write_bytes(b"fixture")
             source = root / "engines.py"
             source.write_text("query version 1")
+            (root / "oracle_sql.py").write_text("oracle version 1")
             from types import SimpleNamespace
 
             args = SimpleNamespace(threads=8, reps=3)
@@ -327,25 +328,89 @@ class BenchmarkReports(unittest.TestCase):
 
 
 class CorrectnessOnly(unittest.TestCase):
+    def setUp(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("complete answer fixtures require PyArrow")
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.receipts = []
+        for label, values in (("good", [2]), ("wrong", [2, 3])):
+            folder = root / label
+            folder.mkdir()
+            path, schema = folder / "q1-0.parquet", folder / "q1-0.schema.json"
+            pq.write_table(
+                pa.table({"id1": ["a"] * len(values), "v1": values}), path
+            )
+            schema.write_text(
+                json.dumps(
+                    {
+                        "format": "suite-answer-v1",
+                        "query": "q1",
+                        "repetition": 0,
+                        "rows": len(values),
+                        "columns": [
+                            {"name": "id1", "arrow": "string"},
+                            {"name": "v1", "arrow": "int64"},
+                        ],
+                        "oracle": {
+                            "width": 2,
+                            "order": [],
+                            "limit": None,
+                            "offset": 0,
+                        },
+                    }
+                )
+            )
+            self.receipts.append(
+                bench.suite_answers.pin_export(
+                    {
+                        "path": str(path),
+                        "schema_path": str(schema),
+                        "repetition": 0,
+                    },
+                    folder,
+                    "q1",
+                )
+            )
+
     def result(self, status="ok", reference=True):
         result = fixture()
+        result["provenance"]["reps"] = 0
         result["query_plan"] = [dict(suite="h2o_groupby", variant="base", queries=["q1"])]
-        result["runs"] = [dict(
-            suite="h2o_groupby", variant="base", query="q1", engine=engine,
-            status=status if engine == "mojo" else "ok",
-            summary=dict(height=1, values=[2.0], names=["value"]),
-        ) for engine in (["mojo", "duckdb"] if reference else ["mojo"])]
+        result["runs"] = [
+            dict(
+                suite="h2o_groupby",
+                variant="base",
+                query="q1",
+                engine=engine,
+                status=status if engine == "mojo" else "ok",
+                summary=dict(height=1, values=[2.0], names=["value"]),
+                answers=[self.receipts[0]],
+                oracles=[self.receipts[0]] if engine == "duckdb" else [],
+            )
+            for engine in (["mojo", "duckdb"] if reference else ["mojo"])
+        ]
         return result
 
-    def test_untimed_answers_still_detect_wrong_missing_and_failed_results(self):
+    def test_untimed_answers_still_detect_wrong_missing_and_failed_results(
+        self,
+    ):
         with patch("sys.stdout"):
             self.assertFalse(bench.check_correctness(self.result()))
             for status in ("failed", "timeout"):
                 self.assertTrue(bench.check_correctness(self.result(status)))
-            self.assertFalse(bench.check_correctness(self.result("unsupported")))
-            self.assertTrue(bench.check_correctness(self.result(reference=False)))
+            self.assertFalse(
+                bench.check_correctness(self.result("unsupported"))
+            )
+            self.assertTrue(
+                bench.check_correctness(self.result(reference=False))
+            )
             result = self.result()
-            result["runs"][0]["summary"]["height"] = 2
+            result["runs"][0]["answers"] = [self.receipts[1]]
             self.assertTrue(bench.check_correctness(result))
             result["runs"] = []
             self.assertTrue(bench.check_correctness(result))

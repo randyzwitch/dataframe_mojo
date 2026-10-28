@@ -118,7 +118,9 @@ def stage_sources(destination, *, audit_runtime=True):
         _, proof = lift_scalar_selects(original.read_text())
         proof["canonical_source_sha256"] = sha(original)
         proof["metal_derived_source_sha256"] = hashlib.sha256(
-            derive(original.read_text(), name, "metal", audit_runtime=audit_runtime).encode()
+            derive(
+                original.read_text(), name, "metal", audit_runtime=audit_runtime
+            ).encode()
         ).hexdigest()
         materialization_proofs[str(original.relative_to(ROOT))] = proof
         for engine in ("cpu", "metal"):
@@ -151,6 +153,7 @@ def main() raises:
         (destination / f"suite_{name}.mojo").write_text(wrapper)
     copied_sources = {
         "suite_common.mojo": ROOT / "benchmarks/suites/suite_common.mojo",
+        "answer_exports.mojo": ROOT / "benchmarks/suites/answer_exports.mojo",
         "metal_suite_common.mojo": ROOT / "benchmarks/metal_suite_common.mojo",
         "metal_suite_answer_exports.mojo": ROOT
         / "benchmarks/metal_suite_answer_exports.mojo",

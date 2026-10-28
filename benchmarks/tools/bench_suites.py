@@ -17,7 +17,7 @@ One worker process per (suite, variant, engine, round) loads the tables once
 (untimed), then warms up and times --reps runs of each query; the per-round
 figure is the fastest run, the report shows the median over rounds, and the
 order of the engines under test rotates. Every answer is checked against
-DuckDB (see engines.py `summary`); a wrong answer is reported as such and
+independent DuckDB full relations (see suite_answers.py); a wrong answer is reported as such and
 excluded from ratios. Unsupported queries are counted, not dropped. Data
 lives outside the repository (benchmarks/suites/datagen.py).
 """
@@ -33,6 +33,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,8 @@ import bench_html  # noqa: E402
 import bench_policy  # noqa: E402
 import datagen  # noqa: E402
 from bench_host import compiler_processes  # noqa: E402
+import suite_answers  # noqa: E402
+import suite_schema  # noqa: E402
 
 ENGINES = ("mojo", "polars", "duckdb")
 
@@ -156,11 +159,9 @@ VARIANTS = {
     "clickbench": {"base": {}},
 }
 
-# Output columns to compare, by position or name, where a query's full result
-# is not unique: rows tied at a LIMIT boundary may differ between engines (and
-# between runs of one engine), but the ORDER BY columns may not. An empty
-# list compares only the row count (an unordered LIMIT).
-CHECKS = {
+# Historical lossy-summary policy, retained only to reproduce its defects.
+# Complete-result evaluation never uses these column omissions.
+LEGACY_CHECKS = {
     ("clickbench", "q8"): [1],
     ("clickbench", "q9"): [2],
     ("clickbench", "q10"): [1],
@@ -194,7 +195,7 @@ CHECKS = {
 
 
 # The same, for one data variant only: (suite, variant, query).
-VARIANT_CHECKS = {
+LEGACY_VARIANT_CHECKS = {
     # Independent per-set float sums make subtotal/group ties in q67's rank
     # thread-dependent; DuckDB's single-set answer is the reference, and a
     # shared-scan rollup removes it. The decimal variant is exact, so it
@@ -324,7 +325,7 @@ def environment(threads, trace=False):
     return env
 
 
-def parse(output, queries):
+def parse(output, queries, answer_directory=None):
     """Per-query outcomes from a worker's tagged output lines."""
     found = {q: {"status": "failed", "reason": "no output"} for q in queries}
     for line in output.splitlines():
@@ -335,6 +336,31 @@ def parse(output, queries):
         entry = found[query]
         if kind == "time":
             entry.setdefault("times", []).append(int(fields[2]))
+        elif kind in ("answer", "oracle"):
+            try:
+                if answer_directory is None:
+                    raise ValueError(
+                        "answer directory was not supplied by driver"
+                    )
+                directory = (
+                    Path(answer_directory) / "oracle" if kind
+                    == "oracle" else answer_directory
+                )
+                receipt = suite_answers.pin_export(
+                    json.loads(fields[2]), directory, query
+                )
+                answers = entry.setdefault(
+                    "oracles" if kind == "oracle" else "answers", []
+                )
+                if any(
+                    a["repetition"] == receipt["repetition"] for a in answers
+                ):
+                    raise ValueError("duplicate answer repetition")
+                answers.append(receipt)
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                entry["answer_error"] = str(error)
+        elif kind == "oracle_error":
+            entry["oracle_error"] = fields[2]
         elif kind == "summary":
             values = [float(v) for v in fields[3].split(",")] if fields[
                 3
@@ -348,9 +374,9 @@ def parse(output, queries):
                 "names": names,
             }
             if len(fields) > 5:
-                summary["pairs"] = (
-                    [float(v) for v in fields[5].split(",")] if fields[5] else []
-                )
+                summary["pairs"] = [
+                    float(v) for v in fields[5].split(",")
+                ] if fields[5] else []
             entry.update(status="ok", reason="", summary=summary)
         elif kind in ("unsupported", "failed"):
             entry.update(status=kind, reason=fields[2])
@@ -428,6 +454,10 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
     """Run one worker over `queries`; returns (per-query outcomes, stderr)."""
     if hasattr(os, "getloadavg"):
         LOAD.append(os.getloadavg()[0])
+    # Retained files are evidence used by caches and --report-from. Never
+    # put generated answers in the checkout or delete them before evaluation.
+    answer_directory = tempfile.mkdtemp(prefix="dataframe-suite-answers-")
+    env = dict(env, DATAFRAME_SUITE_ANSWER_DIR=answer_directory)
     for _ in range(3):
         if not allow_busy:
             _wait_quiet()
@@ -439,7 +469,7 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
             out = expired.stdout or ""
             if isinstance(out, bytes):
                 out = out.decode(errors="replace")
-            found = parse(out, queries)
+            found = parse(out, queries, answer_directory)
             for entry in found.values():
                 if (
                     entry["status"] == "failed"
@@ -454,7 +484,7 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
         )
     else:
         raise RuntimeError("compiler activity kept overlapping timed runs")
-    found = parse(proc.stdout, queries)
+    found = parse(proc.stdout, queries, answer_directory)
     stderr = proc.stderr
     if proc.returncode != 0:
         tail = " | ".join((proc.stderr or "").strip().splitlines()[-2:])
@@ -468,9 +498,9 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
         # query alone failed: the ones after it never ran, so run them in a
         # new worker instead of counting one crash as many failures.
         if silent:
-            found[silent[0]]["reason"] = (
-                f"worker exited {proc.returncode}: {tail}"
-            )
+            found[silent[0]][
+                "reason"
+            ] = f"worker exited {proc.returncode}: {tail}"
         rest = silent[1:]
         joined = ",".join(queries)
         if rest and joined in cmd:
@@ -508,12 +538,13 @@ def _positions(spec, summary):
     return out
 
 
-def same_answer(suite, query, got, want, variant=None):
+def legacy_summary_agrees(suite, query, got, want, variant=None):
+    """Diagnostic legacy behavior only; never use to admit benchmark timing."""
     if got["height"] != want["height"]:
         return False
-    spec = VARIANT_CHECKS.get((suite, variant, query)) or CHECKS.get(
-        (suite, query)
-    )
+    spec = LEGACY_VARIANT_CHECKS.get(
+        (suite, variant, query)
+    ) or LEGACY_CHECKS.get((suite, query))
     if spec is None:
         if len(got["values"]) != len(want["values"]):
             return False
@@ -540,6 +571,10 @@ def same_answer(suite, query, got, want, variant=None):
         return all(_close(a, b) for a, b in zip(got["pairs"], want["pairs"]))
     return True
 
+
+# Compatibility for the Apple collector, migrated in the next stacked PR.
+# CPU correctness evaluation never calls this legacy summary comparator.
+same_answer = legacy_summary_agrees
 
 # --- measurement -------------------------------------------------------------
 
@@ -627,18 +662,27 @@ def _cache_key(engine, paths, args):
     import polars
 
     version = polars.__version__ if engine == "polars" else duckdb.__version__
-    files = sorted(
-        f"{Path(p).name}:{Path(p).stat().st_size}:{int(Path(p).stat().st_mtime)}"
-        for p in paths.values()
-    )
     # Cached reference answers/timings must match the query implementation.
     import hashlib
 
-    implementation = hashlib.sha256(
-        (SUITES_DIR / "engines.py").read_bytes()
-    ).hexdigest()
+    implementation_hash = hashlib.sha256()
+    for source in [
+        SUITES_DIR / "engines.py",
+        SUITES_DIR / "oracle_sql.py",
+        Path(__file__),
+        Path(suite_answers.__file__),
+        Path(suite_schema.__file__),
+        Path(__file__).with_name("suite_numerical_policy.json"),
+        Path(__file__).with_name("metal_numerical_compare.py"),
+        Path(__file__).with_name("metal_numerical_audit.py"),
+    ]:
+        implementation_hash.update(source.read_bytes())
+    implementation = implementation_hash.hexdigest()
+    files = sorted(
+        f"{name}:{suite_answers.sha256(p)}" for name, p in paths.items()
+    )
     return (
-        f"{engine} {version} source={implementation} threads={args.threads} reps={args.reps} "
+        f"{engine} {version} source={implementation} threads={args.threads} reps={args.reps} rounds={getattr(args, 'rounds', 1)} "
         + " ".join(files)
     )
 
@@ -651,6 +695,20 @@ def load_reference(suite, variant, engine, paths, args):
         return None
     cached = json.loads(path.read_text())
     if cached.get("key") != _cache_key(engine, paths, args):
+        return None
+    # An evicted/corrupt snapshot is a cache miss, not reusable correctness
+    # evidence. Rebuild it rather than publishing unverified cached timings.
+    try:
+        for run in cached["runs"]:
+            if run["status"] != "ok":
+                continue
+            if not run.get("answers") or (
+                engine == "duckdb" and len(run.get("oracles", [])) != 1
+            ):
+                return None
+            for record in run.get("answers", []) + run.get("oracles", []):
+                suite_answers.load_answer(record)
+    except (OSError, ValueError, TypeError, KeyError, ImportError):
         return None
     return cached
 
@@ -710,8 +768,16 @@ def measure(args):
             )
 
     result["query_plan"] = [
-        {"suite": suite, "variant": variant, "queries": queries}
-        for suite, variant, queries, _ in plan
+        {
+            "suite": suite,
+            "variant": variant,
+            "queries": queries,
+            "inputs": {
+                name: {"path": str(path), "sha256": suite_answers.sha256(path)}
+                for name, path in paths.items()
+            },
+        }
+        for suite, variant, queries, paths in plan
     ]
 
     def save():
@@ -812,43 +878,97 @@ def _median_ms(runs):
 
 
 def evaluate(result):
-    """Per (suite, variant, query, engine): status and median time, with
-    answers checked against DuckDB (or Polars when DuckDB did not run)."""
+    """Validate every repetition and round against independent complete answers.
+
+    A summary-only historical run remains renderable, but cannot contribute
+    a verified timing. Failures in any round remain failures.
+    """
     grouped = {}
     for run in result["runs"]:
         key = (run["suite"], run["variant"], run["query"], run["engine"])
         grouped.setdefault(key, []).append(run)
+    def answers(run):
+        # Load one repetition at a time. Retaining every round of every query
+        # can multiply full-tier answer memory by the entire suite size.
+        if run.get("answer_error"):
+            raise ValueError(run["answer_error"])
+        records = run.get("answers", [])
+        if any(record.get("query") != run["query"] for record in records):
+            raise ValueError("answer query identity differs from run")
+        requested_reps = result.get("provenance", {}).get("reps")
+        if requested_reps is not None and len(run.get("times", [])) != requested_reps:
+            raise ValueError("missing timed repetitions")
+        expected_count = max(1, requested_reps if requested_reps is not None else len(run.get("times", [])))
+        if len(records) != expected_count or sorted(a["repetition"] for a in records) != list(range(expected_count)):
+            raise ValueError("missing or duplicate complete answer repetitions")
+        for record in records:
+            yield suite_answers.load_answer(record)
+
     cells = {}
     for (suite, variant, query, engine), runs in grouped.items():
-        statuses = {r["status"] for r in runs}
-        if "ok" not in statuses:
-            first = runs[0]
-            cells[(suite, variant, query, engine)] = {
-                "status": first["status"],
-                "reason": first.get("reason", ""),
-            }
+        oracle = answer = None  # Release the preceding query's full results.
+        key = (suite, variant, query, engine)
+        cell = cells[key] = {"status": "ok", "reason": ""}
+        bad = next((r for r in runs if r["status"] != "ok"), None)
+        if bad is not None:
+            cell.update(status=bad["status"], reason=bad.get("reason", ""))
             continue
-        cells[(suite, variant, query, engine)] = {
-            "status": "ok",
-            "ms": _median_ms(runs),
-            "rounds": [min(r["times"]) / 1e6 for r in runs if r.get("times")],
-            "summary": next(r["summary"] for r in runs if r["status"] == "ok"),
-        }
-    for (suite, variant, query, engine), cell in cells.items():
-        if cell["status"] != "ok":
-            continue
-        reference = None
-        for other in ("duckdb", "polars"):
-            ref = cells.get((suite, variant, query, other))
-            if ref and ref["status"] == "ok":
-                reference = ref
-                break
-        if reference is None or reference is cell:
-            continue
-        if not same_answer(
-            suite, query, cell["summary"], reference["summary"], variant
+        expected_rounds = result.get("provenance", {}).get("rounds")
+        if expected_rounds is not None and (
+            len(runs) != expected_rounds
+            or {r.get("round", 0) for r in runs} != set(range(expected_rounds))
         ):
-            cell["status"] = "wrong answer"
+            cell.update(
+                status="unverified",
+                reason="missing or duplicate measurement rounds",
+            )
+            continue
+        reference_runs = grouped.get((suite, variant, query, "duckdb"), [])
+        if not reference_runs or any(
+            r["status"] != "ok" for r in reference_runs
+        ):
+            cell.update(
+                status="unverified",
+                reason="missing successful independent DuckDB reference",
+            )
+            continue
+        try:
+            records = reference_runs[0].get("oracles", [])
+            if len(records) != 1 or reference_runs[0].get("oracle_error"):
+                cell.update(
+                    status="unverified",
+                    reason=reference_runs[0].get(
+                        "oracle_error", "missing independent full relation"
+                    ),
+                )
+                continue
+            if records[0].get("query") != query:
+                raise ValueError("oracle query identity differs from run")
+            oracle = suite_schema.normalize(
+                suite_answers.load_answer(records[0]), suite, query
+            )
+            tolerant = suite_answers.tolerant_columns(suite, query, oracle)
+            checked_runs = runs if engine == "duckdb" else runs + reference_runs
+            for answer in (answer for run in checked_runs for answer in answers(run)):
+                answer = suite_schema.normalize(answer, suite, query)
+                comparison = suite_answers.compare_selection(
+                    answer, oracle, tolerant_columns=tolerant
+                )
+                if comparison["status"] != "equal":
+                    cell.update(
+                        status="wrong answer" if comparison["status"]
+                        == "different" else "unverified",
+                        reason=comparison["reason"],
+                    )
+                    break
+        except (OSError, ValueError, TypeError, KeyError, ImportError) as error:
+            cell.update(status="unverified", reason=str(error))
+        if cell["status"] == "ok":
+            cell.update(
+                ms=_median_ms(runs),
+                rounds=[min(r["times"]) / 1e6 for r in runs if r.get("times")],
+                summary=runs[0].get("summary", {}),
+            )
     return cells
 
 
@@ -1259,11 +1379,13 @@ def main():
             setattr(args, name, value)
     if args.correctness_only:
         if args.baseline or args.report_from:
-            parser.error("--correctness-only cannot use --baseline or --report-from")
-        if "mojo" not in args.engines.split(",") or not set(
-            args.engines.split(",")
-        ).intersection(("duckdb", "polars")):
-            parser.error("--correctness-only requires Mojo and a reference engine")
+            parser.error(
+                "--correctness-only cannot use --baseline or --report-from"
+            )
+        if not {"mojo", "duckdb"} <= set(args.engines.split(",")):
+            parser.error(
+                "--correctness-only requires Mojo and the independent DuckDB reference"
+            )
         args.rounds, args.reps = 1, 0
         args.trace = args.reuse_references = False
         args.allow_busy = True

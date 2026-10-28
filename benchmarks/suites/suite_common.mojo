@@ -10,9 +10,13 @@ times REPS runs, each producing a materialized DataFrame. It prints the same
 lines as benchmarks/suites/engines.py, each tagged with its query:
 
     time<TAB>QUERY<TAB>NANOSECONDS                  one per timed run
+    answer<TAB>QUERY<TAB>JSON                       typed snapshot receipt
     summary<TAB>QUERY<TAB>HEIGHT<TAB>V1,V2<TAB>N1,N2<TAB>P1 see engines.py `summary`
     unsupported<TAB>QUERY<TAB>REASON
     failed<TAB>QUERY<TAB>MESSAGE
+
+With DATAFRAME_SUITE_ANSWER_DIR set by the driver, every timed result is
+exported after stopping its timer. Summaries remain diagnostic only.
 
 A query reports unsupported by raising an error that starts with
 "unsupported:"; any other error fails that query alone.
@@ -23,6 +27,7 @@ from std.sys import argv
 from std.time import monotonic
 
 from dataframe import DataFrame, DataType, Expr, col, lit, read_parquet
+from answer_exports import export_answer
 
 
 def unsupported(reason: String) -> Error:
@@ -116,7 +121,9 @@ def run[
         print("dataframe-query:", name, file=RawFileDescriptor(2))
         try:
             var result = query(name, tables)
-            for _ in range(reps):
+            if reps == 0:
+                export_answer(result, name, 0)
+            for repetition in range(reps):
                 var start = monotonic()
                 var next = query(name, tables)
                 # Explicit replacement avoids retaining overwritten results
@@ -125,6 +132,7 @@ def run[
                 _ = result^
                 result = next^
                 print("time\t" + name + "\t" + String(monotonic() - start))
+                export_answer(result, name, repetition)
             var values = String()
             var columns = String()
             for i in range(result.width()):

@@ -425,7 +425,7 @@ def excess_discount(
         )
         .join(typical, left_on=[prefix + "_item_sk"], right_on=["typical_item"])
         .filter(col(amount).cast(DataType.FLOAT64) > lit(1.3) * col("typical"))
-        .select_exprs([col(amount).sum().alias("excess")])
+        .select_exprs([col(amount).sum(min_count=1).alias("excess")])
     )
 
 
@@ -773,7 +773,11 @@ def q23_channel(
         .with_columns(
             [
                 (
-                    col(prefix + "_quantity").cast(price_type)
+                    col(prefix + "_quantity").cast(
+                        DataType.decimal(
+                            19, 0
+                        ) if price_type.is_decimal() else DataType.FLOAT64
+                    )
                     * col(prefix + "_list_price")
                 ).alias("value")
             ]
@@ -1649,7 +1653,7 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                     col("ss_quantity").mean().alias("avg1"),
                     col("ss_ext_sales_price").mean().alias("avg2"),
                     col("ss_ext_wholesale_cost").mean().alias("avg3"),
-                    col("ss_ext_wholesale_cost").sum().alias("sum4"),
+                    col("ss_ext_wholesale_cost").sum(min_count=1).alias("sum4"),
                 ]
             )
         return (
@@ -2905,7 +2909,11 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                         when(col("sr_return_quantity").is_not_null())
                         .then(kept)
                         .otherwise(col("ss_quantity"))
-                        .cast(price_type)
+                        .cast(
+                            DataType.decimal(
+                                19, 0
+                            ) if price_type.is_decimal() else DataType.FLOAT64
+                        )
                         * col("ss_sales_price")
                     ).alias("act_sales")
                 ]
@@ -2930,7 +2938,7 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             [
                 col("w_substr"),
                 col("sm_type"),
-                col("cc_name").str().to_lowercase().alias("cc_name_lower"),
+                col("cc_name"),
                 col("30 days"),
                 col("31-60 days"),
                 col("61-90 days"),
@@ -2939,7 +2947,7 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             ]
         )
         return ascending(
-            grouped, ["w_substr", "sm_type", "cc_name_lower"], nulls_first=True
+            grouped, ["w_substr", "sm_type", "cc_name"], nulls_first=True
         ).head(100)
     if q == "q6":
         # The month of January 2001, read first, as a user would.
@@ -5216,9 +5224,11 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
     if q == "q23":
         var price_type = t["store_sales"].column("ss_sales_price").dtype()
         var four_years = col("d_year").is_in(ints([2000, 2001, 2002, 2003]))
-        var store_value = col("ss_quantity").cast(price_type) * col(
-            "ss_sales_price"
-        )
+        var store_value = col("ss_quantity").cast(
+            DataType.decimal(
+                19, 0
+            ) if price_type.is_decimal() else DataType.FLOAT64
+        ) * col("ss_sales_price")
         # Items sold more than 4 times on one day; an item appears once per
         # such day, and the joins below match each of those rows.
         var frequent = (

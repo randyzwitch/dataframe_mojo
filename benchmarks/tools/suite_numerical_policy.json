@@ -1,0 +1,582 @@
+{
+  "format": "dataframe-metal-numerical-policy-v1",
+  "rtol": 1e-09,
+  "atol": 1e-12,
+  "comparison": "abs(a-b) <= max(atol, rtol * max(abs(a), abs(b)))",
+  "scope": "Independent CPU suite validation: named aggregate/arithmetic Float64 fields only; schemas, keys, copied values, integers and decimals remain exact. Field definitions reused from the Metal policy after review against issue #1041 revision; current suite source identities are pinned below.",
+  "source_sha256": {
+    "benchmarks/suites/h2o.mojo": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
+    "benchmarks/suites/pdsh.mojo": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
+    "benchmarks/suites/tpcds.mojo": "9b7495c65df82028e0086bf4e86f0414c7571071084e4a00ca837135167605d0"
+  },
+  "cases": {
+    "h2o_groupby/q3": [
+      "v3"
+    ],
+    "h2o_groupby/q4": [
+      "v1",
+      "v2",
+      "v3"
+    ],
+    "h2o_groupby/q5": [
+      "v3"
+    ],
+    "h2o_groupby/q6": [
+      "median_v3",
+      "sd_v3"
+    ],
+    "h2o_groupby/q9": [
+      "r2"
+    ],
+    "pdsh/q1": [
+      "sum_qty",
+      "sum_base_price",
+      "sum_disc_price",
+      "sum_charge",
+      "avg_qty",
+      "avg_price",
+      "avg_disc"
+    ],
+    "pdsh/q10": [
+      "revenue"
+    ],
+    "pdsh/q15": [
+      "total_revenue"
+    ],
+    "pdsh/q17": [
+      "avg_yearly"
+    ],
+    "pdsh/q5": [
+      "revenue"
+    ],
+    "pdsh/q6": [
+      "revenue"
+    ],
+    "pdsh/q7": [
+      "revenue"
+    ],
+    "pdsh/q8": [
+      "mkt_share"
+    ],
+    "pdsh/q9": [
+      "sum_profit"
+    ],
+    "tpcds/q12": [
+      "itemrevenue",
+      "revenueratio"
+    ],
+    "tpcds/q19": [
+      "ext_price"
+    ],
+    "tpcds/q20": [
+      "itemrevenue",
+      "revenueratio"
+    ],
+    "tpcds/q26": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4"
+    ],
+    "tpcds/q27": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4"
+    ],
+    "tpcds/q28": [
+      "B1_LP",
+      "B2_LP",
+      "B3_LP",
+      "B4_LP",
+      "B5_LP",
+      "B6_LP"
+    ],
+    "tpcds/q31": [
+      "web_q1_q2_increase",
+      "store_q1_q2_increase",
+      "web_q2_q3_increase",
+      "store_q2_q3_increase"
+    ],
+    "tpcds/q33": [
+      "total_sales"
+    ],
+    "tpcds/q42": [
+      "total"
+    ],
+    "tpcds/q43": [
+      "sun_sales",
+      "mon_sales",
+      "tue_sales",
+      "wed_sales",
+      "thu_sales",
+      "fri_sales",
+      "sat_sales"
+    ],
+    "tpcds/q47": [
+      "avg_monthly_sales",
+      "sum_sales",
+      "psum",
+      "nsum"
+    ],
+    "tpcds/q52": [
+      "ext_price"
+    ],
+    "tpcds/q53": [
+      "sum_sales",
+      "avg_quarterly_sales"
+    ],
+    "tpcds/q55": [
+      "ext_price"
+    ],
+    "tpcds/q56": [
+      "total_sales"
+    ],
+    "tpcds/q57": [
+      "avg_monthly_sales",
+      "sum_sales",
+      "psum",
+      "nsum"
+    ],
+    "tpcds/q59": [
+      "sun_sales_ratio",
+      "mon_sales_ratio",
+      "tue_sales_ratio",
+      "wed_sales_ratio",
+      "thu_sales_ratio",
+      "fri_sales_ratio",
+      "sat_sales_ratio"
+    ],
+    "tpcds/q60": [
+      "total_sales"
+    ],
+    "tpcds/q61": [
+      "promotions",
+      "total",
+      "share"
+    ],
+    "tpcds/q63": [
+      "sum_sales",
+      "avg_monthly_sales"
+    ],
+    "tpcds/q66": [
+      "jan_sales",
+      "feb_sales",
+      "mar_sales",
+      "apr_sales",
+      "may_sales",
+      "jun_sales",
+      "jul_sales",
+      "aug_sales",
+      "sep_sales",
+      "oct_sales",
+      "nov_sales",
+      "dec_sales",
+      "jan_sales_per_sq_foot",
+      "feb_sales_per_sq_foot",
+      "mar_sales_per_sq_foot",
+      "apr_sales_per_sq_foot",
+      "may_sales_per_sq_foot",
+      "jun_sales_per_sq_foot",
+      "jul_sales_per_sq_foot",
+      "aug_sales_per_sq_foot",
+      "sep_sales_per_sq_foot",
+      "oct_sales_per_sq_foot",
+      "nov_sales_per_sq_foot",
+      "dec_sales_per_sq_foot",
+      "jan_net",
+      "feb_net",
+      "mar_net",
+      "apr_net",
+      "may_net",
+      "jun_net",
+      "jul_net",
+      "aug_net",
+      "sep_net",
+      "oct_net",
+      "nov_net",
+      "dec_net"
+    ],
+    "tpcds/q75": [
+      "sales_amt_diff"
+    ],
+    "tpcds/q89": [
+      "sum_sales",
+      "avg_monthly_sales"
+    ],
+    "tpcds/q9": [
+      "bucket1",
+      "bucket2",
+      "bucket3",
+      "bucket4",
+      "bucket5"
+    ],
+    "tpcds/q98": [
+      "itemrevenue",
+      "revenueratio"
+    ],
+    "pdsh/q3": [
+      "revenue"
+    ],
+    "pdsh/q11": [
+      "value"
+    ],
+    "pdsh/q14": [
+      "promo_revenue"
+    ],
+    "pdsh/q18": [
+      "sum_qty"
+    ],
+    "pdsh/q19": [
+      "revenue"
+    ],
+    "pdsh/q22": [
+      "totacctbal"
+    ],
+    "tpcds/q2": [
+      "r1",
+      "r2",
+      "r3",
+      "r4",
+      "r5",
+      "r6",
+      "r7"
+    ],
+    "tpcds/q3": [
+      "sum_agg"
+    ],
+    "tpcds/q5": [
+      "sales",
+      "returns_",
+      "profit"
+    ],
+    "tpcds/q7": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4"
+    ],
+    "tpcds/q8": [
+      "sum(ss_net_profit)"
+    ],
+    "tpcds/q13": [
+      "avg1",
+      "avg2",
+      "avg3",
+      "sum4"
+    ],
+    "tpcds/q14": [
+      "sum_sales"
+    ],
+    "tpcds/q15": [
+      "total"
+    ],
+    "tpcds/q16": [
+      "total shipping cost",
+      "total net profit"
+    ],
+    "tpcds/q17": [
+      "store_sales_quantityave",
+      "store_sales_quantitystdev",
+      "store_sales_quantitycov",
+      "store_returns_quantityave",
+      "store_returns_quantitystdev",
+      "store_returns_quantitycov",
+      "catalog_sales_quantityave",
+      "catalog_sales_quantitystdev",
+      "catalog_sales_quantitycov"
+    ],
+    "tpcds/q18": [
+      "agg1",
+      "agg2",
+      "agg3",
+      "agg4",
+      "agg5",
+      "agg6",
+      "agg7"
+    ],
+    "tpcds/q22": [
+      "qoh"
+    ],
+    "tpcds/q23": [
+      "sales"
+    ],
+    "tpcds/q24": [
+      "paid"
+    ],
+    "tpcds/q25": [
+      "store_sales_profit",
+      "store_returns_loss",
+      "catalog_sales_profit"
+    ],
+    "tpcds/q30": [
+      "ctr_total_return"
+    ],
+    "tpcds/q32": [
+      "excess"
+    ],
+    "tpcds/q35": [
+      "avg1",
+      "avg2",
+      "avg3"
+    ],
+    "tpcds/q36": [
+      "gross_margin"
+    ],
+    "tpcds/q39": [
+      "mean1",
+      "cov1",
+      "mean2",
+      "cov2"
+    ],
+    "tpcds/q40": [
+      "sales_before",
+      "sales_after"
+    ],
+    "tpcds/q45": [
+      "total"
+    ],
+    "tpcds/q46": [
+      "amt",
+      "profit"
+    ],
+    "tpcds/q49": [
+      "return_ratio"
+    ],
+    "tpcds/q51": [
+      "web_sales",
+      "store_sales",
+      "web_cumulative",
+      "store_cumulative"
+    ],
+    "tpcds/q58": [
+      "ss_item_rev",
+      "ss_dev",
+      "cs_item_rev",
+      "cs_dev",
+      "ws_item_rev",
+      "ws_dev",
+      "average"
+    ],
+    "tpcds/q64": [
+      "s11",
+      "s21",
+      "s31",
+      "s12",
+      "s22",
+      "s32"
+    ],
+    "tpcds/q65": [
+      "revenue"
+    ],
+    "tpcds/q67": [
+      "sumsales"
+    ],
+    "tpcds/q68": [
+      "extended_price",
+      "extended_tax",
+      "list_price"
+    ],
+    "tpcds/q70": [
+      "total_sum"
+    ],
+    "tpcds/q71": [
+      "ext_price"
+    ],
+    "tpcds/q76": [
+      "sales_amt"
+    ],
+    "tpcds/q77": [
+      "sales",
+      "returns_",
+      "profit"
+    ],
+    "tpcds/q78": [
+      "ratio",
+      "store_wholesale_cost",
+      "store_sales_price",
+      "other_chan_wholesale_cost",
+      "other_chan_sales_price"
+    ],
+    "tpcds/q79": [
+      "amt",
+      "profit"
+    ],
+    "tpcds/q80": [
+      "sales",
+      "returns_",
+      "profit"
+    ],
+    "tpcds/q81": [
+      "ctr_total_return"
+    ],
+    "tpcds/q83": [
+      "sr_dev",
+      "cr_dev",
+      "wr_dev",
+      "average"
+    ],
+    "tpcds/q85": [
+      "avg1",
+      "avg2",
+      "avg3"
+    ],
+    "tpcds/q86": [
+      "total_sum"
+    ],
+    "tpcds/q90": [
+      "am_pm_ratio"
+    ],
+    "tpcds/q91": [
+      "Returns_Loss"
+    ],
+    "tpcds/q92": [
+      "excess"
+    ],
+    "tpcds/q93": [
+      "sumsales"
+    ],
+    "tpcds/q94": [
+      "total shipping cost",
+      "total net profit"
+    ],
+    "tpcds/q95": [
+      "total shipping cost",
+      "total net profit"
+    ],
+    "clickbench/q2": [
+      "a"
+    ],
+    "clickbench/q3": [
+      "UserID"
+    ],
+    "clickbench/q9": [
+      "a"
+    ],
+    "clickbench/q27": [
+      "l"
+    ],
+    "clickbench/q28": [
+      "l"
+    ],
+    "clickbench/q30": [
+      "w"
+    ],
+    "clickbench/q31": [
+      "w"
+    ],
+    "clickbench/q32": [
+      "w"
+    ]
+  },
+  "duckdb_sql_sha256": {
+    "pdsh/q1": "8aefe77a1c97459bc69acbbcdaf3b8637d8ea22dfc3ac7be732d4446da83b69b",
+    "pdsh/q3": "1f120d790d4914652cbf3fbc0fa28ed6573e4adee61ae7164a8c3d99b7c6b7fe",
+    "pdsh/q5": "495def7debb02ab1def31da07fbc88b4796813b754832ce15d54a35dcb104577",
+    "pdsh/q6": "3638535fb92a6026b3359a2ad9e6ed7da9ad9080152513e6fd3818d1a853c29f",
+    "pdsh/q7": "5e8077121a42ca8ebf5ff54e5842a614e839da945b0331e3b63d9ccad2361201",
+    "pdsh/q8": "948338f54b97a2c49aea15f8c4d609ecf244d00ad7754edcea60b4748504a1ce",
+    "pdsh/q9": "af90ccbe30ece396209e6627c10c0086ed54208100357922ee404de8bb867e56",
+    "pdsh/q10": "0b48b00cffa3776b32e67e9041191dea25095e2a952ee5251990b9c8585031ed",
+    "pdsh/q11": "f313c766fac507c1204fb6f2bacd35719a61a11c0f69601302555150dddeda78",
+    "pdsh/q14": "e7ec7960a4c49219fc76dc03495a1530aeb30c796413dd1dc9d501b86934f222",
+    "pdsh/q15": "1cb57383eeff60261a1b4b2a141c71d8672729d743a7dfa74d9a4bcaf69c44d4",
+    "pdsh/q17": "dfc7f00ac8a500c2ac2735b05b41b462bbe4af9ce7cd6c37e42d1bb9df4a02e1",
+    "pdsh/q18": "8c5076061727d974f96708f0da930fc58843eac297a80c7ad658d64d152a19bb",
+    "pdsh/q19": "341f97d1f74deb30aca2a8b0ee849772a3b0e098a06cf12266c63573cb985478",
+    "pdsh/q22": "d8ed6332e75f9193391000ba071e17adcf735a2d99c5a4da0f7c13d695ccbd42",
+    "tpcds/q2": "1f220eee70975c3df1ef0f2038cb08315e04245373d2c4bda9303e635e863c84",
+    "tpcds/q3": "89d2b3157dd0e7b016a748d6014e6572af36d9e87c16c539ae95ad5ee765fecd",
+    "tpcds/q5": "14c4c840cf26e38a65520e523329bfbd0ef2b4130490090539cac134c0d684f4",
+    "tpcds/q7": "ae9d2df0f6ab5fc253c39f613b1b8a0e7e33b7b04a70fabfe841ddd5d21bd39c",
+    "tpcds/q8": "b45ca7ec21a00fe0b2a2e9180eff224f5b1568e745b92fdef9598664ba21ed08",
+    "tpcds/q9": "fea5958fec32acdee8e1be43874e1c6348d1396bbcf18dcb18fe92319a691b39",
+    "tpcds/q12": "3e1183f150fa18593a67f7ceabf7579a79a3a77ce0b88957aeb3bb904ae47d40",
+    "tpcds/q13": "a6a1e3fb1cfb27848e7efbdedce5022abffeecf31621b98458f6f17fbc246883",
+    "tpcds/q14": "3bd1e71c82f86c305439f37c9f7cc79b4cdb8490ec0bdafdafa37eaee6fe7cd1",
+    "tpcds/q15": "4c3db1d1c43ddd2180698779317967d8b7dd94f25365e446db2337c73d5da6df",
+    "tpcds/q16": "83f25fcd92b8312c5fb9a3b8ab9df0f398a263901315a3b4c50efddf81488c58",
+    "tpcds/q17": "15541b9c7113fa6830d809ed63543c10d0cf17d1c7f2809a3809fd2c956f48ee",
+    "tpcds/q18": "73c936a7f826ebacc2207ce8f92aa20e6afccfb991f7485b59fbfe882c8aa367",
+    "tpcds/q19": "06b4dba4a4f6199b5477b9ee4c78165bb7cbd5b12c61806d73833d03d7dfa51f",
+    "tpcds/q20": "868cd5290ae6bb27ad9ccc4b7c92fbed70ffb78a89d5bb3e886a4976581253d9",
+    "tpcds/q22": "1aff753f39ee3aef6f5c3c1d2285e2773428f615f520c47a4a8e133846b8ea3c",
+    "tpcds/q23": "e95aa7ed2c328af2aee106d9e89b2743e7714c8b24f4a83f9539d8d48edcd621",
+    "tpcds/q24": "207acb2e45de27ac0d6b0d0ef11241f20619f9af333205cab8578ee3f3d5ce5e",
+    "tpcds/q25": "a51e6f1fb73d0766f709e7ecf2711987bad9a408f4d16262a668aa43d4a56702",
+    "tpcds/q26": "5e7a316b24e56429b1dbbcff6dda328c77a71ec0a5e84934d5d439c1f6bdf28a",
+    "tpcds/q27": "3e345789ba4a8cdd49a9214f4d5fd7a83660e9bcfe3df0cb10a1e72c758b1762",
+    "tpcds/q28": "617360dff7ca12a83eb4dd3e3b404b19d430ae89c999ba61945fd3f6b011d2eb",
+    "tpcds/q30": "d620d0c1dca37da3233f186b74c31ea0b39f60325a2d70b9af7b9a3693ee5bf2",
+    "tpcds/q31": "8414309feead85d5eb89c1150fd66536d4b815f29f80d0da6a06786a69af91b4",
+    "tpcds/q32": "07cb7196c528920fee2b0f69a92e511817859ac19882fc76989163eecac4c716",
+    "tpcds/q33": "b17835984efdfb406162e648ca3c9a2587b1712ed872080493779258dcdd4b3d",
+    "tpcds/q35": "7f0c64abae43d552a46c2302ff262822328702a70bed71dbe46ac63c8a4195d4",
+    "tpcds/q36": "37d407b1c33a1bb1b4927fd64a11c908c83cd024a7fecaf26f6c4a69ad5b48c4",
+    "tpcds/q39": "14fe0b0acde2fbf318ff2cd6369ef6a21e8a101950ce3a4d3a02e6ea19938f0a",
+    "tpcds/q40": "9bc7c60e5b3396512c701282d68bb73b23ef24655e749151d885bbc2a5feb4a3",
+    "tpcds/q42": "4029602a5c51a6f2349e0a9f83f7f3ad0be7cd0f47d0fa7b0c1db97e6539e9f6",
+    "tpcds/q43": "e1c99f32a735cdc779b1638e9580f737d4160fddfdbd53c09eb55892a09e7080",
+    "tpcds/q45": "1886bc936768add9b5a3ba6918083e08a7214e13f950cb51bf2dca3f6b3d689b",
+    "tpcds/q46": "31e511278bd8fcb0a23f2f92fcdc0dda74939007b0d1749b09eabf0ebc9c1ec1",
+    "tpcds/q47": "4b645dace804b4228cf57ca4f107e3c8b2b3d0be6d799098811cf084a27f7791",
+    "tpcds/q49": "8cf6db915033e26eeced16922274ea15305b7db45f377a22994f7b415ea42f42",
+    "tpcds/q51": "33dce0201e2554dfd4f8fd3be36e67180eba3252c58be585d028fdcefeb75e79",
+    "tpcds/q52": "3468ecab6d21adc3883acb5834384e74e5d2272f4a6cffe133e49144ab8fb09d",
+    "tpcds/q53": "2fee437740cf49bbcfb8614eb81f182ecaadd18a683377d2e29beafcab6f9808",
+    "tpcds/q55": "fc9173c806abb01bd44be47a2ca9ec4053ffefb6318c7374ea344c93b6bccd0f",
+    "tpcds/q56": "90daef6537f621b8f81f1fee7c572768471278613e626e87d070951a562ffa00",
+    "tpcds/q57": "46e95db1764f4b29f9bc9c4d7200479bb0ea38449fa499a6fd90bdfd61f4950f",
+    "tpcds/q58": "431f81697fa50ee6f7c9d0e471bb35d33dc8ed604d1b6f43dbaf52c09388472a",
+    "tpcds/q59": "31dbb3355f3ee7a1af88529cda30d5be73cdbca5ed1c97dc25c046b9e9c70bf0",
+    "tpcds/q60": "048697f5f7400357a3f424ee9c9a35819501e1ae732c757a84fe2bb487d1ae09",
+    "tpcds/q61": "1b9122eb1c31cc15f56634c3ee67ea5514959566943330053c929bfa8030314b",
+    "tpcds/q63": "8debe6a5b78cddbf958ea5b8c8ac59090cce8578322452fb16b4d92f2cffd3af",
+    "tpcds/q64": "26f8734a7fac1b7df899e101a23321549af5fd90bdcfba98d444d28c5c74b97d",
+    "tpcds/q65": "0ecf1b2b4081572500b154eedcf8241019da64f1c85e71d0a71320567f35510f",
+    "tpcds/q66": "e59220f32b2dc9143094bb4907540d09d950520425a97c69a42b8d3738502ac7",
+    "tpcds/q67": "c40fc03b7c1daffb847ee9f541926a0170eed2dd00eed8d8dc584dfd13b510b6",
+    "tpcds/q68": "f5a0b7b72f885958fac62e529c62f4cc4ea32dddff8aed2bd6677393b3981585",
+    "tpcds/q70": "1bccaffda71404df582bca0b5ee1cadc9e4103822cce6525014f0eaaeb0b5305",
+    "tpcds/q71": "4eb87d9d5261fdb7c73c70d36f3deae3536855a7e80dbc27c0e866e6e16c6026",
+    "tpcds/q75": "dcf94f580656df199b734dbee341b4ae0bf93ac337b55bee652aade9b251310a",
+    "tpcds/q76": "9998d5a311ec847cf10cba00faa8534505f31dd1609fc73f41ae56afbc3fae36",
+    "tpcds/q77": "035ecc85677ad8f5b3a15d68ca5a2dabcebb5c288d4d7d17d385a16a536804f4",
+    "tpcds/q78": "1eac43327189e25670d87a068184f103697f19bae31ea92c7d063937f3bdea87",
+    "tpcds/q79": "cfc3ea4e2b2adeeeb0225ba4fd17ad8b1fd25c9ab7924ce4c615c09afba15ad9",
+    "tpcds/q80": "6f645bc7354af5298f2fda6373b2ef35d73778515e917e39faafb0ea985b07f9",
+    "tpcds/q81": "a447253ea378dd5ada72ac4b99bf521f842be921cf30f0513561673a44d108da",
+    "tpcds/q83": "d2c4ee616c97593071c6cf509e860efdf8156ee58f567f940edfb9d36c189349",
+    "tpcds/q85": "4459e75dc4cfa5e94e61732eb5627f7d04fd08c9d973c7294dcfbab8b5b17589",
+    "tpcds/q86": "ab90fbbc0afc9cfc6e75ce890644f1b1b767cfe990c5d19a43f65467e12dcdc9",
+    "tpcds/q89": "1e300adf313db9d94039bf650567333b91c7e5ae23afd87ac7008cc617a5a287",
+    "tpcds/q90": "3aa4c21b2ad659cc18d26928e146ef1ca0ca40ce339825a55dd0cbc423a71441",
+    "tpcds/q91": "b4308019c72692f86d8de1d2fa8a93b7452e84244a5b363b0ac670423613d1e2",
+    "tpcds/q92": "b8b65dc82fc2fd8943dadabbdf2b01e81c89f492814ec7bc7c8fd5dd0df9e742",
+    "tpcds/q93": "7371a7682f747846f0b082fd5e5c234b7e2a19f607bd40152c0aa57199ae9740",
+    "tpcds/q94": "f3428484f57fd5bcd5f164dd89f654ff1d038d347ba87a89bd144b03644b5ed0",
+    "tpcds/q95": "86316da5c7dc5276b553baa60dfde21ee3863b4538c123bb6be2e04436273f56",
+    "tpcds/q98": "08dfca4494a9b9d752486472ed72324419bc42b00b9f968867490c9104c506b1",
+    "clickbench/q2": "ba789a7fdd20673d5a1de18603f6241b5abe66edc985128790e53ebd504a323a",
+    "clickbench/q3": "7a41406a2ec8d4563146920aaaeb5e23a9f96e51c4a8642b7fa1c225d79b4d71",
+    "clickbench/q9": "291921eb48c5986a9f8bb71fef0c0487a9376010fdf426d61bca3392364417ea",
+    "clickbench/q27": "e5a7051fb4cd0d4de81bf6cda2bd474985d1618e654bab77da10a73d26801925",
+    "clickbench/q28": "9743f2d9f8f4dc3618c728b807192062377c7106876355ae794f536eb403ae07",
+    "clickbench/q30": "5b15d0f8f265e1f9920ef40ebf8a3c1c4ff540b7e4f23e7d6f5e87714b8ce4a8",
+    "clickbench/q31": "559c2ad1ec70e59e237b26bcad1321830fbce15aac05ef296501cc8fcf6e8fa6",
+    "clickbench/q32": "af6c7a2d15772efd18d85d74fa32d79130e67a9edaac77ef7423c81fc72f377e"
+  },
+  "clickbench_source_sha256": "451f54c051715d0f4c3b72364037a4688a4b52fee8ec2be11b6a2b6c610c90ee",
+  "exact_copied_float_fields": {
+    "pdsh": [
+      "c_acctbal",
+      "o_totalprice",
+      "s_acctbal"
+    ],
+    "tpcds": [
+      "ca_gmt_offset",
+      "i_current_price",
+      "i_wholesale_cost"
+    ]
+  }
+}
