@@ -22,13 +22,13 @@ from std.bit import count_leading_zeros
 from std.memory import bitcast
 
 from dataframe.aggregation.reducer import float_key
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .parallel import Job, Pool, configured_workers
 from .partition import _combine, _hash_bytes, _mix
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 from .string_bytes import _Bytes, _same_bytes
 
 # Rows per partition to aim for: a table of twice that many 16-byte keys and

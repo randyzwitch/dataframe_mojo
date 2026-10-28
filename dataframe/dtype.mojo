@@ -11,7 +11,7 @@ spec behind a shared pointer and decode them on demand. A DataType cannot
 hold a `List[DataType]`, even indirectly: Mojo rejects that cycle in an
 imported module.
 """
-from ._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from std.collections import Optional
 from std.memory import ArcPointer
 from std.sys import size_of

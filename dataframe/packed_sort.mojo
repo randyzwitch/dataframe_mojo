@@ -36,13 +36,13 @@ from std.bit import count_leading_zeros
 from std.memory import bitcast
 from std.sys import bit_width_of
 
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .parallel import Job, Pool, configured_workers
 from .series import Series
 from .string_bytes import _Bytes
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 
 # Tier codes as stored: a key with nulls or NaN orders tiers first. Values
 # take the lower middle tier ascending and NaN the upper; descending swaps

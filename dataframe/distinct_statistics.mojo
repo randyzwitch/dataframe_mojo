@@ -14,11 +14,11 @@ from std.math import sqrt
 from std.memory import bitcast
 from std.sys import size_of
 
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 
 # Registers of the sketch, 2^P (`HyperLogLog::P`, `M`, `Q`).
 comptime _P = 6

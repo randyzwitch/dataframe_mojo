@@ -9,11 +9,11 @@ from std.collections import Dict
 from std.memory import Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 from dataframe.aggregation.reducer import float_key
-from .bool_column import BoolColumn
-from .column import Column, _validity_at
-from .huge_pages import huge_list
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _validity_at
+from dataframe.storage.allocation import huge_list
 from .dtype import NUMERIC_DTYPES
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 from .series import Series
 from .parallel import Job, partitions, run_jobs
 

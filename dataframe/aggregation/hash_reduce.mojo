@@ -19,8 +19,8 @@ from std.memory import Pointer, bitcast
 
 from dataframe.aggregation.reducer import Reducer
 from dataframe.binding import BoundExpr
-from dataframe.column import Column
-from dataframe.huge_pages import huge_list
+from dataframe.storage.column import Column
+from dataframe.storage.allocation import huge_list
 from dataframe.dtype import DataType
 from dataframe.execution import _new_reducer
 from dataframe.expr import COL, COUNT, LEN, MAX, MEAN, MIN, SUM

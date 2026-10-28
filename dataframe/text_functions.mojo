@@ -11,15 +11,15 @@ are copied, as `slice_strings` does; other string results are appended to one
 each code point past ASCII). `contains_any` and `replace_many` match every
 pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
-from ._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from .byte_encoding import (
     encode_bytes,
     decode_bytes as _decode_row,
     digit as _digit,
 )
 from std.memory import ArcPointer, Pointer
-from .bool_column import BoolColumn
-from .column import Column, _copy_validity
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _copy_validity
 from .expr import (
     Node,
     STR_TITLECASE,
@@ -38,14 +38,14 @@ from .expr import (
     STR_JSON_PATH,
 )
 from .dtype import DataType
-from .nested_column import StructColumn
+from dataframe.storage.nested import StructColumn
 from .regex import Regex
 from .regex_kernels import compile_pattern, regex_count, regex_find
 from .series import Series
 from .string_bytes import _Bytes, _find_bytes, _same_bytes
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_predicates import decode_values
-from .string_view import StringView, StringViewStorage
+from dataframe.storage.string_view import StringView, StringViewStorage
 from .json_decode import decode_json
 from .json_strings import json_path_match
 from .unicode_normalization import normalize_series

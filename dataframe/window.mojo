@@ -6,12 +6,12 @@ earlier row. cum_min and cum_max skip NaN: a NaN row gets the running
 value so far, and is NaN only before the first number (#816). A
 rolling_min or rolling_max window holding a NaN is NaN.
 """
-from .bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from .canonical_labels import canonical_labels
 from .hashing import encode_rows
 from .partition import encode_partitioned, low_cardinality
 from .parallel import worker_count
-from .column import Column, _copy_validity
+from dataframe.storage.column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     split_names,
@@ -47,8 +47,8 @@ from .expr import (
     SEP,
 )
 from .expr_kernels import checked_add, validity
-from .string_column import StringColumn
-from .nested_column import StructColumn
+from dataframe.storage.string import StringColumn
+from dataframe.storage.nested import StructColumn
 from .parse import parse_float64
 from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit

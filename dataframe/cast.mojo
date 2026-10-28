@@ -8,9 +8,9 @@ infinities, and out-of-range values.
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
 from std.bit import count_trailing_zeros
-from .bool_column import BoolColumn, _bits64
-from .column import Column, _copy_validity
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.boolean import BoolColumn, _bits64
+from dataframe.storage.column import Column, _copy_validity
+from dataframe.storage.string import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .parse import parse_bool, parse_float64, parse_integer
 from .decimal import (

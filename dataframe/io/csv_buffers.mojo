@@ -6,10 +6,10 @@ Strings use 16-byte views with inline short values and retained blocks.
 """
 from std.collections import Dict
 from std.utils import Variant
-from ..column import Column, _append_validity_bit
-from ..bool_column import BoolColumn
-from ..string_column import StringColumn
-from ..string_view import StringViewBuilder
+from dataframe.storage.column import Column, _append_validity_bit
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringViewBuilder
 from ..series import Series
 from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .csv_types import CsvField

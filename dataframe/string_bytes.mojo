@@ -6,14 +6,14 @@ over every row those checks cost more than the comparison itself. `_Bytes`
 reads offsets and bytes (or view storage) directly, and `_same_bytes` and
 `_order_bytes` compare eight bytes at a time.
 """
-from ._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from std.bit import byte_swap
 
 from std.memory import ArcPointer, Pointer
 
 from .regex.dfa import find_literal_bytes
-from .string_column import StringColumn
-from .string_view import StringView
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringView
 
 
 @always_inline

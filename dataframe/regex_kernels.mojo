@@ -14,15 +14,15 @@ literal kernel of `string_predicates`.
 """
 from std.memory import Pointer
 
-from .bool_column import BoolColumn
-from .column import Column, _copy_validity
-from .nested_column import ListColumn, StructColumn
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _copy_validity
+from dataframe.storage.nested import ListColumn, StructColumn
 from .parallel import Job, run_jobs, worker_count
 from .regex import Matcher, Regex, Template, escape
 from .regex_cache import cached_pattern
 from .series import Series
 from .string_bytes import _Bytes
-from .string_column import StringColumn, StringBuilder
+from dataframe.storage.string import StringColumn, StringBuilder
 from .string_predicates import string_contains
 
 comptime _CONTAINS = 0

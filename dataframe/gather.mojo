@@ -15,12 +15,12 @@ Inputs are shared read-only (reference-counted buffers); outputs are only
 published after every worker succeeds, so a failure never exposes a
 partially built column.
 """
-from ._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
-from .bool_column import BoolColumn, _bits64
-from .column import Column
-from .huge_pages import huge_uninit
+from dataframe.storage.boolean import BoolColumn, _bits64
+from dataframe.storage.column import Column
+from dataframe.storage.allocation import huge_uninit
 
 # Fixed-width payloads a gather copies: the numeric types plus Int128, the
 # storage of decimal columns, which joins used to return as nulls.
@@ -48,7 +48,7 @@ from .parallel import (
     worker_count,
 )
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 from .trace import trace_path
 
 

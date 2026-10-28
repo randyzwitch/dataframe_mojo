@@ -16,7 +16,7 @@ from dataframe.planning.cost.model import trace_decision
 from dataframe.categorical import (
     decode,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.dtype import (

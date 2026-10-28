@@ -6,7 +6,7 @@ long strings compare their remaining bytes before moving to the next key.
 from std.ffi import external_call
 from std.memory import Pointer
 from .series import Series
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 from .dtype import DataType
 from .row_encode import encodable, encode_sort_keys, STRING_PREFIX_BYTES
 from .comparison_sort import KeyOrder, comparison_arg_sort

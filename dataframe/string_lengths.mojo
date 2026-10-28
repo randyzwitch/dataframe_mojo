@@ -1,9 +1,9 @@
 """String lengths from storage metadata and UTF-8 leading bytes."""
 from std.memory import Pointer
-from .column import Column, _copy_validity
+from dataframe.storage.column import Column, _copy_validity
 from .series import Series
 from .string_bytes import _Bytes
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 
 
 @always_inline

@@ -1,8 +1,8 @@
 """DBASE III/IV attributes and live record positions for shapefiles."""
 from .shapefile_binary import read_bytes, require, uint, text, encoding_name
 from ..series import Series
-from ..column import Column
-from ..bool_column import BoolColumn
+from dataframe.storage.column import Column
+from dataframe.storage.boolean import BoolColumn
 from ..dtype import DataType
 from ..parse import parse_integer, parse_float64
 from ..temporal import parse

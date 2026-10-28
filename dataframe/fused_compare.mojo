@@ -11,13 +11,13 @@ written. The combined bitmap is the selection for the next pipeline step.
 Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
 floats, so a NaN compares false except with `!=`.
 """
-from ._buffer import _BufferData
+from dataframe.storage.buffer import _BufferData
 from std.memory import pack_bits
 
 from .expr import node_children
 from .binding import bind
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .execution import _numeric_literal, evaluate
 from .expr import (

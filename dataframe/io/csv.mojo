@@ -6,9 +6,9 @@ typed column builders.
 from std.collections import Dict
 from .csv_types import CsvField, CsvSchema, CsvOptions
 from .csv_reader import read_csv_explicit, read_csv_inferred
-from ..bool_column import BoolColumn
-from ..column import Column
-from ..string_column import StringColumn
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
+from dataframe.storage.string import StringColumn
 from ..dtype import DataType, NUMERIC_DTYPES
 from ..categorical import decode
 from ..frame import DataFrame

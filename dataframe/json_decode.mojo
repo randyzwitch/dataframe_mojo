@@ -5,11 +5,11 @@ from std.sys import size_of
 from std.utils import Variant
 from .json_reader import JsonReader, JsonBytes
 from .dtype import DataType
-from .column import Column, SCALAR_DTYPES
-from .bool_column import BoolColumn
-from .string_column import StringBuilder, StringColumn
+from dataframe.storage.column import Column, SCALAR_DTYPES
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.string import StringBuilder, StringColumn
 from .string_bytes import _Bytes
-from .nested_column import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from .series import Series
 from .parse import parse_integer, parse_float64
 from .temporal import parse_in, zone_of, has_offset

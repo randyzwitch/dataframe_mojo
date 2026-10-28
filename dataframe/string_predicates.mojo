@@ -10,9 +10,9 @@ writes the result bitmap; validity is the input's, copied once. Equality
 checks the length before any byte; `is_in` with more than eight values
 probes a small open-addressing table of their hashes.
 """
-from ._buffer import _Buffer
-from .bool_column import BoolColumn
-from .column import _copy_validity
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import _copy_validity
 from .expr import EQ, GE, GT, LE, LT, NE
 from .parallel import Job, run_jobs, worker_count
 from .partition import _hash_bytes
@@ -24,8 +24,8 @@ from .string_bytes import (
     _same_bytes,
     _search,
 )
-from .string_column import StringColumn
-from .string_view import StringView, StringViewStorage
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringView, StringViewStorage
 from std.memory import ArcPointer, Pointer
 
 # Predicate codes beside the comparison operators.

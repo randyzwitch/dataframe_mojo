@@ -1,6 +1,6 @@
 """Sorted as-of matching, retaining exact integer and temporal key ordering."""
 from std.collections import Optional
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .series import Series
 from .value import AnyValue

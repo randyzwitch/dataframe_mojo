@@ -6,24 +6,24 @@ continue to the next slot. Exact column equality resolves hash collisions.
 Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
-from ._buffer import _Buffer
+from dataframe.storage.buffer import _Buffer
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
 
 from dataframe.aggregation.reducer import float_key
-from .bool_column import BoolColumn
-from .column import Column, _validity_at
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
-from .huge_pages import huge_capacity, huge_list, huge_uninit
+from dataframe.storage.allocation import huge_capacity, huge_list, huge_uninit
 from .join_fuse import FusedJoin, MatchJob, fused_gather, probe_blocks
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _hash_bytes, _mix, _short_hash
 from .series import Series
 from .string_bytes import _Bytes
-from .string_column import StringColumn
-from .string_view import StringView
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringView
 from .trace import trace_path
 
 

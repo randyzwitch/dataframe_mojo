@@ -9,7 +9,7 @@ A morsel is a frame and a selection. A filter narrows the selection
 without copying data. When a step reads a column, that column is gathered
 through the selection once and replaces its shared version.
 """
-from ._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
@@ -19,11 +19,11 @@ from std.sys import size_of
 from std.time import perf_counter_ns
 
 from .canonical_labels import canonical_labels
-from .bool_column import BoolColumn, both_true, true_count
+from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .execution import _ReduceJob, _new_reducer, _valid_lanes
 from .expr import (
@@ -87,12 +87,12 @@ from .runtime_filter import (
     build_bloom,
 )
 from .gather import can_filter_aligned_chunks, take_parallel, true_rows
-from .huge_pages import huge_list
+from dataframe.storage.allocation import huge_list
 from .mask_filter import filter_columns
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
 from .hashing import encode_rows
-from .string_column import StringColumn
+from dataframe.storage.string import StringColumn
 from .trace import trace_path
 
 # Step kinds, the row-local plan nodes a pipeline runs between its source

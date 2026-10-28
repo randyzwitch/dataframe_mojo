@@ -1,15 +1,19 @@
 """Runtime-tagged, named columns without per-element type erasure."""
-from ._buffer import _Buffer
-from .field_metadata import _equal_metadata, _without_extensions
+from dataframe.kernels.scalar_gather import gather_scalars
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.field_metadata import (
+    _equal_metadata,
+    _without_extensions,
+)
 from .wkb import GeometryBounds
 from .geometry import geometry_type, crs, bounding_box, total_bounds
 from .dtype import DataType, NUMERIC_DTYPES, CategoricalDictionary
 from std.utils import Variant
-from .bool_column import BoolColumn
-from .column import Column, SCALAR_DTYPES, _copy_validity, gather_scalars
-from .nested_column import ListColumn, StructColumn
-from .string_column import StringCodes, StringColumn
-from .string_view import StringViewStorage
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column, SCALAR_DTYPES, _copy_validity
+from dataframe.storage.nested import ListColumn, StructColumn
+from dataframe.storage.string import StringCodes, StringColumn
+from dataframe.storage.string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
 from .parallel import (
@@ -392,7 +396,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return merged^
 
     def _merge_storage(self, parts: List[Self]) raises -> Self:
-        from .nested_merge import concatenate_nested
+        from dataframe.storage.nested_merge import concatenate_nested
 
         var result = parts[0].copy()
         if self.dtype().is_nested():

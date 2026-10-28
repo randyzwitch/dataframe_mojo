@@ -11,7 +11,7 @@ from std.collections import Optional
 from std.memory import Pointer
 from ..frame import DataFrame, Field, concat, _shared_dictionaries
 from ..series import Series
-from ..nested_column import (
+from dataframe.storage.nested import (
     ListColumn,
     StructColumn,
     _hold,

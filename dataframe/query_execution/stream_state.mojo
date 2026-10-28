@@ -4,7 +4,7 @@ from dataframe.planning.cost.eligibility import _pipeline_steps
 from dataframe.categorical import (
     decode,
 )
-from dataframe.column import (
+from dataframe.storage.column import (
     Column,
 )
 from dataframe.expr import (

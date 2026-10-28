@@ -18,12 +18,12 @@ set bits of the rest:
 String and nested columns still go through a row list (`take`); #375 makes
 string gathers produce views.
 """
-from ._buffer import _Buffer, _BufferData
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.bit import count_leading_zeros, count_trailing_zeros, pop_count
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 
-from .bool_column import BoolColumn, _FULL, _bits64
-from .column import Column, _validity_at
+from dataframe.storage.boolean import BoolColumn, _FULL, _bits64
+from dataframe.storage.column import Column, _validity_at
 from .gather import GATHER_DTYPES
 from .parallel import Job, run_jobs, worker_count
 from .series import Series

@@ -1,10 +1,10 @@
 """Bounded text rendering. Only displayed cells are ever formatted."""
 from .dtype import DataType, NUMERIC_DTYPES
 from .temporal import format as format_temporal
-from .bool_column import BoolColumn
-from .column import Column
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import Column
 from .decimal import format_decimal
-from .string_column import StringColumn, escape_bytes
+from dataframe.storage.string import StringColumn, escape_bytes
 from .series import Series
 from .wkb import _wkb_display
 

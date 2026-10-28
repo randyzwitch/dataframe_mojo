@@ -15,7 +15,7 @@ in parallel chunks that are then merged.
 """
 from std.memory import bitcast
 
-from .column import Column
+from dataframe.storage.column import Column
 from .dtype import NUMERIC_DTYPES
 from .parallel import Job, configured_workers, run_jobs
 from .series import Series
