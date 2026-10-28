@@ -2304,10 +2304,10 @@ def tpcds_polars(t, q):
             .select(
                 "w_substr",
                 "sm_type",
-                col("cc_name").str.to_lowercase().alias("cc_name_lower"),
+                col("cc_name"),
                 "30 days", "31-60 days", "61-90 days", "91-120 days", ">120 days",
             )  # fmt: skip
-            .sort(["w_substr", "sm_type", "cc_name_lower"], nulls_last=False)
+            .sort(["w_substr", "sm_type", "cc_name"], nulls_last=False)
             .head(100)
         )
     elif q == "q6":

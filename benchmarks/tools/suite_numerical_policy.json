@@ -5,9 +5,9 @@
   "comparison": "abs(a-b) <= max(atol, rtol * max(abs(a), abs(b)))",
   "scope": "Independent CPU suite validation: named aggregate/arithmetic Float64 fields only; schemas, keys, copied values, integers and decimals remain exact. Field definitions reused from the Metal policy after review against issue #1041 revision; current suite source identities are pinned below.",
   "source_sha256": {
-    "benchmarks/suites/h2o.mojo": "bba2b834539145cbd45d1751bf72ed172e94672f5328e64352c32015fbbae05c",
-    "benchmarks/suites/pdsh.mojo": "f27444f0de2e128f05ed457b65fa1d1fc93ebae1f3f7eabe1dd9e306819b990e",
-    "benchmarks/suites/tpcds.mojo": "461f91f5a20f32c06d98ee81210390ca15b605665c087b7d614fa4f9e1b557ee"
+    "benchmarks/suites/h2o.mojo": "3c3c689c0f378f191efc582719f13058bf19ac0764708e4b63482c9100be5274",
+    "benchmarks/suites/pdsh.mojo": "fa0d127ee6c823e13cb2e115f86a82c1de1c1903000ce456c3a889255b0450d9",
+    "benchmarks/suites/tpcds.mojo": "9b7495c65df82028e0086bf4e86f0414c7571071084e4a00ca837135167605d0"
   },
   "cases": {
     "h2o_groupby/q3": [

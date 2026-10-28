@@ -119,7 +119,6 @@ ALIASES = {
     },
     ("tpcds", "q92"): {"Excess Discount Amount": "excess"},
     ("tpcds", "q96"): {"count_star()": "count"},
-    ("tpcds", "q99"): {"cc_name": "cc_name_lower"},
 }
 
 

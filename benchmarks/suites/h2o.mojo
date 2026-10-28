@@ -3,19 +3,24 @@ reference SQL and the Polars versions). Usage: see suite_common.mojo."""
 from std.collections import Dict
 from std.sys import argv
 
-from dataframe import DataFrame, col, corr, lit
+from dataframe import DataFrame, DataType, col, corr, lit, null, when
 from suite_common import run
 
 
 def groupby(query: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     ref x = t["x"]
     if query == "q1":
-        return x.group_by("id1").agg([col("v1").sum().alias("v1")])
+        return x.group_by("id1").agg([col("v1").sum(min_count=1).alias("v1")])
     if query == "q2":
-        return x.group_by(["id1", "id2"]).agg([col("v1").sum().alias("v1")])
+        return x.group_by(["id1", "id2"]).agg(
+            [col("v1").sum(min_count=1).alias("v1")]
+        )
     if query == "q3":
         return x.group_by("id3").agg(
-            [col("v1").sum().alias("v1"), col("v3").mean().alias("v3")]
+            [
+                col("v1").sum(min_count=1).alias("v1"),
+                col("v3").mean().alias("v3"),
+            ]
         )
     if query == "q4":
         return x.group_by("id4").agg(
@@ -28,9 +33,9 @@ def groupby(query: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     if query == "q5":
         return x.group_by("id6").agg(
             [
-                col("v1").sum().alias("v1"),
-                col("v2").sum().alias("v2"),
-                col("v3").sum().alias("v3"),
+                col("v1").sum(min_count=1).alias("v1"),
+                col("v2").sum(min_count=1).alias("v2"),
+                col("v3").sum(min_count=1).alias("v3"),
             ]
         )
     if query == "q6":
@@ -53,12 +58,25 @@ def groupby(query: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             .select_exprs([col("id6"), col("v3").alias("largest2_v3")])
         )
     if query == "q9":
+        var pairs = (
+            (col("v1").is_not_null() & col("v2").is_not_null())
+            .cast(DataType.INT64)
+            .sum()
+        )
         return x.group_by(["id2", "id4"]).agg(
-            [corr(col("v1"), col("v2")).pow(lit(2.0)).alias("r2")]
+            [
+                when(pairs > 0)
+                .then(corr(col("v1"), col("v2")).pow(lit(2.0)))
+                .otherwise(null(DataType.FLOAT64))
+                .alias("r2")
+            ]
         )
     if query == "q10":
         return x.group_by(["id1", "id2", "id3", "id4", "id5", "id6"]).agg(
-            [col("v3").sum().alias("v3"), col("v1").len().alias("count")]
+            [
+                col("v3").sum(min_count=1).alias("v3"),
+                col("v1").len().alias("count"),
+            ]
         )
     raise Error("unknown query " + query)
 

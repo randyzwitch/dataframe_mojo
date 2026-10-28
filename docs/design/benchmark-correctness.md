@@ -114,17 +114,23 @@ for the added fields. Copied floating attributes (`s_acctbal`, `c_acctbal`,
 `o_totalprice`, `i_current_price`, `i_wholesale_cost`, `ca_gmt_offset`) remain
 exact. The historical Metal policy and its retained receipts are unchanged.
 
-## Failures exposed for separate follow-up
+## Query translations corrected by complete validation
 
-The smoke inputs expose native empty/all-null aggregate outputs that the
-legacy zero-valued summaries accepted: PDS-H q17 and TPC-DS q13, q32 and q92
-return zero where independent SQL returns null. The TPC-DS q99 translation
-projects lowercased call-center names where SQL projects their original case;
-equal string byte lengths hid this discrepancy. Decimal variants also expose
-PDS-H q11's floating result in place of an exact decimal result, and differing
-decimal scales in TPC-DS q23/q93. These cases remain failures; this benchmark
-change does not alter engine semantics or query definitions to conceal them.
-H2O's null-containing group-by variant also exposes q9's NaN-versus-null
-correlation results and q10's zero-versus-null sums in all-null groups.
-Retain the concrete exports and reruns outside the repository when addressing
-them in follow-up changes.
+The smoke inputs exposed empty/all-null aggregate outputs that the legacy
+zero-valued summaries accepted. The native H2O sums, PDS-H q17 and TPC-DS
+q13/q32/q92 now request `sum(min_count=1)` to preserve SQL nulls. H2O q9
+returns null with no non-null pairs, while retaining NaN for singleton pairs
+and zero variance, as DuckDB does.
+
+TPC-DS q99 now projects and sorts the original call-center name; lowercasing
+it preserved string byte lengths and hid the previous answer discrepancy.
+PDS-H q11 retains decimal products, sums and its threshold comparison instead
+of converting them to floats. TPC-DS q23/q93 cast integer quantities to
+scale-zero decimals before multiplication, preserving the SQL result scale.
+The checker still compares nulls, NaNs, strings and decimal schemas exactly.
+These changes correct the benchmark translations through the existing public
+API; engine semantics and tolerance limits are unchanged.
+
+Current-suite numerical-policy and case-metadata source pins are refreshed
+for these reviewed translations. The historical Metal numerical policy and
+its retained receipts remain unchanged.
