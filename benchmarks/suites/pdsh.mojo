@@ -1,8 +1,8 @@
 """PDS-H: the 22 TPC-H-derived queries of Polars' benchmark, written with
 this library's lazy API, as the Polars versions are: each query builds one
 plan over the tables and collects it, so projection and predicate pushdown
-decide which columns and rows reach each join (#329). q11 and q22 collect a
-scalar subquery first and use its value, as a user would. engines.py holds
+decide which columns and rows reach each join (#329). q22 collects a
+scalar subquery first and uses its value, as a user would. engines.py holds
 the Polars versions; DuckDB runs `tpch_queries()`. The same queries run on both
 data variants (bench_suites.py): money columns as Float64, or as
 Decimal(15, 2), where literals must be decimals too (`money`) and ratios
@@ -354,19 +354,26 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             .with_columns(
                 [
                     (
-                        real(col("ps_supplycost"))
-                        * col("ps_availqty").cast(DataType.FLOAT64)
+                        col("ps_supplycost")
+                        * col("ps_availqty").cast(
+                            DataType.decimal(19, 0) if dec else DataType.FLOAT64
+                        )
                     ).alias("v")
                 ]
             )
         )
-        var threshold = (
-            german.select(col("v").sum()).collect().item().float64() * 0.0001
+        var factor = lit("0.0001000000").cast(
+            DataType.decimal(11, 10)
+        ) if dec else lit(0.0001)
+        var threshold = german.select(
+            (col("v").sum(min_count=1) * factor).alias("threshold")
         )
         return (
             german.group_by(["ps_partkey"])
-            .agg([col("v").sum().alias("value")])
-            .filter(col("value") > lit(threshold))
+            .agg([col("v").sum(min_count=1).alias("value")])
+            .join(threshold, how="cross")
+            .filter(col("value") > col("threshold"))
+            .select(["ps_partkey", "value"])
             .sort("value", descending=True)
         )
     if q == "q12":
@@ -479,7 +486,9 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             real(col("l_quantity"))
             < lit(0.2) * col("l_quantity").mean().over("p_partkey")
         ).select(
-            (real(col("l_extendedprice").sum()) / lit(7.0)).alias("avg_yearly")
+            (real(col("l_extendedprice").sum(min_count=1)) / lit(7.0)).alias(
+                "avg_yearly"
+            )
         )
     if q == "q18":
         var big = (
