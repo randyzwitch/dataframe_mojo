@@ -11,6 +11,17 @@ from suite_answers import Answer, compare_selection
 
 
 class SQLTests(unittest.TestCase):
+    def test_q41_distinct_parentheses_preserve_projected_ordering(self):
+        sql, _ = full_relation(
+            "SELECT DISTINCT(a) FROM t ORDER BY a LIMIT 2", ["a"]
+        )
+        self.assertIn('a AS "__suite_rank_0"', sql)
+        with self.assertRaises(ValueError):
+            full_relation(
+                "SELECT DISTINCT((a)+(b)) FROM t ORDER BY a LIMIT 2",
+                ["((a) + (b))"],
+            )
+
     def test_distinct_cannot_gain_duplicate_outputs_from_hidden_keys(self):
         with self.assertRaises(ValueError):
             full_relation("SELECT DISTINCT a FROM t ORDER BY b LIMIT 2", ["a"])

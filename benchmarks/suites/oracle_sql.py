@@ -64,6 +64,21 @@ def split_expressions(text):
     ]
 
 
+def _projection_identity(text):
+    """Ignore complete redundant parentheses, retaining expression structure."""
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        inner = text[1:-1].strip()
+        try:
+            list(tokens(inner))
+        except ValueError:
+            break
+        text = inner
+    # Unquoted identifiers are case-insensitive; string literals and compound
+    # expressions retain their spelling rather than guessing equivalence.
+    return text.lower() if re.fullmatch(r"[A-Za-z_]\w*", text) else text
+
+
 def full_relation(sql, output_names=None):
     """Return SQL with hidden sort fields, plus LIMIT/OFFSET/order metadata."""
     sql = sql.strip().rstrip(";")
@@ -113,7 +128,7 @@ def full_relation(sql, output_names=None):
             raise ValueError("DISTINCT ON requires a dedicated selection proof")
         if distinct:
             projection_text = re.sub(
-                r"^\s*DISTINCT\s+", "", projection_text, flags=re.I
+                r"^\s*DISTINCT\s*", "", projection_text, flags=re.I
             )
         projections = split_expressions(projection_text)
         aliases = {}
@@ -171,8 +186,8 @@ def full_relation(sql, output_names=None):
             # Adding a hidden source field to DISTINCT can split one original
             # row into multiple rows. Only duplicate projected expressions
             # are safe without a separate functional-dependency proof.
-            if distinct and expression.strip().lower() not in {
-                p.strip().lower() for p in projection_values
+            if distinct and _projection_identity(expression) not in {
+                _projection_identity(p) for p in projection_values
             }:
                 raise ValueError(
                     "hidden DISTINCT ordering requires a dedicated proof"
