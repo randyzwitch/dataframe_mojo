@@ -366,7 +366,7 @@ def coverage_comparison(before, after):
 
 def basis_label(value):
     return {
-        "eligible_separate_exact_and_external_summary_evidence": "Admitted: matching exact receipt and independent summary checks",
+        "eligible_separate_exact_and_external_complete_evidence": "Admitted: matching exact receipt and independent complete-result checks",
         "unverified_or_hybrid_exact_basis": "Exact validation unavailable, failed, or hybrid",
         "incomplete_rounds": "Incomplete paired rounds",
         "failed_or_contaminated_run": "Failed or contaminated worker",

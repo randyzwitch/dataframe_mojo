@@ -15,6 +15,7 @@ spec = importlib.util.spec_from_file_location(
 )
 collector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collector)
+from suite_answer_fixture import export_fixture
 
 
 def protocol():
@@ -26,6 +27,47 @@ def protocol():
 
 
 class ApplePerformanceCollector(unittest.TestCase):
+    def test_complete_answer_protocol_binds_every_phase(self):
+        with tempfile.TemporaryDirectory() as folder:
+            records = [
+                export_fixture(repetition=i, directory=folder) for i in range(5)
+            ]
+            output = (
+                "".join(
+                    "complete_answer\tq1\t" + json.dumps(record) + "\n"
+                    for record in records
+                )
+                + protocol()
+            )
+            run = dict(
+                collector.parse(
+                    output, 3, 1, answer_directory=folder, query="q1"
+                ),
+                suite="h2o_groupby",
+                query="q1",
+            )
+            self.assertEqual(
+                [
+                    (s["phase"], s["index"], s["complete_answer"]["repetition"])
+                    for s in run["samples"]
+                ],
+                [
+                    ("cold", 0, 0),
+                    ("warmup", 0, 1),
+                    ("warm", 0, 2),
+                    ("warm", 1, 3),
+                    ("warm", 2, 4),
+                ],
+            )
+            reference = dict(status="ok", oracles=[export_fixture(oracle=True)])
+            self.assertEqual(
+                collector.oracle_checks(run, reference)["status"], "matches"
+            )
+            run["samples"][-1].pop("complete_answer")
+            self.assertEqual(
+                collector.oracle_checks(run, reference)["status"], "unverified"
+            )
+
     def test_rotated_order_retains_every_case_engine_round(self):
         cases = [dict(query="q1"), dict(query="q2")]
         plan = collector.schedule(cases, 3)
@@ -301,16 +343,22 @@ class ApplePerformanceCollector(unittest.TestCase):
         self.assertEqual(
             collector.oracle_checks(
                 run,
-                dict(status="ok", summary=dict(height=1, values=[3.0], names=["v"])),
+                dict(
+                    status="ok",
+                    summary=dict(height=1, values=[3.0], names=["v"]),
+                ),
             )["status"],
-            "matches",
+            "unverified",
         )
         self.assertEqual(
             collector.oracle_checks(
                 run,
-                dict(status="ok", summary=dict(height=1, values=[4.0], names=["v"])),
+                dict(
+                    status="ok",
+                    summary=dict(height=1, values=[4.0], names=["v"]),
+                ),
             )["status"],
-            "differs",
+            "unverified",
         )
         self.assertEqual(run["status"], "ok")
 
@@ -326,7 +374,7 @@ class ApplePerformanceCollector(unittest.TestCase):
                 collector.parse(protocol(), 3, 1),
                 engine=engine,
                 round=index,
-                oracle=dict(status="matches"),
+                oracle=dict(status="matches", format=collector.ANSWER_POLICY),
             )
             for index in range(3)
             for engine in ("cpu", "metal")
@@ -366,7 +414,9 @@ class ApplePerformanceCollector(unittest.TestCase):
             changed = copy.deepcopy(runs)
             changed[0][field] = value
             self.assertFalse(
-                collector.ratio_basis(changed, strict, 3, 3).startswith("eligible")
+                collector.ratio_basis(changed, strict, 3, 3).startswith(
+                    "eligible"
+                )
             )
 
     def test_inherited_exports_cannot_contaminate_actual_worker_environment(self):

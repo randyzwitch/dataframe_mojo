@@ -309,7 +309,7 @@ Every query runs in fresh worker processes, once per engine per round.
 (`cpu ms`, `metal ms`, `vs cpu`, `worst vs cpu (variant)`, status), a summary,
 the excluded cases grouped by reason, and the provenance last. Ratios are
 Metal divided by CPU, so below 1 means Metal is faster. Only cases with a
-matching exact receipt and DuckDB summary check are admitted and get a ratio;
+matching exact receipt and independent DuckDB complete-result check are admitted and get a ratio;
 the others are marked wrong answer, unsupported or unverified. The raw
 samples stay in `performance.json`.
 
