@@ -53,7 +53,16 @@ def record(root, selected, suites):
     )
     paths += [
         root / "benchmarks" / "tools" / name
-        for name in ("bench_suites.py", "bench_html.py", "bench_policy.py")
+        for name in (
+            "bench_suites.py",
+            "bench_html.py",
+            "bench_policy.py",
+            "suite_answers.py",
+            "suite_schema.py",
+            "suite_numerical_policy.json",
+            "metal_numerical_compare.py",
+            "metal_numerical_audit.py",
+        )
     ]
     hashes = {
         str(path.relative_to(root)): hashlib.sha256(

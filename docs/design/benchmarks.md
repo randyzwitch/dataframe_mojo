@@ -402,10 +402,10 @@ SQL text before any query in it is timed:
    rank; q36's SQL writes its rollup as a UNION of three groupings, so it is
    translated as written.
 
-That is 99 of 99. q67 ranks Float64 sums, whose ties depend on rounding, so
-on the Float64 variant its rank column is not compared
-(`VARIANT_CHECKS` in bench_suites.py; the decimal variant is exact and
-compares it); every other column is.
+That is 99 of 99. q67 ranks Float64 sums, whose ties can depend on rounding.
+The former summary checker omitted its rank column on the Float64 variant.
+Complete-result validation retains the rank check against independent SQL;
+rank differences remain visible and cannot qualify a timing.
 
 Add further batches by a rule of the same kind, never by which queries run
 well. A translation uses the API as a user would; where the
@@ -450,14 +450,40 @@ python3 benchmarks/tools/query_diagrams.py --from-json build/query-plans/plans.j
 
 ## Answer checks
 
-Every engine prints the same order-insensitive summary of its result: the row
-count and one number per column (numeric sums, string byte lengths, dates in
-days, datetimes in seconds). Values must agree within a relative 1e-6. Where a
-query's result is not unique, only the columns that determine it are
-compared: rows tied at a `LIMIT` boundary may legitimately differ between
-engines, and between runs of one engine, so ClickBench's top-N queries compare
-their `ORDER BY` column; q17, a `LIMIT` without `ORDER BY`, compares the row
-count. `CHECKS` in `benchmarks/tools/bench_suites.py` lists them.
+Every timed result is exported after stopping the timer, with its complete
+original schema, values and nulls. The driver checks every repetition and
+round against independent DuckDB SQL over the same input files. Queries
+without `ORDER BY` compare row multisets, including duplicate multiplicities.
+For ordered queries, the oracle computes the full relation and hidden sort
+keys before applying `LIMIT`/`OFFSET`. Each selected row must belong to the
+relation with valid multiplicity and occupy a valid rank position. Tied
+boundaries permit different peer rows. ClickBench q17 must return a valid
+ten-row subset of the complete grouped relation, or all rows if fewer exist.
+
+Schemas compare exactly except for the explicit SQL/API aliases and transport
+equivalences in `benchmarks/tools/suite_schema.py`. These include Arrow string
+offset widths, equivalent decimal storage widths with identical precision and
+scale, and declared integer reductions transported by DuckDB as HUGEINT via
+`DECIMAL(38,0)`. Integer/decimal values never pass through Float64. Original
+schemas remain in hash-pinned sidecars, and subsecond timestamp values retain
+their full integer precision.
+
+Only named aggregate/arithmetic Float64 outputs in
+`benchmarks/tools/suite_numerical_policy.json` receive relative tolerance
+`1e-9` and absolute tolerance `1e-12`. Copied attributes and grouping keys stay
+exact. Decimal and integer fields stay exact, even in queries with eligible
+floating fields. Duplicate-preserving one-to-one matching prevents a nearby
+float value from being reused to match multiple rows. NaN matches only NaN,
+null only null, and infinities require the same sign.
+
+Legacy summaries remain diagnostic; they cannot certify an answer. Missing,
+corrupt or summary-only evidence and exhausted matching limits are
+`unverified`, excluded from ratios, and fail `--correctness-only`. Snapshot
+files live in driver-owned directories outside the repository; saved reports
+and reference caches retain their paths and content hashes. Keep those files
+when rerendering a report. A missing cached snapshot causes fresh reference
+collection. See [the correctness audit](benchmark-correctness.md) for the
+exception inventory, oracle-independence rules and follow-up failures.
 
 ## Mechanism benchmarks
 

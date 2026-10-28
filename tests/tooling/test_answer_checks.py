@@ -49,14 +49,14 @@ class SameAnswerTest(unittest.TestCase):
             )
 
         self.assertTrue(
-            bench_suites.same_answer(
+            bench_suites.legacy_summary_agrees(
                 "x", "q", strings(["aa", "bb"]), strings(["cc", "dd"])
             )
         )
 
     def test_q17_accepts_arbitrary_same_height_values(self):
         self.assertTrue(
-            bench_suites.same_answer(
+            bench_suites.legacy_summary_agrees(
                 "clickbench",
                 "q17",
                 _summary(10, [123.0, 456.0, 789.0]),
@@ -67,7 +67,7 @@ class SameAnswerTest(unittest.TestCase):
     def test_large_integer_precision_is_lost(self):
         self.assertNotEqual(2**53, 2**53 + 1)
         self.assertTrue(
-            bench_suites.same_answer(
+            bench_suites.legacy_summary_agrees(
                 "x",
                 "q",
                 _summary(1, [float(2**53)]),
@@ -79,13 +79,13 @@ class SameAnswerTest(unittest.TestCase):
         # [null, 1] and [0, 1] have the same height and sum.
         got = _summary(2, [1.0])
         want = dict(got, names=["different_name"])
-        self.assertTrue(bench_suites.same_answer("x", "q", got, want))
+        self.assertTrue(bench_suites.legacy_summary_agrees("x", "q", got, want))
 
     def test_adjacent_products_can_also_collide(self):
         # [(0, 0), (1, 1), (2, 2)] versus [(0, 1), (1, -1), (2, 3)]:
         # both column sums are 3 and both product sums are 5.
         self.assertTrue(
-            bench_suites.same_answer(
+            bench_suites.legacy_summary_agrees(
                 "x",
                 "q",
                 _summary(3, [3.0, 3.0], [5.0]),
@@ -100,16 +100,16 @@ class SameAnswerTest(unittest.TestCase):
         got = _summary(2, [3.0, 2.0], [4.0])
         want = _summary(2, [3.0, 2.0], [2.0])
         self.assertFalse(
-            bench_suites.same_answer("x", "q", got, want)
+            bench_suites.legacy_summary_agrees("x", "q", got, want)
         )
-        self.assertTrue(bench_suites.same_answer("x", "q", got, got))
+        self.assertTrue(bench_suites.legacy_summary_agrees("x", "q", got, got))
 
     def test_reference_without_pairs_still_compares_columns(self):
         got = _summary(2, [3.0, 2.0], [4.0])
         old = _summary(2, [3.0, 2.0])
-        self.assertTrue(bench_suites.same_answer("x", "q", got, old))
+        self.assertTrue(bench_suites.legacy_summary_agrees("x", "q", got, old))
         self.assertFalse(
-            bench_suites.same_answer(
+            bench_suites.legacy_summary_agrees(
                 "x", "q", got, _summary(2, [3.0, 3.0])
             )
         )
