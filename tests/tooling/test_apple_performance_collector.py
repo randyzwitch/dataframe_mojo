@@ -15,7 +15,7 @@ spec = importlib.util.spec_from_file_location(
 )
 collector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collector)
-from suite_answer_fixture import export_fixture
+from suite_answer_fixture import export_fixture  # suite_answer_fixture.py
 
 
 def protocol():

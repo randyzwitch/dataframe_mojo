@@ -15,7 +15,7 @@ spec = importlib.util.spec_from_file_location(
 )
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
-from suite_answer_fixture import export_fixture
+from suite_answer_fixture import export_fixture  # suite_answer_fixture.py
 
 
 def fixture():
