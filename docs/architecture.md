@@ -330,3 +330,17 @@ from this shared value domain, and prevents engine imports through old facades.
 The extraction retains exact implementations, including duplicate/object order,
 JSONPath number behavior, Unicode escapes, temporal/duration conversion,
 null/empty rules, and error timing. No parser or wire format changes here.
+
+## General Unicode data and normalization
+
+`text/unicode/` owns alphabetic properties, normalization and its generated
+tables. The normalization-table generator's default output follows that owner;
+table content and generation logic are unchanged. The original three root
+modules remain import-compatible re-exports, and engine imports use canonical
+modules. Regex Unicode property tables remain with the matching engine.
+
+The text boundary gate also checks the Unicode subtree and legacy aliases.
+Alphabetic and normalization tables cannot import engine layers. Normalization
+retains its reusable per-row scratch behavior and exact composition,
+decomposition, combining-class and UTF-8 handling. Existing Unicode version
+provenance and vendor-license references remain intact.

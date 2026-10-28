@@ -164,7 +164,7 @@ def composition(a: Int, b: Int) -> Int:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ucd', required=True, type=Path)
-    parser.add_argument('--output', type=Path, default=ROOT/'dataframe/unicode_normalization_tables.mojo')
+    parser.add_argument('--output', type=Path, default=ROOT/'dataframe/text/unicode/normalization_tables.mojo')
     args = parser.parse_args()
     args.output.write_text(generate(args.ucd))
     subprocess.run(['mblack', '--target-version', 'mojo', '--line-length', '80', str(args.output)], check=True)

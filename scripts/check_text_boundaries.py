@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LEGACY = {'dataframe.' + name for name in (
     'str_kernels', 'string_bytes', 'string_lengths', 'string_predicates',
     'string_transform', 'text_functions', 'byte_encoding', 'parse',
-    'regex_kernels', 'regex_cache',
+    'regex_kernels', 'regex_cache', 'unicode_alphabetic',
+    'unicode_normalization', 'unicode_normalization_tables',
 )}
 
 
@@ -18,6 +19,8 @@ def check():
     for path in sorted((ROOT / 'dataframe/text').rglob('*.mojo')):
         name = module_name(path)
         for dependency in imports(path):
+            if name in {'dataframe.text.unicode.alphabetic', 'dataframe.text.unicode.normalization_tables'} and dependency.startswith('dataframe'):
+                failures.append(f'{name} imports above generated Unicode data: {dependency}')
             if dependency in {'dataframe', 'dataframe.execution', 'dataframe.binding'} or dependency.startswith((
                 'dataframe.execution.', 'dataframe.binding.', 'dataframe.frame',
                 'dataframe.lazy', 'dataframe.planning', 'dataframe.optimizer',
