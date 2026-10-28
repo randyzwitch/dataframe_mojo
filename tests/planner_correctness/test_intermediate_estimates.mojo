@@ -6,6 +6,7 @@ from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
     _cost_rows,
     bounded_distinct,
+    frame_column_width,
 )
 from dataframe.planning.graph import plan_height_bound, plan_known_height
 from dataframe.kernels.distinct_statistics import TableStatistics
@@ -267,3 +268,28 @@ def test_failed_filter_sample_is_unknown_and_execution_still_reports_errors() ra
     except:
         failed = True
     assert_true(failed)
+
+
+def test_width_estimates_preserve_sliced_string_views_and_fragmented_storage() raises:
+    var short = StringColumn(
+        List[String](length=6000, fill="abcdefghij")
+    )._as_views()
+    var long = StringColumn(
+        List[String](length=6000, fill="abcdefghijklmnopqrstuvwxyz1234")
+    )._as_views()
+    var series = Series._from_chunks(
+        [Series("s", short.slice(7, 5000)), Series("s", long.slice(11, 5000))]
+    ).slice(17, 9000)
+    var expected = 16.0 + (4983.0 * 10.0 + 4017.0 * 30.0) / 9000.0
+    var width = frame_column_width(DataFrame([series.copy()]), "s")
+    assert_true(abs(width - expected) < 0.02)
+    assert_equal(series.n_chunks(), 2)
+    assert_equal(series._chunked.value()[].cache[].state.load(), 0)
+    assert_equal(frame_column_width(DataFrame([series.slice(0, 0)]), "s"), 16.0)
+    # A contiguous offsets column needs only its two endpoint offsets.
+    assert_equal(
+        frame_column_width(
+            DataFrame([Series("s", StringColumn(["abc", "defgh"]))]), "s"
+        ),
+        20.0,
+    )

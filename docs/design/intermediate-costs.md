@@ -41,10 +41,16 @@ counts without resampling. Entries retain shallow owners to prevent pointer
 reuse from causing false hits. A changed view replaces its named entry;
 failed preparations are not cached.
 
-Payload widths use source buffer metadata, including average string bytes,
-and preserve plain-column aliases. Width lookup does not sample distinct
-values. Unsupported computed or nested payloads use a declared cost-model
-fallback, rather than inventing a physical layout guarantee.
+Payload widths preserve plain-column aliases. Contiguous offsets strings
+use their endpoint offsets; view-backed or fragmented strings use at most
+4,096 jittered length observations, weighted by the number of rows each
+stratum represents. Computing a view column's exact byte
+total would visit every row, so that operation is kept out of preparation.
+Width lookup does not sample distinct values. NDV samples use the existing
+sparse gather to collect each chunk's selected rows together, rather than
+constructing thousands of one-row views. Unsupported computed or nested
+payloads use a declared cost-model fallback, rather than inventing a
+physical layout guarantee.
 
 ## Join build decisions
 

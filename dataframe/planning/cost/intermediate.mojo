@@ -39,6 +39,7 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.properties import _stream_rows
 from dataframe.storage.boolean import true_count
+from dataframe.storage.string import StringColumn
 
 
 @fieldwise_init
@@ -56,13 +57,52 @@ def _cost_rows(value: Float64) -> Int:
     return Int(min(max(value, 0.0), Float64(Int.MAX // 2)))
 
 
+def _sample_row(height: Int, count: Int, k: Int) -> Int:
+    """One deterministic jittered observation per population stratum."""
+    var step = height // count
+    var extra = height % count
+    var first = k * step + min(k, extra)
+    var width = step + (1 if k < extra else 0)
+    var hash = UInt64(k + 1) * UInt64(0x9E3779B97F4A7C15)
+    hash ^= hash >> 30
+    hash *= UInt64(0xBF58476D1CE4E5B9)
+    hash ^= hash >> 27
+    return first + Int(hash % UInt64(width))
+
+
+def _mean_text_bytes(column: Series) raises -> Float64:
+    var height = len(column)
+    if height == 0:
+        return 0.0
+    var count = min(height, 4096)
+    var total = 0.0
+    if not column.is_chunked():
+        ref strings = column._data[StringColumn]
+        if not strings._is_view_storage():
+            # Two offset reads give the exact byte span. View storage's
+            # _value_bytes instead visits every row, so sample it below.
+            return Float64(strings._value_bytes()) / Float64(height)
+        for k in range(count):
+            var weight = height // count + (1 if k < height % count else 0)
+            total += Float64(
+                strings._byte_length(_sample_row(height, count, k))
+            ) * Float64(weight)
+        return total / Float64(height)
+    for k in range(count):
+        var row = _sample_row(height, count, k)
+        var part = column._chunk_at(row)
+        var local_row = part[1]
+        ref strings = part[0]._data[StringColumn]
+        var weight = height // count + (1 if k < height % count else 0)
+        total += Float64(strings._byte_length(local_row)) * Float64(weight)
+    return total / Float64(height)
+
+
 def frame_column_width(frame: DataFrame, name: String) raises -> Float64:
-    """Payload bytes/value from buffer metadata, with no distinct sampling."""
+    """Metadata or at most 4,096 length reads; no distinct-value sampling."""
     var column = frame.column(name)
     if column.dtype() == DataType.STRING or column.dtype()._is_bytes():
-        return 16.0 + Float64(column._text_bytes()) / Float64(
-            max(1, frame.height())
-        )
+        return 16.0 + _mean_text_bytes(column)
     if column.dtype().is_nested():
         return -1.0
     return Float64(max(1, column.dtype().bit_width() // 8))
@@ -84,30 +124,14 @@ def bounded_distinct(column: Series) raises -> Int:
     var sample = column.copy()
     if height > count:
         var rows = List[Int](capacity=count)
-        var step = height // count
-        var extra = height % count
         for k in range(count):
-            var first = k * step + min(k, extra)
-            var width = step + (1 if k < extra else 0)
-            var hash = UInt64(k + 1) * UInt64(0x9E3779B97F4A7C15)
-            hash ^= hash >> 30
-            hash *= UInt64(0xBF58476D1CE4E5B9)
-            hash ^= hash >> 27
-            rows.append(first + Int(hash % UInt64(width)))
+            rows.append(_sample_row(height, count, k))
         if column.is_chunked():
-            # Series.take currently rechunks its entire input. Borrow only
-            # the sampled windows so estimate preparation does not copy the
-            # full payload of a fragmented intermediate.
-            var chunks = column.chunks()
-            var parts = List[Series](capacity=count)
-            var chunk = 0
-            var first = 0
-            for row in rows:
-                while chunk < len(chunks) and row >= first + len(chunks[chunk]):
-                    first += len(chunks[chunk])
-                    chunk += 1
-                parts.append(chunks[chunk].slice(row - first, 1))
-            sample = Series._from_chunks(parts)
+            # Gather each source chunk's selected rows together, preserving
+            # metadata without expanding the sample into 4,096 tiny arrays.
+            # The explicit sparse adapter avoids the full-merge alternative
+            # that Series.take may choose for relatively dense samples.
+            sample = column._take_from_chunks(rows)
         else:
             sample = column.take(rows)
     var codes = encode_rows([sample^], nulls_equal=False)
@@ -370,7 +394,7 @@ struct IntermediateEstimates(Movable):
                     var budget = 64 * 1024
                     if height > budget:
                         sample = frame._sampled(names, 64, 1024)
-                    var kept = 0
+                    var kept: Int
                     try:
                         kept = true_count(
                             sample._selection(node.exprs[0], 8192)
