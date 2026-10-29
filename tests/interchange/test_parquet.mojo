@@ -260,7 +260,7 @@ def test_parquet_late_corruption_raises_after_valid_batches_and_column_projectio
                 seen.append(batch.value().item(row, "x").int64())
     except error:
         if String(error).find("read_parquet stream:") < 0:
-            raise error^
+            raise error ^
         rejected = True
     assert_true(
         rejected, "late corrupted data page must propagate its native error"
@@ -270,7 +270,7 @@ def test_parquet_late_corruption_raises_after_valid_batches_and_column_projectio
     assert_equal(observer.get(3), Int64(3))
     assert_equal(observer.get(12), Int64(1))
     observer.assert_balanced()
-    _ = cursor^
+    _ = cursor ^
     observer.assert_balanced()
     observer.reset()
     var projected = read_parquet(fixture("late-corrupt"), columns=["s"])
@@ -288,7 +288,7 @@ def test_parquet_late_corruption_raises_after_valid_batches_and_column_projectio
         )
     except error:
         if String(error).find("read_parquet stream:") < 0:
-            raise error^
+            raise error ^
         public_rejected = True
     assert_true(public_rejected)
     observer.assert_balanced()
@@ -299,7 +299,7 @@ def consume_first_native_batch(path: String, fail: Bool) raises -> DataFrame:
     var first = cursor.next().value().copy()
     if fail:
         raise Error("deliberate parquet consumer stop")
-    return first^
+    return first ^
 
 
 def test_parquet_early_close_consumer_error_and_public_head_release_actual_native_exports() raises:
@@ -315,7 +315,7 @@ def test_parquet_early_close_consumer_error_and_public_head_release_actual_nativ
         _ = consume_first_native_batch(fixture("plain"), True)
     except error:
         if String(error).find("deliberate parquet consumer stop") < 0:
-            raise error^
+            raise error ^
         rejected = True
     assert_true(rejected)
     assert_equal(observer.get(3), Int64(1))
@@ -332,7 +332,7 @@ def test_parquet_early_close_consumer_error_and_public_head_release_actual_nativ
     assert_equal(observer.last_stream(2), Int64(1))
     assert_equal(observer.get(12), Int64(0))
     observer.assert_balanced()
-    _ = setting^
+    _ = setting ^
 
 
 def assert_typed_rows(frame: DataFrame) raises:
@@ -394,8 +394,8 @@ def with_independent_field_metadata(frame: DataFrame) raises -> DataFrame:
         # importing the released public export into a new owned Series.
         schema.metadata = Int(encoded.unsafe_ptr())
         fields.append(import_arrow_series(array, schema))
-    _ = encoded^
-    return DataFrame(fields^)
+    _ = encoded ^
+    return DataFrame(fields ^)
 
 
 # expected-failure: Public Parquet read drops arbitrary field metadata
@@ -469,6 +469,9 @@ def test_parquet_public_writer_preserves_independently_produced_types_metadata_c
 def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_reports_failures() raises:
     from tests.support.parquet_runtime import Locations, WorkingDirectory
 
+    var previous_library = getenv("DATAFRAME_PARQUET_LIBRARY")
+    var previous_delegate = getenv("DATAFRAME_TEST_PARQUET_DELEGATE")
+    var previous_prefix = getenv("CONDA_PREFIX")
     var observer = Observer()
     var locations = Locations()
     var expected_version = parquet_backend_version()
@@ -492,8 +495,8 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
             ),
             Int32(0),
         )
-        _ = c_source^
-        _ = c_alias^
+        _ = c_source ^
+        _ = c_alias ^
     set_setting("DATAFRAME_PARQUET_LIBRARY", observer.path)
     set_setting("CONDA_PREFIX", root)
     assert_equal(
@@ -512,7 +515,7 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
         _ = parquet_backend_version()
     except error:
         if String(error).find("read_parquet could not load " + broken) < 0:
-            raise error^
+            raise error ^
         rejected = True
     assert_true(rejected)
     # Prefix and default paths are absent in this isolated working directory.
@@ -528,11 +531,17 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
             String(error).find("read_parquet needs libdfparquet; looked for")
             < 0
         ):
-            raise error^
+            raise error ^
         rejected = True
     assert_true(rejected)
-    _ = working^
-    _ = locations^
+    _ = working ^
+    _ = locations ^
+    # Locations captured the observer override. Keep the observer alive until
+    # after that inner guard restores its snapshot, then restore the caller.
+    _ = observer ^
+    assert_equal(getenv("DATAFRAME_PARQUET_LIBRARY"), previous_library)
+    assert_equal(getenv("DATAFRAME_TEST_PARQUET_DELEGATE"), previous_delegate)
+    assert_equal(getenv("CONDA_PREFIX"), previous_prefix)
 
 
 def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_exports_valid() raises:
@@ -569,7 +578,7 @@ def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_
                 or message.find("write_parquet") >= 0
             )
             if not valid:
-                raise error^
+                raise error ^
             rejected = True
         assert_true(rejected)
         observer.assert_balanced(0)
@@ -584,7 +593,7 @@ def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_
         )
     except error:
         if String(error).find("write_parquet:") < 0:
-            raise error^
+            raise error ^
         failed_write = True
     assert_true(failed_write)
     assert_equal(observer.get(6), Int64(1))
