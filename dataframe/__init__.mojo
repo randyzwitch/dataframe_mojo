@@ -67,6 +67,7 @@ from .io.arrow import (
     import_arrow,
     import_arrow_series,
 )
+from .io.csv_input import CsvBuffer
 from .io.csv import (
     CsvField,
     CsvOptions,

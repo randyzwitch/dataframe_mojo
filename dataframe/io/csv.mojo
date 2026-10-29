@@ -5,7 +5,13 @@ typed column builders.
 """
 from std.collections import Dict
 from .csv_types import CsvField, CsvSchema, CsvOptions
-from .csv_reader import read_csv_explicit, read_csv_inferred
+from .csv_reader import (
+    read_csv_explicit,
+    read_csv_inferred,
+    read_csv_buffer_explicit,
+    read_csv_buffer_inferred,
+)
+from .csv_input import CsvBuffer
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
@@ -133,6 +139,140 @@ def read_csv(
     """
     var table = read_csv_inferred(
         path,
+        infer_schema_length=infer_schema_length,
+        schema_overrides=schema_overrides,
+        try_parse_dates=try_parse_dates,
+        has_header=has_header,
+        separator=separator,
+        quote_char=quote_char,
+        comment_prefix=comment_prefix,
+        skip_rows=skip_rows,
+        n_rows=n_rows,
+        columns=columns,
+        null_values=null_values,
+        ignore_errors=ignore_errors,
+        truncate_ragged_lines=truncate_ragged_lines,
+        encoding=encoding,
+        buffer_size=buffer_size,
+    )
+    return table^._with_statistics()
+
+
+def read_csv(
+    source: CsvBuffer,
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+) raises -> DataFrame:
+    """Read an in-memory CSV through the file reader's typed builders.
+
+    Schema names label columns positionally. Null and conversion behavior
+    is controlled by the options; CsvField.nullable is metadata, not a
+    parsing guard.
+    The source is decoded synchronously. buffer_size remains a validated
+    compatibility argument. See docs/csv.md.
+    """
+    var table = read_csv_buffer_explicit(
+        source,
+        schema,
+        has_header=has_header,
+        separator=separator,
+        quote_char=quote_char,
+        comment_prefix=comment_prefix,
+        skip_rows=skip_rows,
+        n_rows=n_rows,
+        columns=columns,
+        null_values=null_values,
+        ignore_errors=ignore_errors,
+        truncate_ragged_lines=truncate_ragged_lines,
+        encoding=encoding,
+        buffer_size=buffer_size,
+    )
+    return table^._with_statistics()
+
+
+def read_csv(
+    source: CsvBuffer,
+    schema: List[Tuple[String, DataType]],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+) raises -> DataFrame:
+    """Read CSV with ordered (name, dtype) pairs as a concise schema.
+
+    Fields default to nullable=True and ISO temporal parsing, exactly as
+    CsvField(name, dtype). Use CsvSchema for per-field configuration.
+    """
+    var fields = List[CsvField](capacity=len(schema))
+    for field in schema:
+        fields.append(CsvField(field[0], field[1]))
+    var explicit = CsvSchema(fields^)
+    return read_csv(
+        source,
+        explicit,
+        has_header=has_header,
+        separator=separator,
+        quote_char=quote_char,
+        comment_prefix=comment_prefix,
+        skip_rows=skip_rows,
+        n_rows=n_rows,
+        columns=columns,
+        null_values=null_values,
+        ignore_errors=ignore_errors,
+        truncate_ragged_lines=truncate_ragged_lines,
+        encoding=encoding,
+        buffer_size=buffer_size,
+    )
+
+
+def read_csv(
+    source: CsvBuffer,
+    *,
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+) raises -> DataFrame:
+    """Infer and decode an in-memory CSV through the shared parser.
+
+    Sample 100 rows by default; -1 scans all rows for inference. Temporal
+    inference is enabled by try_parse_dates. schema_overrides sets explicit
+    output dtypes. See docs/csv.md for the inference rules.
+    """
+    var table = read_csv_buffer_inferred(
+        source,
         infer_schema_length=infer_schema_length,
         schema_overrides=schema_overrides,
         try_parse_dates=try_parse_dates,
