@@ -235,6 +235,7 @@ def plan_execute_node(
                 ignore_errors=scan.ignore_errors,
                 truncate_ragged_lines=scan.truncate_ragged_lines,
                 encoding=scan.encoding,
+                glob=False,
             )
         return read_csv(
             node.text,
@@ -252,6 +253,7 @@ def plan_execute_node(
             ignore_errors=scan.ignore_errors,
             truncate_ragged_lines=scan.truncate_ragged_lines,
             encoding=scan.encoding,
+            glob=False,
         )
     if node.kind == SCAN_NDJSON:
         if not empty:
@@ -289,8 +291,11 @@ def plan_execute_node(
                 node.text,
                 columns=node.scan_projection(),
                 row_groups=List[Int](),
+                glob=False,
             )
-        return read_parquet(node.text, columns=node.scan_projection())
+        return read_parquet(
+            node.text, columns=node.scan_projection(), glob=False
+        )
     # Keep a sort's row permutation until after a plain projection, so
     # columns used only as sort keys are never gathered into output.
     if node.kind == SELECT and not empty:
@@ -334,7 +339,7 @@ def plan_execute_node(
                 parquet_row_group_statistics(source.text), node.exprs[0]
             )
             return read_parquet(
-                source.text, columns=source.names, row_groups=groups
+                source.text, columns=source.names, row_groups=groups, glob=False
             ).filter(node.exprs[0])
         if source.kind == SCAN_CSV and source.scan_row_limit() < 0:
             var scan = _scan_options(source)

@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.planning.node_builders import (
     _aggregate_node,
     _concat_node,
@@ -2993,6 +2994,7 @@ def scan_csv(
     infer_schema_length: Int = 100,
     schema_overrides: Dict[String, String] = Dict[String, String](),
     try_parse_dates: Bool = False,
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
     collect; projection and head() are pushed into the reader.
@@ -3001,6 +3003,23 @@ def scan_csv(
     however the plan runs (eagerly, streaming, or for its schema); invalid
     ones raise here, as read_csv would raise them.
     """
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=True,
+        )
     var options = _CsvScanOptions(
         has_header,
         separator,
@@ -3036,10 +3055,26 @@ def scan_csv(
     ignore_errors: Bool = False,
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an explicit schema, which labels the
     fields by position; the options are read_csv's (see the overload
     above)."""
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=True,
+        )
     var options = _CsvScanOptions.defaults()
     options.has_header = has_header
     options.separator = separator
@@ -3101,10 +3136,19 @@ def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:
     )
 
 
-def scan_parquet(path: String) raises -> LazyFrame:
+def scan_parquet(
+    path: String,
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
     """Lazily read a Parquet file. Nothing is read until collect; projection
     is pushed into the reader, and a filter directly above the scan decodes
     only the row groups whose footer statistics can hold a match."""
+    if glob and has_pattern(path):
+        return scan_parquet(
+            [path],
+            glob=True,
+        )
     return LazyFrame(
         [_parquet_scan_node(path=path, slot=0)],
         [DataFrame([])],
@@ -3215,3 +3259,110 @@ def _from_context(var context: QueryContext) -> LazyFrame:
     )
     result._plan = context^
     return result^
+
+
+def scan_csv(
+    paths: List[String],
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_csv(
+    paths: List[String],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_parquet(
+    paths: List[String],
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_parquet(
+            path,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")

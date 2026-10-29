@@ -174,3 +174,6 @@ also occur as literal values cannot be distinguished by quoting alone.
 
 Compression, remote URLs, per-column null tokens, custom input EOL bytes and
 Arrow stream export are not exposed by this API.
+
+`read_csv` and `scan_csv` also accept path lists and glob patterns; see
+[multiple local files](datasets.md) for ordering and combined row limits.

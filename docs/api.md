@@ -1740,15 +1740,27 @@ def parquet_row_group_statistics(path: String) -> DataFrame
 Read CSV through the range-splitting scanner and typed builders.
 
 ```mojo
-def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
@@ -1824,7 +1836,11 @@ def read_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema
 Read a local Parquet file into a DataFrame.
 
 ```mojo
-def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
+def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True, glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_parquet(paths: List[String], *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True, glob: Bool = True) -> DataFrame
 ```
 
 ## `read_shapefile`
@@ -1861,11 +1877,19 @@ An owned row reference; cells convert to AnyValue when accessed.
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
 
 ```mojo
-def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False) -> LazyFrame
+def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
 ```
 
 ```mojo
-def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8") -> LazyFrame
+def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_csv(paths: List[String], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
 ```
 
 ## `scan_ipc`
@@ -1889,7 +1913,11 @@ def scan_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema
 Lazily read a Parquet file. Nothing is read until collect; projection is pushed into the reader, and a filter directly above the scan decodes only the row groups whose footer statistics can hold a match.
 
 ```mojo
-def scan_parquet(path: String) -> LazyFrame
+def scan_parquet(path: String, *, glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_parquet(paths: List[String], *, glob: Bool = True) -> LazyFrame
 ```
 
 ## `Series`
