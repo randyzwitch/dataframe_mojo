@@ -439,3 +439,90 @@ def test_build_side_estimates_combine_joins_the_order_did_not_build() raises:
     var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
     assert_equal(inner._cardinality(len(inner._plan._nodes) - 1), -1)
 
+
+def test_a_left_join_over_a_join_graph_builds_on_the_graphs_estimate() raises:
+    # The graph under the left join keeps about 400 sales rows (20
+    # products of 2K). The cost order leaves it in place (the left join
+    # above passes its row order on), but its joins keep the estimate
+    # that order would have used, so the left join over it builds on
+    # that small side rather than hash 20K right rows.
+    var t = tables()
+    var b_store = List[Int64]()
+    var b_value = List[Int64]()
+    for row in range(20_000):
+        b_store.append(Int64((row * 31) % 4000))
+        b_value.append(Int64(row % 89))
+    var visits = DataFrame(
+        [ints("b_store", b_store), ints("b_value", b_value)]
+    ).lazy()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var graph = (
+        t[0]
+        .join(
+            t[1].filter(col("p_id") < lit(Int64(20))),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2], left_on=["p_category"], right_on=["c_id"])
+    )
+    var query = (
+        graph.join(visits, left_on=["f_store"], right_on=["b_store"], how="left")
+        .group_by(["c_group"])
+        .agg([col("b_value").sum().alias("total"), col("f_amount").count()])
+        .sort(["c_group"])
+    )
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    var text = observed.text()
+    assert_true(
+        "dataframe-path: lazy.swap_left_join_sides\n" in text
+        or "dataframe-path: stream.smaller_left_build\n" in text,
+        "the left join did not build on the graph's smaller side",
+    )
+    _ = observed^
+    _ = trace^
+    var eager = (
+        t[0]
+        .collect()
+        .join(
+            t[1].filter(col("p_id") < lit(Int64(20))).collect(),
+            left_on=["f_product"],
+            right_on=["p_id"],
+        )
+        .join(t[2].collect(), left_on=["p_category"], right_on=["c_id"])
+        .join(
+            visits.collect(),
+            left_on=["f_store"],
+            right_on=["b_store"],
+            how="left",
+        )
+        .group_by(["c_group"])
+        .agg([col("b_value").sum().alias("total"), col("f_amount").count()])
+        .sort(["c_group"])
+    )
+    assert_true(eager.height() > 0)
+    assert_frame(rows, eager)
+
+
+def test_filters_over_intermediates_and_aggregates_estimate_like_duckdb() raises:
+    # DuckDB 2.0: a filter over an intermediate keeps a fifth of its
+    # input; a group by keeps the occupied share of its keys' distinct
+    # counts, or half its input when a key has none.
+    var t = tables()
+    var left = t[0].join(
+        t[3], left_on=["f_store"], right_on=["s_id"], how="left"
+    )
+    var filtered = left.filter(col("s_region") < lit(Int64(3)))
+    assert_equal(filtered._cardinality(len(filtered._plan._nodes) - 1), 8000)
+    var unknown = t[0].group_by(["f_store"]).agg([col("f_amount").sum()])
+    assert_equal(unknown._cardinality(len(unknown._plan._nodes) - 1), 20_000)
+    # 2K products over 20 categories fill every bin: the estimate is the
+    # key's distinct count, as the table's statistics estimate it.
+    var table = t[1].collect()._with_statistics()
+    var products = (
+        table.lazy().group_by(["p_category"]).agg([col("p_id").count()])
+    )
+    assert_equal(
+        products._cardinality(len(products._plan._nodes) - 1),
+        table._distinct_count("p_category"),
+    )

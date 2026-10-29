@@ -44,6 +44,7 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_order import (
     FilterEdge,
     JoinEdge,
+    JoinGraph,
     order_joins,
 )
 from dataframe.join_type import (
@@ -69,6 +70,7 @@ from dataframe.planning.context import (
 from dataframe.planning.graph import (
     plan_aggregated,
     plan_available,
+    plan_cardinality,
     plan_collect_graph,
     plan_columns_of,
     plan_compact_scan_slots,
@@ -336,6 +338,7 @@ def plan_order_joins(
         plan_reorder(self, root)
         plan_compact_scan_slots(self)
         plan_push_projections(self)
+        plan_stamp_graph_estimates(self, len(self._nodes) - 1)
         return
     # First choose each chain's first input, then order what joins it.
     var changed = plan_probe_largest_inputs(self, root, streaming, batch_size)
@@ -364,6 +367,7 @@ def plan_order_joins(
         plan_compact_scan_slots(self)
     if changed:
         plan_push_projections(self)
+    plan_stamp_graph_estimates(self, len(self._nodes) - 1)
 
 
 def plan_push_join_key_sets(
@@ -1008,6 +1012,127 @@ def plan_cost_order_joins(
         trace_path("lazy.cost_join_order")
         changed = True
     return changed
+
+
+def plan_stamp_graph_estimates(mut self: QueryContext, root: Int) raises:
+    """Keep on each join graph the join order left in place the estimates
+    that order would have used, as DuckDB 2.0 runs a child join order
+    optimizer under each operator it cannot reorder and stamps
+    `estimated_cardinality` on every join it rebuilds. The joins keep
+    their order; each join and filter in the graph keeps the estimate for
+    the relations under it (`JoinGraph.estimate`). A graph the cost order
+    built already holds its own. Each relation's rows are
+    `plan_cardinality`'s: nothing is run, and no join's result sampled."""
+    var parents = plan_live_parents(self, root)
+    for top in range(len(parents)):
+        if parents[top] == -2 or not plan_graph_step(self, top):
+            continue
+        var up = parents[top]
+        if up >= 0 and plan_graph_step(self, up):
+            continue
+        # The cost order stamped every join it built.
+        var cursor = top
+        while self._nodes[cursor].kind != JOIN:
+            cursor = self._nodes[cursor].left
+        if self._nodes[cursor].estimated_rows >= 0:
+            continue
+        var relations = List[Int]()
+        var pairs = List[Tuple[String, String]]()
+        var filters = List[Int]()
+        plan_collect_graph(self, top, relations, pairs, filters)
+        var n = len(relations)
+        if n < 2 or n > 62:
+            continue
+        var provider = Dict[String, Int]()
+        var known = True
+        for r in range(n):
+            for c in plan_columns_of(self, relations[r]):
+                if c in provider:
+                    known = False
+                provider[c] = r
+        if not known:
+            continue
+        var edges = List[JoinEdge]()
+        for pair in pairs:
+            var a = provider.get(pair[0], -1)
+            var b = provider.get(pair[1], -1)
+            if a < 0 or b < 0 or a == b:
+                known = False
+                break
+            var found = False
+            for k in range(len(edges)):
+                if edges[k].a == a and edges[k].b == b:
+                    edges[k].a_keys.append(pair[0])
+                    edges[k].b_keys.append(pair[1])
+                    found = True
+                elif edges[k].a == b and edges[k].b == a:
+                    edges[k].a_keys.append(pair[1])
+                    edges[k].b_keys.append(pair[0])
+                    found = True
+            if not found:
+                edges.append(JoinEdge(a, b, [pair[0]], [pair[1]]))
+        if not known:
+            continue
+        var rows = List[Float64](capacity=n)
+        var domains = List[Float64](capacity=n)
+        var position = Dict[Int, Int]()
+        for r in range(n):
+            var estimated = plan_cardinality(self, relations[r])
+            # A relation met twice (a shared input joined to itself) has
+            # no single place in the masks.
+            if estimated < 0 or relations[r] in position:
+                known = False
+                break
+            var table = plan_spine_rows(self, relations[r])
+            rows.append(Float64(estimated))
+            domains.append(Float64(table if table > 0 else estimated))
+            position[relations[r]] = r
+        if not known:
+            continue
+        var compares = List[FilterEdge]()
+        for f in filters:
+            for part in conjuncts(self._nodes[f].exprs[0]):
+                var compare = _comparison_edge(part, provider)
+                if compare:
+                    compares.append(compare.take())
+        var distinct = Dict[String, Float64]()
+        for e in edges:
+            for i in range(len(e.a_keys)):
+                for side in range(2):
+                    var r = e.a if side == 0 else e.b
+                    var name = e.a_keys[i] if side == 0 else e.b_keys[i]
+                    var key = String(r) + "/" + name
+                    if key in distinct:
+                        continue
+                    var table = plan_spine_frame(self, relations[r])
+                    if not table:
+                        continue
+                    var count = table.value()._distinct_count(name)
+                    if count > 0:
+                        distinct[key] = Float64(count)
+        var graph = JoinGraph(rows, domains, edges, distinct, compares)
+        _ = _stamp_graph(self, top, position, graph)
+
+
+def _stamp_graph(
+    mut self: QueryContext,
+    index: Int,
+    position: Dict[Int, Int],
+    mut graph: JoinGraph,
+) raises -> Int:
+    """The relations under graph node `index`, as a mask, after stamping
+    each join and filter on the way with their estimate."""
+    if index in position:
+        return 1 << position[index]
+    var kind = self._nodes[index].kind
+    var mask = _stamp_graph(self, self._nodes[index].left, position, graph)
+    if kind == JOIN:
+        mask |= _stamp_graph(self, self._nodes[index].right, position, graph)
+    if kind == JOIN or kind == FILTER:
+        self._nodes[index].estimated_rows = Int(
+            min(graph.estimate(mask), Float64(Int.MAX // 2))
+        )
+    return mask
 
 
 def plan_probe_largest_inputs(

@@ -78,6 +78,7 @@ from dataframe.planning.expression_inputs import (
 from dataframe.series import (
     Series,
 )
+from std.math import exp
 from std.collections import (
     Dict,
     Optional,
@@ -963,6 +964,15 @@ def plan_cardinality(self: QueryContext, index: Int) raises -> Int:
         if left < 0 or right < 0:
             return -1
         return left + right
+    if node.kind == FILTER:
+        # A filter over an intermediate keeps DuckDB's default share of
+        # its input (`DEFAULT_SELECTIVITY`, `ExtractOperatorStats`).
+        var input = plan_cardinality(self, node.left)
+        if input < 0:
+            return -1
+        return max(1, Int(Float64(input) * 0.2))
+    if node.kind == AGG:
+        return _aggregate_cardinality(self, node)
     if node.kind != JOIN or not (
         node.how == JOIN_LEFT
         or node.how == JOIN_SEMI
@@ -976,6 +986,31 @@ def plan_cardinality(self: QueryContext, index: Int) raises -> Int:
     if right < 0:
         return -1
     return max(left, right)
+
+
+def _aggregate_cardinality(self: QueryContext, node: PlanNode) raises -> Int:
+    """DuckDB 2.0's group estimate (`EstimateDistinctCardinality`): the
+    product of the keys' distinct counts, 5% less per key past the first
+    for correlation, as the occupied share of that many bins after the
+    input's rows land in them, at most the input's rows. Half the input
+    when a key has no distinct count; one row with no keys."""
+    var keys = node.group_keys().copy()
+    if len(keys) == 0:
+        return 1
+    var input = plan_cardinality(self, node.left)
+    if input < 0:
+        return -1
+    var table = plan_spine_frame(self, node.left)
+    var product = 1.0
+    for key in keys:
+        var count = table.value()._distinct_count(key) if table else -1
+        if count < 0:
+            return max(1, input // 2)
+        product *= Float64(max(count, 1))
+    product *= 0.95 ** Float64(len(keys) - 1)
+    var occupied = 1.0 - exp(-Float64(input) / product)
+    var groups = Float64(input) if occupied == 0.0 else product * occupied
+    return max(1, Int(min(groups, Float64(input))))
 
 
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
