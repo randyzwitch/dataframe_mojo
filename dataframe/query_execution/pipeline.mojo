@@ -350,14 +350,20 @@ def plan_stream_execute(
             # few hundred parts its filter keeps.
             var bound = plan_height_bound(self, node.left)
             var right_rows = plan_known_height(self, node.right)
-            # A left input made by another join has no bound; how many
-            # rows it holds is known only once it has run.
-            var unbounded = bound < 0 and plan_joins_below(self, node.left)
+            # A left input made by other joins has no bound: its
+            # estimate (`plan_cardinality`) stands in for this choice
+            # only, and `bound` stays a proven limit for the rules
+            # below. With neither, the join streams, as DuckDB keeps a
+            # join's sides without an estimate to flip them on.
+            var small = bound
+            if small < 0 and plan_joins_below(self, node.left):
+                small = plan_cardinality(self, node.left)
             if (
                 (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                 and plan_known_height(self, node.left) < 0
-                and right_rows >= 524288
-                and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
+                and right_rows >= 0
+                and small >= 0
+                and 4 * small <= right_rows
             ):
                 # Under an unordered aggregation into the aggregate
                 # table the join's row order is free: build on the
@@ -415,12 +421,9 @@ def plan_stream_execute(
                 # prepared probe of this one's output, so it takes a
                 # wider margin: PDS-H q16 (200K parts at most, 800K
                 # partsupp rows) was 10% slower leaving it. A left input
-                # made by other joins has no bound and leaves too: PDS-H
-                # q5 hashed 6M lineitem rows for about 45K orders, and
-                # q18, q11, q7 and q2 gained 15-44%. Where that input is
-                # large, streaming was faster: q9's partsupp and orders
-                # joins (about 320K rows on the left) are 14% slower.
-                if unbounded or 8 * bound <= right_rows:
+                # made by other joins leaves on its estimate: PDS-H q5
+                # hashed 6M lineitem rows for about 45K orders.
+                if 8 * small <= right_rows:
                     break
             if (
                 plan_known_height(self, node.left) <= batch_size
