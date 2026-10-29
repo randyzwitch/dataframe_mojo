@@ -98,11 +98,14 @@ from dataframe.planning.inputs import (
 )
 from dataframe.planning.model import (
     AGG,
+    DROP,
     FILTER,
     JOIN,
     PlanNode,
     SCAN_FRAME,
     SELECT,
+    SORT,
+    WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
     _bound_filter,
@@ -1043,6 +1046,13 @@ def plan_stamp_graph_estimates(mut self: QueryContext, root: Int) raises:
         var n = len(relations)
         if n < 2 or n > 62:
             continue
+        # Only a graph whose estimate a build side decision reads: one
+        # of three or more relations, whose upper joins have joined
+        # inputs, or one feeding a join's left input through steps that
+        # keep its rows. Estimating any other costs time and decides
+        # nothing.
+        if n == 2 and not _feeds_join_left(self, top, parents):
+            continue
         var provider = Dict[String, Int]()
         var known = True
         for r in range(n):
@@ -1112,6 +1122,29 @@ def plan_stamp_graph_estimates(mut self: QueryContext, root: Int) raises:
                         distinct[key] = Float64(count)
         var graph = JoinGraph(rows, domains, edges, distinct, compares)
         _ = _stamp_graph(self, top, position, graph)
+
+
+def _feeds_join_left(
+    self: QueryContext, index: Int, parents: List[Int]
+) -> Bool:
+    """Whether node `index` is a join's left input, directly or through
+    filters, projections, drops and sorts."""
+    var cursor = index
+    while parents[cursor] >= 0:
+        var up = parents[cursor]
+        ref node = self._nodes[up]
+        if node.kind == JOIN:
+            return node.left == cursor
+        if not (
+            node.kind == FILTER
+            or node.kind == SELECT
+            or node.kind == WITH_COLUMNS
+            or node.kind == DROP
+            or node.kind == SORT
+        ):
+            return False
+        cursor = up
+    return False
 
 
 def _stamp_graph(
