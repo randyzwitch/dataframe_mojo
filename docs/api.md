@@ -986,8 +986,49 @@ A flat, topologically ordered tree; composition never evaluates data.
   Last n values, independently in each aggregation group.
 - `def gather(self, indices: List[Int]) -> Self`
   Values at the given positions; negative indices count from the end.
+- `def gather(self, indices: Self) -> Self`
+  Values at expression-computed integer positions; null indices yield null.
 - `def get(self, index: Int) -> Self`
   One value at a position, returning a scalar per aggregation group.
+- `def sort(self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Sort values stably, per group inside aggregation.
+- `def arg_sort(self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Int64 positions in stable sorted order, relative to each group.
+- `def reverse(self) -> Self`
+  Reverse value order, independently within each aggregation group.
+- `def unique(self, maintain_order: Bool = False) -> Self`
+  Distinct values, including one null; optionally keep first appearance.
+- `def unique_counts(self) -> Self`
+  Int64 frequencies of distinct values in first-appearance order.
+- `def top_k(self, k: Int = Int(5)) -> Self`
+  Largest k values, preferring non-null values and keeping ties stable.
+- `def bottom_k(self, k: Int = Int(5)) -> Self`
+  Smallest k values, preferring non-null values and keeping ties stable.
+- `def sort_by(self, by: Self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Order these values by a corresponding expression, keeping ties stable.
+- `def sort_by(self, by: String, descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def sort_by(self, by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def sort_by(self, by: List[Self], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def top_k_by(self, by: Self, k: Int = Int(5)) -> Self`
+  Values at the k largest non-null-preferred ordering keys.
+- `def top_k_by(self, by: String, k: Int = Int(5)) -> Self`
+- `def top_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
+- `def top_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: Self, k: Int = Int(5)) -> Self`
+  Values at the k smallest non-null-preferred ordering keys.
+- `def bottom_k_by(self, by: String, k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def max_by(self, by: Self) -> Self`
+  Value at the largest non-null key; first input row wins ties.
+- `def max_by(self, by: String) -> Self`
+- `def max_by(self, by: List[String]) -> Self`
+- `def max_by(self, by: List[Self]) -> Self`
+- `def min_by(self, by: Self) -> Self`
+  Value at the smallest non-null key; first input row wins ties.
+- `def min_by(self, by: String) -> Self`
+- `def min_by(self, by: List[String]) -> Self`
+- `def min_by(self, by: List[Self]) -> Self`
 - `def drop_nulls(self) -> Self`
   Remove null values, preserving the order of the remaining values.
 - `def drop_nans(self) -> Self`
@@ -1165,10 +1206,12 @@ Axis-aligned XY coordinate extent, in the geometry's existing CRS.
 
 ## `GroupBy`
 
-An eager grouping request. No per-group dataframe materialization.
+An eager grouping request over a snapshot and evaluated key columns.
 
-It owns a snapshot of the input and the evaluated key columns.
-
+- `def head(self, n: Int = Int(5)) -> DataFrame`
+  First n rows of each group, retaining every original column.
+- `def tail(self, n: Int = Int(5)) -> DataFrame`
+  Last n rows of each group, retaining every original column.
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def len(self, name: String = "len") -> DataFrame`
@@ -1450,6 +1493,10 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 
 A pending lazy grouping; finish it with agg, len or a reduction of every other column such as sum.
 
+- `def head(self, n: Int = Int(5)) -> LazyFrame`
+  First n rows of each group, retaining the original column schema.
+- `def tail(self, n: Int = Int(5)) -> LazyFrame`
+  Last n rows of each group, retaining the original column schema.
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
   One row per group: the keys, then the aggregations; see GroupBy.agg.
 - `def agg(self, expr: Expr) -> LazyFrame`
