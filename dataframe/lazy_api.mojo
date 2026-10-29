@@ -50,8 +50,12 @@ from dataframe._accel_provider import (
 )
 from dataframe.planning.device_placement import (
     CPU as _PLACE_CPU,
+    Placement,
+    PlacementPipeline,
     PlacementProblem,
     plan_pipelines,
+    plan_substitute,
+    plan_unit_region,
     solve_placement,
 )
 from dataframe.storage.column import (
@@ -1632,6 +1636,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return _execute_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )[0].copy()
+        if engine == "auto":
+            var placed = _collect_placed(
+                self, _RegisteredProvider(), optimize, streaming, batch_size
+            )
+            if placed:
+                return placed.take()
         var crew = Crew.start()
         try:
             var result: DataFrame
@@ -1689,6 +1699,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     batch_size,
                     False,
                 )[0].copy()
+            var placed = _collect_placed(
+                self, accelerator, optimize, streaming, batch_size
+            )
+            if placed:
+                return placed.take()
             return self.collect(
                 engine="cpu",
                 optimize=optimize,
@@ -2619,15 +2634,22 @@ def _device_label(device: DeviceInfo) -> String:
     return device.backend + ":" + String(device.ordinal)
 
 
-def _device_placement_lines[
+@fieldwise_init
+struct _DevicePlacement(Movable):
+    """A plan's placement units, the numbers they were placed from, and the
+    placement, for `explain` and `collect`."""
+
+    var devices: List[DeviceInfo]
+    var units: List[PlacementPipeline]
+    var problem: PlacementProblem
+    var placement: Placement
+
+
+def _solve_devices[
     B: AcceleratorBackend
-](plan: LazyFrame, backend: B) raises -> String:
-    """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
-    summary: where each unit would run and why. Nothing when the backend
-    reports no devices. Placement is reported, not yet executed."""
-    var devices = backend.devices()
-    if len(devices) == 0:
-        return String()
+](
+    plan: LazyFrame, backend: B, var devices: List[DeviceInfo]
+) raises -> _DevicePlacement:
     var units = plan_pipelines(plan._plan)
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
@@ -2659,6 +2681,24 @@ def _device_placement_lines[
                     region, devices[d].ordinal, unit.features
                 )
     var placement = solve_placement(problem)
+    return _DevicePlacement(devices^, units^, problem^, placement^)
+
+
+def _device_placement_lines[
+    B: AcceleratorBackend
+](plan: LazyFrame, backend: B) raises -> String:
+    """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
+    summary: where each unit runs under `engine="auto"` and why. Nothing
+    when the backend reports no devices."""
+    var found = backend.devices()
+    if len(found) == 0:
+        return String()
+    var solved = _solve_devices(plan, backend, found^)
+    ref devices = solved.devices
+    ref units = solved.units
+    ref problem = solved.problem
+    ref placement = solved.placement
+    var count = len(devices) + 1
     var names = List[String]()
     names.append("cpu")
     var out = String("DEVICES cpu")
@@ -2703,6 +2743,79 @@ def _device_placement_lines[
         + "\n"
     )
     return out^
+
+
+def _has_pipeline_costs() raises -> Bool:
+    """Whether this machine's CPU calibration measures any pipeline; when
+    it does not, no unit can be compared, so collect skips placement."""
+    for key in load_costs("cpu").keys():
+        if key.startswith("pipeline:"):
+            return True
+    return False
+
+
+def _frame_to_host(frame: DataFrame) raises:
+    for column in frame._columns:
+        column._copy_to_host()
+
+
+def _collect_placed[
+    B: AcceleratorBackend
+](
+    query: LazyFrame,
+    backend: B,
+    optimize: Bool,
+    streaming: Bool,
+    batch_size: Int,
+) raises -> Optional[DataFrame]:
+    """Collect with the units placement puts on a device run there; None
+    when the backend reports no devices or every unit stays on the CPU.
+
+    Units run children first. A device unit runs through `run_pipeline` on
+    its inputs, and its result, which may stay in device memory, replaces
+    its top node, so the rest of the plan reads it as a frame. A result a
+    CPU unit or the caller reads is copied to the host here, where a
+    failed copy raises. The CPU executor then runs what remains. Errors
+    from a device propagate; nothing reruns on the CPU."""
+    var found = backend.devices()
+    if len(found) == 0 or not _has_pipeline_costs():
+        return None
+    var plan = query._optimized() if optimize else query.copy()
+    var solved = _solve_devices(plan, backend, found^)
+    ref chosen = solved.placement.devices
+    var any_device = False
+    for d in chosen:
+        any_device |= d != _PLACE_CPU
+    if not any_device:
+        return None
+    ref units = solved.units
+    var parent = List[Int](length=len(units), fill=-1)
+    for p in range(len(units)):
+        for c in units[p].children:
+            parent[c] = p
+    var context = plan._plan.copy()
+    var crew = Crew.start()
+    try:
+        for p in range(len(units)):
+            var device = chosen[p]
+            if device == _PLACE_CPU:
+                continue
+            var region = plan_unit_region(context, units[p])
+            var result = backend.run_pipeline(
+                _from_context(region^), solved.devices[device - 1].ordinal
+            )
+            var consumer = chosen[parent[p]] if parent[p] >= 0 else _PLACE_CPU
+            if consumer != device:
+                _frame_to_host(result)
+            plan_substitute(context, units[p], result^)
+        var result = _from_context(context^)._collect(
+            optimize=False, streaming=streaming, batch_size=batch_size
+        )
+        crew.release()
+        return result^
+    except e:
+        crew.release()
+        raise e^
 
 
 @fieldwise_init

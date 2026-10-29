@@ -1,7 +1,7 @@
 """Device placement: the exact program against brute force, the cases it
 must get right, how a plan is cut into units, and what explain reports."""
 # contract-group: planner.device_placement
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from dataframe import Column, DataFrame, LazyFrame, Series, col
 from dataframe.devices import (
     ByteCost,
@@ -11,6 +11,8 @@ from dataframe.devices import (
     TransferModel,
 )
 from dataframe.frame import DataFrame as Frame
+from dataframe.dtype import DataType
+from std.memory import Layout, Allocation, alloc, dealloc
 from dataframe.lazy import AcceleratorBackend
 from dataframe.planning.device_placement import (
     CPU,
@@ -19,6 +21,15 @@ from dataframe.planning.device_placement import (
     solve_placement,
 )
 from tests.support.group_strategy_reference import ScopedEnvironment
+from std.atomic import Atomic
+from std.memory import ArcPointer, Pointer, unsafe_memcpy
+from std.sys import size_of
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.residence import (
+    _CopyToHost,
+    _DeviceResidence,
+    _ReleaseDevice,
+)
 
 comptime NEVER = Float64(1e300)
 
@@ -241,12 +252,113 @@ def test_a_plan_is_cut_into_units_children_first() raises:
     assert_true(units[0].features.input_rows >= 0)
 
 
+struct Runs(Movable):
+    """What the fake device was asked to do."""
+
+    var pipelines: Int
+    var copies: Atomic[Int64]
+    var fail: Bool
+    # Device memory: every Float64 result column the fake device returned.
+    var memory: List[List[Float64]]
+
+    def __init__(out self, fail: Bool = False):
+        self.pipelines = 0
+        self.copies = Atomic[Int64](0)
+        self.fail = fail
+        self.memory = List[List[Float64]]()
+
+
+def runs_at(address: Int) -> Pointer[Runs, MutUntrackedOrigin]:
+    return Pointer[Runs, MutUntrackedOrigin](unsafe_from_address=address)
+
+
+struct Held(Movable):
+    var runs: Int
+    var values: List[Float64]
+
+    def __init__(out self, runs: Int, var values: List[Float64]):
+        self.runs = runs
+        self.values = values^
+
+
+def held_to_host(context: Int, address: Int, bytes: Int) abi("C") -> Int:
+    var held = Pointer[Held, MutUntrackedOrigin](unsafe_from_address=context)
+    _ = runs_at(held[].runs)[].copies.fetch_add(1)
+    unsafe_memcpy(
+        dest=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=address),
+        src=Pointer[UInt8, MutUntrackedOrigin](
+            unsafe_from_address=Int(held[].values.unsafe_ptr())
+        ),
+        count=bytes,
+    )
+    return 0
+
+
+def held_release(context: Int) abi("C"):
+    var pointer = Pointer[Held, MutUntrackedOrigin](unsafe_from_address=context)
+    _ = pointer.unsafe_take_pointee()^
+    dealloc(
+        Allocation[Held](
+            unsafe_owned_ptr=pointer, layout=Layout[Held](length=1)
+        )
+    )
+
+
+def on_device(column: Column[Float64], runs: Int) raises -> Column[Float64]:
+    """The column's values moved into fake device memory."""
+    var values = List[Float64]()
+    for i in range(len(column)):
+        values.append(column._get(i))
+    var slot = alloc(Layout[Held](length=1)).unsafe_leak()
+    var length = len(values)
+    slot.unsafe_write(Held(runs, values^))
+    var copy: _CopyToHost = held_to_host
+    var release: _ReleaseDevice = held_release
+    var residence = ArcPointer(
+        _DeviceResidence(
+            backend="fake",
+            device=0,
+            context=Int(slot),
+            bytes=length * size_of[Float64](),
+            to_host=Pointer(to=copy).unsafe_bitcast[Int]()[],
+            release=Pointer(to=release).unsafe_bitcast[Int]()[],
+        )
+    )
+    return Column[Float64]._from_buffers(
+        _Buffer[Float64].on_device(length, residence),
+        column._bits.copy(),
+        0,
+        length,
+    )
+
+
 @fieldwise_init
 struct FakeDevice(AcceleratorBackend):
     """One discrete device that runs every unit at a hundredth of a
-    nanosecond per input row."""
+    nanosecond per input row. It runs a unit by computing it on the CPU and
+    returning its Float64 columns in fake device memory."""
 
     var budget: Int
+    var runs: Int
+
+    def run_pipeline(self, pipeline: LazyFrame, device: Int) raises -> Frame:
+        ref runs = runs_at(self.runs)[]
+        runs.pipelines += 1
+        if runs.fail:
+            raise Error("fake device fault")
+        var result = pipeline.collect(engine="cpu", optimize=False)
+        var columns = List[Series]()
+        for series in result._columns:
+            if series.dtype() == DataType.FLOAT64:
+                columns.append(
+                    Series(
+                        series.name(),
+                        on_device(series.float64(), self.runs),
+                    )
+                )
+            else:
+                columns.append(series.copy())
+        return Frame(columns^)
 
     def execute(self, plan: LazyFrame) raises -> Tuple[Frame, Frame]:
         raise Error("not used")
@@ -297,7 +409,7 @@ def test_explain_reports_the_placement_it_would_make() raises:
         keys.append(unit.key)
     # Without a CPU calibration nothing is compared and all stays on CPU.
     var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
-    var shown = summed.explain(accelerator=FakeDevice(-1), engine="auto")
+    var shown = summed.explain(accelerator=FakeDevice(-1, 0), engine="auto")
     assert_true("DEVICES cpu, fake:0 Fake GPU (discrete)" in shown, shown)
     assert_true("cpu not measured" in shown, shown)
     assert_false("on fake:0" in shown, shown)
@@ -306,17 +418,17 @@ def test_explain_reports_the_placement_it_would_make() raises:
     var path = String("build/test-device-placement-slow-cpu.json")
     calibrate(path, keys, 1e6)
     var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
-    shown = summed.explain(accelerator=FakeDevice(-1), engine="auto")
+    shown = summed.explain(accelerator=FakeDevice(-1, 0), engine="auto")
     assert_true("on fake:0" in shown, shown)
     assert_false("on cpu" in shown, shown)
     assert_true("PLACEMENT estimated" in shown, shown)
     # A budget too small for the unit keeps it on the CPU.
-    shown = summed.explain(accelerator=FakeDevice(1), engine="auto")
+    shown = summed.explain(accelerator=FakeDevice(1, 0), engine="auto")
     assert_false("on fake:0" in shown, shown)
     # The join's output rows are not estimated, so the aggregate above it
     # has no CPU cost, and the join's output cannot be moved by an unknown
     # number of bytes: both stay on the CPU.
-    shown = plan.explain(accelerator=FakeDevice(-1), engine="auto")
+    shown = plan.explain(accelerator=FakeDevice(-1, 0), engine="auto")
     assert_true("pipeline:agg" in shown and "rows -1" in shown, shown)
     var lines = shown.split("\n")
     for line in lines:
@@ -327,3 +439,48 @@ def test_explain_reports_the_placement_it_would_make() raises:
     _ = calibrated^
     # Without devices there are no placement lines at all.
     assert_false("DEVICES" in summed.explain(engine="auto"))
+
+
+def test_collect_runs_placed_units_on_the_device() raises:
+    var frames = sources()
+    var summed = frames[0].lazy().filter(col("v") > 1).select(col("v").sum())
+    var plan = joined()
+    var keys = List[String]()
+    for unit in plan_pipelines(summed._optimized()._plan):
+        keys.append(unit.key)
+    for unit in plan_pipelines(plan._optimized()._plan):
+        keys.append(unit.key)
+    var path = String("build/test-device-placement-collect.json")
+    calibrate(path, keys, 1e6)
+    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var runs = Runs()
+    var device = FakeDevice(-1, Int(Pointer(to=runs)))
+    # The sum runs on the device; its device-resident result is copied to
+    # the host once, before collect returns.
+    var result = summed.collect(accelerator=device, engine="auto")
+    assert_true(result.equals(summed.collect(engine="cpu")))
+    assert_equal(runs.pipelines, 1)
+    assert_equal(runs.copies.load(), Int64(1))
+    assert_true(result.column("v").float64()._data.on_host())
+    # The join plan's units above the join stay on the CPU, and its
+    # result matches the CPU's.
+    var joined_result = plan.collect(accelerator=device, engine="auto")
+    var expected = plan.collect(engine="cpu").sort("k")
+    assert_true(joined_result.sort("k").equals(expected))
+    # Without devices or measured costs nothing runs on the device.
+    var pipelines = runs.pipelines
+    var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
+    _ = summed.collect(accelerator=device, engine="auto")
+    assert_equal(runs.pipelines, pipelines)
+    _ = unset^
+    # A device fault propagates; the CPU does not rerun the query.
+    var failing = Runs(fail=True)
+    with assert_raises(contains="fake device fault"):
+        _ = summed.collect(
+            accelerator=FakeDevice(-1, Int(Pointer(to=failing))),
+            engine="auto",
+        )
+    assert_equal(failing.pipelines, 1)
+    _ = calibrated^
+    _ = runs^
+    _ = failing^
