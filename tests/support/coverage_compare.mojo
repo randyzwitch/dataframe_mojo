@@ -121,9 +121,9 @@ def assert_frame_unordered(actual: DataFrame, expected: DataFrame) raises:
             text in waiting and len(waiting[text]) > 0,
             "No unused expected row matches output row " + String(row),
         )
-        var match = waiting[text].pop()
+        var partner = waiting[text].pop()
         for name in expected.columns():
-            assert_value(actual.item(row, name), expected.item(match, name))
+            assert_value(actual.item(row, name), expected.item(partner, name))
 
 
 def assert_model(actual: DataFrame, expected: ReferenceTable) raises:

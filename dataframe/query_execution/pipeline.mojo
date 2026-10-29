@@ -1,4 +1,9 @@
 """Streaming pipeline lowering and execution."""
+from dataframe.io.dataset_scan import _DatasetBatches
+from dataframe.io.sinks import FileSink
+from dataframe.io.csv_reader import _open_csv_batches
+from dataframe.io.csv_types import _CsvScanOptions
+
 from dataframe.planning.node_builders import (
     _frame_scan_node,
     _join_node,
@@ -203,6 +208,7 @@ from std.collections import (
 )
 from std.memory import (
     ArcPointer,
+    Pointer,
 )
 from std.time import (
     perf_counter_ns,
@@ -210,7 +216,7 @@ from std.time import (
 
 
 def plan_stream_execute(
-    self: QueryContext, index: Int, batch_size: Int
+    self: QueryContext, index: Int, batch_size: Int, sink: Int = 0
 ) raises -> Optional[DataFrame]:
     var cursor = index
     var expressions = List[Expr]()
@@ -314,7 +320,7 @@ def plan_stream_execute(
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return plan._execute(index, False, True, batch_size)
+        return _stream_after_materialization(plan, index, batch_size, sink)
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if _stream_rows(node):
@@ -388,7 +394,9 @@ def plan_stream_execute(
                             plan._nodes[operation_nodes[k]].right = (
                                 len(plan._nodes) - 1
                             )
-                        return plan._execute(index, False, True, batch_size)
+                        return _stream_after_materialization(
+                            plan, index, batch_size, sink
+                        )
                 # The bound only says the left side may be small; the
                 # eager join then decides with the real heights (a
                 # filter often keeps far fewer rows than it scans).
@@ -479,7 +487,9 @@ def plan_stream_execute(
                         plan._nodes[operation_nodes[k]].right = (
                             len(plan._nodes) - 1
                         )
-                    return plan._execute(index, False, True, batch_size)
+                    return _stream_after_materialization(
+                        plan, index, batch_size, sink
+                    )
             if (
                 (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                 and node.coalesce
@@ -501,6 +511,7 @@ def plan_stream_execute(
                 if most < 0 or most * columns < right_cost:
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
+<<<<<<< HEAD
                         # The join builds on the smaller left inside the
                         # pipeline (a join promises no row order): the
                         # right streams through the left's index, a left
@@ -523,6 +534,39 @@ def plan_stream_execute(
                                     joins[
                                         operations[k].join_build_slot()
                                     ].copy()
+=======
+                        # A left join under a consumer that ignores row
+                        # order builds on the smaller left inside the
+                        # pipeline: the right streams through the left's
+                        # index and the left rows nothing matched come
+                        # out last. The join's output is then never
+                        # materialized outside the pipeline.
+                        if node.how == JOIN_LEFT and order_free:
+                            var swapped = plan_swap_left_join_sides(
+                                self, cursor, built, batch_size
+                            )
+                            if swapped:
+                                var plan = swapped.take()
+                                for k in range(len(operations)):
+                                    if operations[k].kind != JOIN:
+                                        continue
+                                    plan._frames.append(
+                                        joins[
+                                            operations[k].join_build_slot()
+                                        ].copy()
+                                    )
+                                    plan._schemas.append(Optional[CsvSchema]())
+                                    plan._nodes.append(
+                                        _frame_scan_node(
+                                            slot=len(plan._frames) - 1
+                                        )
+                                    )
+                                    plan._nodes[operation_nodes[k]].right = (
+                                        len(plan._nodes) - 1
+                                    )
+                                return _stream_after_materialization(
+                                    plan, index, batch_size, sink
+>>>>>>> origin/main
                                 )
                                 plan._schemas.append(Optional[CsvSchema]())
                                 plan._nodes.append(
@@ -545,7 +589,9 @@ def plan_stream_execute(
                         plan._nodes[cursor] = _frame_scan_node(
                             slot=len(plan._frames) - 1
                         )
-                        return plan._execute(index, False, True, batch_size)
+                        return _stream_after_materialization(
+                            plan, index, batch_size, sink
+                        )
             if (
                 (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
                 and built.height() >= 524288
@@ -588,7 +634,9 @@ def plan_stream_execute(
                         _frame_scan_node(slot=len(plan._frames) - 1)
                     )
                     plan._nodes[cursor].right = len(plan._nodes) - 1
-                return plan._execute(index, False, True, batch_size)
+                return _stream_after_materialization(
+                    plan, index, batch_size, sink
+                )
             # The build frame in one chunk per column, once: a probe
             # gathers the build's payload through `take_parallel`,
             # which rechunks a chunked column every time it is
@@ -803,24 +851,52 @@ def plan_stream_execute(
     var shared_indexes = ArcPointer(indexes^)
     ref source = self._nodes[cursor]
     var csv = List[_CsvBatches]()
+    var dataset = List[_DatasetBatches]()
     var parquet = List[_ParquetBatches]()
     var ipc = List[_IpcBatches]()
     var ndjson = List[_NdjsonBatches]()
     var input = DataFrame(List[Series](), height=0)
-    if source.kind == SCAN_CSV:
-        var mapping = _map_file(source.text)
-        if mapping.address == 0:
-            return None
-        csv.append(
-            _CsvBatches(
-                mapping^,
-                self._schemas[source.source_slot()],
-                source.names,
-                source.scan_row_limit(),
-                batch_size,
-                _scan_options(source),
+    if source.has_dataset():
+        var columns = Optional[List[String]]()
+        if source.dataset_projected:
+            columns = source.scan_projection().copy()
+        var scan = _CsvScanOptions.defaults()
+        if source.kind == SCAN_CSV:
+            scan = _scan_options(source)
+        var predicate = Optional[Expr]()
+        # A source limit precedes these operations. Pruning a file here
+        # would change which rows an earlier head selects.
+        if (
+            source.scan_row_limit() < 0
+            and len(operations)
+            and operations[0].kind == FILTER
+        ):
+            predicate = operations[0].exprs[0].copy()
+        source._record_execution()
+        dataset.append(
+            _DatasetBatches(
+                source.dataset_spec(),
+                source.kind == SCAN_PARQUET,
+                schema=self._schemas[source.source_slot()],
+                scan=scan,
+                columns=columns,
+                limit=source.scan_row_limit(),
+                batch_size=batch_size,
+                predicate=predicate,
             )
         )
+    elif source.kind == SCAN_CSV:
+        var opened = _open_csv_batches(
+            source.text,
+            self._schemas[source.source_slot()],
+            source.names,
+            source.scan_row_limit(),
+            batch_size,
+            _scan_options(source),
+        )
+        if not opened:
+            return None
+        csv.append(opened.take())
     elif source.kind == SCAN_PARQUET:
         var groups = Optional[List[Int]]()
         if len(operations) and operations[0].kind == FILTER:
@@ -1036,7 +1112,9 @@ def plan_stream_execute(
     # worker takes morsels from a shared cursor and runs every step on
     # them; nothing is held, judged or merged on the main thread.
     if (
-        decision.uses_pipeline()
+        sink == 0
+        and len(dataset) == 0
+        and decision.uses_pipeline()
         and len(csv) == 0
         and len(parquet) == 0
         and len(ipc) == 0
@@ -1189,6 +1267,7 @@ def plan_stream_execute(
     var per_round = workers
     if (
         len(csv) == 0
+        and len(dataset) == 0
         and len(parquet) == 0
         and len(ipc) == 0
         and len(ndjson) == 0
@@ -1219,7 +1298,13 @@ def plan_stream_execute(
             var frame = DataFrame(List[Series](), height=0)
             var decode = List[_DecodeJob]()
             var json_decode = List[_JsonDecodeJob]()
-            if len(csv):
+            if len(dataset):
+                var next = dataset[0].next()
+                if not next:
+                    ended = True
+                    break
+                frame = next.take()
+            elif len(csv):
                 var next = csv[0].next()
                 if not next:
                     ended = True
@@ -1376,7 +1461,12 @@ def plan_stream_execute(
                 part = part.slice(dropped, limit)
                 if limit >= 0:
                     limit -= part.height()
-                outputs.append(part^)
+                if sink != 0:
+                    Pointer[FileSink, MutAnyOrigin](
+                        unsafe_from_address=sink
+                    )[].append(part)
+                else:
+                    outputs.append(part^)
         if collecting and collected_bytes >= collect_budget:
             # The budget is reached: reduce what is collected into one
             # state (every key encoded once) and keep collecting. The
@@ -1441,6 +1531,10 @@ def plan_stream_execute(
             held = List[DataFrame]()
             held_states = List[List[_StreamReduction]]()
     pool.release()
+    if len(csv):
+        csv[0].finish()
+    if len(dataset):
+        dataset[0].finish()
     # NDJSON jobs borrow mapped addresses; retain the source through
     # the final worker join, even after an early head or an error.
     _ = ndjson^
@@ -1483,6 +1577,18 @@ def plan_stream_execute(
             result = merged.slice(skip, limit)
     elif len(outputs):
         result = concat(outputs)
+    if (
+        sink != 0
+        and not result
+        and (
+            len(expressions) == 0
+            or (len(keys) > 0 and not grouping)
+            or top >= 0
+        )
+    ):
+        result = Pointer[FileSink, MutAnyOrigin](
+            unsafe_from_address=sink
+        )[].schema.copy()
     if counting:
         if _is_scan(source.kind):
             plan_record(self, cursor, "streaming", 0, fed_rows)
@@ -1659,4 +1765,17 @@ def plan_reduce_by_probe_keys(
         )
         plan._nodes.append(semi^)
         plan._nodes[aggregate].left = len(plan._nodes) - 1
+    return plan._execute(index, False, True, batch_size)
+
+
+def _stream_after_materialization(
+    plan: QueryContext,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+) raises -> Optional[DataFrame]:
+    if sink != 0:
+        var streamed = plan_stream_execute(plan, index, batch_size, sink)
+        if streamed:
+            return streamed^
     return plan._execute(index, False, True, batch_size)

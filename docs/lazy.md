@@ -5,9 +5,21 @@
 or `scan_parquet(path)` starts a `LazyFrame`. Its methods
 (`filter`, `select`, `select_exprs`, `with_columns`, `group_by(...).agg(...)`,
 `join`, `sort`, `slice`, `head`, `limit`, `tail`, `reverse`, `shift`,
-`with_row_index`, `unique`, `drop`, `rename`, `cast`) only record plan nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
+`with_row_index`, `unique`, `drop`, `rename`, `cast`) record plan nodes. File
+payloads are decoded when the plan runs; schema inference may inspect input
+earlier. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
+
+CSV and Parquet scans also accept path lists and globs, with
+`glob=True`, `hive_partitioning=False`, `hive_schema=Dict[String, String]()`,
+`include_file_paths=""`, `missing_columns="raise"`, `extra_columns="raise"`,
+and `union_by_name=False`. Paths resolve when a scan is constructed. These
+options add partition/source fields and control cross-file schema alignment;
+filters on partition fields can skip irrelevant payloads. CSV scans also
+accept gzip and zstd input. See [multiple local files](datasets.md) for the
+shared contract, [CSV](csv.md) for decoding options, and [Parquet](parquet.md)
+for row groups.
 
 `collect`, `profile`, and `fetch` default to `engine="auto"`; `engine="cpu"`
 forces CPU execution and `engine="accel"` requires an accelerator provider.
@@ -105,6 +117,37 @@ and [expressions](expressions.md). `collect_schema()` returns `name: dtype`
 pairs by running with zero-row scans. CSV inference samples the usual rows,
 but a schema probe does not decode data chunks. Explicit schemas therefore
 validate field/plan structure without evaluating data values.
+
+## File sinks
+
+Use a sink to write a lazy result without retaining its complete output:
+
+```mojo
+scan_csv("input/*.csv").filter(col("amount") > 0).sink_csv("filtered.csv")
+scan_parquet("input/*.parquet").sink_parquet(
+    "output.parquet", row_group_size=250_000, batch_size=65536
+)
+```
+
+Both methods accept `batch_size=65536` and `optimize=True`. `sink_csv` also
+accepts `write_csv`'s formatting options: `has_header=True`, `separator=","`,
+`quote_style="necessary"`, `null_value=""`, `line_terminator="\n"`, and
+`buffer_size=65536`. `sink_parquet` accepts `compression="zstd"` and
+`row_group_size=1_000_000`; output row groups span execution batches.
+Sinks execute through the CPU query executor and do not take `engine` or
+`streaming` arguments.
+
+Row-local pipelines hand batches directly to the sink. Sorts, joins, grouping,
+and other stateful operators retain their documented memory requirements.
+The sink writes a temporary file beside the destination and replaces the
+file after successful completion. Errors preserve an existing destination,
+and a scan can replace its own input file. CSV emits one header when enabled,
+including for empty results; Parquet preserves an empty result's schema.
+These atomic publication rules differ from eager single-file `write_parquet`,
+which can leave partial output on failure. For eager Hive directory output,
+use `write_parquet(frame, root, partition_by=[...])`.
+See [CSV writing](csv.md#writing), [Parquet output](parquet.md#lazy-sinks-and-partitioned-output),
+and [dataset output](datasets.md#output).
 
 ## Streaming and state
 

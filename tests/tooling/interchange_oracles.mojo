@@ -82,6 +82,11 @@ def main() raises:
         "json-written-oracle.ndjson",
         "tests/support/json_oracle.py",
     )
+    var dataset_count = _consume_outputs(
+        String(args[1]),
+        "stream-writer-groups.parquet",
+        "tests/support/dataset_io_oracle.py",
+    )
     run_command(["python3", "tests/support/arrow_oracle.py", "--check"])
     var library = getenv("DATAFRAME_PARQUET_LIBRARY")
     if not library:
@@ -108,5 +113,7 @@ def main() raises:
         "IPC contract run directories",
         "and",
         json_count,
-        "JSON contract run directories",
+        "JSON contract run directories and",
+        dataset_count,
+        "dataset writer contract run directories",
     )

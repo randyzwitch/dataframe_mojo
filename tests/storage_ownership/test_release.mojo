@@ -257,7 +257,10 @@ def consume_discarded_csv_pages(path: String) raises -> List[DataFrame]:
         job.run()
         frames.append(job^.into_frame())
         cursor.discard()
-        if not proved_unmapped and cursor.mapping.address != first_page:
+        if (
+            not proved_unmapped
+            and cursor.mapped[0].mapping.address != first_page
+        ):
             # Probe the actual mapping; a counter or a copied result alone
             # would not prove that the source pages ceased to exist.
             assert_unmapped_page(first_page)

@@ -70,7 +70,7 @@ case "$(uname -s)" in
 esac
 ${CXX:-c++} -O2 -std=c++20 -fPIC "${LINK_FLAGS[@]}" \
   -I"$SRC/src" -I"$BUILD/src" -I"$SRC/thirdparty/flatbuffers/include" \
-  "$HERE/dfparquet.cc" "$HERE/dfipc.cc" -o "$LIB" \
+  "$HERE/dfparquet.cc" "$HERE/dfipc.cc" "$HERE/dfcsv.cc" -o "$LIB" \
   -L"$BUILD/release" "${ARCHIVES[@]}" "${SYSTEM_LIBS[@]}"
 strip "${STRIP_FLAGS[@]}" "$LIB"
 ls -la "$LIB"

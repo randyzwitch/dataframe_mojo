@@ -370,19 +370,14 @@ def infer_csv_schema(
         start = header_end
         record += 1
 
-    var candidates = List[Int](capacity=len(names))
-    for _ in range(len(names)):
-        candidates.append(0)
-    # `read_until_start_and_infer_schema` returns leftover at this position;
-    # sampling below must not consume the handoff offset exposed to read_impl.
+    var state = _CsvInferenceState(
+        names, has_header, infer_schema_length, try_parse_dates
+    )
     var data_offset = start
     var record_start = record
     var sample_rows = 0
-    # `ContentInspect` falls through to `InferCollect` for the first record.
-    # Therefore a zero inference length still observes one row's width.
-    var limit = infer_schema_length
-    if limit == 0:
-        limit = 1
+    # A zero inference length still observes one row's width.
+    var limit = max(1, infer_schema_length)
     while start < len(bytes) and (
         infer_schema_length < 0 or sample_rows < limit
     ):
@@ -391,7 +386,39 @@ def infer_csv_schema(
             record += 1
             continue
         var end = _record_end(bytes, start, options)
-        var line = _trim_cr(bytes[start:end])
+        state.add(bytes[start:end], options)
+        start = end
+        record += 1
+        sample_rows += 1
+    return CsvInference(
+        state.finish(schema_overrides), data_offset, record_start
+    )
+
+
+struct _CsvInferenceState(Movable):
+    """Incremental form of the span reader's type-mask reduction."""
+
+    var names: List[String]
+    var candidates: List[Int]
+    var has_header: Bool
+    var strings_only: Bool
+    var try_parse_dates: Bool
+
+    def __init__(
+        out self,
+        names: List[String],
+        has_header: Bool,
+        infer_schema_length: Int,
+        try_parse_dates: Bool,
+    ):
+        self.names = names.copy()
+        self.candidates = List[Int](length=len(names), fill=0)
+        self.has_header = has_header
+        self.strings_only = infer_schema_length == 0
+        self.try_parse_dates = try_parse_dates
+
+    def add(mut self, bytes: Span[UInt8, ImmutAnyOrigin], options: CsvOptions):
+        var line = _trim_cr(bytes)
         var quote = _quote(options)
         var fields = CsvSplitFields(
             options.separator.as_bytes()[0], quote[0], quote[1]
@@ -402,51 +429,52 @@ def infer_csv_schema(
             if not next:
                 break
             var field = next.value().copy()
-            if column >= len(names):
-                if has_header:
+            if column >= len(self.names):
+                if self.has_header:
                     break
-                names.append("column_" + String(column + 1))
-                candidates.append(0)
-            if infer_schema_length == 0:
-                candidates[column] |= _STRING
+                self.names.append("column_" + String(column + 1))
+                self.candidates.append(0)
+            if self.strings_only:
+                self.candidates[column] |= _STRING
             else:
                 var raw = field.bytes(line)
-                if len(raw) == 0:
-                    # Polars records nullable but adds no type possibility.
-                    pass
-                else:
+                if len(raw) != 0:
                     raw = _unwrapped(raw, field.needs_escaping)
                     if not _is_null(raw, options):
-                        candidates[column] |= _infer_field(raw, try_parse_dates)
+                        self.candidates[column] |= _infer_field(
+                            raw, self.try_parse_dates
+                        )
             column += 1
-        start = end
-        record += 1
-        sample_rows += 1
 
-    if len(names) == 0:
-        raise Error("CSV inference found no columns")
-    var overrides = _apply_overrides(names, schema_overrides)
-    var fields = List[CsvField](capacity=len(names))
-    for i in range(len(names)):
-        var dtype = DataType.STRING
-        if names[i] in overrides:
-            dtype = overrides[names[i]]
-        elif candidates[i] == _BOOL:
-            dtype = DataType.BOOL
-        elif candidates[i] == _INT:
-            dtype = DataType.INT64
-        elif candidates[i] == _FLOAT or candidates[i] == (_INT | _FLOAT):
-            dtype = DataType.FLOAT64
-        elif candidates[i] == _DATE:
-            dtype = DataType.DATE
-        elif candidates[i] == _DATETIME:
-            dtype = DataType.datetime("us")
-        elif candidates[i] == _DATETIME_UTC:
-            dtype = DataType.datetime("us", "UTC")
-        elif candidates[i] == _TIME:
-            dtype = DataType.TIME
-        elif candidates[i] == _STRING:
-            dtype = DataType.STRING
-        # Polars' Null/unsupported result becomes the clean API's String.
-        fields.append(CsvField(names[i], dtype, True))
-    return CsvInference(CsvSchema(fields^), data_offset, record_start)
+    def finish(
+        self, schema_overrides: Dict[String, String]
+    ) raises -> CsvSchema:
+        if len(self.names) == 0:
+            raise Error("CSV inference found no columns")
+        var overrides = _apply_overrides(self.names, schema_overrides)
+        var fields = List[CsvField](capacity=len(self.names))
+        for i in range(len(self.names)):
+            var dtype = DataType.STRING
+            if self.names[i] in overrides:
+                dtype = overrides[self.names[i]]
+            elif self.candidates[i] == _BOOL:
+                dtype = DataType.BOOL
+            elif self.candidates[i] == _INT:
+                dtype = DataType.INT64
+            elif self.candidates[i] == _FLOAT or self.candidates[i] == (
+                _INT | _FLOAT
+            ):
+                dtype = DataType.FLOAT64
+            elif self.candidates[i] == _DATE:
+                dtype = DataType.DATE
+            elif self.candidates[i] == _DATETIME:
+                dtype = DataType.datetime("us")
+            elif self.candidates[i] == _DATETIME_UTC:
+                dtype = DataType.datetime("us", "UTC")
+            elif self.candidates[i] == _TIME:
+                dtype = DataType.TIME
+            elif self.candidates[i] == _STRING:
+                dtype = DataType.STRING
+            # Polars' Null/unsupported result becomes the clean API's String.
+            fields.append(CsvField(self.names[i], dtype, True))
+        return CsvSchema(fields^)

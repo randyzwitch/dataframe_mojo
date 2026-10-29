@@ -1,17 +1,17 @@
-"""As-of sortedness is a validated input contract, including zero-row results."""
+"""As-of joins accept unsorted input, including zero-row results."""
 # contract-group: table.join
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal
 from dataframe import Column, DataFrame, Series
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
-def test_empty_left_asof_still_validates_right_sortedness() raises:
+def test_empty_left_asof_accepts_unsorted_right() raises:
     for grouped in [False, True]:
         var left = DataFrame(
             [Series("k", Column[Int64]([])), Series("g", Column[Int64]([]))]
         )
         # Hidden -999 does not break ordering. In grouped mode, the 100 in
-        # another group does not either; the final 2 after 3 is the violation.
+        # another group does not either; the final 2 after 3 is out of order.
         var keys: List[Int64] = [1, -999, 100, 3, 2] if grouped else [
             1,
             -999,
@@ -35,42 +35,35 @@ def test_empty_left_asof_still_validates_right_sortedness() raises:
                 == 1 else chunk_layout(raw)
             )
             for strategy in ["backward", "forward", "nearest"]:
+                var names: List[String] = ["k", "g"]
+                if not grouped:
+                    names.append("g_right")
                 for execution in range(5):
-                    var failed = False
-                    try:
-                        if execution == 0:
-                            _ = left.join_asof(
-                                right, on="k", by=by, strategy=strategy
+                    var joined: DataFrame
+                    if execution == 0:
+                        joined = left.join_asof(
+                            right, on="k", by=by, strategy=strategy
+                        )
+                    else:
+                        joined = (
+                            left.lazy()
+                            .join_asof(
+                                right.lazy(),
+                                on="k",
+                                by=by,
+                                strategy=strategy,
                             )
-                        else:
-                            _ = (
-                                left.lazy()
-                                .join_asof(
-                                    right.lazy(),
-                                    on="k",
-                                    by=by,
-                                    strategy=strategy,
-                                )
-                                .collect(
-                                    optimize=execution > 2,
-                                    streaming=execution % 2 == 0,
-                                    batch_size=2,
-                                    engine="cpu",
-                                )
+                            .collect(
+                                optimize=execution > 2,
+                                streaming=execution % 2 == 0,
+                                batch_size=2,
+                                engine="cpu",
                             )
-                    except error:
-                        assert_true(String(error).find("right column 'k'") >= 0)
-                        assert_true(String(error).find("row 4") >= 0)
-                        failed = True
-                    assert_true(
-                        failed,
-                        "empty left must not bypass right sortedness validation",
-                    )
+                        )
+                    assert_equal(joined.height(), 0)
+                    assert_equal(joined.columns(), names)
                 var control = left.join_asof(
                     right.head(4), on="k", by=by, strategy=strategy
                 )
                 assert_equal(control.height(), 0)
-                var names: List[String] = ["k", "g"]
-                if not grouped:
-                    names.append("g_right")
                 assert_equal(control.columns(), names)

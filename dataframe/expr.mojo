@@ -1961,7 +1961,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling sum over a sorted Date/Datetime duration window."""
+        """Rolling sum over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_SUM_BY, window_size, closed, min_samples, 1
         )
@@ -1973,7 +1973,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling sum over a sorted Date/Datetime duration window."""
+        """Rolling sum over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_SUM_BY, window_size, closed, min_samples, 1
         )
@@ -1985,7 +1985,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling mean over a sorted Date/Datetime duration window."""
+        """Rolling mean over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_MEAN_BY, window_size, closed, min_samples, 1
         )
@@ -1997,7 +1997,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling mean over a sorted Date/Datetime duration window."""
+        """Rolling mean over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_MEAN_BY, window_size, closed, min_samples, 1
         )
@@ -2009,7 +2009,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling min over a sorted Date/Datetime duration window."""
+        """Rolling min over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_MIN_BY, window_size, closed, min_samples, 1
         )
@@ -2021,7 +2021,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling min over a sorted Date/Datetime duration window."""
+        """Rolling min over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_MIN_BY, window_size, closed, min_samples, 1
         )
@@ -2033,7 +2033,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling max over a sorted Date/Datetime duration window."""
+        """Rolling max over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_MAX_BY, window_size, closed, min_samples, 1
         )
@@ -2045,7 +2045,7 @@ struct Expr(Copyable):
         closed: String = "right",
         min_samples: Int = 1,
     ) -> Self:
-        """Rolling max over a sorted Date/Datetime duration window."""
+        """Rolling max over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_MAX_BY, window_size, closed, min_samples, 1
         )
@@ -2058,7 +2058,7 @@ struct Expr(Copyable):
         min_samples: Int = 1,
         ddof: Int = 1,
     ) -> Self:
-        """Rolling std over a sorted Date/Datetime duration window."""
+        """Rolling std over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_STD_BY, window_size, closed, min_samples, ddof
         )
@@ -2071,7 +2071,7 @@ struct Expr(Copyable):
         min_samples: Int = 1,
         ddof: Int = 1,
     ) -> Self:
-        """Rolling std over a sorted Date/Datetime duration window."""
+        """Rolling std over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_STD_BY, window_size, closed, min_samples, ddof
         )
@@ -2084,7 +2084,7 @@ struct Expr(Copyable):
         min_samples: Int = 1,
         ddof: Int = 1,
     ) -> Self:
-        """Rolling var over a sorted Date/Datetime duration window."""
+        """Rolling var over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             by, ROLLING_VAR_BY, window_size, closed, min_samples, ddof
         )
@@ -2097,7 +2097,7 @@ struct Expr(Copyable):
         min_samples: Int = 1,
         ddof: Int = 1,
     ) -> Self:
-        """Rolling var over a sorted Date/Datetime duration window."""
+        """Rolling var over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_VAR_BY, window_size, closed, min_samples, ddof
         )

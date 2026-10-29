@@ -469,6 +469,9 @@ def test_parquet_public_writer_preserves_independently_produced_types_metadata_c
 def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_reports_failures() raises:
     from tests.support.parquet_runtime import Locations, WorkingDirectory
 
+    var previous_library = getenv("DATAFRAME_PARQUET_LIBRARY")
+    var previous_delegate = getenv("DATAFRAME_TEST_PARQUET_DELEGATE")
+    var previous_prefix = getenv("CONDA_PREFIX")
     var observer = Observer()
     var locations = Locations()
     var expected_version = parquet_backend_version()
@@ -533,6 +536,12 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
     assert_true(rejected)
     _ = working^
     _ = locations^
+    # Locations captured the observer override. Keep the observer alive until
+    # after that inner guard restores its snapshot, then restore the caller.
+    _ = observer^
+    assert_equal(getenv("DATAFRAME_PARQUET_LIBRARY"), previous_library)
+    assert_equal(getenv("DATAFRAME_TEST_PARQUET_DELEGATE"), previous_delegate)
+    assert_equal(getenv("CONDA_PREFIX"), previous_prefix)
 
 
 def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_exports_valid() raises:

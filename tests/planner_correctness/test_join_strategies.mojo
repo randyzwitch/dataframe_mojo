@@ -140,7 +140,7 @@ def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_pl
         )
     )
     var actual = query.collect(engine="cpu")
-    _check_groups(actual, False, False)
+    _check_groups(actual, False)
     var ordered = actual.sort("a")
     for row in range(3):
         assert_equal(
@@ -274,7 +274,7 @@ def test_a_join_is_free_to_reorder_under_any_consumer() raises:
             "label"
         ),
         joined.with_columns([col("value").cum_sum().alias("c")]).sort("label"),
-        joined,
+        joined.copy(),
     ]:
         var found = _join_below(query)
         assert_true(query._order_free_above(found[0], found[1]))

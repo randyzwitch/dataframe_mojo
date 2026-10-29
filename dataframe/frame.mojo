@@ -6,6 +6,7 @@ from .time_windows import (
     shift_time,
     truncate_time,
     check_time_index,
+    sort_time_groups,
     search_time,
     rolling_bounds,
 )
@@ -1723,8 +1724,10 @@ struct DataFrame(Copyable, Sized, Writable):
 
         Strategies are backward (last <=), forward (first >=), and nearest
         (ties prefer the later key and last duplicate). Null ordered keys
-        and null group keys do not match. Both sides must be sorted within
-        each group, ignoring null ordered keys; unsorted input raises.
+        and null group keys do not match. Inputs need not be sorted: a side
+        whose keys are out of order within a group is matched through a
+        stable (group, key) order with null keys last. Output keeps left row
+        order.
         Keys must have the same integer, float, Date, Datetime or Duration
         dtype. Use `on`, or both `left_on` and `right_on`. Right keys with a
         different name are retained; common keys and `by` columns coalesce.
@@ -3151,7 +3154,12 @@ struct DataFrame(Copyable, Sized, Writable):
         label: String = "left",
         group_by: List[String] = List[String](),
     ) raises -> TimeGroupBy:
-        """Group sorted temporal rows into calendar-aligned, possibly overlapping windows."""
+        """Group temporal rows into calendar-aligned, possibly overlapping windows.
+
+        The index need not be sorted: each group's rows are taken in stable
+        index order. Groups appear in first-appearance order, and windows
+        within a group in time order.
+        """
         return TimeGroupBy(
             self.copy(),
             index_column,
@@ -3172,7 +3180,12 @@ struct DataFrame(Copyable, Sized, Writable):
         closed: String = "right",
         group_by: List[String] = List[String](),
     ) raises -> TimeGroupBy:
-        """Aggregate a duration window for each sorted temporal input row."""
+        """Aggregate a duration window for each temporal input row.
+
+        The index need not be sorted: windows are formed from each group's
+        rows in stable index order, and output rows keep input row order
+        within each group.
+        """
         return TimeGroupBy(
             self.copy(),
             index_column,
@@ -3811,7 +3824,13 @@ struct TimeGroupBy(Copyable):
         if len(keys):
             ids = encode_rows(_expand_struct_keys(keys), True).ids.copy()
         var groups = window_partitions(self._frame.height(), ids)
-        check_time_index(index, groups)
+        # Unsorted groups are put in index order; rolling output rows still
+        # follow input row order within each group.
+        var inputs = List[List[Int]]()
+        if not check_time_index(index, groups):
+            if self._rolling:
+                inputs = groups.copy()
+            sort_time_groups(index, groups)
         var dtype = index.dtype()
         var zone = zone_of(dtype)
         ref times = index._data[Column[Int64]]
@@ -3823,8 +3842,10 @@ struct TimeGroupBy(Copyable):
             var bounds = rolling_bounds(
                 index, groups, self._period, self._offset, self._closed
             )
-            for rows in groups:
-                for row in rows:
+            for g in range(len(groups)):
+                ref rows = groups[g]
+                for j in range(len(rows)):
+                    var row = inputs[g][j] if len(inputs) else rows[j]
                     var id = len(labels)
                     labels.append(times._get(row))
                     representatives.append(row)

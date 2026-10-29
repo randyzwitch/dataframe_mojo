@@ -13,8 +13,8 @@ col("price").rolling_var(20, ddof=0)
 `min_samples` defaults to the window size for row-count windows. A window with
 at most `ddof` non-null samples produces null. The result is Float64.
 
-For irregular sampling, the six `rolling_*_by` expressions use a sorted Date
-or Datetime index. The `by` argument accepts a name or expression.
+For irregular sampling, the six `rolling_*_by` expressions use a Date or
+Datetime index, which need not be sorted. The `by` argument accepts a name or expression.
 
 ```mojo
 col("price").rolling_mean_by("time", "1h30m")
@@ -26,8 +26,9 @@ Available functions are sum, mean, min, max, std and var. `min_samples` defaults
 to one; `closed="right"` means `(time - window_size, time]`. `left`, `both` and
 `none` select the other endpoint combinations. All rows with the same timestamp
 see the same window, including duplicate timestamps later in input order.
-A null index or descending index within a partition raises. Lazy expressions
-perform these checks when collected.
+An index out of order within a partition is handled by forming windows over
+that partition's rows in stable index order; results stay in input row order.
+A null index raises. Lazy expressions perform these checks when collected.
 
 Durations use `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`, `mo`, `q` and `y`, including
 combinations such as `1h30m`. Months and years use the Gregorian calendar and
@@ -59,7 +60,10 @@ windows are omitted. Monthly windows include all of February in leap years.
 negative `period`; an explicit offset changes the interval to
 `(time + offset, time + offset + period]`. Empty windows remain, with each
 aggregate's normal empty-input result. Both requests accept `group_by` as a
-name, a list of names, or `None`; sortedness is checked within each group.
+name, a list of names, or `None`. The index need not be sorted: each group's
+rows are taken in stable index order. `rolling` output keeps input row order
+within each group; `group_by_dynamic` returns groups in first-appearance order
+and each group's windows in time order.
 
 Time grouping gathers overlapping row membership once, then uses the existing
 grouped expression reducers. Memory grows with total membership across windows.
