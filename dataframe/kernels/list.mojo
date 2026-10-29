@@ -19,7 +19,7 @@ from dataframe.expr import (
     STRUCT_FIELD,
     Node,
 )
-from dataframe.storage.nested import ListColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.regex import Regex
 from dataframe.text.regex_adapter import (
     compile_pattern,
@@ -44,10 +44,13 @@ def nested_op(
     if input.is_chunked():
         if node.op == LIST_LEN:
             return _chunked_list_len(input)
-        if node.op == STRUCT_FIELD:
+        if node.op == STRUCT_FIELD and input.dtype().is_struct():
             var fields = List[Series]()
-            for part in input.chunks():
-                fields.append(_struct_field(part, node.text))
+            ref chunks = input._chunked.value()[]
+            for storage in chunks.arrays:
+                fields.append(
+                    _struct_field_column(storage[StructColumn], node.text)
+                )
             if fields[0].dtype().is_categorical():
                 for field in fields:
                     if field.dtype() != fields[0].dtype():
@@ -354,7 +357,10 @@ def _reduce(lists: ListColumn, op: Int) raises -> Series:
 
 def _struct_field(input: Series, name: String) raises -> Series:
     """One field, null wherever the struct row itself is null."""
-    var structs = input.struct_column()
+    return _struct_field_column(input.struct_column(), name)
+
+
+def _struct_field_column(structs: StructColumn, name: String) raises -> Series:
     var field = structs.field(name)
     if structs.null_count() == 0:
         return field.renamed("")
