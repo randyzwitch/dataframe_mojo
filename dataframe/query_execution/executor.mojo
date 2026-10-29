@@ -235,6 +235,7 @@ def plan_execute_node(
                 ignore_errors=scan.ignore_errors,
                 truncate_ragged_lines=scan.truncate_ragged_lines,
                 encoding=scan.encoding,
+                glob=False,
             )
         return read_csv(
             node.text,
@@ -252,6 +253,7 @@ def plan_execute_node(
             ignore_errors=scan.ignore_errors,
             truncate_ragged_lines=scan.truncate_ragged_lines,
             encoding=scan.encoding,
+            glob=False,
         )
     if node.kind == SCAN_NDJSON:
         if not empty:
