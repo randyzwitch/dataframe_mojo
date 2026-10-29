@@ -976,6 +976,18 @@ A flat, topologically ordered tree; composition never evaluates data.
   Number of null values, as Int64.
 - `def approx_n_unique(self) -> Self`
   Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+- `def filter(self, predicate: Self) -> Self`
+  Keep values whose corresponding predicate is true; null is false.
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
+  Select a range; negative offsets count from the end, -1 means rest.
+- `def head(self, n: Int = Int(5)) -> Self`
+  First n values, independently in each aggregation group.
+- `def tail(self, n: Int = Int(5)) -> Self`
+  Last n values, independently in each aggregation group.
+- `def gather(self, indices: List[Int]) -> Self`
+  Values at the given positions; negative indices count from the end.
+- `def get(self, index: Int) -> Self`
+  One value at a position, returning a scalar per aggregation group.
 - `def drop_nulls(self) -> Self`
   Remove null values, preserving the order of the remaining values.
 - `def drop_nans(self) -> Self`
