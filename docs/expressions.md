@@ -157,6 +157,17 @@ operations likewise run per group, so `col("x").cum_sum().max()` is each
 group's running peak. Rolling min/max are O(n x window); other kernels are
 linear apart from `rank`, which sorts each partition.
 
+Expression row selection is available before a reduction or as a standalone
+column: `col("amount").filter(col("refunded")).sum()`, `head(n)`, `tail(n)`,
+`slice(offset, length=-1)`, `gather(indices)`, and scalar `get(index)`.
+Null filter predicates are false, while selected null values remain in the
+result and count toward `len()`. Negative offsets and indices count from
+the end; out-of-bounds gather/get indices raise. Head/tail counts and
+explicit slice lengths are nonnegative. Inside `group_by().agg()`, these
+operations act separately within each group; unreduced selections produce
+one list per group. Outside aggregation, selections that change height
+cannot share `select` output with columns of a different height.
+
 ### Temporal types
 
 `DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit, time_zone)`

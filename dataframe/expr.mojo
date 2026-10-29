@@ -367,6 +367,12 @@ comptime DROP_NULLS = 285
 comptime DROP_NANS = 286
 comptime _SCALAR_SOURCE = 287
 
+# Per-expression row selection, materialized at sequence boundaries.
+comptime EXPR_FILTER = 288
+comptime EXPR_SLICE = 289
+comptime EXPR_GATHER = 290
+comptime EXPR_GET = 291
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -439,6 +445,7 @@ def is_reduction(op: Int) -> Bool:
         or op == VALUE_COUNTS
         or op == PRODUCT
         or op == APPROX_N_UNIQUE
+        or op == EXPR_GET
     )
 
 
@@ -497,11 +504,16 @@ def is_drop(op: Int) -> Bool:
     return op == DROP_NULLS or op == DROP_NANS
 
 
+def is_sequence(op: Int) -> Bool:
+    """Whole-expression operations evaluated at their own row boundary."""
+    return is_drop(op) or (op >= EXPR_FILTER and op <= EXPR_GET)
+
+
 def changes_length(expr: Expr) -> Bool:
     """Whether the output's row axis can differ from the input's."""
     var changing = List[Bool]()
     for node in expr._nodes:
-        var changed = is_drop(node.op)
+        var changed = is_sequence(node.op) and node.op != EXPR_GET
         if not is_reduction(node.op) and node.op != OVER:
             for child in node_children(node):
                 changed = changed or changing[child]
@@ -514,7 +526,7 @@ def is_window(op: Int) -> Bool:
         (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
         or is_distinct_flag(op)
-        or is_drop(op)
+        or is_sequence(op)
     )
 
 
@@ -1426,6 +1438,59 @@ struct Expr(Copyable):
         of cardinality, and saturates at UInt32.MAX.
         """
         return self._unary(APPROX_N_UNIQUE)
+
+    def filter(self, predicate: Self) -> Self:
+        """Keep values whose corresponding predicate is true; null is false.
+
+        Inside aggregation, filter each group's values before reducing or
+        collecting them. Outside aggregation, the result can change height.
+        """
+        return self._binary(predicate, EXPR_FILTER)
+
+    def slice(self, offset: Int, length: Int = -1) -> Self:
+        """Select a range; negative offsets count from the end, -1 means rest."""
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EXPR_SLICE,
+                len(nodes) - 1,
+                integer=Int64(offset),
+                min_count=length,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def head(self, n: Int = 5) -> Self:
+        """First n values, independently in each aggregation group."""
+        var result = self.slice(0, n)
+        result._nodes[len(result._nodes) - 1].text = "head"
+        return result^
+
+    def tail(self, n: Int = 5) -> Self:
+        """Last n values, independently in each aggregation group."""
+        var result = self.slice(-n, n)
+        result._nodes[len(result._nodes) - 1].text = "tail"
+        return result^
+
+    def gather(self, indices: List[Int]) -> Self:
+        """Values at the given positions; negative indices count from the end."""
+        var encoded = List[String](capacity=len(indices))
+        for index in indices:
+            encoded.append(String(index))
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EXPR_GATHER,
+                len(nodes) - 1,
+                text=_joined(encoded),
+                min_count=len(indices),
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def get(self, index: Int) -> Self:
+        """One value at a position, returning a scalar per aggregation group."""
+        return self._window(EXPR_GET, Int64(index))
 
     def drop_nulls(self) -> Self:
         """Remove null values, preserving the order of the remaining values.

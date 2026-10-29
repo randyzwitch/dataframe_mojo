@@ -9,6 +9,11 @@ from .expr import (
     DROP_NULLS,
     DROP_NANS,
     is_drop,
+    is_sequence,
+    EXPR_FILTER,
+    EXPR_SLICE,
+    EXPR_GATHER,
+    EXPR_GET,
     LIT_INT,
     UNTYPED,
     Node,
@@ -1352,6 +1357,32 @@ def bind(
             if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown null literal dtype: " + node.text)
             dtype = node.dtypes[0].value()
+        elif is_sequence(node.op) and not is_drop(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid sequence input")
+            _default(nodes, types, node.left)
+            dtype = types[node.left]
+            shape = ROWS
+            has_aggregate = aggregated[node.left]
+            if node.op == EXPR_FILTER:
+                if node.right < 0 or node.right >= i:
+                    raise Error("Invalid filter predicate")
+                _default(nodes, types, node.right)
+                if types[node.right] != DataType.BOOL:
+                    raise Error(
+                        "Expression filter requires a Boolean predicate"
+                    )
+                has_aggregate = has_aggregate or aggregated[node.right]
+            elif node.op == EXPR_SLICE:
+                if node.min_count < -1 or (
+                    node.text != "" and node.min_count < 0
+                ):
+                    raise Error(
+                        "Expression slice length and head/tail count must be nonnegative"
+                    )
+            elif node.op == EXPR_GET:
+                shape = AGGREGATE
+                has_aggregate = True
         elif is_reduction(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid aggregate input")
