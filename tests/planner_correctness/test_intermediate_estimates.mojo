@@ -75,6 +75,9 @@ def test_payload_width_retains_source_string_lengths_and_projection_aliases() ra
     var query = frame.lazy().select_exprs([col("text").alias("label")])
     var index = len(query._plan._nodes) - 1
     var estimates = IntermediateEstimates(len(query._plan._nodes))
+    assert_equal(
+        estimates.payload_copy_width(query._plan, index, ["label"]), 16.0
+    )
     assert_equal(estimates.payload_width(query._plan, index, ["label"]), 22.0)
     assert_equal(estimates.payload_width(query._plan, index, ["missing"]), 16.0)
     assert_true(_cost_rows(Float64(Int.MAX) * Float64(Int.MAX)) > 0)

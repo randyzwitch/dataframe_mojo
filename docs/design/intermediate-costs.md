@@ -46,6 +46,9 @@ use their endpoint offsets; view-backed or fragmented strings use at most
 4,096 jittered length observations, weighted by the number of rows each
 stratum represents. Computing a view column's exact byte
 total would visit every row, so that operation is kept out of preparation.
+Length observations borrow the backing arrays directly. Gather costing uses
+the fixed string descriptor width and skips text-length sampling entirely;
+its memo entries remain separate from hashing/payload width estimates.
 Width lookup does not sample distinct values. NDV samples use the existing
 sparse gather to collect each chunk's selected rows together, rather than
 constructing thousands of one-row views. Unsupported computed or nested

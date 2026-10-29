@@ -88,21 +88,34 @@ def _mean_text_bytes(column: Series) raises -> Float64:
                 strings._byte_length(_sample_row(height, count, k))
             ) * Float64(weight)
         return total / Float64(height)
+    ref chunks = column._chunked.value()[]
     for k in range(count):
         var row = _sample_row(height, count, k)
-        var part = column._chunk_at(row)
-        var local_row = part[1]
-        ref strings = part[0]._data[StringColumn]
+        # The exact column length bounds every sample index. Borrow the
+        # backing array directly instead of creating thousands of Series
+        # owners merely to read a descriptor's length.
+        var lo = 0
+        var hi = len(chunks.ends)
+        while lo < hi:
+            var mid = lo + (hi - lo) // 2
+            if row < chunks.ends[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        var first = 0 if lo == 0 else chunks.ends[lo - 1]
+        ref strings = chunks.arrays[lo][StringColumn]
         var weight = height // count + (1 if k < height % count else 0)
-        total += Float64(strings._byte_length(local_row)) * Float64(weight)
+        total += Float64(strings._byte_length(row - first)) * Float64(weight)
     return total / Float64(height)
 
 
-def frame_column_width(frame: DataFrame, name: String) raises -> Float64:
+def frame_column_width(
+    frame: DataFrame, name: String, for_copy: Bool = False
+) raises -> Float64:
     """Metadata or at most 4,096 length reads; no distinct-value sampling."""
     var column = frame.column(name)
     if column.dtype() == DataType.STRING or column.dtype()._is_bytes():
-        return 16.0 + _mean_text_bytes(column)
+        return 16.0 if for_copy else 16.0 + _mean_text_bytes(column)
     if column.dtype().is_nested():
         return -1.0
     return Float64(max(1, column.dtype().bit_width() // 8))
@@ -496,35 +509,43 @@ struct IntermediateEstimates(Movable):
         """Bytes moved by a gather: string views carry descriptors, not bytes."""
         var width = 0.0
         for name in names:
-            var bytes = self.column_width(plan, index, name)
+            var bytes = self.column_width(plan, index, name, True)
             width += min(16.0, bytes) if bytes >= 0 else 16.0
         return max(width, 1.0)
 
     def column_width(
-        mut self, plan: QueryContext, index: Int, name: String
+        mut self,
+        plan: QueryContext,
+        index: Int,
+        name: String,
+        for_copy: Bool = False,
     ) raises -> Float64:
-        var key = String(index) + "/" + name
+        var key = ("copy/" if for_copy else "") + String(index) + "/" + name
         self.used = True
         if key in self.widths:
             return self.widths[key]
-        var width = self._column_width(plan, index, name)
+        var width = self._column_width(plan, index, name, for_copy)
         self.widths[key] = width
         return width
 
     def _column_width(
-        mut self, plan: QueryContext, index: Int, name: String
+        mut self,
+        plan: QueryContext,
+        index: Int,
+        name: String,
+        for_copy: Bool,
     ) raises -> Float64:
         ref node = plan._nodes[index]
         if index in self.observed:
             ref frame = self.observed[index]
             return (
-                frame_column_width(frame, name) if name
+                frame_column_width(frame, name, for_copy) if name
                 in frame.columns() else -1.0
             )
         if node.kind == SCAN_FRAME:
             ref frame = plan._frames[node.source_slot()]
             return (
-                frame_column_width(frame, name) if name
+                frame_column_width(frame, name, for_copy) if name
                 in frame.columns() else -1.0
             )
         if node.kind == DROP and name in node.names:
@@ -537,7 +558,7 @@ struct IntermediateEstimates(Movable):
                         and expression._nodes[0].op == COL
                     ):
                         return self.column_width(
-                            plan, node.left, expression._nodes[0].text
+                            plan, node.left, expression._nodes[0].text, for_copy
                         )
                     return -1.0
             if node.kind == SELECT:
@@ -551,12 +572,12 @@ struct IntermediateEstimates(Movable):
                 and name not in node.names
             ):
                 return -1.0
-            var left = self.column_width(plan, node.left, name)
+            var left = self.column_width(plan, node.left, name, for_copy)
             if left >= 0:
                 return left
             if node.how in [JOIN_SEMI, JOIN_ANTI]:
                 return -1.0
-            return self.column_width(plan, node.right, name)
+            return self.column_width(plan, node.right, name, for_copy)
         if node.kind in [
             DROP,
             SELECT,
@@ -567,5 +588,5 @@ struct IntermediateEstimates(Movable):
             SLICE,
             UNIQUE,
         ]:
-            return self.column_width(plan, node.left, name)
+            return self.column_width(plan, node.left, name, for_copy)
         return -1.0
