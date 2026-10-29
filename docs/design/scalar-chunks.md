@@ -48,3 +48,29 @@ are zeroed as in the contiguous path. Input merge caches remain untouched.
 The contiguous path, checked casts, masks, categorical dictionaries, temporal
 units and decimal rules keep their existing converters. Other consumers
 remain under measurement; this initial change does not complete #1003.
+
+## Initial cast measurements
+
+The frozen paired comparison at implementation revision `b7c8d971` completed
+576 case/layer pairs (1,152 workers), with complete ordered NumPy/schema
+checks and no compiler overlap. The one-worker runs are busy-host diagnostics;
+four-worker runs are unflagged. Results are retained outside the repository
+at `/tmp/1003-comparison-b7c8d971/receipt.json`.
+
+For the unsliced 1M-row Int64-to-Float32 direct cast at four workers, cold
+64/1024-chunk medians changed from 1.313/1.605 ms to 0.369/0.503 ms.
+The baseline retained an 8 MB merged input; the candidate retained none.
+Whole-expression cold medians changed from 0.529/1.089 ms to 0.453/0.833 ms.
+Already-contiguous inputs take the existing path. These are mechanism
+measurements, not an external-suite performance claim; unchanged controls
+also show noise, especially for tiny operations.
+
+A retained tradeoff is the warm direct 1K-row/1024-chunk case: the baseline
+reuses its merged input at 2.26 us, while the candidate walks descriptors
+at 8.13 us. Its cold comparison is 454.74 us versus 8.43 us. No blanket
+non-regression claim or threshold chosen to hide this case is made. Caller
+reuse and whether a contiguous input already exists need further study.
+Process peak RSS includes fixtures, outputs and untimed exports; retained
+merge-cache bytes do not measure every temporary allocation. Full owned
+allocation accounting and the remaining text/nested/temporal consumers are
+still pending, as are external-suite and live M1 validation of this change.
