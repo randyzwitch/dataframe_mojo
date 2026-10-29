@@ -55,6 +55,11 @@ int fail(const arrow::Status& status, char** error_out) {
   return 1;
 }
 
+struct ParquetWriter {
+  std::shared_ptr<arrow::io::FileOutputStream> output;
+  std::unique_ptr<parquet::arrow::FileWriter> writer;
+};
+
 bool StringDictionary(const arrow::DataType& type) {
   if (type.id() != arrow::Type::DICTIONARY) return false;
   auto value = static_cast<const arrow::DictionaryType&>(type).value_type()->id();
@@ -476,6 +481,66 @@ int dfq_read_parquet_stream_dict(const char* path, int use_threads,
 
 // Import owns the exports on success; the caller releases any structs left
 // unconsumed on failure. store_schema preserves duration and Arrow type widths.
+int dfq_parquet_writer_open(const char* path, ArrowSchema* schema,
+                            const char* compression, int64_t row_group_size,
+                            void** out, char** error_out) {
+  *error_out = nullptr;
+  *out = nullptr;
+  parquet::Compression::type codec;
+  std::string name(compression);
+  if (name == "uncompressed") codec = parquet::Compression::UNCOMPRESSED;
+  else if (name == "snappy") codec = parquet::Compression::SNAPPY;
+  else if (name == "zstd") codec = parquet::Compression::ZSTD;
+  else return fail(arrow::Status::Invalid("unsupported compression: ", name), error_out);
+  if (row_group_size <= 0) {
+    return fail(arrow::Status::Invalid("row_group_size must be positive"), error_out);
+  }
+  auto imported = arrow::ImportSchema(schema);
+  if (!imported.ok()) return fail(imported.status(), error_out);
+  auto owned = std::make_unique<ParquetWriter>();
+  auto output = arrow::io::FileOutputStream::Open(path);
+  if (!output.ok()) return fail(output.status(), error_out);
+  owned->output = *output;
+  auto properties = parquet::WriterProperties::Builder()
+      .compression(codec)->max_row_group_length(row_group_size)->build();
+  auto arrow_properties = parquet::ArrowWriterProperties::Builder()
+      .store_schema()->build();
+  auto writer = parquet::arrow::FileWriter::Open(
+      **imported, arrow::default_memory_pool(), owned->output,
+      properties, arrow_properties);
+  if (!writer.ok()) return fail(writer.status(), error_out);
+  owned->writer = std::move(*writer);
+  *out = owned.release();
+  return 0;
+}
+
+int dfq_parquet_writer_write(void* handle, ArrowArray* array,
+                             ArrowSchema* schema, char** error_out) {
+  *error_out = nullptr;
+  auto batch = arrow::ImportRecordBatch(array, schema);
+  if (!batch.ok()) return fail(batch.status(), error_out);
+  auto* owned = static_cast<ParquetWriter*>(handle);
+  if (!(*batch)->schema()->Equals(*owned->writer->schema(), true)) {
+    return fail(arrow::Status::Invalid("Parquet batch schema changed"), error_out);
+  }
+  auto status = owned->writer->WriteRecordBatch(**batch);
+  return status.ok() ? 0 : fail(status, error_out);
+}
+
+// Close consumes the handle even when writing the footer or closing fails.
+int dfq_parquet_writer_close(void* handle, char** error_out) {
+  *error_out = nullptr;
+  std::unique_ptr<ParquetWriter> owned(static_cast<ParquetWriter*>(handle));
+  auto status = owned->writer->Close();
+  auto closed = owned->output->Close();
+  if (!status.ok()) return fail(status, error_out);
+  return closed.ok() ? 0 : fail(closed, error_out);
+}
+
+void dfq_parquet_writer_abort(void* handle) {
+  delete static_cast<ParquetWriter*>(handle);
+}
+
 int dfq_write_parquet(const char* path, struct ArrowArray* array,
                       struct ArrowSchema* schema, const char* compression,
                       int64_t row_group_size, char** error_out) {

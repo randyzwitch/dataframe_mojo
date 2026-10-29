@@ -897,7 +897,9 @@ def plan_fuse_top_k(mut self: QueryContext):
             self._nodes[node.left].set_sort_limit(limit)
 
 
-def plan_push_projections(mut self: QueryContext) raises:
+def plan_push_projections(
+    mut self: QueryContext, *, prune_outputs: Bool = True
+) raises:
     """Scans read only columns that some operator above them uses.
 
     A join passes each input only its keys and the columns the plan
@@ -928,7 +930,7 @@ def plan_push_projections(mut self: QueryContext) raises:
             merged_copies[copy_of[i]] = True
             plan_share_copy_schemas(self, copy_of, copy_of[i])
             _merge_copy_needs(copy_of, copy_of[i], needed, all_needed)
-        if not all_needed[i] and needed[i]:
+        if prune_outputs and not all_needed[i] and needed[i]:
             plan_prune_outputs(self, i, needed[i].value())
         ref node = self._nodes[i]
         if node.kind == JOIN and not all_needed[i] and needed[i]:
@@ -954,9 +956,9 @@ def plan_push_projections(mut self: QueryContext) raises:
                         if want == c:
                             keep.append(c)
                             break
-                if (len(keep) > 0 or node.kind == SCAN_IPC) and len(keep) < len(
-                    columns
-                ):
+                if (
+                    len(keep) > 0 or node.kind == SCAN_IPC or node.has_dataset()
+                ) and len(keep) < len(columns):
                     self._nodes[i].set_scan_projection(keep^)
                     # Only this scan's schema changes among the nodes
                     # still to visit: they come before it, and none
@@ -983,6 +985,15 @@ def plan_push_projections(mut self: QueryContext) raises:
             or node.kind == HCONCAT
             or node.kind == GATHER
         )
+        if (
+            not prune_outputs
+            and node.kind == CONCAT
+            and not plan_mask_only_union(self, i)
+        ):
+            # Without inserting projections, every branch must keep its
+            # original output shape. Expressions on an intermediate branch
+            # can retain fields that another branch would otherwise drop.
+            reads_all = True
         if node.kind == UNNEST:
             reads.append(node.text)
         if node.kind == UNIQUE and len(node.names) == 0:
@@ -1031,10 +1042,13 @@ def plan_push_projections(mut self: QueryContext) raises:
                 needed[child] = merged^
             else:
                 needed[child] = reads.copy()
-    var aligned = plan_align_union_inputs(self, unions, union_columns)
-    plan_narrow_join_inputs(self, narrow_joins, narrow_sides, narrow_columns)
-    if aligned:
-        plan_reorder(self)
+    if prune_outputs:
+        var aligned = plan_align_union_inputs(self, unions, union_columns)
+        plan_narrow_join_inputs(
+            self, narrow_joins, narrow_sides, narrow_columns
+        )
+        if aligned:
+            plan_reorder(self)
     if owned:
         self._schema_memo = None
 
@@ -1218,3 +1232,49 @@ def plan_narrow_join_inputs(
         added = True
     if added:
         plan_reorder(self)
+
+
+def plan_mask_only_union(self: QueryContext, index: Int) -> Bool:
+    """Whether a union tree can narrow every branch without inserted steps."""
+    ref node = self._nodes[index]
+    if _is_scan(node.kind):
+        # Only dataset masks are transferred back to the original plan.
+        # A frame or ordinary scan sibling would retain its original width.
+        return node.has_dataset()
+    if node.kind != CONCAT:
+        return False
+    return plan_mask_only_union(self, node.left) and plan_mask_only_union(
+        self, node.right
+    )
+
+
+def plan_prepare_dataset_projections(mut self: QueryContext) raises:
+    """Resolve required dataset fields without rewriting relational steps.
+
+    Schema reconciliation must not reject an unobserved field merely because
+    general optimizer rewrites were disabled. Keep the original expressions
+    and operators, and copy only the scan's required physical field mask.
+    """
+    var present = False
+    for node in self._nodes:
+        present = present or node.has_dataset()
+    if not present:
+        return
+    var projected = self.copy()
+    projected._schema_memo = None
+    plan_push_projections(projected, prune_outputs=False)
+    for i in range(len(self._nodes)):
+        if not self._nodes[i].has_dataset():
+            continue
+        for candidate in projected._nodes:
+            if (
+                candidate.kind == self._nodes[i].kind
+                and candidate.source_slot() == self._nodes[i].source_slot()
+                and candidate.has_dataset()
+                and candidate.dataset_projected
+                and candidate.dataset_spec().signature()
+                == self._nodes[i].dataset_spec().signature()
+            ):
+                self._nodes[i].set_scan_projection(candidate.names.copy())
+                break
+    self._schema_memo = None

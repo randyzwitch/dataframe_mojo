@@ -4,8 +4,9 @@ All public read_csv overloads use the same range-splitting scanner and
 typed column builders.
 """
 from .file_sources import has_pattern, resolve_paths
-from std.collections import Dict
-from .csv_types import CsvField, CsvSchema, CsvOptions
+from std.collections import Dict, Optional
+from .dataset_options import DatasetOptions, DatasetSpec
+from .csv_types import CsvField, CsvSchema, CsvOptions, _CsvScanOptions
 from .csv_reader import (
     read_csv_explicit,
     read_csv_inferred,
@@ -42,6 +43,12 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Read CSV through the range-splitting scanner and typed builders.
 
@@ -51,6 +58,37 @@ def read_csv(
     buffer_size remains a positive compatibility argument; mapped reads use
     the pipeline's row-aligned chunk sizing. See docs/csv.md.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            [path],
+            Optional(schema.copy()),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=100,
+            schema_overrides=Dict[String, String](),
+            try_parse_dates=False,
+        )
+
     if glob and has_pattern(path):
         return read_csv(
             [path],
@@ -105,12 +143,49 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Read CSV with ordered (name, dtype) pairs as a concise schema.
 
     Fields default to nullable=True and ISO temporal parsing, exactly as
     CsvField(name, dtype). Use CsvSchema for per-field configuration.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            [path],
+            Optional(_dataset_csv_schema(schema)),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=100,
+            schema_overrides=Dict[String, String](),
+            try_parse_dates=False,
+        )
+
     if glob and has_pattern(path):
         return read_csv(
             [path],
@@ -171,6 +246,12 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Infer a CSV schema and decode it through the single CSV pipeline.
 
@@ -178,6 +259,37 @@ def read_csv(
     inference is enabled by try_parse_dates. schema_overrides sets explicit
     output dtypes. See docs/csv.md for the inference rules.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            [path],
+            Optional[CsvSchema](),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+        )
+
     if glob and has_pattern(path):
         return read_csv(
             [path],
@@ -610,12 +722,49 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Read sorted local file sources, expanding glob patterns by default.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            paths,
+            Optional[CsvSchema](),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+        )
+
     var files = resolve_paths(paths, glob)
     var frames = List[DataFrame](capacity=len(files))
     var total = 0
@@ -662,12 +811,49 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Read sorted local file sources, expanding glob patterns by default.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            paths,
+            Optional(_dataset_csv_schema(schema)),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=100,
+            schema_overrides=Dict[String, String](),
+            try_parse_dates=False,
+        )
+
     var files = resolve_paths(paths, glob)
     var frames = List[DataFrame](capacity=len(files))
     var total = 0
@@ -712,12 +898,49 @@ def read_csv(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> DataFrame:
     """Read sorted local file sources, expanding glob patterns by default.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _read_dataset_csv(
+            paths,
+            Optional(schema.copy()),
+            dataset_options,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            infer_schema_length=100,
+            schema_overrides=Dict[String, String](),
+            try_parse_dates=False,
+        )
+
     var files = resolve_paths(paths, glob)
     var frames = List[DataFrame](capacity=len(files))
     var total = 0
@@ -743,3 +966,66 @@ def read_csv(
         total += frame.height()
         frames.append(frame^)
     return concat(frames)._with_statistics()
+
+
+def _dataset_csv_schema(
+    fields: List[Tuple[String, DataType]]
+) raises -> CsvSchema:
+    var output = List[CsvField]()
+    for field in fields:
+        output.append(CsvField(field[0], field[1]))
+    return CsvSchema(output^)
+
+
+def _read_dataset_csv(
+    paths: List[String],
+    schema: Optional[CsvSchema],
+    options: DatasetOptions,
+    *,
+    has_header: Bool,
+    separator: String,
+    quote_char: String,
+    comment_prefix: String,
+    skip_rows: Int,
+    n_rows: Int,
+    columns: List[String],
+    null_values: List[String],
+    ignore_errors: Bool,
+    truncate_ragged_lines: Bool,
+    encoding: String,
+    buffer_size: Int,
+    infer_schema_length: Int,
+    schema_overrides: Dict[String, String],
+    try_parse_dates: Bool,
+) raises -> DataFrame:
+    from .dataset_scan import read_dataset
+
+    if buffer_size <= 0:
+        raise Error("CSV buffer_size must be positive")
+    var scan = _CsvScanOptions(
+        has_header,
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        infer_schema_length,
+        schema_overrides.copy(),
+        try_parse_dates,
+    )
+    _ = scan.reader(n_rows)
+    var spec = DatasetSpec(paths, options)
+    var selected = Optional[List[String]]()
+    if len(columns):
+        selected = columns.copy()
+    return read_dataset(
+        spec,
+        False,
+        schema=schema,
+        scan=scan,
+        columns=selected,
+        limit=n_rows,
+    )._with_statistics()

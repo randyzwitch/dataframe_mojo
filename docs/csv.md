@@ -4,7 +4,35 @@
 infers their types. Both use one native Mojo pipeline derived from Polars
 1.44.2: mapped input, quote-aware record scanning, borrowed field splitting,
 typed builders, and chunk-preserving assembly. There is no alternate legacy
-reader and no Python, Arrow, Polars, Rayon or jemalloc runtime dependency.
+reader. Uncompressed input has no Python, Arrow, Polars, Rayon or jemalloc
+runtime dependency.
+
+## Local datasets and compressed input
+
+Path-based `read_csv` and `scan_csv` accept a path, a list of paths, or glob
+patterns. Files are processed in sorted path order; `read_csv(..., n_rows=n)`
+limits their combined output. Both APIs expose these dataset options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `glob` | `True` | expand path patterns; disable for literal pattern characters |
+| `hive_partitioning` | `False` | add fields from `key=value` directories |
+| `hive_schema` | empty `Dict[String, String]` | override partition fields with `"Int64"` or `"String"` |
+| `include_file_paths` | `""` | name an additional String field containing each source path |
+| `missing_columns` | `"raise"` | use `"insert"` to fill missing fields with typed nulls |
+| `extra_columns` | `"raise"` | use `"ignore"` to discard fields absent from the first file |
+| `union_by_name` | `False` | include all fields by name, overriding missing/extra controls |
+
+Shared required fields still need compatible dtypes. Explicit CSV schemas
+continue to label source fields by position. See [multiple local files](datasets.md)
+for schema alignment, partition inference, escaping, and pruning rules.
+
+CSV path readers and owned byte buffers accept gzip and zstd input. Content
+magic takes precedence over filename extensions, and concatenated members or
+frames are supported. Full reads validate the compressed tail; a row limit
+can stop before unread data is validated. Compressed input requires the native
+`libdfparquet` transport; build or rebuild it with
+`pixi run -e native build-dfparquet`. See [compressed CSV](datasets.md#compressed-csv).
 
 ## In-memory input
 
@@ -134,8 +162,8 @@ cannot be represented by the inferred dtype.
 | `encoding` | `"utf8"` | strict UTF-8 or `"utf8-lossy"` |
 | `buffer_size` | `65536` | positive compatibility argument; it does not select a tokenizer or bound memory |
 
-Regular files are mapped. Sources that cannot be mapped are read into owned
-bytes and passed to the same decoder. That fallback is not a bounded-memory
+Uncompressed regular files are mapped. Sources that cannot be mapped are
+read into owned bytes and passed to the same decoder. That fallback is not a bounded-memory
 streaming API. Chunk boundaries come from the record scanner, independently
 of `buffer_size`. Numeric buffers and StringView storage transfer into output
 columns. Results may retain multiple chunks; `rechunk()` explicitly requests
@@ -172,8 +200,13 @@ also occur as literal values cannot be distinguished by quoting alone.
   and headers; `never` writes raw text and may not re-read correctly.
 - Output line endings may be LF or CRLF.
 
-Compression, remote URLs, per-column null tokens, custom input EOL bytes and
-Arrow stream export are not exposed by this API.
+For a lazy query, `plan.sink_csv(path, ...)` accepts the same formatting
+options as `write_csv`, plus `batch_size=65536` and `optimize=True`. It writes
+ordered execution batches with one header when `has_header=True`, including
+for an empty result. It stages output beside the destination and replaces the
+file only after successful completion; an error preserves an existing file.
+A scan can safely sink to its own input path. See [lazy output](lazy.md#file-sinks)
+and [dataset output](datasets.md#output) for execution memory requirements.
 
-`read_csv` and `scan_csv` also accept path lists and glob patterns; see
-[multiple local files](datasets.md) for ordering and combined row limits.
+CSV output is uncompressed. Remote URLs, per-column null tokens, custom
+input EOL bytes and Arrow stream export are not exposed by this API.
