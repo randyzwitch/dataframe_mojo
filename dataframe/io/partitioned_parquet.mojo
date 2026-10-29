@@ -52,7 +52,7 @@ struct _DatasetOutput(Movable):
         if address == 0:
             raise Error("cannot create staging directory beside " + destination)
         self.temporary = _read_c_string(address)
-        _ = pattern ^
+        _ = pattern^
         self.pending = True
 
     def __deinit__(deinit self):
@@ -85,8 +85,8 @@ struct _DatasetOutput(Movable):
         var status = external_call["rename", Int32](
             source.unsafe_ptr(), destination.unsafe_ptr()
         )
-        _ = source ^
-        _ = destination ^
+        _ = source^
+        _ = destination^
         if status != 0:
             raise Error(
                 "cannot publish partitioned Parquet directory: "
@@ -123,7 +123,7 @@ def write_partitioned_parquet(
         var trimmed = String(
             destination[byte = 0 : destination.byte_length() - 1]
         )
-        destination = trimmed ^
+        destination = trimmed^
     _empty_destination(destination)
     var keys = List[Series]()
     var names = List[String]()
@@ -135,7 +135,7 @@ def write_partitioned_parquet(
             raise Error("unsupported partition column dtype: " + name)
         if key.dtype().is_categorical():
             key = decode(key)
-        keys.append(key ^)
+        keys.append(key^)
         names.append(name)
     var groups = encode_rows(keys, nulls_equal=True)
     var paths = List[List[String]]()
@@ -160,7 +160,7 @@ def write_partitioned_parquet(
                 "partition keys render to the same Hive path: " + relative
             )
         seen[relative] = len(paths)
-        paths.append(components ^)
+        paths.append(components^)
     var rows = List[List[Int]](capacity=groups.count())
     for _ in range(groups.count()):
         rows.append(List[Int]())

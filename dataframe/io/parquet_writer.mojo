@@ -59,7 +59,7 @@ struct _AtomicOutput(Movable):
         self.temporary = _read_c_string(Int(pattern.unsafe_ptr()))
         self.pending = True
         var closed = external_call["close", Int32](fd)
-        _ = pattern ^
+        _ = pattern^
         if closed != 0:
             raise Error("cannot close temporary output: " + self.temporary)
 
@@ -106,8 +106,8 @@ def _open_writer(
         Int(Pointer(to=handle)),
         Int(Pointer(to=error)),
     )
-    _ = filename ^
-    _ = codec ^
+    _ = filename^
+    _ = codec^
     return status
 
 
@@ -193,7 +193,7 @@ struct _ParquetWriter(Movable):
                 _raise_backend_error(self.library, error, "write_parquet")
         except caught:
             _release_imported(array, schema)
-            raise caught ^
+            raise caught^
 
     def __deinit__(deinit self):
         if self.handle != 0:
@@ -222,7 +222,7 @@ struct _ParquetWriter(Movable):
                 _raise_backend_error(self.library, error, "write_parquet")
         except caught:
             _release_imported(array, schema)
-            raise caught ^
+            raise caught^
 
     def finish(mut self) raises:
         if self.handle == 0:
