@@ -231,6 +231,8 @@ comptime FORWARD_FILL = 120
 comptime BACKWARD_FILL = 121
 # Evaluate the child per partition of the SEP-joined key names in text2.
 comptime OVER = 122
+# An empty partition list and a partition column named "" encode differently.
+comptime OVER_GLOBAL = 4
 # Fill interior nulls in row position, or using a second numeric expression.
 comptime INTERPOLATE = 123
 comptime INTERPOLATE_BY = 124
@@ -1825,6 +1827,23 @@ struct Expr(Copyable):
         are null."""
         return self._window(SHIFT, Int64(n))
 
+    def shift(self, n: Int, fill_value: Self) -> Self:
+        """Shift values, filling only vacated positions; source nulls stay null.
+
+        `fill_value` follows conditional-expression dtype and broadcast rules.
+        """
+        var occupied = self.is_null().cum_count().shift(n).is_not_null()
+        return when(occupied).then(self.shift(n)).otherwise(fill_value)
+
+    def shift(self, fill_value: Self) -> Self:
+        return self.shift(1, fill_value)
+
+    def shift(self, n: Int, fill_value: String) -> Self:
+        return self.shift(n, lit(fill_value))
+
+    def shift(self, fill_value: String) -> Self:
+        return self.shift(1, lit(fill_value))
+
     def diff(self, n: Int = 1) -> Self:
         """Difference from the value n rows earlier."""
         return self - self.shift(n)
@@ -2134,17 +2153,93 @@ struct Expr(Copyable):
         )
         return Self(nodes^, self._name)
 
-    def over(self, partition_by: String) -> Self:
-        return self.over([partition_by])
+    def over(
+        self,
+        partition_by: String,
+        order_by: String = "",
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            [partition_by],
+            [order_by] if order_by != "" else List[String](),
+            descending,
+            nulls_last,
+        )
 
-    def over(self, partition_by: List[String]) -> Self:
-        """Evaluate within partitions of the key columns, keeping row order.
+    def over(
+        self,
+        partition_by: List[String] = List[String](),
+        order_by: String = "",
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        """Evaluate per partition, optionally ordered, then restore input rows.
 
-        Aggregates broadcast back to every row of their partition; window
-        operations restart in each partition. Nulls form their own key.
+        Ties keep input order. NaN and null placement follow frame sorting.
+        With only `order_by`, the whole frame is one partition.
         """
+        return self._over_ordered(
+            partition_by,
+            [order_by] if order_by != "" else List[String](),
+            descending,
+            nulls_last,
+        )
+
+    def over(
+        self,
+        partition_by: String,
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            [partition_by], order_by, descending, nulls_last
+        )
+
+    def over(
+        self,
+        partition_by: List[String],
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            partition_by, order_by, descending, nulls_last
+        )
+
+    def over(
+        self,
+        *,
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        """One globally ordered partition, accepting multiple ordering columns."""
+        return self._over_ordered(
+            List[String](), order_by, descending, nulls_last
+        )
+
+    def _over_ordered(
+        self,
+        partition_by: List[String],
+        order_by: List[String],
+        descending: Bool,
+        nulls_last: Bool,
+    ) -> Self:
         var nodes = self._nodes.copy()
-        nodes.append(_node(OVER, len(nodes) - 1, text2=_joined(partition_by)))
+        nodes.append(
+            _node(
+                OVER,
+                len(nodes) - 1,
+                text=_joined(order_by),
+                text2=_joined(partition_by),
+                min_count=len(order_by),
+                integer=Int64(descending)
+                + 2 * Int64(nulls_last)
+                + OVER_GLOBAL * Int64(len(partition_by) == 0),
+            )
+        )
         return Self(nodes^, self._name)
 
     def list(self) -> ListNamespace:

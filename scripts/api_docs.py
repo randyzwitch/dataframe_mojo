@@ -58,6 +58,12 @@ def public_methods(struct: dict) -> list[dict]:
     ]
 
 
+def overloads(item: dict) -> list[dict]:
+    """Overloads by signature: `mojo doc` lists them in an order that
+    differs between machines, and the reference must not."""
+    return sorted(item["overloads"], key=lambda overload: overload["signature"])
+
+
 def render(decl: dict, names: list[str], table: dict) -> str:
     lines = [
         "# API reference",
@@ -79,11 +85,11 @@ def render(decl: dict, names: list[str], table: dict) -> str:
         if text:
             lines += [text, ""]
         if kind == "function":
-            for overload in item["overloads"]:
+            for overload in overloads(item):
                 lines += ["```mojo", overload["signature"], "```", ""]
             continue
         for method in public_methods(item):
-            for overload in method["overloads"]:
+            for overload in overloads(method):
                 lines.append(f"- `{overload['signature']}`")
                 if overload.get("summary"):
                     lines.append(f"  {overload['summary']}")
