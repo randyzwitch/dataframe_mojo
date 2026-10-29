@@ -1055,7 +1055,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         limit: Optional[Int] = None,
         subset: List[String] = List[String](),
     ) raises -> Self:
-        """Fill nulls by strategy over the whole input; see DataFrame.fill_null."""
+        """Fill nulls by strategy over the whole input; see DataFrame.fill_null.
+        """
         var run_limit = self._input_schema()._fill_strategy_limit(
             strategy, limit, subset
         )
@@ -1066,7 +1067,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
 
     def fill_nan(self, value: Float64) raises -> Self:
-        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes.
+        """
         return self.fill_nan(lit(value))
 
     def fill_nan(self, value: Expr) raises -> Self:
@@ -2533,7 +2535,8 @@ trait AcceleratorBackend(Copyable):
     """Optional execution provider; importing dataframe needs no GPU SDK."""
 
     def estimate_auto(self, plan: LazyFrame) raises -> PlanEstimate:
-        """Optional plan-time facts; no device submission or source-value reads."""
+        """Optional plan-time facts; no device submission or source-value reads.
+        """
         raise Error("provider has no analytical plan estimate")
 
     def select_auto(
@@ -2847,8 +2850,12 @@ def _collect_placed[
     CPU unit or the caller reads is copied to the host here, where a
     failed copy raises. The CPU executor then runs what remains. Errors
     from a device propagate; nothing reruns on the CPU."""
+    # The calibration is read once per process; asking for devices may
+    # query a driver, so it comes second.
+    if not _has_pipeline_costs():
+        return None
     var found = backend.devices()
-    if len(found) == 0 or not _has_pipeline_costs():
+    if len(found) == 0:
         return None
     var plan = query._optimized() if optimize else query.copy()
     var solved = _solve_devices(plan, backend, found^)
@@ -3397,7 +3404,8 @@ def _handoff_context(plan: QueryContext) raises -> DataFrame:
 
 
 def _from_context(var context: QueryContext) -> LazyFrame:
-    """Move internal plan state into the public facade without copying buffers."""
+    """Move internal plan state into the public facade without copying buffers.
+    """
     # Initialize through the existing constructor, then transfer the context
     # whole. Empty lists need no source storage or intermediate plan copies.
     var result = LazyFrame(
