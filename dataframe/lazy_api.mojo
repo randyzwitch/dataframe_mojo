@@ -50,8 +50,13 @@ from dataframe._accel_provider import (
 )
 from dataframe.planning.device_placement import (
     CPU as _PLACE_CPU,
+    Placement,
+    PlacementPipeline,
     PlacementProblem,
     plan_pipelines,
+    plan_substitute,
+    plan_substitute_node,
+    plan_unit_region,
     solve_placement,
 )
 from dataframe.storage.column import (
@@ -136,9 +141,11 @@ from dataframe.parallel import (
     Crew,
 )
 from dataframe.placement import (
+    LinearCost,
     calibration_path,
     load_costs,
 )
+from dataframe.planning.cost.sampling import _frame_bytes
 from dataframe.devices import (
     DeviceInfo,
     MEMORY_UNIFIED,
@@ -1632,6 +1639,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return _execute_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )[0].copy()
+        if engine == "auto":
+            var placed = _collect_placed(
+                self, _RegisteredProvider(), optimize, streaming, batch_size
+            )
+            if placed:
+                return placed.take()
         var crew = Crew.start()
         try:
             var result: DataFrame
@@ -1689,6 +1702,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     batch_size,
                     False,
                 )[0].copy()
+            var placed = _collect_placed(
+                self, accelerator, optimize, streaming, batch_size
+            )
+            if placed:
+                return placed.take()
             return self.collect(
                 engine="cpu",
                 optimize=optimize,
@@ -2619,15 +2637,22 @@ def _device_label(device: DeviceInfo) -> String:
     return device.backend + ":" + String(device.ordinal)
 
 
-def _device_placement_lines[
+@fieldwise_init
+struct _DevicePlacement(Movable):
+    """A plan's placement units, the numbers they were placed from, and the
+    placement, for `explain` and `collect`."""
+
+    var devices: List[DeviceInfo]
+    var units: List[PlacementPipeline]
+    var problem: PlacementProblem
+    var placement: Placement
+
+
+def _solve_devices[
     B: AcceleratorBackend
-](plan: LazyFrame, backend: B) raises -> String:
-    """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
-    summary: where each unit would run and why. Nothing when the backend
-    reports no devices. Placement is reported, not yet executed."""
-    var devices = backend.devices()
-    if len(devices) == 0:
-        return String()
+](
+    plan: LazyFrame, backend: B, var devices: List[DeviceInfo]
+) raises -> _DevicePlacement:
     var units = plan_pipelines(plan._plan)
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
@@ -2659,6 +2684,24 @@ def _device_placement_lines[
                     region, devices[d].ordinal, unit.features
                 )
     var placement = solve_placement(problem)
+    return _DevicePlacement(devices^, units^, problem^, placement^)
+
+
+def _device_placement_lines[
+    B: AcceleratorBackend
+](plan: LazyFrame, backend: B) raises -> String:
+    """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
+    summary: where each unit runs under `engine="auto"` and why. Nothing
+    when the backend reports no devices."""
+    var found = backend.devices()
+    if len(found) == 0:
+        return String()
+    var solved = _solve_devices(plan, backend, found^)
+    ref devices = solved.devices
+    ref units = solved.units
+    ref problem = solved.problem
+    ref placement = solved.placement
+    var count = len(devices) + 1
     var names = List[String]()
     names.append("cpu")
     var out = String("DEVICES cpu")
@@ -2703,6 +2746,211 @@ def _device_placement_lines[
         + "\n"
     )
     return out^
+
+
+def _has_pipeline_costs() raises -> Bool:
+    """Whether this machine's CPU calibration measures any pipeline; when
+    it does not, no unit can be compared, so collect skips placement."""
+    for key in load_costs("cpu").keys():
+        if key.startswith("pipeline:"):
+            return True
+    return False
+
+
+def _frame_location(frame: DataFrame, labels: List[String]) -> Int:
+    """The device holding every column of `frame`, or the CPU."""
+    if frame.width() == 0:
+        return _PLACE_CPU
+    var first = frame._columns[0]._residence()
+    for column in frame._columns:
+        if column._residence() != first:
+            return _PLACE_CPU
+    for d in range(1, len(labels)):
+        if labels[d] == first:
+            return d
+    return _PLACE_CPU
+
+
+def _decide_at_start[
+    B: AcceleratorBackend
+](
+    backend: B,
+    devices: List[DeviceInfo],
+    mut problem: PlacementProblem,
+    unit: PlacementPipeline,
+    p: Int,
+    region: QueryContext,
+    cpu_costs: Dict[String, LinearCost],
+) raises -> Placement:
+    """Re-solve the remaining plan with unit `p`'s exact inputs. Its
+    children have run, so their costs are spent and their results are its
+    sources."""
+    var labels = List[String]()
+    labels.append("cpu")
+    for device in devices:
+        labels.append(_device_label(device))
+    ref input = region._frames[0]
+    var rows = input.height()
+    var bytes = _frame_bytes(input)
+    var location = _frame_location(input, labels)
+    var build_rows = -1
+    if len(region._frames) > 1:
+        ref build = region._frames[1]
+        build_rows = build.height()
+        bytes += _frame_bytes(build)
+        if _frame_location(build, labels) != location:
+            location = _PLACE_CPU
+    var output_rows = unit.features.output_rows
+    # A join can grow its input; every other unit is bounded by it.
+    if output_rows >= 0 and not unit.key.startswith("pipeline:join"):
+        output_rows = min(output_rows, rows)
+    var features = PipelineFeatures(
+        rows, bytes, output_rows, unit.features.groups, build_rows
+    )
+    problem.children[p] = List[Int]()
+    problem.source_bytes[p] = bytes
+    problem.source_device[p] = location
+    if problem.output_bytes[p] >= 0 and unit.features.output_rows > 0:
+        problem.output_bytes[p] = (
+            problem.output_bytes[p] // unit.features.output_rows
+        ) * max(output_rows, 0)
+    problem.working_bytes[p] = (
+        bytes + problem.output_bytes[p] if problem.output_bytes[p] >= 0 else -1
+    )
+    for d in range(problem.devices()):
+        problem.run_ns[p][d] = -1
+    var cpu = cpu_costs.get(unit.key)
+    if cpu:
+        problem.run_ns[p][
+            _PLACE_CPU
+        ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
+        var lazy = _from_context(region.copy())
+        for d in range(len(devices)):
+            if backend.pipeline_supports(lazy, devices[d].ordinal):
+                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                    lazy, devices[d].ordinal, features
+                )
+    return solve_placement(problem)
+
+
+def _frame_to_host(frame: DataFrame) raises:
+    for column in frame._columns:
+        column._copy_to_host()
+
+
+def _collect_placed[
+    B: AcceleratorBackend
+](
+    query: LazyFrame,
+    backend: B,
+    optimize: Bool,
+    streaming: Bool,
+    batch_size: Int,
+) raises -> Optional[DataFrame]:
+    """Collect with the units placement puts on a device run there; None
+    when the backend reports no devices or every unit stays on the CPU.
+
+    Units run children first. A device unit runs through `run_pipeline` on
+    its inputs, and its result, which may stay in device memory, replaces
+    its top node, so the rest of the plan reads it as a frame. A result a
+    CPU unit or the caller reads is copied to the host here, where a
+    failed copy raises. The CPU executor then runs what remains. Errors
+    from a device propagate; nothing reruns on the CPU."""
+    # The calibration is read once per process; asking for devices may
+    # query a driver, so it comes second.
+    if not _has_pipeline_costs():
+        return None
+    var found = backend.devices()
+    if len(found) == 0:
+        return None
+    var plan = query._optimized() if optimize else query.copy()
+    var solved = _solve_devices(plan, backend, found^)
+    var chosen = solved.placement.devices.copy()
+    var any_device = False
+    for d in chosen:
+        any_device |= d != _PLACE_CPU
+    if not any_device:
+        return None
+    ref units = solved.units
+    var problem = solved.problem.copy()
+    var cpu_costs = load_costs("cpu")
+    var labels = List[String]()
+    labels.append("cpu")
+    for device in solved.devices:
+        labels.append(_device_label(device))
+    var parent = List[Int](length=len(units), fill=-1)
+    for p in range(len(units)):
+        for c in units[p].children:
+            parent[c] = p
+    var context = plan._plan.copy()
+    var crew = Crew.start()
+    try:
+        for p in range(len(units)):
+            var device = chosen[p]
+            if device == _PLACE_CPU:
+                continue
+            var region = plan_unit_region(context, units[p])
+            # Its inputs have run: decide again from exact rows, bytes and
+            # where they live, with finished units' costs spent and
+            # started devices' start-up paid.
+            var planned = device
+            var revised = _decide_at_start(
+                backend,
+                solved.devices,
+                problem,
+                units[p],
+                p,
+                region,
+                cpu_costs,
+            )
+            for q in range(p, len(units)):
+                chosen[q] = revised.devices[q]
+            device = chosen[p]
+            if getenv("DATAFRAME_TRACE_PATHS"):
+                print(
+                    "dataframe-placement:",
+                    units[p].key,
+                    "rows",
+                    region._frames[0].height(),
+                    "planned",
+                    labels[planned],
+                    "at start",
+                    labels[device],
+                    file=RawFileDescriptor(2),
+                )
+            if device == _PLACE_CPU:
+                # The CPU runs it with the rest, on the inputs computed
+                # here, copied to the host now so a failed copy raises.
+                _frame_to_host(region._frames[0])
+                plan_substitute_node(
+                    context, units[p].input, region._frames[0].copy()
+                )
+                if len(region._frames) > 1:
+                    _frame_to_host(region._frames[1])
+                    plan_substitute_node(
+                        context,
+                        context._nodes[units[p].sink].right,
+                        region._frames[1].copy(),
+                    )
+                continue
+            for d in range(1, problem.devices()):
+                if d == device:
+                    problem.startup_ns[d] = 0
+            var result = backend.run_pipeline(
+                _from_context(region^), solved.devices[device - 1].ordinal
+            )
+            var consumer = chosen[parent[p]] if parent[p] >= 0 else _PLACE_CPU
+            if consumer != device:
+                _frame_to_host(result)
+            plan_substitute(context, units[p], result^)
+        var result = _from_context(context^)._collect(
+            optimize=False, streaming=streaming, batch_size=batch_size
+        )
+        crew.release()
+        return result^
+    except e:
+        crew.release()
+        raise e^
 
 
 @fieldwise_init

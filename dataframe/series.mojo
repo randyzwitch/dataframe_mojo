@@ -1104,6 +1104,47 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             raise Error("Expected float64 column")
         return self._data[Column[Float64]].copy()
 
+    def _residence(self) -> String:
+        """`backend:ordinal` of the device holding this series' values, or
+        empty when they are on the host (or the series is chunked)."""
+        if self.is_chunked():
+            return String()
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                var held = self._data[Column[Scalar[D]]]._data.residence()
+                if not held:
+                    return String()
+                return (
+                    held.value()[].backend + ":" + String(held.value()[].device)
+                )
+        return String()
+
+    def _copy_to_host(self) raises:
+        """Copy any of this series' buffers that live in an accelerator's
+        memory to the host now (`_Buffer.copy_to_host`), so later reads
+        need no copy and a failed copy raises here. Backends produce device
+        buffers for numeric and Bool columns."""
+        if self.is_chunked():
+            for part in self.chunks():
+                part._copy_to_host()
+            return
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                ref column = self._data[Column[Scalar[D]]]
+                column._data.copy_to_host()
+                column._bits.copy_to_host()
+                return
+        if self._data.isa[Column[Int128]]():
+            ref column = self._data[Column[Int128]]
+            column._data.copy_to_host()
+            column._bits.copy_to_host()
+        elif self._data.isa[BoolColumn]():
+            ref column = self._data[BoolColumn]
+            column._data.copy_to_host()
+            column._bits.copy_to_host()
+
     def numeric[D: DType](self) raises -> Column[Scalar[D]]:
         """The (shared, immutable) column as Scalar[D], raising on a dtype
         mismatch. Temporal columns read as their Int64 storage."""
