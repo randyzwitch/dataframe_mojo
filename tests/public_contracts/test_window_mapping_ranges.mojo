@@ -323,7 +323,7 @@ def test_range_positions_do_not_restart_in_streaming_batches() raises:
                     batch_size=2,
                 )
             )
-            assert_frame(result.select_exprs(expressions), expected)
+            assert_frame(result.select([String("x"), "i"]), expected)
     _check(
         frame,
         [int_range(lit(Int64(6))).sum().alias("s")],

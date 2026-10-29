@@ -8,7 +8,9 @@ This is a working first implementation, not a production engine or a portable
 backend facade. The API is provisional.
 
 Calendar-aware rolling and dynamic grouping are described in
-[Time windows](docs/time-windows.md).
+[Time windows](docs/time-windows.md). Ordered partitions, row numbers,
+mapping strategies and SQL ranking recipes are described in
+[Window functions](docs/window-functions.md).
 The Metal backend for Apple silicon is being rebuilt and runs no queries yet
 (see [Apple Metal](docs/apple-metal.md)).
 

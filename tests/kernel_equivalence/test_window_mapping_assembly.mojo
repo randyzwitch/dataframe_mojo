@@ -38,7 +38,7 @@ def test_window_mapping_rows_join_and_explode_partition_order() raises:
 
 
 def _nested_mapping_prototype() raises -> Series:
-    var child = Series("item", Column[Int32]([3, 4])).with_dtype(DataType.DATE)
+    var child = Series("item", Column[Int64]([3, 4])).with_dtype(DataType.DATE)
     var metadata: List[UInt8] = [1, 0, 0, 0, 1, 0, 0, 0, 107, 1, 0, 0, 0, 118]
     child._field_metadata = ArcPointer(metadata^)
     var lists = Series("dates", ListColumn([Int64(0), 1, 2], child^))

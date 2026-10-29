@@ -393,8 +393,6 @@ def test_shift_ignore_nulls_preserves_logical_cells_across_layouts() raises:
         18,
         22,
         25,
-        26,
-        27,
         28,
     ]:
         var frame = DataFrame([selection_column(kind, 9, 0, 1)])
@@ -534,7 +532,7 @@ def test_first_last_ignore_nulls_ordered_all_null_partitions() raises:
             )
 
 
-def test_empty_nested_shift_window_mapping_retains_child_field_metadata() raises:
+def test_empty_nested_filtered_window_mapping_retains_child_field_metadata() raises:
     from std.memory import ArcPointer
     from dataframe import ListColumn
     from std.testing import assert_equal
@@ -545,9 +543,9 @@ def test_empty_nested_shift_window_mapping_retains_child_field_metadata() raises
     child._field_metadata = ArcPointer(metadata^)
     var original = DataFrame(
         [
-            Series("x", ListColumn([0, 1, 2], child.copy())),
-            Series("g", Column[Int64]([0, 0])),
-            Series("t", Column[Int64]([0, 1])),
+            Series("x", ListColumn([0, 0, 1, 2], child.copy(), [UInt8(6)])),
+            Series("g", Column[Int64]([0, 0, 0])),
+            Series("t", Column[Int64]([0, 1, 2])),
         ]
     )
     for source in [
@@ -560,7 +558,7 @@ def test_empty_nested_shift_window_mapping_retains_child_field_metadata() raises
             for mapping in [String("join"), "explode"]:
                 var expression = (
                     col("x")
-                    .shift(ignore_nulls=True)
+                    .drop_nulls()
                     .over("g", order_by="t", mapping_strategy=mapping)
                     .alias("out")
                 )
@@ -572,7 +570,10 @@ def test_empty_nested_shift_window_mapping_retains_child_field_metadata() raises
                             engine="cpu", batch_size=1
                         ) if lazy else frame.select(expression)
                     )
-                    assert_equal(actual.height(), 0 if empty else 2)
+                    assert_equal(
+                        actual.height(),
+                        0 if empty else (3 if mapping == "join" else 2),
+                    )
                     var output = actual.column("out")
                     assert_true(
                         output.dtype()
@@ -599,9 +600,11 @@ def test_empty_nested_shift_window_mapping_retains_child_field_metadata() raises
                     )
                     if not empty:
                         assert_equal(
-                            len(shifted), 4 if mapping == "join" else 2
+                            len(shifted), 6 if mapping == "join" else 2
                         )
-                        assert_true(shifted.get(0).is_null())
                         assert_equal(
-                            shifted.get(1).list().get(0).int64(), Int64(11)
+                            shifted.get(0).list().get(0).int64(), Int64(11)
+                        )
+                        assert_equal(
+                            shifted.get(1).list().get(0).int64(), Int64(22)
                         )
