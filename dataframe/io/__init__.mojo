@@ -13,6 +13,7 @@ from .arrow import (
     import_arrow,
     import_arrow_series,
 )
+from .csv_input import CsvBuffer
 from .csv import (
     CsvField,
     CsvOptions,

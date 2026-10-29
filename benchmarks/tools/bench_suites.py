@@ -997,8 +997,9 @@ def check_correctness(result):
     return failures
 
 
-def report(result):
-    cells = evaluate(result)
+def report(result, cells=None):
+    if cells is None:
+        cells = evaluate(result)
     info = result["provenance"]
     engines = result.get("engines", list(ENGINES))
     lines = [
@@ -1406,10 +1407,13 @@ def main():
             print("dataframe_mojo failures:", failures, file=sys.stderr)
             sys.exit(1)
         return
-    text = report(result)
+    # One complete validation covers Markdown, HTML and the exit check in
+    # this invocation. A new command always reads and validates answers again.
+    cells = evaluate(result)
+    text = report(result, cells)
     print(text)
     page = bench_html.render(
-        result, evaluate(result), SUITES, VARIANTS, instrumented_paths()
+        result, cells, SUITES, VARIANTS, instrumented_paths()
     )
     if args.output and not args.report_from:
         args.output.with_suffix(".md").write_text(text)
@@ -1421,7 +1425,7 @@ def main():
     if args.check:
         bad = [
             key
-            for key, cell in evaluate(result).items()
+            for key, cell in cells.items()
             if (key[3] == "mojo" or key[3].startswith("base@"))
             and cell["status"] in ("wrong answer", "failed", "timeout")
         ]

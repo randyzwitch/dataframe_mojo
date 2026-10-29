@@ -157,6 +157,33 @@ operations likewise run per group, so `col("x").cum_sum().max()` is each
 group's running peak. Rolling min/max are O(n x window); other kernels are
 linear apart from `rank`, which sorts each partition.
 
+`over(partition_by, order_by="time", descending=False, nulls_last=False)`
+sorts within each partition before evaluating the expression, then scatters
+results back to their original rows. Ties keep input order; NaN and nulls
+follow frame sorting. `order_by` also accepts a list of names. Omit
+`partition_by` for one partition spanning the whole frame, for example
+`col("amount").cum_sum().over(order_by="date")` or
+`col("amount").cum_sum().over(order_by=[String("date"), "sequence"])`.
+An empty partition list means one global partition; `[String("")]` instead
+partitions by the column named `""`. Use a list to order by that empty-named
+column too. Partition and ordering keys remain lazy plan dependencies even
+when they are absent from the output.
+
+`shift(n, fill_value=...)` fills only vacated positions. Nulls moved from
+the input remain null; the fill value follows conditional expression type
+rules. The same rule applies separately within each `over` partition.
+
+Expression row selection is available before a reduction or as a standalone
+column: `col("amount").filter(col("refunded")).sum()`, `head(n)`, `tail(n)`,
+`slice(offset, length=-1)`, `gather(indices)`, and scalar `get(index)`.
+Null filter predicates are false, while selected null values remain in the
+result and count toward `len()`. Negative offsets and indices count from
+the end; out-of-bounds gather/get indices raise. Head/tail counts and
+explicit slice lengths are nonnegative. Inside `group_by().agg()`, these
+operations act separately within each group; unreduced selections produce
+one list per group. Outside aggregation, selections that change height
+cannot share `select` output with columns of a different height.
+
 ### Temporal types
 
 `DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit, time_zone)`
@@ -951,3 +978,6 @@ row has the same element count in each.
 Nested columns cannot yet be sort keys, be cast, be reduced (other than
 `implode`), be used in `when`/`then`, or be written to CSV; each raises an
 error that says so.
+
+See [expressions within groups](group-expressions.md) for filtered and ordered
+aggregates, row selection, distinct/top-k operations and `GroupBy.head/tail`.
