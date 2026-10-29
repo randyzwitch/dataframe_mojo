@@ -273,6 +273,19 @@ Return canonical CRS JSON (object or string), or `null` if unknown.
 def crs(series: Series) -> String
 ```
 
+## `CsvBuffer`
+
+Reusable CSV bytes. A String constructor treats its text as CSV data.
+
+Byte lists convert implicitly; String paths remain unambiguous because
+the String constructor requires an explicit CsvBuffer(...). Copies share
+immutable bytes. Readers borrow them only while decoding; output columns
+own their values independently.
+
+- `def __init__(out self, bytes: List[UInt8])`
+- `def __init__(out self, text: String)`
+- `def __len__(self) -> Int`
+
 ## `CsvField`
 
 One CSV output field. Names and dtypes are always explicit.
@@ -1677,6 +1690,18 @@ def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header:
 
 ```mojo
 def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
 ## `read_geojson`
