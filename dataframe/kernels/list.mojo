@@ -3,7 +3,7 @@ and struct field access. Nulls propagate: a null list row gives a null
 result, and a null struct row makes every field null."""
 from std.math import isnan
 from dataframe.storage.boolean import BoolColumn
-from dataframe.storage.column import Column
+from dataframe.storage.column import Column, _append_validity
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     LIST_CONTAINS,
@@ -40,6 +40,13 @@ def nested_op(
     compiled: Optional[Regex] = None,
 ) raises -> Series:
     if input.is_chunked():
+        if node.op == LIST_LEN:
+            return _chunked_list_len(input)
+        if node.op == STRUCT_FIELD:
+            var fields = List[Series]()
+            for part in input.chunks():
+                fields.append(_struct_field(part, node.text))
+            return Series._from_chunks(fields)
         return nested_op(node, input.rechunk(), input_dtype, compiled)
     if node.op == STR_SPLIT:
         if node.min_count > 0:
@@ -72,6 +79,21 @@ def nested_op(
     if node.op == LIST_JOIN:
         return _join(lists, node.text)
     return _reduce(lists, node.op)
+
+
+def _chunked_list_len(input: Series) raises -> Series:
+    """Read only list offsets and parent validity into one numeric output."""
+    var lengths = List[Int64](unsafe_uninit_length=len(input))
+    var bits = List[UInt8]()
+    var base = 0
+    ref chunks = input._chunked.value()[]
+    for storage in chunks.arrays:
+        ref lists = storage[ListColumn]
+        for row in range(len(lists)):
+            lengths[base + row] = Int64(lists.element_count(row))
+        _append_validity(bits, base, lists._bits[], lists._offset, len(lists))
+        base += len(lists)
+    return Series("", Column[Int64](values=lengths^, bits=bits^))
 
 
 def _split_regex(

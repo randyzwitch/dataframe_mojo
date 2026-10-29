@@ -715,17 +715,24 @@ def _packed_temporal(
 def dt_op(
     node: Node, input: Series, dtype: DataType, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
+    var op = node.op
+    # These operations change interpretation metadata, never stored ticks.
+    # Keep the existing arrays (and any existing merge cache) shared.
+    if op == DT_CONVERT_TZ:
+        return input.with_dtype(dtype.with_time_zone(node.text))
+    if op == DT_WITH_TIME_UNIT:
+        var target = DataType.datetime(
+            node.text, dtype.time_zone()
+        ) if dtype.is_datetime() else DataType.duration(node.text)
+        return input.with_dtype(target)
     if input.is_chunked():
         return dt_op(node, input.rechunk(), dtype, mask)
-    var op = node.op
     if op == DT_STRPTIME:
         return _strptime(
             input, node.dtypes[0].value(), node.text, node.integer == 1, mask
         )
     if op == DT_REPLACE_TZ:
         return _replace_time_zone(input, dtype, node)
-    if op == DT_CONVERT_TZ:
-        return input.with_dtype(dtype.with_time_zone(node.text))
     if (
         op == DT_BUILD
         or op == DT_REPLACE
@@ -734,11 +741,6 @@ def dt_op(
         or op == DT_BUSINESS_DAY_COUNT
     ):
         return _packed_temporal(node, input, dtype, mask)
-    if op == DT_WITH_TIME_UNIT:
-        var target = DataType.datetime(
-            node.text, dtype.time_zone()
-        ) if dtype.is_datetime() else DataType.duration(node.text)
-        return input.with_dtype(target)
     var field = field_projection(op, input, dtype, mask)
     if field:
         return field.value().copy()

@@ -1,15 +1,19 @@
 # Scalar kernel chunk consumption
 
-Inventory and measurements for #1003 are in progress. Baseline revision:
-`2d0dce12a41a07c265025a890a10ae121483dc1b`.
+The initial numeric-cast change shipped in #1072. The remaining consumers
+are still being measured for #1003 against current main
+`6d3f987aae999e9e10072f926cc6d9817510fbb8`, which already includes that cast
+optimization. Historical cast measurements below retain their original
+baseline `2d0dce12a41a07c265025a890a10ae121483dc1b`; those gains are not new
+improvements in the remaining-consumer work.
 
 The initial inventory distinguishes explicit APIs requesting an owned
 contiguous column from internal scalar consumers. The former are retained;
 the latter are candidates for aligned chunk-window evaluation.
 
-| Consumer | Current input copy | Constraints to preserve |
+| Consumer | Input copy at the remaining-consumer baseline | Constraints to preserve |
 | --- | --- | --- |
-| `kernels/cast.cast_series` | Rechunks any chunked input | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
+| `kernels/cast.cast_series` | Unmasked infallible numeric casts already consume chunks; remaining checked/masked/logical paths merge | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
 | `kernels/binary.math_unary` and `unary` | Rechunk before scalar dispatch | NaN/infinity/signed zero, integer errors, null tests and masks |
 | `kernels/binary.binary` and `choose` | Rechunk each operand | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
 | `kernels/horizontal` | Rechunks each input | Different boundaries, row null rules, mixed widths and promotions |
@@ -39,6 +43,41 @@ dictionary semantics, error-row numbering and inactive conditional rows.
 Use independent expectations and the existing contiguous path as a
 differential control. Keep generated inputs, binaries and profiles outside
 the repository.
+
+## Remaining metadata consumers
+
+The current-main inventory also finds merges before operations that need
+only a small part of the input storage:
+
+- String byte lengths need offsets or view lengths; character lengths read
+  row bytes but do not need a merged byte buffer.
+- List lengths need parent offsets and validity, not child payloads.
+- Struct field projection needs the selected field and the parent mask,
+  rather than every other field's buffers.
+- Time-zone conversion and `with_time_unit` retag stored ticks without
+  changing them.
+
+The first remaining-consumer candidate addresses these paths. Other string,
+nested, math, binary, horizontal and checked-conversion consumers remain in
+scope; this metadata subset does not complete #1003. Existing contiguous
+paths and explicit contiguous adapters are retained.
+
+The baseline probe has independently checked complete values, nulls, row
+counts and exact Arrow schemas for 30 small/empty cases and 35 scoped
+allocation cases. The latter compare contiguous input with 64 chunks at
+100,000 rows, nullable windows starting at row 13, cold metadata and warmed
+source caches. Direct kernels and selected whole expressions are separate.
+The calibrated allocator observer matches the installed runtime and has zero
+tracking errors in those cases. Requested/live/peak newly owned bytes include
+output and temporaries; existing fixture buffers and warm caches are outside
+the scope. Process RSS includes those excluded buffers and untimed export.
+Instrumented elapsed times are excluded from performance evidence.
+
+The evidence remains outside the repository at
+`/tmp/1003-current-main/baseline-admission.json`. Timing and offsets/view
+layout comparisons are still in progress. No new elapsed-time or general
+engine speedup is claimed from these allocation observations. A zero merge
+cache on a whole-expression source does not prove zero temporary copying.
 
 ## Initial numeric cast path
 
