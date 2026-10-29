@@ -157,6 +157,22 @@ operations likewise run per group, so `col("x").cum_sum().max()` is each
 group's running peak. Rolling min/max are O(n x window); other kernels are
 linear apart from `rank`, which sorts each partition.
 
+`over(partition_by, order_by="time", descending=False, nulls_last=False)`
+sorts within each partition before evaluating the expression, then scatters
+results back to their original rows. Ties keep input order; NaN and nulls
+follow frame sorting. `order_by` also accepts a list of names. Omit
+`partition_by` for one partition spanning the whole frame, for example
+`col("amount").cum_sum().over(order_by="date")` or
+`col("amount").cum_sum().over(order_by=[String("date"), "sequence"])`.
+An empty partition list means one global partition; `[String("")]` instead
+partitions by the column named `""`. Use a list to order by that empty-named
+column too. Partition and ordering keys remain lazy plan dependencies even
+when they are absent from the output.
+
+`shift(n, fill_value=...)` fills only vacated positions. Nulls moved from
+the input remain null; the fill value follows conditional expression type
+rules. The same rule applies separately within each `over` partition.
+
 Expression row selection is available before a reduction or as a standalone
 column: `col("amount").filter(col("refunded")).sum()`, `head(n)`, `tail(n)`,
 `slice(offset, length=-1)`, `gather(indices)`, and scalar `get(index)`.
