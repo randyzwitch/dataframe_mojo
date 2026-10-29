@@ -39,6 +39,8 @@ def nested_op(
     input_dtype: DataType,
     compiled: Optional[Regex] = None,
 ) raises -> Series:
+    from dataframe.storage.nested_merge import _child
+
     if input.is_chunked():
         if node.op == LIST_LEN:
             return _chunked_list_len(input)
@@ -46,6 +48,13 @@ def nested_op(
             var fields = List[Series]()
             for part in input.chunks():
                 fields.append(_struct_field(part, node.text))
+            if fields[0].dtype().is_categorical():
+                for field in fields:
+                    if field.dtype() != fields[0].dtype():
+                        # Struct schemas encode the categorical type without
+                        # its domain. Reconcile different child dictionaries
+                        # once, without merging any unselected fields.
+                        return _child(fields)
             return Series._from_chunks(fields)
         return nested_op(node, input.rechunk(), input_dtype, compiled)
     if node.op == STR_SPLIT:
