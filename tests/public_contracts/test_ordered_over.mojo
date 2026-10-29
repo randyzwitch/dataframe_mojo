@@ -138,3 +138,69 @@ def test_ordered_over_sorts_categorical_labels_instead_of_dictionary_codes() rai
             source.lazy().select(expr).collect(engine="cpu", batch_size=2),
             expected,
         )
+
+
+def test_shift_fill_only_replaces_vacated_partition_positions() raises:
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 1, 0, 1, 0, 1])),
+            Series("t", Column[Int64]([2, 2, 1, 1, 2, 0])),
+            Series(
+                "x",
+                Column[Int64](
+                    [10, 20, 30, 40, 50, 60],
+                    [False, True, True, False, True, True],
+                ),
+            ),
+        ]
+    )
+    var expressions = [
+        col("x").shift(1, fill_value=-1).over("g", order_by="t").alias("lag"),
+        col("x").shift(-1, fill_value=-1).over("g", order_by="t").alias("lead"),
+        col("x").shift(0, fill_value=-1).over("g", order_by="t").alias("same"),
+        col("x")
+        .shift(100, fill_value=-1)
+        .over("g", order_by="t")
+        .alias("outside"),
+    ]
+    var expected = DataFrame(
+        [
+            Series(
+                "lag",
+                Column[Int64](
+                    [30, 0, -1, 60, 0, -1],
+                    [True, False, True, True, False, True],
+                ),
+            ),
+            Series(
+                "lead",
+                Column[Int64](
+                    [50, -1, 0, 20, -1, 0],
+                    [True, True, False, True, True, False],
+                ),
+            ),
+            frame.column("x").renamed("same"),
+            Series("outside", Column[Int64]([-1, -1, -1, -1, -1, -1])),
+        ]
+    )
+    for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
+        assert_frame(source.select(expressions), expected)
+        assert_frame(
+            source.lazy()
+            .select(expressions)
+            .collect(engine="cpu", batch_size=1),
+            expected,
+        )
+    var text = DataFrame(
+        [Series("x", Column[String](["a", "", "c"], [True, False, True]))]
+    )
+    assert_frame(
+        text.select(col("x").shift(fill_value="empty")),
+        DataFrame(
+            [
+                Series(
+                    "x", Column[String](["empty", "a", ""], [True, True, False])
+                ),
+            ]
+        ),
+    )

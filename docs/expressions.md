@@ -165,6 +165,10 @@ follow frame sorting. `order_by` also accepts a list of names. Omit
 `col("amount").cum_sum().over(order_by="date")`. Ordering keys remain lazy
 plan dependencies even when they are absent from the output.
 
+`shift(n, fill_value=...)` fills only vacated positions. Nulls moved from
+the input remain null; the fill value follows conditional expression type
+rules. The same rule applies separately within each `over` partition.
+
 ### Temporal types
 
 `DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit, time_zone)`

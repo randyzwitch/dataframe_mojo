@@ -1552,6 +1552,23 @@ struct Expr(Copyable):
         are null."""
         return self._window(SHIFT, Int64(n))
 
+    def shift(self, n: Int, fill_value: Self) -> Self:
+        """Shift values, filling only vacated positions; source nulls stay null.
+
+        `fill_value` follows conditional-expression dtype and broadcast rules.
+        """
+        var occupied = lit(1).cum_count().shift(n).is_not_null()
+        return when(occupied).then(self.shift(n)).otherwise(fill_value)
+
+    def shift(self, fill_value: Self) -> Self:
+        return self.shift(1, fill_value)
+
+    def shift(self, n: Int, fill_value: String) -> Self:
+        return self.shift(n, lit(fill_value))
+
+    def shift(self, fill_value: String) -> Self:
+        return self.shift(1, lit(fill_value))
+
     def diff(self, n: Int = 1) -> Self:
         """Difference from the value n rows earlier."""
         return self - self.shift(n)
