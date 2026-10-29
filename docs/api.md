@@ -35,11 +35,11 @@ One nullable cell of a supported dtype.
 Only the payload field matching `dtype` is meaningful. Equality is
 structural: nulls equal nulls of the same dtype and NaN equals NaN.
 
-- `def __init__[D: DType](out self, value: Scalar[D])`
-  A numeric value, preserving integer precision including UInt64 and Int128, and floating-point precision.
+- `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
 - `def __init__(out self, value: Bool)`
 - `def __init__(out self, value: String)`
-- `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
+- `def __init__[D: DType](out self, value: Scalar[D])`
+  A numeric value, preserving integer precision including UInt64 and Int128, and floating-point precision.
 - `def __eq__(self, other: Self) -> Bool`
 - `def nested(dtype: DataType, var series: Series) -> Self`
   A list value (its elements as a series) or a struct value (a one-row series of the struct column).
@@ -110,12 +110,12 @@ def as_struct(fields: List[Expr], name: String = "") -> Expr
 
 A window onto shared, bit-packed values and validity.
 
-- `def __init__(out self, values: List[Bool])`
-- `def __init__(out self, values: List[Bool], valid: List[Bool])`
-- `def __init__(out self, column: Column[Bool])`
-  Pack a byte-per-value Boolean column.
 - `def __init__(out self, *, var values: List[UInt8], var bits: List[UInt8], length: Int)`
   Adopt finished value and validity bitmaps.
+- `def __init__(out self, column: Column[Bool])`
+  Pack a byte-per-value Boolean column.
+- `def __init__(out self, values: List[Bool])`
+- `def __init__(out self, values: List[Bool], valid: List[Bool])`
 - `def __len__(self) -> Int`
 - `def to_list(self) -> List[Bool]`
 - `def is_null(self, index: Int) -> Bool`
@@ -188,10 +188,10 @@ A window onto a shared payload buffer and validity bitmap.
 Underscored storage is internal. Public operations return new columns;
 no mutable buffers or implicit negative indexing are exposed.
 
-- `def __init__(out self, var values: List[T])`
-- `def __init__(out self, var values: List[T], valid: List[Bool])`
 - `def __init__(out self, *, var values: List[T], var bits: List[UInt8])`
   Adopt typed values and a prepacked validity bitmap without copying.
+- `def __init__(out self, var values: List[T])`
+- `def __init__(out self, var values: List[T], valid: List[Bool])`
 - `def __len__(self) -> Int`
 - `def to_list(self) -> List[T]`
   An owned copy of this window's payloads, null slots included.
@@ -382,28 +382,28 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Every column's values moved n rows later (earlier when n is negative). Height and schema stay the same. The min(|n|, height) rows left empty at the start (or, for a negative n, the end) are null, or `fill_value` cast to each column's type. `fill_value` is a scalar expression evaluated against this frame: a literal, or a reduction such as `col("a").max()`.
 - `def vstack(self, other: Self) -> Self`
   Append other's rows; schemas must match exactly.
+- `def hstack(self, columns: List[Series]) -> Self`
 - `def hstack(self, other: Self) -> Self`
   Append other's columns; heights must match, names stay unique.
-- `def hstack(self, columns: List[Series]) -> Self`
 - `def clear(self, n: Int = Int(0)) -> Self`
   The same schema with n rows of nulls (zero rows by default).
 - `def drop(self, name: String) -> Self`
 - `def drop(self, names: List[String]) -> Self`
   Remove columns; every name must exist and appear once.
-- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
-  Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored.
 - `def rename(self, function: def(String) raises thin -> String) -> Self`
   Rename every column using a Mojo function; reject duplicate outputs.
 - `def rename(self, function: def(String) thin -> String) -> Self`
   Rename every column using a Mojo function; reject duplicate outputs.
+- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
+  Rename columns by old name; all names are validated first. With strict=False, names this frame lacks are ignored.
 - `def insert_column(self, index: Int, column: Series) -> Self`
   Insert a column by position, returning a frame with shared buffers.
 - `def gather_every(self, n: Int, offset: Int = Int(0)) -> Self`
   Take every nth row from a nonnegative offset; n must be positive.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row index starting at offset.
-- `def select(self, names: List[String]) -> Self`
 - `def select(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
+- `def select(self, names: List[String]) -> Self`
 - `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
 - `def sum(self) -> Self`
@@ -431,10 +431,10 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def gather(self, indices: List[Int], *, null_on_oob: Bool = False) -> Self`
   The rows at `indices`, in that order: a negative index counts from the end. An index out of range raises, or with null_on_oob=True gives a row of nulls.
 - `def take(self, indices: List[Int]) -> Self`
-- `def filter(self, mask: Column[Bool]) -> Self`
-  Filter with a byte-per-value Boolean column (packed first).
 - `def filter(self, mask: BoolColumn) -> Self`
   Keep true rows, dropping false and null mask entries, in input order.
+- `def filter(self, mask: Column[Bool]) -> Self`
+  Filter with a byte-per-value Boolean column (packed first).
 - `def filter(self, predicate: Expr, *, batch_size: Int = Int(8192), keep: List[String] = List()) -> Self`
   The rows `predicate` keeps. Given `keep`, only those columns are returned: the predicate still reads any column, but columns only it reads are never copied (a lazy filter whose later steps read fewer columns than it does).
 - `def explode(self, column: String) -> Self`
@@ -446,43 +446,43 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Add a struct column built from existing columns (kept as they are); unnest(name) gives them back.
 - `def with_column(self, var column: Series) -> Self`
   Replace by name or append; the input dataframe is unchanged.
-- `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Single-column sort. NaNs follow non-null numbers. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order.
-- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Lexicographic sort by several columns, one direction; equal keys in no particular order unless `maintain_order`.
-- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
-  Per-column direction and null placement; list lengths match by. Equal keys in no particular order unless `maintain_order`.
 - `def sort(self, by: Expr, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Sort by an expression, evaluated once before sorting.
-- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Sort by expression keys with common direction and null placement.
 - `def sort(self, by: List[Expr], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
   Sort by expression keys with a direction and null placement each.
-- `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
+- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by expression keys with common direction and null placement.
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Per-column direction and null placement; list lengths match by. Equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Lexicographic sort by several columns, one direction; equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Single-column sort. NaNs follow non-null numbers. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order.
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
   Row order of a stable sort; equal keys keep input order.
+- `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
 - `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows with greatest values by `by` (ascending when `reverse=True`).
 - `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows that sort(by) would put first (sort(by, descending=True) with reverse=True); nulls rank last.
 - `def bottom_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
   Match each left row to an ordered right key, optionally within `by`.
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join(self, right: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
-- `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
-- `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
-  Hash join on key columns of any dtype; null keys never match.
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, right: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every left row paired with every right row, left-major.
+- `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Hash join on key columns of any dtype; null keys never match.
+- `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+- `def join(self, right: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(8192)) -> Self`
   Evaluate against the original frame. Scalar-only output has one row.
 - `def with_columns(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
@@ -504,31 +504,31 @@ Own equal-length, uniquely named columns; transformations copy storage.
   True for every row whose key occurs exactly once.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
   Keep rows with no null in subset (default: every column).
-- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
-  Fill nulls in string columns with a string.
-- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
-  Fill nulls with a scalar value.
 - `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
   Fill nulls with forward/backward, min/max/mean, zero, or one.
-- `def fill_nan(self, value: Float64) -> Self`
-  Replace floating NaNs with a numeric scalar, preserving column dtypes.
+- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
+  Fill nulls with a scalar value.
+- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
+  Fill nulls in string columns with a string.
 - `def fill_nan(self, value: Expr) -> Self`
   Replace NaNs in floating columns; nulls and other columns stay.
+- `def fill_nan(self, value: Float64) -> Self`
+  Replace floating NaNs with a numeric scalar, preserving column dtypes.
 - `def drop_nans(self, subset: List[String] = List()) -> Self`
   Remove rows with a NaN in subset's floating columns; keep nulls.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> TimeGroupBy`
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> TimeGroupBy`
   Group sorted temporal rows into calendar-aligned, possibly overlapping windows.
-- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
-- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> TimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> TimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> TimeGroupBy`
 - `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", group_by: List[String] = List()) -> TimeGroupBy`
   Aggregate a duration window for each sorted temporal input row.
-- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> TimeGroupBy`
-- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> TimeGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> GroupBy`
-- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> GroupBy`
-  Group by one or more columns of any dtype.
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
+- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> GroupBy`
+  Group by one or more columns of any dtype.
 - `def group_by_rollup(self, keys: List[String]) -> GroupingSets`
   Group by the rollup sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), and (). Finish with `agg`; see GroupingSets for the output. Runs the lazy plan.
 - `def group_by_cube(self, keys: List[String]) -> GroupingSets`
@@ -552,11 +552,11 @@ list(inner) holds a variable number of `inner` values per row, and
 struct(names, dtypes) holds one value of each named field per row.
 
 - `def __init__(out self, code: Int, unit: Int)`
-- `def __init__(out self, storage: DType)`
-  A numeric type stored as Scalar[storage].
-- `def __init__(out self, code: Int, var spec: String)`
 - `def __init__(out self, code: Int, unit: Int, var zone: String)`
   A datetime in a time zone; the zone rides in `_nested`.
+- `def __init__(out self, code: Int, var spec: String)`
+- `def __init__(out self, storage: DType)`
+  A numeric type stored as Scalar[storage].
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
 - `def list(inner) -> Self`
@@ -777,11 +777,11 @@ def exclude(names: List[String]) -> Expr
 Export a frame as an Arrow struct array (format `+s`), the shape used for a record batch.
 
 ```mojo
-def export_arrow(frame: DataFrame, mut array: ArrowArray, mut schema: ArrowSchema)
+def export_arrow(frame: DataFrame, array_address: Int, schema_address: Int)
 ```
 
 ```mojo
-def export_arrow(frame: DataFrame, array_address: Int, schema_address: Int)
+def export_arrow(frame: DataFrame, mut array: ArrowArray, mut schema: ArrowSchema)
 ```
 
 ## `export_arrow_series`
@@ -789,11 +789,11 @@ def export_arrow(frame: DataFrame, array_address: Int, schema_address: Int)
 Fill consumer-allocated ArrowArray and ArrowSchema structs.
 
 ```mojo
-def export_arrow_series(series: Series, mut array: ArrowArray, mut schema: ArrowSchema)
+def export_arrow_series(series: Series, array_address: Int, schema_address: Int)
 ```
 
 ```mojo
-def export_arrow_series(series: Series, array_address: Int, schema_address: Int)
+def export_arrow_series(series: Series, mut array: ArrowArray, mut schema: ArrowSchema)
 ```
 
 ## `Expr`
@@ -802,9 +802,9 @@ A flat, topologically ordered tree; composition never evaluates data.
 
 - `def __init__(out self, then: Then)`
   A when/then chain without otherwise yields null for unmatched rows.
-- `def __init__(out self, value: Int)`
-- `def __init__(out self, value: Float64)`
 - `def __init__(out self, value: Bool)`
+- `def __init__(out self, value: Float64)`
+- `def __init__(out self, value: Int)`
 - `def __neg__(self) -> Self`
 - `def __invert__(self) -> Self`
 - `def __lt__(self, other: Self) -> Self`
@@ -852,24 +852,24 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def name_suffix(self, suffix: String) -> Self`
   Suffix the output name; for selectors, every expanded name.
 - `def pow(self, exponent: Self) -> Self`
-- `def eq(self, other: String) -> Self`
 - `def eq(self, other: Self) -> Self`
-- `def ne(self, other: String) -> Self`
+- `def eq(self, other: String) -> Self`
 - `def ne(self, other: Self) -> Self`
-- `def eq_missing(self, other: String) -> Self`
-  Null-safe equality with a string literal; see the Expr overload.
+- `def ne(self, other: String) -> Self`
 - `def eq_missing(self, other: Self) -> Self`
   Compare for equality, returning a Bool for every row.
-- `def ne_missing(self, other: String) -> Self`
-  Null-safe inequality with a string literal; see the Expr overload.
+- `def eq_missing(self, other: String) -> Self`
+  Null-safe equality with a string literal; see the Expr overload.
 - `def ne_missing(self, other: Self) -> Self`
   The Boolean complement of eq_missing, with no null results.
-- `def fill_null(self, value: String) -> Self`
+- `def ne_missing(self, other: String) -> Self`
+  Null-safe inequality with a string literal; see the Expr overload.
 - `def fill_null(self, value: Self) -> Self`
   Replace nulls with value; the dtypes must match.
-- `def is_in(self, values: List[String]) -> Self`
+- `def fill_null(self, value: String) -> Self`
 - `def is_in(self, values: List[Self]) -> Self`
   True when equal to any value; null input stays null.
+- `def is_in(self, values: List[String]) -> Self`
 - `def abs(self) -> Self`
 - `def sqrt(self) -> Self`
 - `def exp(self) -> Self`
@@ -939,48 +939,48 @@ A flat, topologically ordered tree; composition never evaluates data.
   Replace valid NaNs in a Float64 expression with value.
 - `def is_between(self, lower: Self, upper: Self, closed: String = "both") -> Self`
   True when lower <= x <= upper; `closed` is both, left, right, or none.
+- `def replace(self, mapping: Dict[Int, Int]) -> Self`
+  Replace each key of `mapping` with its value.
+- `def replace(self, mapping: Dict[String, String]) -> Self`
+  Replace each key of `mapping` with its value.
 - `def replace(self, old: List[Self], new: List[Self]) -> Self`
   Replace values equal to an entry of `old` with the entry of `new` at the same position; every other value, and the dtype, is kept.
+- `def replace(self, old: List[Self], new: Self) -> Self`
+  Replace each value of `old` with the one value `new`.
 - `def replace(self, old: List[String], new: List[String]) -> Self`
   Replace strings; see the List[Expr] overload.
+- `def replace(self, old: List[String], new: String) -> Self`
+  Replace each string of `old` with the one string `new`.
 - `def replace(self, old: Self, new: Self) -> Self`
   Replace one value; see the List[Expr] overload.
 - `def replace(self, old: String, new: String) -> Self`
   Replace one string; see the List[Expr] overload.
-- `def replace(self, old: List[Self], new: Self) -> Self`
-  Replace each value of `old` with the one value `new`.
-- `def replace(self, old: List[String], new: String) -> Self`
-  Replace each string of `old` with the one string `new`.
-- `def replace(self, mapping: Dict[String, String]) -> Self`
-  Replace each key of `mapping` with its value.
-- `def replace(self, mapping: Dict[Int, Int]) -> Self`
-  Replace each key of `mapping` with its value.
-- `def replace_strict(self, old: List[Self], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map every value through `old` -> `new`; the result may change dtype.
-- `def replace_strict(self, old: List[String], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map strings to strings; see the List[Expr] overload.
-- `def replace_strict(self, old: List[String], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
-  Map strings to strings, with a string default.
-- `def replace_strict(self, old: List[String], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map strings to other values; see the List[Expr] overload.
-- `def replace_strict(self, old: List[Self], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map values to strings; see the List[Expr] overload.
-- `def replace_strict(self, old: List[Self], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
-  Map values to strings, with a string default.
-- `def replace_strict(self, old: Self, new: Self, default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map one value; see the List[Expr] overload.
-- `def replace_strict(self, mapping: Dict[String, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map each key of `mapping` to its value.
-- `def replace_strict(self, mapping: Dict[String, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
-  Map each key of `mapping` to its value, with a string default.
-- `def replace_strict(self, mapping: Dict[String, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
-  Map each key of `mapping` to its value.
-- `def replace_strict(self, mapping: Dict[Int, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+- `def replace_strict(self, mapping: Dict[Int, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
   Map each key of `mapping` to its value.
 - `def replace_strict(self, mapping: Dict[Int, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
   Map each key of `mapping` to its value, with a string default.
-- `def replace_strict(self, mapping: Dict[Int, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+- `def replace_strict(self, mapping: Dict[Int, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
   Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[String, Int], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, mapping: Dict[String, String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value, with a string default.
+- `def replace_strict(self, mapping: Dict[String, String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map each key of `mapping` to its value.
+- `def replace_strict(self, old: List[Self], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map every value through `old` -> `new`; the result may change dtype.
+- `def replace_strict(self, old: List[Self], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings, with a string default.
+- `def replace_strict(self, old: List[Self], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map values to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: List[String], new: List[Self], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to other values; see the List[Expr] overload.
+- `def replace_strict(self, old: List[String], new: List[String], *, default: String, return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings, with a string default.
+- `def replace_strict(self, old: List[String], new: List[String], default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map strings to strings; see the List[Expr] overload.
+- `def replace_strict(self, old: Self, new: Self, default: Self = _no_default(), return_dtype: Optional[DataType] = None) -> Self`
+  Map one value; see the List[Expr] overload.
 - `def any(self, ignore_nulls: Bool = True) -> Self`
   Any true value. With ignore_nulls=False, Kleene: null if no true and some null.
 - `def all(self, ignore_nulls: Bool = True) -> Self`
@@ -1017,31 +1017,31 @@ A flat, topologically ordered tree; composition never evaluates data.
   Largest k values, preferring non-null values and keeping ties stable.
 - `def bottom_k(self, k: Int = Int(5)) -> Self`
   Smallest k values, preferring non-null values and keeping ties stable.
+- `def sort_by(self, by: List[Self], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def sort_by(self, by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
 - `def sort_by(self, by: Self, descending: Bool = False, nulls_last: Bool = False) -> Self`
   Order these values by a corresponding expression, keeping ties stable.
 - `def sort_by(self, by: String, descending: Bool = False, nulls_last: Bool = False) -> Self`
-- `def sort_by(self, by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
-- `def sort_by(self, by: List[Self], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def top_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def top_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
 - `def top_k_by(self, by: Self, k: Int = Int(5)) -> Self`
   Values at the k largest non-null-preferred ordering keys.
 - `def top_k_by(self, by: String, k: Int = Int(5)) -> Self`
-- `def top_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
-- `def top_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
 - `def bottom_k_by(self, by: Self, k: Int = Int(5)) -> Self`
   Values at the k smallest non-null-preferred ordering keys.
 - `def bottom_k_by(self, by: String, k: Int = Int(5)) -> Self`
-- `def bottom_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
-- `def bottom_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def max_by(self, by: List[Self]) -> Self`
+- `def max_by(self, by: List[String]) -> Self`
 - `def max_by(self, by: Self) -> Self`
   Value at the largest non-null key; first input row wins ties.
 - `def max_by(self, by: String) -> Self`
-- `def max_by(self, by: List[String]) -> Self`
-- `def max_by(self, by: List[Self]) -> Self`
+- `def min_by(self, by: List[Self]) -> Self`
+- `def min_by(self, by: List[String]) -> Self`
 - `def min_by(self, by: Self) -> Self`
   Value at the smallest non-null key; first input row wins ties.
 - `def min_by(self, by: String) -> Self`
-- `def min_by(self, by: List[String]) -> Self`
-- `def min_by(self, by: List[Self]) -> Self`
 - `def drop_nulls(self) -> Self`
   Remove null values, preserving the order of the remaining values.
 - `def drop_nans(self) -> Self`
@@ -1120,9 +1120,9 @@ A flat, topologically ordered tree; composition never evaluates data.
   Bin numeric values at explicit sorted edges, including open-ended outer bins.
 - `def qcut(self, quantiles: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False, allow_duplicates: Bool = False) -> Self`
   Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true.
-- `def over(self, partition_by: String) -> Self`
 - `def over(self, partition_by: List[String]) -> Self`
   Evaluate within partitions of the key columns, keeping row order.
+- `def over(self, partition_by: String) -> Self`
 - `def list(self) -> ListNamespace`
   Operations on list columns.
 - `def implode(self) -> Self`
@@ -1295,20 +1295,20 @@ def grouping_id(names: List[String]) -> Expr
 
 A pending `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`; finish it with agg.
 
+- `def agg(self, expr: Expr) -> DataFrame`
 - `def agg(self, exprs: List[Expr]) -> DataFrame`
   The rows of every grouping set, in set order: the keys (null in the sets that do not group by them), then the aggregations. Use `grouping` / `grouping_id` in `exprs` to tell subtotal rows from null key values. See LazyGroupingSets.agg.
-- `def agg(self, expr: Expr) -> DataFrame`
 
 ## `import_arrow`
 
 Import an exported Arrow record batch, copying by default.
 
 ```mojo
-def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> DataFrame
+def import_arrow(array_address: Int, schema_address: Int, *, copy: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def import_arrow(array_address: Int, schema_address: Int, *, copy: Bool = True) -> DataFrame
+def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> DataFrame
 ```
 
 ## `import_arrow_series`
@@ -1316,11 +1316,11 @@ def import_arrow(array_address: Int, schema_address: Int, *, copy: Bool = True) 
 Import an exported Arrow array, copying payloads by default.
 
 ```mojo
-def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> Series
+def import_arrow_series(array_address: Int, schema_address: Int, *, copy: Bool = True) -> Series
 ```
 
 ```mojo
-def import_arrow_series(array_address: Int, schema_address: Int, *, copy: Bool = True) -> Series
+def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> Series
 ```
 
 ## `last`
@@ -1343,27 +1343,27 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def select_exprs(self, exprs: List[Expr]) -> Self`
 - `def with_columns(self, expr: Expr) -> Self`
 - `def with_columns(self, exprs: List[Expr]) -> Self`
-- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False) -> LazyGroupBy`
   Group by computed keys, as DataFrame.group_by(List[Expr]): each key is evaluated once and named by its output name, and the aggregations still read the input's columns. Keys that are columns under their own names group as names do.
+- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets`
   Expand to the rollup sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), and () in one plan. Finish with `agg`; see LazyGroupingSets for the output.
 - `def group_by_cube(self, keys: List[String]) -> LazyGroupingSets`
   Every subset of the keys as a grouping set, for 2^n sets. A repeated key in `keys` yields repeated sets. Finish with `agg`.
 - `def group_by_grouping_sets(self, sets: List[List[String]]) -> LazyGroupingSets`
   One grouping per listed set; an empty set produces the grand total. A set listed twice yields its rows twice. Finish with `agg`.
-- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Sort by `by`. Rows with equal keys have unspecified order unless `maintain_order` preserves their input order.
-- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
-  Sort with a direction and null placement per key, as the eager DataFrame.sort takes them; equal keys in no particular order unless `maintain_order`.
-- `def sort(self, by: String, descending: Bool = False, *, maintain_order: Bool = False) -> Self`
 - `def sort(self, by: Expr, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Sort by an expression, evaluated once before sorting.
-- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
-  Sort by expression keys with common direction and null placement.
 - `def sort(self, by: List[Expr], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
   Sort by expression keys with a direction and null placement each.
+- `def sort(self, by: List[Expr], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by expression keys with common direction and null placement.
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> Self`
+  Sort with a direction and null placement per key, as the eager DataFrame.sort takes them; equal keys in no particular order unless `maintain_order`.
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
+  Sort by `by`. Rows with equal keys have unspecified order unless `maintain_order` preserves their input order.
+- `def sort(self, by: String, descending: Bool = False, *, maintain_order: Bool = False) -> Self`
 - `def gather_every(self, n: Int, offset: Int = Int(0)) -> Self`
   Take every nth row from a nonnegative offset; n must be positive.
 - `def insert_column(self, index: Int, column: Series) -> Self`
@@ -1377,12 +1377,12 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   `pivot` with the new columns given as `on` values, named as DataFrame.pivot names them.
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
-- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
-  Rename columns by old name, with the result and errors of DataFrame.rename. This is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
 - `def rename(self, function: def(String) raises thin -> String) -> Self`
   Rename every column using a Mojo function, resolving only schema.
 - `def rename(self, function: def(String) thin -> String) -> Self`
   Rename every column using a Mojo function, resolving only schema.
+- `def rename(self, mapping: Dict[String, String], *, strict: Bool = True) -> Self`
+  Rename columns by old name, with the result and errors of DataFrame.rename. This is a select of every input column, aliased where renamed, so filters and column selections above it move below it in the input's names. The input's names are resolved here, as collect_schema resolves them, without reading rows. With strict=False, names the input lacks are ignored.
 - `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
@@ -1429,23 +1429,23 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Every column moved n rows later (earlier when negative), the vacated rows null or `fill_value`; see DataFrame.shift.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row number starting at offset; see DataFrame.with_row_index. The numbers count the rows this plan produces here, so filters and slices above it stay above it.
+- `def explode(self, column: String) -> Self`
 - `def explode(self, columns: List[String]) -> Self`
   One row per list element; see DataFrame.explode.
-- `def explode(self, column: String) -> Self`
 - `def unnest(self, column: String) -> Self`
   Replace a struct column with its fields; see DataFrame.unnest.
 - `def unpivot(self, on: List[String] = List(), index: List[String] = List(), *, variable_name: String = "variable", value_name: String = "value") -> Self`
   Wide to long: one row per (input row, `on` column), with the same output and errors as DataFrame.unpivot. `on` defaults to every non-index column. Filters and slices above it stay above it.
-- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
-  Fill nulls in string columns with a string; see the Expr overload.
-- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
-  Fill nulls with a scalar value, choosing columns from this plan's schema: a with_columns of `col(c).fill_null(value)` for each selected column. Unknown subset names raise here, while the plan is built.
 - `def fill_null(self, *, strategy: String, limit: Optional[Int] = None, subset: List[String] = List()) -> Self`
   Fill nulls by strategy over the whole input; see DataFrame.fill_null.
-- `def fill_nan(self, value: Float64) -> Self`
-  Replace floating NaNs with a numeric scalar, preserving column dtypes.
+- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
+  Fill nulls with a scalar value, choosing columns from this plan's schema: a with_columns of `col(c).fill_null(value)` for each selected column. Unknown subset names raise here, while the plan is built.
+- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
+  Fill nulls in string columns with a string; see the Expr overload.
 - `def fill_nan(self, value: Expr) -> Self`
   Replace NaNs in floating columns; see DataFrame.fill_nan.
+- `def fill_nan(self, value: Float64) -> Self`
+  Replace floating NaNs with a numeric scalar, preserving column dtypes.
 - `def drop_nans(self, subset: List[String] = List()) -> Self`
   Remove NaN rows, retaining nulls; see DataFrame.drop_nans.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
@@ -1458,47 +1458,47 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   One Boolean column "is_duplicated", true for every row whose key on subset (default: every column) occurs more than once: the Series DataFrame.is_duplicated returns, as a frame.
 - `def is_unique(self, subset: List[String] = List()) -> Self`
   One Boolean column "is_unique", true for every row whose key on subset (default: every column) occurs exactly once: the Series DataFrame.is_unique returns, as a frame.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> LazyTimeGroupBy`
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> LazyTimeGroupBy`
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> LazyTimeGroupBy`
   Group rows into calendar-aligned, possibly overlapping windows of the index column; see DataFrame.group_by_dynamic.
-- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> LazyTimeGroupBy`
-- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> LazyTimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> LazyTimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> LazyTimeGroupBy`
 - `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", group_by: List[String] = List()) -> LazyTimeGroupBy`
   Aggregate a duration window ending at each row's index value; see DataFrame.rolling.
-- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> LazyTimeGroupBy`
-- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> LazyTimeGroupBy`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
   As-of join with sortedness checked at execution; see DataFrame.join_asof.
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-- `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
-  Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
-- `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
-  Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join.
-- `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, other: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
+- `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join.
+- `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
+- `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def collect[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
   Execute with an explicit optional runtime and its placement policy.
-- `def profile[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
-  Execute with a provider and report its observed execution regions.
 - `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> Tuple[DataFrame, DataFrame]`
   Collect, and report what each plan node did (#439).
-- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
-  Describe provider capability without submitting device work.
+- `def profile[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
+  Execute with a provider and report its observed execution regions.
 - `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> String`
   The (optimized) plan, one operator per line, root first. With `engine="auto"` (what `collect` uses), an `ENGINE` line naming the selected engine and why comes first.
-- `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
-  Collect the first n rows using an explicit provider.
+- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
+  Describe provider capability without submitting device work.
 - `def fetch(self, n: Int = Int(5), *, engine: String = "auto") -> DataFrame`
   Collect only the first n rows of the result.
+- `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
+  Collect the first n rows using an explicit provider.
 - `def collect_schema(self) -> List[String]`
   Output names and dtypes as "name: dtype", computed without reading rows: every scan yields zero rows, then the plan runs as usual, so binding validates each expression exactly as collect would.
 
@@ -1510,9 +1510,9 @@ A pending lazy grouping; finish it with agg, len or a reduction of every other c
   First n rows of each group, retaining the original column schema.
 - `def tail(self, n: Int = Int(5)) -> LazyFrame`
   Last n rows of each group, retaining the original column schema.
+- `def agg(self, expr: Expr) -> LazyFrame`
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
   One row per group: the keys, then the aggregations; see GroupBy.agg.
-- `def agg(self, expr: Expr) -> LazyFrame`
 - `def len(self, name: String = "len") -> LazyFrame`
   Rows per group as Int64, rows with nulls included; see GroupBy.len.
 - `def sum(self) -> LazyFrame`
@@ -1538,17 +1538,17 @@ A pending lazy grouping; finish it with agg, len or a reduction of every other c
 
 A pending `group_by_rollup`, `group_by_cube` or `group_by_grouping_sets`; finish it with agg.
 
+- `def agg(self, expr: Expr) -> LazyFrame`
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
   The rows of every grouping set, in set order: the keys (every key any set names, in order of first appearance), then the aggregations. A key a set does not group by is null in that set's rows, and `grouping` / `grouping_id` in `exprs` tell those subtotal nulls from null key values. Within a set the aggregations act as in `group_by(set).agg(exprs)`; the empty set gives one row, over the whole input, even when it has no rows. Row order is unspecified unless the result is sorted.
-- `def agg(self, expr: Expr) -> LazyFrame`
 
 ## `LazyTimeGroupBy`
 
 A pending lazy `group_by_dynamic` or `rolling`; finish it with agg.
 
+- `def agg(self, expr: Expr, *, batch_size: Int = Int(1024)) -> LazyFrame`
 - `def agg(self, exprs: List[Expr], *, batch_size: Int = Int(1024)) -> LazyFrame`
   One row per window: the `group_by` keys, the index column (the window's label) and the aggregations; see TimeGroupBy.agg.
-- `def agg(self, expr: Expr, *, batch_size: Int = Int(1024)) -> LazyFrame`
 
 ## `ListColumn`
 
@@ -1590,12 +1590,12 @@ Expressions on list columns. A null list gives a null result.
   Element at index (negative counts from the end); null when out of range.
 - `def first(self) -> Expr`
 - `def last(self) -> Expr`
-- `def contains(self, value: String) -> Expr`
-  Whether a string list holds the value.
-- `def contains(self, value: Int64) -> Expr`
-  Whether an integer list holds the value.
 - `def contains(self, value: Float64) -> Expr`
   Whether a float list holds the value.
+- `def contains(self, value: Int64) -> Expr`
+  Whether an integer list holds the value.
+- `def contains(self, value: String) -> Expr`
+  Whether a string list holds the value.
 - `def join(self, separator: String) -> Expr`
   Join a string list's elements, skipping null elements.
 - `def sum(self) -> Expr`
@@ -1608,19 +1608,19 @@ Expressions on list columns. A null list gives a null result.
 A typed scalar literal; there is no implicit numeric promotion.
 
 ```mojo
-def lit(value: Int64) -> Expr
+def lit(value: AnyValue) -> Expr
+```
+
+```mojo
+def lit(value: Bool) -> Expr
+```
+
+```mojo
+def lit(value: Float32) -> Expr
 ```
 
 ```mojo
 def lit(value: Float64) -> Expr
-```
-
-```mojo
-def lit[D: DType](value: Scalar[D]) -> Expr
-```
-
-```mojo
-def lit(value: Int8) -> Expr
 ```
 
 ```mojo
@@ -1632,7 +1632,19 @@ def lit(value: Int32) -> Expr
 ```
 
 ```mojo
-def lit(value: UInt8) -> Expr
+def lit(value: Int64) -> Expr
+```
+
+```mojo
+def lit(value: Int64, dtype: DataType) -> Expr
+```
+
+```mojo
+def lit(value: Int8) -> Expr
+```
+
+```mojo
+def lit(value: String) -> Expr
 ```
 
 ```mojo
@@ -1648,23 +1660,11 @@ def lit(value: UInt64) -> Expr
 ```
 
 ```mojo
-def lit(value: Float32) -> Expr
+def lit(value: UInt8) -> Expr
 ```
 
 ```mojo
-def lit(value: Bool) -> Expr
-```
-
-```mojo
-def lit(value: String) -> Expr
-```
-
-```mojo
-def lit(value: Int64, dtype: DataType) -> Expr
-```
-
-```mojo
-def lit(value: AnyValue) -> Expr
+def lit[D: DType](value: Scalar[D]) -> Expr
 ```
 
 ## `max_horizontal`
@@ -1740,6 +1740,10 @@ def parquet_row_group_statistics(path: String) -> DataFrame
 Read CSV through the range-splitting scanner and typed builders.
 
 ```mojo
+def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
 def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
@@ -1748,11 +1752,11 @@ def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header:
 ```
 
 ```mojo
-def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
@@ -1760,7 +1764,7 @@ def read_csv(paths: List[String], schema: List[Tuple[String, DataType]], *, has_
 ```
 
 ```mojo
-def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+def read_csv(source: CsvBuffer, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
 ```mojo
@@ -1769,10 +1773,6 @@ def read_csv(source: CsvBuffer, schema: CsvSchema, *, has_header: Bool = True, s
 
 ```mojo
 def read_csv(source: CsvBuffer, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
-```
-
-```mojo
-def read_csv(source: CsvBuffer, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
 ## `read_geojson`
@@ -1788,11 +1788,11 @@ def read_geojson(path: String, *, geometry_name: String = "geometry", id_name: S
 Read an Arrow IPC file (Feather v2), preserving record-batch chunks.
 
 ```mojo
-def read_ipc(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
+def read_ipc(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_ipc(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
+def read_ipc(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = True) -> DataFrame
 ```
 
 ## `read_ipc_schema`
@@ -1808,11 +1808,11 @@ def read_ipc_schema(path: String, *, stream: Bool = False) -> List[Field]
 Read a local IPC stream file, with the same selection rules as read_ipc.
 
 ```mojo
-def read_ipc_stream(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
+def read_ipc_stream(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
 ```
 
 ```mojo
-def read_ipc_stream(path: String, *, columns: List[String], n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
+def read_ipc_stream(path: String, *, columns: Optional[List[String]] = None, n_rows: Optional[Int] = None, memory_map: Bool = False) -> DataFrame
 ```
 
 ## `read_json`
@@ -1885,11 +1885,11 @@ def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separa
 ```
 
 ```mojo
-def scan_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
+def scan_csv(paths: List[String], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
 ```
 
 ```mojo
-def scan_csv(paths: List[String], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
+def scan_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
 ```
 
 ## `scan_ipc`
@@ -1924,42 +1924,42 @@ def scan_parquet(paths: List[String], *, glob: Bool = True) -> LazyFrame
 
 A named column of one supported dtype, plus expression-backed methods.
 
-- `def __init__[D: DType](out self, var name: String, var column: Column[Scalar[D]])`
-- `def __init__(out self, var name: String, var column: BoolColumn)`
 - `def __init__(out self, var name: String, column: Column[Bool])`
   Pack a byte-per-value Boolean column into bits.
-- `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, column: Column[String])`
   Convert list-backed strings to the contiguous UTF-8 layout.
+- `def __init__(out self, var name: String, var column: BoolColumn)`
 - `def __init__(out self, var name: String, var column: ListColumn)`
+- `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, var column: StructColumn)`
 - `def __init__(out self, var name: String, var storage: Storage, dtype: DataType, metadata: Optional[ArcPointer[List[UInt8]]] = None)`
+- `def __init__[D: DType](out self, var name: String, var column: Column[Scalar[D]])`
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`
 - `def __invert__(self) -> Self`
-- `def __lt__(self, other: Self) -> Self`
 - `def __lt__(self, other: Expr) -> Self`
-- `def __le__(self, other: Self) -> Self`
+- `def __lt__(self, other: Self) -> Self`
 - `def __le__(self, other: Expr) -> Self`
-- `def __gt__(self, other: Self) -> Self`
+- `def __le__(self, other: Self) -> Self`
 - `def __gt__(self, other: Expr) -> Self`
-- `def __ge__(self, other: Self) -> Self`
+- `def __gt__(self, other: Self) -> Self`
 - `def __ge__(self, other: Expr) -> Self`
-- `def __add__(self, other: Self) -> Self`
+- `def __ge__(self, other: Self) -> Self`
 - `def __add__(self, other: Expr) -> Self`
-- `def __sub__(self, other: Self) -> Self`
+- `def __add__(self, other: Self) -> Self`
 - `def __sub__(self, other: Expr) -> Self`
-- `def __mul__(self, other: Self) -> Self`
+- `def __sub__(self, other: Self) -> Self`
 - `def __mul__(self, other: Expr) -> Self`
-- `def __truediv__(self, other: Self) -> Self`
+- `def __mul__(self, other: Self) -> Self`
 - `def __truediv__(self, other: Expr) -> Self`
-- `def __floordiv__(self, other: Self) -> Self`
+- `def __truediv__(self, other: Self) -> Self`
 - `def __floordiv__(self, other: Expr) -> Self`
-- `def __mod__(self, other: Self) -> Self`
+- `def __floordiv__(self, other: Self) -> Self`
 - `def __mod__(self, other: Expr) -> Self`
-- `def __pow__(self, other: Self) -> Self`
+- `def __mod__(self, other: Self) -> Self`
 - `def __pow__(self, other: Expr) -> Self`
+- `def __pow__(self, other: Self) -> Self`
 - `def __and__(self, other: Self) -> Self`
 - `def __or__(self, other: Self) -> Self`
 - `def __xor__(self, other: Self) -> Self`
@@ -1968,9 +1968,9 @@ A named column of one supported dtype, plus expression-backed methods.
   Number of physical Arrow arrays backing this series.
 - `def chunks(self) -> List[Self]`
   Owned column views sharing the immutable buffers of each array.
+- `def binary(var name: String, values: List[List[UInt8]]) -> Self`
 - `def binary(var name: String, values: List[List[UInt8]], valid: List[Bool]) -> Self`
   A binary column: arbitrary bytes per row, never read as text.
-- `def binary(var name: String, values: List[List[UInt8]]) -> Self`
 - `def rechunk(self) -> Self`
   Materialize one contiguous Arrow array, preserving name and dtype.
 - `def with_dtype(self, dtype: DataType) -> Self`
@@ -1998,10 +1998,10 @@ A named column of one supported dtype, plus expression-backed methods.
   Return one cell as a tagged value; raises when out of bounds.
 - `def equals(self, other: Self, *, null_equal: Bool = True, check_names: Bool = False) -> Bool`
   Structural equality: NaN equals NaN and -0.0 equals 0.0.
-- `def eq(self, other: Self) -> Self`
 - `def eq(self, other: Expr) -> Self`
-- `def ne(self, other: Self) -> Self`
+- `def eq(self, other: Self) -> Self`
 - `def ne(self, other: Expr) -> Self`
+- `def ne(self, other: Self) -> Self`
 - `def apply(self, expr: Expr) -> Self`
   Evaluate any expression written against this series' name.
 - `def is_null(self) -> Self`
@@ -2061,9 +2061,9 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def argsort(self, descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
   Stable sort order: ranks are resolved once, then merged by Int.
 - `def slice(self, offset: Int, length: Int) -> Self`
-- `def full_null(var name: String, dtype: String, length: Int) -> Self`
 - `def full_null(var name: String, dtype: DataType, length: Int) -> Self`
   A column of `length` nulls with the requested dtype.
+- `def full_null(var name: String, dtype: String, length: Int) -> Self`
 - `def append(self, other: Self) -> Self`
   Return a new series with other's rows after this one's.
 - `def reverse(self) -> Self`
@@ -2086,8 +2086,8 @@ Kernels build string results here instead of collecting `String`s.
 - `def __init__(out self, rows: Int = Int(0), bytes: Int = Int(0))`
   Reserve for about `rows` rows and `bytes` bytes of text.
 - `def __len__(self) -> Int`
-- `def append(mut self, text: StringSpan)`
 - `def append(mut self, text: String)`
+- `def append(mut self, text: StringSpan)`
 - `def append_null(mut self)`
 - `def finish(deinit self) -> StringColumn`
 
@@ -2095,12 +2095,12 @@ Kernels build string results here instead of collecting `String`s.
 
 A window onto shared UTF-8 bytes, Int64 offsets, and validity.
 
-- `def __init__(out self, values: List[String])`
-- `def __init__(out self, values: List[String], valid: List[Bool])`
-- `def __init__(out self, column: Column[String])`
-  Convert a list-backed string column into the UTF-8 layout.
 - `def __init__(out self, *, var bytes: List[UInt8], var offsets: List[Int64], var bits: List[UInt8], length: Int)`
   Adopt finished buffers; offsets must have length + 1 entries.
+- `def __init__(out self, column: Column[String])`
+  Convert a list-backed string column into the UTF-8 layout.
+- `def __init__(out self, values: List[String])`
+- `def __init__(out self, values: List[String], valid: List[Bool])`
 - `def __init__(out self, var storage: StringViewStorage)`
   Adopt finished Arrow Utf8View descriptors and their Arc blocks.
 - `def from_bytes(values: List[List[UInt8]], valid: List[Bool]) -> Self`
@@ -2257,8 +2257,8 @@ A when/then chain; add branches with `when` or finish with `otherwise`.
 It converts implicitly to an Expr whose unmatched rows are null.
 
 - `def when(self, condition: Expr) -> When`
-- `def otherwise(self, value: String) -> Expr`
 - `def otherwise(self, value: Expr) -> Expr`
+- `def otherwise(self, value: String) -> Expr`
 - `def end(self) -> Expr`
 - `def alias(self, name: String) -> Expr`
 
@@ -2309,8 +2309,8 @@ def total_bounds(series: Series) -> Optional[GeometryBounds]
 
 A pending condition; call `then` to supply its value.
 
-- `def then(self, value: String) -> Then`
 - `def then(self, value: Expr) -> Then`
+- `def then(self, value: String) -> Then`
 
 ## `when`
 
