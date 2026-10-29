@@ -30,6 +30,7 @@ from std.collections import Optional
 from dataframe.aggregation.expressions import _row_local
 from dataframe.devices import ByteCost, PipelineFeatures, TransferModel
 from dataframe.dtype import DataType
+from dataframe.expr import changes_length
 from dataframe.frame import DataFrame
 from dataframe.io.csv import CsvSchema
 from dataframe.planning.context import QueryContext
@@ -310,9 +311,13 @@ def _bounded_rows(
     self: QueryContext, top: Int, sink: Int, input_rows: Int
 ) raises -> Int:
     """The planner's estimate of a unit's output rows, or else an upper
-    bound: no row-local step, aggregate, unique, sort or slice produces
-    more rows than it reads. A bound overstates what moving the output
-    costs, never understates it. Joins have none; -1 when unknown."""
+    bound for operations that cannot expand their input. Scalar selects
+    can produce one row even from empty input. Length-changing selects
+    and joins have no general bound; -1 when unknown."""
+    if sink >= 0 and self._nodes[sink].kind == SELECT:
+        for expression in self._nodes[sink].exprs:
+            if changes_length(expression):
+                return -1
     var estimated = plan_estimated_rows(self, top)
     if estimated >= 0 or input_rows < 0:
         return estimated
@@ -322,7 +327,9 @@ def _bounded_rows(
     if kind == SLICE:
         var length = self._nodes[sink].slice_length()
         return min(length, input_rows) if length >= 0 else input_rows
-    if kind == AGG or kind == UNIQUE or kind == SORT or kind == SELECT:
+    if kind == SELECT:
+        return max(1, input_rows)
+    if kind == AGG or kind == UNIQUE or kind == SORT:
         return input_rows
     return -1
 

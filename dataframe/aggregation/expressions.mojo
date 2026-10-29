@@ -32,6 +32,7 @@ from dataframe.expr import (
     SUM,
     VAR,
     is_reduction,
+    is_sequence,
     is_window,
     node_children,
     subtree,
@@ -74,7 +75,12 @@ def _row_local(exprs: List[Expr]) -> Bool:
     """True when every output row depends only on the same input row."""
     for e in exprs:
         for node in e._nodes:
-            if is_reduction(node.op) or is_window(node.op) or node.op == OVER:
+            if (
+                is_reduction(node.op)
+                or is_sequence(node.op)
+                or is_window(node.op)
+                or node.op == OVER
+            ):
                 return False
     return True
 
@@ -90,7 +96,12 @@ def _stream_reductions(expressions: List[Expr], holistic: Bool = False) -> Bool:
         for reverse in range(len(nodes)):
             var i = len(nodes) - 1 - reverse
             ref node = nodes[i]
-            if is_window(node.op) or node.op == OVER or node.op == SELECTOR:
+            if (
+                is_window(node.op)
+                or is_sequence(node.op)
+                or node.op == OVER
+                or node.op == SELECTOR
+            ):
                 return False
             if not reachable[i]:
                 continue

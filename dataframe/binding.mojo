@@ -6,6 +6,8 @@ from .expr import (
     Expr,
     COL,
     _SCALAR_SOURCE,
+    ROW_LEN,
+    INT_RANGE,
     DROP_NULLS,
     DROP_NANS,
     is_drop,
@@ -123,6 +125,8 @@ from .expr import (
     QCUT,
     OVER,
     OVER_GLOBAL,
+    OVER_JOIN,
+    OVER_MAPPING_MASK,
     FLOORDIV,
     DT_DAY,
     DT_NANOSECOND,
@@ -1343,6 +1347,36 @@ def bind(
             if dtype.is_categorical() and len(nodes) > 1:
                 dtype = DataType.STRING
             shape = SCALAR if node.op == _SCALAR_SOURCE else ROWS
+        elif node.op == ROW_LEN:
+            dtype = DataType.INT64
+            shape = AGGREGATE
+            has_aggregate = True
+        elif node.op == INT_RANGE:
+            if (
+                node.left < 0
+                or node.right < 0
+                or node.left >= i
+                or node.right >= i
+            ):
+                raise Error("Invalid int_range bounds")
+            if node.integer == 0:
+                raise Error("int_range step must be nonzero")
+            for child in [node.left, node.right]:
+                _default(nodes, types, child)
+                if (
+                    not types[child].is_integer()
+                    or types[child] != types[child].physical()
+                ):
+                    raise Error("int_range bounds must be integer expressions")
+                if shapes[child] == ROWS:
+                    raise Error(
+                        "int_range bounds must be scalar or aggregate expressions"
+                    )
+            dtype = DataType.INT64
+            shape = ROWS
+            # A generated sequence starts a fresh row axis. Reducing it
+            # is not a reduction of either scalar bound's aggregate state.
+            has_aggregate = False
         elif node.op == LIT_INT:
             if node.text == UNTYPED:
                 dtype = DataType.UNTYPED_INT
@@ -1697,6 +1731,10 @@ def bind(
         elif node.op == OVER:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid over input")
+            if (node.integer & OVER_MAPPING_MASK) == OVER_MAPPING_MASK:
+                raise Error(
+                    "mapping_strategy must be group_to_rows, join, or explode"
+                )
             if (node.integer & OVER_GLOBAL) != 0 and node.min_count == 0:
                 raise Error("over requires partition columns or order_by")
             var window_keys = List[String]()
@@ -1719,6 +1757,8 @@ def bind(
                     " cannot be used in over(); use group_by().agg() instead"
                 )
             dtype = types[node.left]
+            if (node.integer & OVER_JOIN) != 0 and shapes[node.left] == ROWS:
+                dtype = DataType.list(dtype)
             shape = ROWS
         elif node.op == CAST:
             if node.left < 0 or node.left >= i:
