@@ -438,6 +438,62 @@ class CorrectnessOnly(unittest.TestCase):
             bench.main()
         self.assertEqual(error.exception.code, 1)
 
+    def test_timed_and_saved_report_commands_share_one_complete_validation(self):
+        result = self.result()
+        path = Path(self.directory.name) / "report.json"
+        path.write_text(json.dumps(result))
+        for saved in (False, True):
+            argv = ["bench", "--check"] + (
+                ["--report-from", str(path)] if saved
+                else ["--output", str(path)]
+            )
+            with self.subTest(saved=saved), patch.object(
+                bench, "measure", return_value=result
+            ), patch.object(bench, "evaluate", wraps=bench.evaluate) as evaluate, patch.object(
+                bench, "report", return_value="markdown"
+            ) as report, patch.object(
+                bench.bench_html, "render", return_value="<html>report</html>"
+            ) as render, patch.object(sys, "argv", argv), patch("sys.stdout"):
+                bench.main()
+            self.assertEqual(evaluate.call_count, 1)
+            cells = render.call_args.args[1]
+            self.assertIs(report.call_args.args[1], cells)
+            self.assertEqual(cells[("h2o_groupby", "base", "q1", "mojo")]["status"], "ok")
+
+    def test_each_report_command_revalidates_tampered_answer_evidence(self):
+        path = Path(self.directory.name) / "report.json"
+        path.write_text(json.dumps(self.result()))
+        with patch.object(
+            bench, "evaluate", wraps=bench.evaluate
+        ) as evaluate, patch.object(bench, "report", return_value="markdown"), patch.object(
+            bench.bench_html, "render", return_value="<html>report</html>"
+        ) as render, patch.object(
+            sys, "argv", ["bench", "--report-from", str(path)]
+        ), patch("sys.stdout"):
+            bench.main()
+            self.assertEqual(render.call_args.args[1][("h2o_groupby", "base", "q1", "mojo")]["status"], "ok")
+            Path(self.receipts[0]["path"]).write_bytes(b"corrupt answer")
+            bench.main()
+        self.assertEqual(evaluate.call_count, 2)
+        cell = render.call_args.args[1][("h2o_groupby", "base", "q1", "mojo")]
+        self.assertEqual(cell["status"], "unverified")
+        self.assertNotIn("ms", cell)
+
+    def test_one_validation_keeps_failed_timed_workers_failing_the_command(self):
+        path = Path(self.directory.name) / "failed.json"
+        with patch.object(
+            bench, "measure", return_value=self.result("failed")
+        ), patch.object(bench, "evaluate", wraps=bench.evaluate) as evaluate, patch.object(
+            bench, "report", return_value="markdown"
+        ), patch.object(
+            bench.bench_html, "render", return_value="<html>report</html>"
+        ), patch.object(
+            sys, "argv", ["bench", "--check", "--output", str(path)]
+        ), patch("sys.stdout"), patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+            bench.main()
+        self.assertEqual(error.exception.code, 1)
+        self.assertEqual(evaluate.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

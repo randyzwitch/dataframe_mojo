@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.planning.node_builders import (
     _aggregate_node,
     _concat_node,
@@ -41,6 +42,17 @@ from dataframe._accel_provider import (
     handoff_supports as _handoff_supports,
     installed as _accel_installed,
     select_auto as _select_auto_accel,
+    devices as _accel_devices,
+    transfer_model as _accel_transfer_model,
+    pipeline_supports as _accel_pipeline_supports,
+    pipeline_estimate as _accel_pipeline_estimate,
+    run_pipeline as _accel_run_pipeline,
+)
+from dataframe.planning.device_placement import (
+    CPU as _PLACE_CPU,
+    PlacementProblem,
+    plan_pipelines,
+    solve_placement,
 )
 from dataframe.storage.column import (
     Column,
@@ -60,7 +72,7 @@ from dataframe.execution_settings import (
 )
 from dataframe.expr import (
     Expr,
-    changes_length,
+    group_sequence_rows,
     col,
     exclude,
     has_grouping,
@@ -125,6 +137,13 @@ from dataframe.parallel import (
 )
 from dataframe.placement import (
     calibration_path,
+    load_costs,
+)
+from dataframe.devices import (
+    DeviceInfo,
+    MEMORY_UNIFIED,
+    PipelineFeatures,
+    TransferModel,
 )
 from dataframe.plan_types import (
     PlanEstimate,
@@ -1829,6 +1848,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 + ": "
                 + selected[1]
                 + "\n"
+                + _device_placement_lines(
+                    self._optimized() if optimize else self.copy(),
+                    accelerator,
+                )
                 + (
                     self.explain(
                         engine="cpu",
@@ -1883,6 +1906,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             out = backend.describe()
         if engine == "auto" and _automatic_handoff():
             out += plan._placement_lines()
+        if engine == "auto":
+            out += _device_placement_lines(plan, _RegisteredProvider())
         plan._describe(len(plan._plan._nodes) - 1, 0, out, streaming)
         return out^
 
@@ -2526,6 +2551,159 @@ trait AcceleratorBackend(Copyable):
         """Optional measured execution; providers may retain the base report."""
         return self.execute(plan)
 
+    def devices(self) -> List[DeviceInfo]:
+        """Devices this runtime runs pipelines on; none by default."""
+        return List[DeviceInfo]()
+
+    def transfer_model(self, device: Int) -> TransferModel:
+        return TransferModel.unmeasured()
+
+    def pipeline_supports(self, pipeline: LazyFrame, device: Int) -> Bool:
+        return False
+
+    def pipeline_estimate(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Float64:
+        return Float64(-1)
+
+    def run_pipeline(
+        self, pipeline: LazyFrame, device: Int
+    ) raises -> DataFrame:
+        raise Error("provider does not run pipelines")
+
+
+def _group_edge_name(mut names: List[String], stem: String) -> String:
+    var name = stem.copy()
+    while name in names:
+        name += "_"
+    names.append(name.copy())
+    return name^
+
+
+@fieldwise_init
+struct _RegisteredProvider(AcceleratorBackend):
+    """The provider chosen at build time (`_accel_provider`), seen through
+    the same trait as an explicit runtime, so placement has one path."""
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        return _execute_accel(plan)
+
+    def describe(self, plan: LazyFrame) -> String:
+        return _describe_accel(plan)
+
+    def devices(self) -> List[DeviceInfo]:
+        return _accel_devices()
+
+    def transfer_model(self, device: Int) -> TransferModel:
+        return _accel_transfer_model(device)
+
+    def pipeline_supports(self, pipeline: LazyFrame, device: Int) -> Bool:
+        return _accel_pipeline_supports(pipeline, device)
+
+    def pipeline_estimate(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Float64:
+        return _accel_pipeline_estimate(pipeline, device, features)
+
+    def run_pipeline(
+        self, pipeline: LazyFrame, device: Int
+    ) raises -> DataFrame:
+        return _accel_run_pipeline(pipeline, device)
+
+
+def _ms(ns: Float64) -> String:
+    return String(round(ns / 1e6, 3)) + " ms"
+
+
+def _device_label(device: DeviceInfo) -> String:
+    return device.backend + ":" + String(device.ordinal)
+
+
+def _device_placement_lines[
+    B: AcceleratorBackend
+](plan: LazyFrame, backend: B) raises -> String:
+    """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
+    summary: where each unit would run and why. Nothing when the backend
+    reports no devices. Placement is reported, not yet executed."""
+    var devices = backend.devices()
+    if len(devices) == 0:
+        return String()
+    var units = plan_pipelines(plan._plan)
+    var count = len(devices) + 1
+    var problem = PlacementProblem(len(units), count)
+    var cpu_costs = load_costs("cpu")
+    for d in range(len(devices)):
+        var model = backend.transfer_model(devices[d].ordinal)
+        problem.transfers[d + 1] = model.copy()
+        problem.budgets[d + 1] = devices[d].budget_bytes
+        problem.startup_ns[d + 1] = model.startup_ns
+    for p in range(len(units)):
+        ref unit = units[p]
+        problem.children[p] = unit.children.copy()
+        problem.output_bytes[p] = unit.output_bytes
+        problem.source_bytes[p] = unit.source_bytes
+        problem.working_bytes[p] = unit.working_bytes
+        var rows = unit.features.input_rows
+        var cpu = cpu_costs.get(unit.key)
+        if cpu and rows >= 0:
+            problem.run_ns[p][
+                _PLACE_CPU
+            ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
+        var region = _from_context(unit.region.copy())
+        for d in range(len(devices)):
+            # A device is compared only against a measured CPU cost.
+            if problem.run_ns[p][_PLACE_CPU] < 0:
+                continue
+            if backend.pipeline_supports(region, devices[d].ordinal):
+                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                    region, devices[d].ordinal, unit.features
+                )
+    var placement = solve_placement(problem)
+    var names = List[String]()
+    names.append("cpu")
+    var out = String("DEVICES cpu")
+    for device in devices:
+        names.append(_device_label(device))
+        out += (
+            ", "
+            + _device_label(device)
+            + " "
+            + device.name
+            + (
+                " (unified)" if device.memory
+                == MEMORY_UNIFIED else " (discrete)"
+            )
+        )
+    out += "\n"
+    for p in range(len(units)):
+        ref unit = units[p]
+        out += (
+            "PIPELINE "
+            + String(p)
+            + " "
+            + unit.key
+            + ": rows "
+            + String(unit.features.input_rows)
+        )
+        for d in range(count):
+            var cost = problem.run_ns[p][d]
+            out += "; " + names[d] + " "
+            if cost >= 0:
+                out += _ms(cost)
+            elif d == _PLACE_CPU:
+                out += "not measured"
+            else:
+                out += "not compared"
+        out += "; on " + names[placement.devices[p]] + "\n"
+    out += (
+        "PLACEMENT estimated "
+        + _ms(placement.total_ns)
+        + "; all cpu "
+        + _ms(placement.cpu_ns)
+        + "\n"
+    )
+    return out^
+
 
 @fieldwise_init
 struct LazyGroupBy(Copyable):
@@ -2538,6 +2716,52 @@ struct LazyGroupBy(Copyable):
     # A group_by on expressions: its keys, parallel to `_keys` (their
     # output names); empty when every key is a column under its own name.
     var _key_exprs: List[Expr]
+
+    def head(self, n: Int = 5) raises -> LazyFrame:
+        """First n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, False)
+
+    def tail(self, n: Int = 5) raises -> LazyFrame:
+        """Last n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, True)
+
+    def _edge_rows(self, n: Int, tail: Bool) raises -> LazyFrame:
+        if n < 0:
+            raise Error("GroupBy.head/tail count must be nonnegative")
+        var names = self._frame._input_schema().columns()
+        var original = names.copy()
+        var row = _group_edge_name(names, "__group_edge_row")
+        var first = _group_edge_name(names, "__group_edge_first")
+        var count = _group_edge_name(names, "__group_edge_count")
+        var frame = self._frame.with_row_index(row)
+        var partitions = self._keys.copy()
+        if len(self._key_exprs) > 0:
+            partitions = List[String]()
+            var computed = List[Expr]()
+            for key in self._key_exprs:
+                if _bare_column(key):
+                    partitions.append(key._name)
+                else:
+                    var name = _group_edge_name(names, "__group_edge_key")
+                    computed.append(key.alias(name))
+                    partitions.append(name)
+            frame = frame.with_columns(computed)
+        if len(partitions) == 0:
+            raise Error("GroupBy.head/tail requires grouping keys")
+        # The non-null row index counts every row, including null payloads.
+        # Group-first order matches eager first-occurrence grouping; the
+        # row index restores input order within each selected group.
+        return (
+            frame.with_columns(
+                [
+                    col(row).first().over(partitions).alias(first),
+                    col(row).cum_count(tail).over(partitions).alias(count),
+                ]
+            )
+            .filter(col(count) <= n)
+            .sort([first, row])
+            .select(original)
+        )
 
     def _grouped(
         self, reads: List[String], every_column: Bool
@@ -2585,7 +2809,7 @@ struct LazyGroupBy(Copyable):
         var prepared = List[Expr](capacity=len(exprs))
         for expression in exprs:
             prepared.append(
-                expression.implode() if changes_length(
+                expression.implode() if group_sequence_rows(
                     expression
                 ) else expression.copy()
             )
@@ -2770,6 +2994,7 @@ def scan_csv(
     infer_schema_length: Int = 100,
     schema_overrides: Dict[String, String] = Dict[String, String](),
     try_parse_dates: Bool = False,
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
     collect; projection and head() are pushed into the reader.
@@ -2778,6 +3003,23 @@ def scan_csv(
     however the plan runs (eagerly, streaming, or for its schema); invalid
     ones raise here, as read_csv would raise them.
     """
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=True,
+        )
     var options = _CsvScanOptions(
         has_header,
         separator,
@@ -2813,10 +3055,26 @@ def scan_csv(
     ignore_errors: Bool = False,
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an explicit schema, which labels the
     fields by position; the options are read_csv's (see the overload
     above)."""
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=True,
+        )
     var options = _CsvScanOptions.defaults()
     options.has_header = has_header
     options.separator = separator
@@ -2878,10 +3136,19 @@ def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:
     )
 
 
-def scan_parquet(path: String) raises -> LazyFrame:
+def scan_parquet(
+    path: String,
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
     """Lazily read a Parquet file. Nothing is read until collect; projection
     is pushed into the reader, and a filter directly above the scan decodes
     only the row groups whose footer statistics can hold a match."""
+    if glob and has_pattern(path):
+        return scan_parquet(
+            [path],
+            glob=True,
+        )
     return LazyFrame(
         [_parquet_scan_node(path=path, slot=0)],
         [DataFrame([])],
@@ -2992,3 +3259,110 @@ def _from_context(var context: QueryContext) -> LazyFrame:
     )
     result._plan = context^
     return result^
+
+
+def scan_csv(
+    paths: List[String],
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_csv(
+    paths: List[String],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_parquet(
+    paths: List[String],
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_parquet(
+            path,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")

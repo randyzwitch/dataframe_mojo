@@ -5,7 +5,20 @@ from std.memory import Pointer
 from std.sys import CompilationTarget
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit, scan_csv
-from dataframe._accel_provider import installed
+from dataframe._accel_provider import (
+    installed,
+    devices,
+    transfer_model,
+    pipeline_supports,
+    pipeline_estimate,
+    run_pipeline,
+)
+from dataframe.devices import (
+    ByteCost,
+    PipelineFeatures,
+    TransferModel,
+)
+from dataframe_metal import provider as metal_provider
 from dataframe.lazy import LazyFrame
 from dataframe_metal.metal import MetalRuntime
 from dataframe_metal.accelerator.gpu.target import compiled_for_metal
@@ -395,3 +408,61 @@ def test_metal_cpu_only_target_keeps_cpu_dispatch_and_rejects_gpu_submission() r
         var joined = frame.lazy().join(frame.lazy(), on="k")
         with assert_raises(contains="Apple Metal compilation target"):
             _ = joined.collect(engine="accel", accelerator=runtime)
+
+
+def test_device_functions_report_nothing_without_a_device() raises:
+    # Linux contract builds use the CPU-only provider; Metal compiled for a
+    # CPU target has no device either.
+    var plan = backend_plan(8)
+    var features = PipelineFeatures.rows(8)
+    if not installed():
+        assert_equal(len(devices()), 0)
+        assert_true(not transfer_model(0).measured())
+        assert_true(not pipeline_supports(plan, 0))
+        assert_equal(pipeline_estimate(plan, 0, features), Float64(-1))
+        with assert_raises(contains="no device runs pipelines"):
+            _ = run_pipeline(plan, 0)
+    if not compiled_for_metal():
+        assert_equal(len(metal_provider.devices()), 0)
+        assert_true(not metal_provider.transfer_model(0).measured())
+        assert_true(not metal_provider.pipeline_supports(plan, 0))
+        assert_equal(
+            metal_provider.pipeline_estimate(plan, 0, features), Float64(-1)
+        )
+        with assert_raises(contains="no device runs pipelines"):
+            _ = metal_provider.run_pipeline(plan, 0)
+
+
+def test_device_cost_types_mean_what_they_say() raises:
+    var link = ByteCost(1000, 0.5)
+    assert_true(link.measured())
+    assert_equal(link.cost(0), Float64(1000))
+    assert_equal(link.cost(4096), Float64(3048))
+    assert_true(not ByteCost(-1, 0.5).measured())
+    var shared = TransferModel.shared_memory()
+    assert_true(shared.measured())
+    assert_equal(shared.to_device.cost(1 << 30), Float64(0))
+    assert_equal(shared.to_host.cost(1 << 30), Float64(0))
+    assert_true(shared.startup_ns < 0)
+    assert_true(not TransferModel.unmeasured().measured())
+    var features = PipelineFeatures.rows(100)
+    assert_equal(features.input_rows, 100)
+    assert_equal(features.groups, -1)
+    assert_equal(features.build_rows, -1)
+
+
+def test_explicit_runtimes_default_to_no_devices() raises:
+    var trace = BackendTrace()
+    var backend = DefaultPolicyBackend(Int(Pointer(to=trace)))
+    var plan = backend_plan(8)
+    assert_equal(len(backend.devices()), 0)
+    assert_true(not backend.transfer_model(0).measured())
+    assert_true(not backend.pipeline_supports(plan, 0))
+    assert_equal(
+        backend.pipeline_estimate(plan, 0, PipelineFeatures.rows(8)),
+        Float64(-1),
+    )
+    with assert_raises(contains="does not run pipelines"):
+        _ = backend.run_pipeline(plan, 0)
+    assert_no_provider_calls(trace)
+    _ = trace^

@@ -17,9 +17,10 @@ The boundary is checked in CI by `scripts/check_accelerator_boundary.sh`.
 
 `dataframe/_accel_provider.mojo` is the only module the core calls to reach a
 backend. Only `dataframe/lazy_api.mojo` and `dataframe/execution_backend.mojo`
-import it. A provider is a module with these nine functions: six for whole
-plans and three for hand-off. Their signatures mention only core types:
-`LazyFrame`, `DataFrame`, `String`, `Bool`, `Int` and `Float64`.
+import it. A provider is a module with these fourteen functions: six for whole
+plans, three for hand-off and five for devices. Their signatures mention only
+core types: `LazyFrame`, `DataFrame`, `String`, `Bool`, `Int`, `Float64` and
+the device types in `dataframe/devices.mojo`.
 
 | Function | Signature | What the core expects |
 | --- | --- | --- |
@@ -33,6 +34,19 @@ plans and three for hand-off. Their signatures mention only core types:
 | `handoff_execute` | `(region: LazyFrame) raises -> DataFrame` | Run an accepted region on its input columns and return the node's columns. |
 | `handoff_estimate` | `(region: LazyFrame, rows: Int) -> Tuple[String, Float64]` | The region's calibration key and the provider's estimated nanoseconds for `rows` input rows, data movement included; -1 when it has no measured cost. Used for `engine="auto"` placement ([Apple Metal](../apple-metal.md)). |
 
+The device functions describe a backend's devices and run pipelines on them.
+They are written against memory models (discrete or unified) and capabilities,
+not vendors, so one placement serves every backend. The core does not call them
+yet.
+
+| Function | Signature | What the core expects |
+| --- | --- | --- |
+| `devices` | `() -> List[DeviceInfo]` | Each device the backend can run on: backend name, ordinal, readable name, memory model (`MEMORY_DISCRETE` or `MEMORY_UNIFIED`) and the bytes the planner may plan to hold there (-1 for no limit). May read driver metadata; must not create an execution context. Empty when nothing can run. |
+| `transfer_model` | `(device: Int) -> TransferModel` | Measured cost of moving bytes to and from the device and of creating a context. Unified memory reports zero transfer cost. Negative fields mean not measured. Does not raise. |
+| `pipeline_supports` | `(pipeline: LazyFrame, device: Int) -> Bool` | Whether the device runs `pipeline`: a plan whose leaves are the pipeline's inputs, its root the pipeline's sink. Decided from the plan and input types; does not raise or open a device. |
+| `pipeline_estimate` | `(pipeline, device, features: PipelineFeatures) -> Float64` | Estimated nanoseconds to run the pipeline on the device, excluding moving its inputs and outputs: the core adds those from `transfer_model` and where each input already lives. -1 when there is no measurement. Does not raise. |
+| `run_pipeline` | `(pipeline: LazyFrame, device: Int) raises -> DataFrame` | Run an accepted pipeline. Inputs may be host or device buffers (`dataframe/storage/residence.mojo`); outputs may stay on the device as device buffers. |
+
 The core calls the whole-plan functions during collection, and the hand-off
 functions from the CPU executor when a provider runs a plan through it.
 
@@ -45,8 +59,8 @@ by nature, so those programs import them from the backend
 
 The same shapes exist as the `dataframe.lazy.AcceleratorBackend` trait, for an
 explicit runtime object passed by the application. Its methods other than
-`execute` and `describe` have defaults (CPU in auto mode, no estimate), so a
-minimal backend implements only those two.
+`execute` and `describe` have defaults (CPU in auto mode, no estimate, no
+devices), so a minimal backend implements only those two.
 
 ### Engine settings the provider honors
 
@@ -124,17 +138,17 @@ Mojo has no conditional imports and no import-time side effects, so a backend
 cannot register itself by being imported. The backend is chosen at build time,
 by import path.
 
-- `dataframe/_accel_provider.mojo` only re-exports the nine provider functions
-  from `dataframe_provider`.
+- `dataframe/_accel_provider.mojo` only re-exports the fourteen provider
+  functions from `dataframe_provider`.
 - `dataframe_provider/` in the repository root is the default provider, Metal:
-  it re-exports the nine functions from `dataframe_metal.provider`. Where Metal
+  it re-exports the fourteen functions from `dataframe_metal.provider`. Where Metal
   cannot run (Linux), `installed()` is false and collection stays on the CPU.
 - `providers/cpu/dataframe_provider/` is the CPU-only provider: `installed()`
   is false, `execute` raises "Accelerator provider is not installed",
   `select_auto` returns `cpu`. `-I providers/cpu -I .` puts it first and
   compiles no GPU code.
 - Another backend ships its own `dataframe_provider/` package that re-exports
-  the nine functions from its implementation package, and puts it first on the
+  the fourteen functions from its implementation package, and puts it first on the
   import path. Two backends in one build are not supported; the first
   `dataframe_provider` on the path wins.
 - Packaging: `scripts/build_package.py` picks the artifact by platform. macOS
@@ -147,9 +161,8 @@ boundaries (`dataframe.lazy` imports `_accel_provider`, which imports
 `dataframe.lazy`). Mojo resolves this at compile time, as it did inside the one
 package before.
 
-The NVIDIA package still replaces `_accel_provider.mojo` in a staged tree. It
-can instead ship a `dataframe_provider/` package that re-exports its nine
-functions, and drop the replacement step.
+The NVIDIA package ships its own `dataframe_provider/` package and puts it
+ahead of the core's on the import path.
 
 The checks are in `scripts/check_accelerator_boundary.sh`: core may import
 `dataframe_provider` only from `_accel_provider.mojo` and never imports
@@ -163,5 +176,5 @@ CPU tests never depend on a backend.
 
 | Backend | Where it lives | How it attaches | What exists | What is missing |
 | --- | --- | --- | --- | --- |
-| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs inside the CPU executor through hand-off ([Apple Metal](../apple-metal.md)); accepts filtered sums of Int32, Int64 and Float32 columns. Implements all nine provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Operators beyond the filtered sum; pipeline-level hand-off. A trait-checked registry: the functions are checked where the core imports them, not in the backend package. |
-| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Build step replaces `_accel_provider.mojo` | Float64 and Int32/Int64 row paths with parity tests on Linux x86-64. Builds against the core revision pinned in `core.json`. | Its replacement file re-exports four names (`installed`, `execute`, `execute_profiled`, `describe`), but the lazy API also imports `select_auto` and `execute_auto`, so it cannot build against the current core without being updated. It can move to a `dataframe_provider/` package. Pinned to an older core revision. |
+| Metal | Package `dataframe_metal` in this repository; its provider is the root `dataframe_provider` | The default provider of the open-source package: a plain `-I .` build | Runs inside the CPU executor through hand-off ([Apple Metal](../apple-metal.md)); accepts filtered sums of Int32, Int64 and Float32 columns. Implements all fourteen provider functions plus its own calibration hooks. Compiled in every default build; Linux CI contract areas opt out with `-I providers/cpu`, and the `linux-default-build` job compiles it for a CPU target. Tested on a local Mac (hosted CI cannot run it). | Operators beyond the filtered sum; pipeline-level hand-off. A trait-checked registry: the functions are checked where the core imports them, not in the backend package. |
+| NVIDIA | Private repository `dataframe_mojo_extensions`, package `dataframe_accel` | Its own `dataframe_provider/` package, first on the import path | Whole-plan execution of row pipelines over every numeric type and Bool, with casts and scalar reductions, on Linux x86-64. Builds against the core revision pinned in `core.json`. | The device functions. Pinned to an older core revision, so it needs them before it moves to this one. |
