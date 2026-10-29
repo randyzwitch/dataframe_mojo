@@ -21,7 +21,8 @@ retains those buffers as Series chunks. Eager reading still stores the whole
 output; temporary Arrow buffers are bounded by a row group instead of a file.
 
 Row-group pruning: `parquet_row_group_statistics` returns one row per row
-group with each column's minimum, maximum and null count from the footer,
+group with each column's minimum, maximum and null count from .file_sources import has_pattern, resolve_paths
+from the footer,
 and `_pruned_row_groups` turns a filter on constant bounds (`col > lit`,
 combined with `&` and `|`) into the row groups that can contain a match.
 The lazy `scan_parquet` uses both, so a filter decodes only those groups.
@@ -248,6 +249,7 @@ def read_parquet(
     columns: List[String] = List[String](),
     row_groups: Optional[List[Int]] = None,
     use_threads: Bool = True,
+    glob: Bool = True,
 ) raises -> DataFrame:
     """Read a local Parquet file into a DataFrame.
 
@@ -273,6 +275,14 @@ def read_parquet(
     missing, or the reader library is not installed (see the module notes
     for where it is looked for).
     """
+    if glob and has_pattern(path):
+        return read_parquet(
+            [path],
+            columns=columns,
+            row_groups=row_groups,
+            use_threads=use_threads,
+            glob=True,
+        )
     if path == "":
         raise Error("read_parquet requires a path")
     for i in range(len(columns)):
@@ -938,3 +948,30 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
             pieces
         ) == 1 else Series._from_chunks(pieces)
     return DataFrame(columns^, height=frame.height())
+
+
+def read_parquet(
+    paths: List[String],
+    *,
+    columns: List[String] = List[String](),
+    row_groups: Optional[List[Int]] = None,
+    use_threads: Bool = True,
+    glob: Bool = True,
+) raises -> DataFrame:
+    """Read sorted local file sources, expanding glob patterns by default.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[DataFrame](capacity=len(files))
+    for path in files:
+        var frame = read_parquet(
+            path,
+            columns=columns,
+            row_groups=row_groups,
+            use_threads=use_threads,
+            glob=False,
+        )
+        frames.append(frame^)
+    return concat(frames)._with_statistics()

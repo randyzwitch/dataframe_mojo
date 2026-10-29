@@ -3,6 +3,7 @@
 All public read_csv overloads use the same range-splitting scanner and
 typed column builders.
 """
+from .file_sources import has_pattern, resolve_paths
 from std.collections import Dict
 from .csv_types import CsvField, CsvSchema, CsvOptions
 from .csv_reader import read_csv_explicit, read_csv_inferred
@@ -11,7 +12,7 @@ from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from ..dtype import DataType, NUMERIC_DTYPES
 from ..categorical import decode
-from ..frame import DataFrame
+from ..frame import DataFrame, concat
 from ..series import Series
 from ..temporal import format_in, zone_of
 from ..timezone import TimeZone
@@ -34,6 +35,7 @@ def read_csv(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     buffer_size: Int = 65536,
+    glob: Bool = True,
 ) raises -> DataFrame:
     """Read CSV through the range-splitting scanner and typed builders.
 
@@ -43,6 +45,24 @@ def read_csv(
     buffer_size remains a positive compatibility argument; mapped reads use
     the pipeline's row-aligned chunk sizing. See docs/csv.md.
     """
+    if glob and has_pattern(path):
+        return read_csv(
+            [path],
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=True,
+        )
     var table = read_csv_explicit(
         path,
         schema,
@@ -78,12 +98,31 @@ def read_csv(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     buffer_size: Int = 65536,
+    glob: Bool = True,
 ) raises -> DataFrame:
     """Read CSV with ordered (name, dtype) pairs as a concise schema.
 
     Fields default to nullable=True and ISO temporal parsing, exactly as
     CsvField(name, dtype). Use CsvSchema for per-field configuration.
     """
+    if glob and has_pattern(path):
+        return read_csv(
+            [path],
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=True,
+        )
     var fields = List[CsvField](capacity=len(schema))
     for field in schema:
         fields.append(CsvField(field[0], field[1]))
@@ -103,6 +142,7 @@ def read_csv(
         truncate_ragged_lines=truncate_ragged_lines,
         encoding=encoding,
         buffer_size=buffer_size,
+        glob=glob,
     )
 
 
@@ -124,6 +164,7 @@ def read_csv(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     buffer_size: Int = 65536,
+    glob: Bool = True,
 ) raises -> DataFrame:
     """Infer a CSV schema and decode it through the single CSV pipeline.
 
@@ -131,6 +172,26 @@ def read_csv(
     inference is enabled by try_parse_dates. schema_overrides sets explicit
     output dtypes. See docs/csv.md for the inference rules.
     """
+    if glob and has_pattern(path):
+        return read_csv(
+            [path],
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=n_rows,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=True,
+        )
     var table = read_csv_inferred(
         path,
         infer_schema_length=infer_schema_length,
@@ -388,3 +449,157 @@ def _reject_nested(frame: DataFrame) raises:
                 + " is "
                 + field.dtype.name()
             )
+
+
+def read_csv(
+    paths: List[String],
+    *,
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    glob: Bool = True,
+) raises -> DataFrame:
+    """Read sorted local file sources, expanding glob patterns by default.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[DataFrame](capacity=len(files))
+    var total = 0
+    for path in files:
+        var remaining = max(0, n_rows - total) if n_rows >= 0 else n_rows
+        var frame = read_csv(
+            path,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=remaining,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=False,
+        )
+        total += frame.height()
+        frames.append(frame^)
+    return concat(frames)._with_statistics()
+
+
+def read_csv(
+    paths: List[String],
+    schema: List[Tuple[String, DataType]],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    glob: Bool = True,
+) raises -> DataFrame:
+    """Read sorted local file sources, expanding glob patterns by default.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[DataFrame](capacity=len(files))
+    var total = 0
+    for path in files:
+        var remaining = max(0, n_rows - total) if n_rows >= 0 else n_rows
+        var frame = read_csv(
+            path,
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=remaining,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=False,
+        )
+        total += frame.height()
+        frames.append(frame^)
+    return concat(frames)._with_statistics()
+
+
+def read_csv(
+    paths: List[String],
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    glob: Bool = True,
+) raises -> DataFrame:
+    """Read sorted local file sources, expanding glob patterns by default.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[DataFrame](capacity=len(files))
+    var total = 0
+    for path in files:
+        var remaining = max(0, n_rows - total) if n_rows >= 0 else n_rows
+        var frame = read_csv(
+            path,
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            n_rows=remaining,
+            columns=columns,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            buffer_size=buffer_size,
+            glob=False,
+        )
+        total += frame.height()
+        frames.append(frame^)
+    return concat(frames)._with_statistics()
