@@ -26,6 +26,7 @@ from tests.support.coverage_generators import (
 )
 from tests.support.coverage_compare import (
     assert_frame,
+    assert_frame_unordered,
     assert_join_pairs,
     assert_join_model,
     assert_reference_cell,
@@ -90,7 +91,7 @@ def test_join_predicates_preserve_outer_null_rows_and_side_dependencies() raises
                             how,
                             pairs,
                         )
-                        assert_frame(optimized, raw)
+                        assert_frame_unordered(optimized, raw)
                     # A differently named right key must not attract a predicate
                     # referring to the output's coalesced left key.
                     var renamed = right.rename({"i": "right_key"})

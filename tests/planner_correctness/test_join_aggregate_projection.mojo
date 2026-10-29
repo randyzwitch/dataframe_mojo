@@ -17,7 +17,10 @@ from dataframe import (
 )
 from dataframe.lazy import SCAN_FRAME, SCAN_CSV
 from tests.support.join_typed_reference import nested_loop_pairs
-from tests.support.coverage_compare import assert_frame
+from tests.support.coverage_compare import (
+    assert_frame,
+    assert_frame_unordered,
+)
 
 
 def _string_side(
@@ -393,11 +396,11 @@ def test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_c
     var count = joined.select(col("k").len().alias("rows"))
     _csv_projection(count, True)
     for optimize in [False, True]:
-        assert_frame(
+        assert_frame_unordered(
             cells.collect(optimize=optimize, streaming=False, engine="cpu"),
             expected,
         )
-        assert_frame(
+        assert_frame_unordered(
             right_cells.collect(
                 optimize=optimize, streaming=False, engine="cpu"
             ),

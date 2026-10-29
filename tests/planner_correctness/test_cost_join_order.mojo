@@ -7,13 +7,17 @@ comparing two relations' columns is an edge of the estimate. A plan's
 result is the same joins over separately collected inputs: a snowflake
 written large-table-last, a nested chain met from its far side (its keys
 swapped, the dropped ones read from their partners), a filter between
-joins, and a plan whose rows' order shows, which keeps its written order."""
+joins, and a graph with no consumer above it, ordered like any other since
+a join promises no row order."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from dataframe.distinct_statistics import distinct_estimate
 from dataframe.join_order import FilterEdge, JoinEdge, JoinGraph, order_joins
-from tests.support.coverage_compare import assert_frame
+from tests.support.coverage_compare import (
+    assert_frame,
+    assert_frame_unordered,
+)
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -160,7 +164,9 @@ def test_a_snowflake_and_a_nested_chain_join_cheapest_first() raises:
     _ = trace^
 
 
-def test_a_join_graph_whose_row_order_shows_keeps_its_order() raises:
+def test_a_join_graph_with_no_consumer_is_ordered_by_cost() raises:
+    # A join promises no row order, so a graph collected as it is, with no
+    # aggregation or sort above it, is ordered by cost like any other.
     var t = tables()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var query = (
@@ -172,8 +178,8 @@ def test_a_join_graph_whose_row_order_shows_keeps_its_order() raises:
     var observed = StrategyTrace()
     var rows = query.collect()
     assert_true(
-        "dataframe-path: lazy.cost_join_order\n" not in observed.text(),
-        "an order-visible join graph was reordered",
+        "dataframe-path: lazy.cost_join_order\n" in observed.text(),
+        "a join graph with no consumer was not ordered by cost",
     )
     _ = observed^
     _ = trace^
@@ -184,7 +190,7 @@ def test_a_join_graph_whose_row_order_shows_keeps_its_order() raises:
         .join(t[0].collect(), left_on=["s_id"], right_on=["f_store"])
         .join(t[1].collect(), left_on=["f_product"], right_on=["p_id"])
     )
-    assert_frame(rows, eager)
+    assert_frame_unordered(rows, eager)
 
 
 def test_counted_domains_take_the_largest_count_and_charge_unused_edges() raises:

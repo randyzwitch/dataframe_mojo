@@ -1,4 +1,4 @@
-"""Join order changes preserve coalesced names and position-sensitive barriers."""
+"""Join order changes preserve coalesced names; a join promises no row order."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
@@ -30,29 +30,30 @@ def _inputs() raises -> Tuple[DataFrame, DataFrame]:
     )
 
 
-def _check_groups(actual: DataFrame, first: Bool, ordered: Bool) raises:
+def _check_groups(actual: DataFrame, first: Bool) raises:
+    # A join promises no row order, so the groups are checked in key
+    # order, and `first` may be any of its group's values.
     assert_equal(actual.height(), 3)
-    var result = actual.copy() if ordered else actual.sort("a")
-    for position in range(3):
-        var key = [2, 0, 1][position] if ordered else position
+    var result = actual.sort("a")
+    for key in range(3):
         var total = Int128(0)
-        var earliest = Int64(0)
-        var count = 0
+        var members = List[Int64]()
         for row in range(299):
             if row * 17 % 7 == key and row % 11 != 3:
-                if count == 0:
-                    earliest = Int64(row - 149)
                 total += Int128(row - 149)
-                count += 1
-        assert_equal(result.item(position, "a").int64(), Int64(key))
-        assert_equal(
-            result.item(position, "answer").int64(),
-            earliest if first else Int64(total),
-        )
-        assert_equal(result.item(position, "n").int64(), Int64(count))
+                members.append(Int64(row - 149))
+        assert_equal(result.item(key, "a").int64(), Int64(key))
+        var answer = result.item(key, "answer").int64()
+        if first:
+            assert_true(answer in members, "first is no member of its group")
+        else:
+            assert_equal(answer, Int64(total))
+        assert_equal(result.item(key, "n").int64(), Int64(len(members)))
 
 
-def test_join_rerooting_restores_coalesced_key_names_and_respects_order_sensitive_reductions() raises:
+def test_join_rerooting_restores_coalesced_key_names_under_any_reduction() raises:
+    # A join promises no row order, so the chain re-roots under a
+    # position-reading reduction or an ordered group-by too.
     var inputs = _inputs()
     for first in [False, True]:
         for ordered in [False, True]:
@@ -73,13 +74,10 @@ def test_join_rerooting_restores_coalesced_key_names_and_respects_order_sensitiv
             for streaming in [False, True]:
                 var planned = query._optimized()
                 var root = len(planned._plan._nodes) - 1
-                assert_equal(
-                    planned._probe_largest_inputs(root, streaming, 7),
-                    not first and not ordered,
-                )
+                assert_true(planned._probe_largest_inputs(root, streaming, 7))
                 var actual = planned._execute(root, False, streaming, 7)
                 assert_equal(actual.columns(), ["a", "answer", "n"])
-                _check_groups(actual, first, ordered)
+                _check_groups(actual, first)
                 for optimize in [False, True]:
                     _check_groups(
                         query.collect(
@@ -89,7 +87,6 @@ def test_join_rerooting_restores_coalesced_key_names_and_respects_order_sensitiv
                             engine="cpu",
                         ),
                         first,
-                        ordered,
                     )
 
 
@@ -261,31 +258,26 @@ def _join_below(plan: LazyFrame) raises -> Tuple[Int, List[Int]]:
     return (top, parents^)
 
 
-def test_a_sort_leaves_the_joins_below_it_free_to_reorder_unless_ties_keep_order() raises:
-    # Equal sort keys owe no order (Polars and DuckDB promise none), so the
-    # rows a join below a sort makes may arrive in any order; with
-    # `maintain_order` their input order shows in the ties.
+def test_a_join_is_free_to_reorder_under_any_consumer() raises:
+    # A join promises no row order (as DuckDB's and Polars' default joins),
+    # so its rows may arrive in any order under every consumer: a sort,
+    # one keeping ties in input order, a partitioned mean and a running
+    # sum alike. The orders those read were never specified.
     var inputs = _inputs()
     var joined = (
         inputs[0].lazy().join(inputs[1].lazy(), left_on=["a"], right_on=["b"])
     )
-    var free = joined.sort("label")
-    var found = _join_below(free)
-    assert_true(free._order_free_above(found[0], found[1]))
-    var kept = joined.sort("label", maintain_order=True)
-    found = _join_below(kept)
-    assert_true(not kept._order_free_above(found[0], found[1]))
-    # Aggregates over partitions read no position; a running sum does.
-    var partitioned = joined.with_columns(
-        [col("value").mean().over("a").alias("m")]
-    ).sort("label")
-    found = _join_below(partitioned)
-    assert_true(partitioned._order_free_above(found[0], found[1]))
-    var running = joined.with_columns([col("value").cum_sum().alias("c")]).sort(
-        "label"
-    )
-    found = _join_below(running)
-    assert_true(not running._order_free_above(found[0], found[1]))
+    for query in [
+        joined.sort("label"),
+        joined.sort("label", maintain_order=True),
+        joined.with_columns([col("value").mean().over("a").alias("m")]).sort(
+            "label"
+        ),
+        joined.with_columns([col("value").cum_sum().alias("c")]).sort("label"),
+        joined,
+    ]:
+        var found = _join_below(query)
+        assert_true(query._order_free_above(found[0], found[1]))
 
 
 def test_maintain_order_keeps_input_order_among_equal_sort_keys() raises:

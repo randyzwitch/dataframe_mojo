@@ -117,6 +117,11 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var asof_tolerance: Optional[AnyValue]
     var source_failure: String
     var json_schema: Optional[DataType]
+    # A JOIN whose build side a swap already chose: no swap rule flips it
+    # again, as DuckDB's build/probe optimizer decides a join's sides
+    # once. Without this a swap made on a low estimate could flip back
+    # once the other side's real height is known, and again after that.
+    var sides_fixed: Bool
 
     # These views borrow the stored lists: reading a payload does not add a
     # copy-on-write owner. String elements share their list's element origin
@@ -456,6 +461,7 @@ def _plan_node(
         Optional[AnyValue](),
         source_failure,
         json_schema.copy(),
+        False,
     )
 
 

@@ -1,11 +1,10 @@
 """An inner join whose executed right side holds more rows than its left can
-is run with the sides swapped when an unordered aggregation whose results do
-not depend on row order consumes it (the aggregate table's states, or a
-distinct count, whose batches are collected for one eager group-by): the
-left is hashed and the right streams through it. The swap must not change
+is run with the sides swapped: the left is hashed and the right streams
+through it. A join promises no row order, so the swap applies whatever
+consumes the join, an ordered group-by included. The swap must not change
 the result, the join's column names (the left key's own name), its key type,
-or which rows join; it is declined where row order matters to the consumer
-(an ordered group-by) and where a shared non-key name would be suffixed."""
+or which rows join; it is declined where a shared non-key name would be
+suffixed."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 
@@ -194,10 +193,12 @@ def test_swapped_join_keeps_the_left_key_name_and_type() raises:
     _ = workers^
 
 
-def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written_and_distinct_counts_swap() raises:
+def test_ordered_group_bys_and_distinct_counts_swap_and_renamed_columns_keep_the_join_as_written() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    # An ordered group-by: same groups, first-occurrence order kept.
+    # An ordered group-by keeps its groups in first-occurrence order of
+    # the rows it reads, but the join promises no order: it swaps, and
+    # the groups are the same.
     var observed = StrategyTrace()
     var ordered = (
         joined()
@@ -205,7 +206,7 @@ def test_order_sensitive_consumers_and_renamed_columns_keep_the_join_as_written_
         .agg(sums())
         .collect()
     )
-    assert_equal(swapped(observed.text()), False)
+    assert_equal(swapped(observed.text()), True)
     _ = observed^
     assert_by_name_and_group(ordered)
     # A distinct count depends on each group's values only: the join

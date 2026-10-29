@@ -361,6 +361,7 @@ def plan_stream_execute(
                 # position, which no swap beats.
                 if (
                     node.how == JOIN_INNER
+                    and not node.sides_fixed
                     and plan_direct_key(self, node.left, node.names)
                     and not plan_progression_key(
                         self, node.right, node.right_keys
@@ -445,6 +446,7 @@ def plan_stream_execute(
             var built = self._execute(node.right, False, True, batch_size)
             if (
                 node.how == JOIN_INNER
+                and not node.sides_fixed
                 and bound >= 0
                 and built.height() > bound
                 and not plan_progression_key(self, node.right, node.right_keys)
@@ -479,8 +481,10 @@ def plan_stream_execute(
                         )
                     return plan._execute(index, False, True, batch_size)
             if (
-                node.how == JOIN_INNER or node.how == JOIN_LEFT
-            ) and node.coalesce:
+                (node.how == JOIN_INNER or node.how == JOIN_LEFT)
+                and node.coalesce
+                and not node.sides_fixed
+            ):
                 # DuckDB's build side (`BuildProbeSideOptimizer`): the
                 # side of fewer rows times columns builds. The right
                 # side has run; when the left one, estimated, is the

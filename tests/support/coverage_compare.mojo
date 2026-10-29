@@ -273,27 +273,79 @@ def assert_join_pairs(
             == "s" else DataType.BOOL
         )
         assert_true(actual.column(names[len(left.names) + c]).dtype() == dtype)
+    # A join promises no row order: each expected pair takes one unused
+    # output row whose cells all match it, its own position first.
+    var used = List[Bool](length=len(pairs), fill=False)
     for index in range(len(pairs)):
-        var pair = pairs[index].copy()
-        for name in left.names:
-            var is_key = False
-            for key in keys:
-                is_key = is_key or key == name
-            var cell = actual.item(index, name)
-            if how == "right" and coalesce and is_key:
-                # A right join preserves its right input's keys, with left names.
-                assert_reference_cell(cell, right.rows[pair.right], name)
-            elif pair.left >= 0:
-                assert_reference_cell(cell, left.rows[pair.left], name)
-            elif coalesce and is_key:
-                assert_reference_cell(cell, right.rows[pair.right], name)
-            else:
-                assert_true(cell.is_null())
-        for c in range(len(right_fields)):
-            var cell = actual.item(index, names[len(left.names) + c])
-            if pair.right >= 0:
-                assert_reference_cell(
-                    cell, right.rows[pair.right], right_fields[c]
+        var found = False
+        for offset in range(len(pairs)):
+            var row = (index + offset) % len(pairs)
+            if used[row]:
+                continue
+            try:
+                _assert_pair_row(
+                    actual,
+                    row,
+                    left,
+                    right,
+                    keys,
+                    how,
+                    pairs[index],
+                    coalesce,
+                    names,
+                    right_fields,
                 )
-            else:
-                assert_true(cell.is_null())
+            except:
+                continue
+            used[row] = True
+            found = True
+            break
+        if not found:
+            # Report the mismatch against the pair's own position.
+            _assert_pair_row(
+                actual,
+                index,
+                left,
+                right,
+                keys,
+                how,
+                pairs[index],
+                coalesce,
+                names,
+                right_fields,
+            )
+            assert_true(False, "Join output row " + String(index) + " reused")
+
+
+def _assert_pair_row(
+    actual: DataFrame,
+    index: Int,
+    left: ReferenceTable,
+    right: ReferenceTable,
+    keys: List[String],
+    how: String,
+    pair: RowPair,
+    coalesce: Bool,
+    names: List[String],
+    right_fields: List[String],
+) raises:
+    for name in left.names:
+        var is_key = False
+        for key in keys:
+            is_key = is_key or key == name
+        var cell = actual.item(index, name)
+        if how == "right" and coalesce and is_key:
+            # A right join preserves its right input's keys, with left names.
+            assert_reference_cell(cell, right.rows[pair.right], name)
+        elif pair.left >= 0:
+            assert_reference_cell(cell, left.rows[pair.left], name)
+        elif coalesce and is_key:
+            assert_reference_cell(cell, right.rows[pair.right], name)
+        else:
+            assert_true(cell.is_null())
+    for c in range(len(right_fields)):
+        var cell = actual.item(index, names[len(left.names) + c])
+        if pair.right >= 0:
+            assert_reference_cell(cell, right.rows[pair.right], right_fields[c])
+        else:
+            assert_true(cell.is_null())

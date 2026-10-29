@@ -640,8 +640,8 @@ def test_build_key_bits_reject_only_absent_keys_in_joins_semi_and_anti() raises:
 def test_eager_join_builds_on_the_side_of_fewer_rows_times_columns() raises:
     # DuckDB's build side: fewer rows times columns builds, the right on a
     # tie, with no minimum size. A 300-row left against a 20,000-row right
-    # builds on the left and still returns left-major rows in right order,
-    # nulls and duplicate keys on both sides included.
+    # builds on the left and returns every pair, nulls and duplicate keys on
+    # both sides included, in no promised order.
     var narrow = DataFrame([Series("k", Column[Int64]([1, 2]))])
     var wide = DataFrame(
         [Series("k", Column[Int64]([1])), Series("v", Column[Int64]([2]))]
@@ -701,14 +701,22 @@ def test_eager_join_builds_on_the_side_of_fewer_rows_times_columns() raises:
                 expected_right.append(-1)
         var actual = left.join(right, ["k"], "left" if outer else "inner")
         assert_equal(actual.height(), len(expected_left))
+        # A join promises no row order: compare the (left, right) pairs
+        # as sorted lists, an unmatched right row as 0.
+        var expected_pairs = List[Int]()
+        var actual_pairs = List[Int]()
         for row in range(actual.height()):
-            assert_equal(
-                actual.item(row, "l").int64(), Int64(expected_left[row])
+            expected_pairs.append(
+                expected_left[row] * (right_rows + 1) + expected_right[row] + 1
             )
-            var j = expected_right[row]
-            assert_equal(actual.item(row, "r").is_null(), j < 0)
-            if j >= 0:
-                assert_equal(actual.item(row, "r").int64(), Int64(j))
+            var r = actual.item(row, "r")
+            actual_pairs.append(
+                Int(actual.item(row, "l").int64()) * (right_rows + 1)
+                + (0 if r.is_null() else Int(r.int64()) + 1)
+            )
+        sort(expected_pairs)
+        sort(actual_pairs)
+        assert_equal(actual_pairs, expected_pairs)
 
 
 def test_parallel_left_major_restore_matches_the_serial_order() raises:

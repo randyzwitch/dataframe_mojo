@@ -230,6 +230,7 @@ def plan_swap_join_sides(
     join.right = build
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_join_sides")
@@ -296,6 +297,7 @@ def plan_swap_left_join_sides(
     join.how = JOIN_RIGHT
     join.text = "right"
     join.coalesce = False
+    join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_left_join_sides")

@@ -1,11 +1,14 @@
 """A stream builds a join on its left side when that side, estimated, is the
-smaller: the join's result keeps the left's row order
-and every row the written join gives, and a join whose left cannot be the
-smaller keeps building on its right."""
+smaller, flipping the join inside the pipeline (a join promises no row
+order): the result has every row the written join gives, and a join whose
+left cannot be the smaller keeps building on its right."""
 # contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
-from tests.support.coverage_compare import assert_frame
+from tests.support.coverage_compare import (
+    assert_frame,
+    assert_frame_unordered,
+)
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -46,7 +49,9 @@ def frames() raises -> List[LazyFrame]:
     ]
 
 
-def test_a_small_left_builds_and_keeps_its_row_order() raises:
+def test_a_small_left_builds_inside_the_pipeline() raises:
+    # The join promises no row order, so it flips inside the pipeline:
+    # the small left is hashed and the stock rows stream through it.
     var t = frames()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var query = (
@@ -58,8 +63,8 @@ def test_a_small_left_builds_and_keeps_its_row_order() raises:
     var observed = StrategyTrace()
     var rows = query.collect()
     assert_true(
-        "dataframe-path: stream.smaller_left_build\n" in observed.text(),
-        "the smaller left side was not built",
+        "dataframe-path: lazy.swap_join_sides\n" in observed.text(),
+        "the smaller left side was not built inside the pipeline",
     )
     _ = observed^
     _ = trace^
@@ -71,8 +76,7 @@ def test_a_small_left_builds_and_keeps_its_row_order() raises:
         .filter(col("s_qty") > lit(Int64(2)))
     )
     assert_true(eager.height() > 0)
-    # Same rows in the same order: the written join's left-major order.
-    assert_frame(rows, eager)
+    assert_frame_unordered(rows, eager)
 
 
 def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
@@ -91,7 +95,7 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
     )
     _ = observed^
     _ = trace^
-    assert_frame(
+    assert_frame_unordered(
         rows,
         t[1]
         .collect()
