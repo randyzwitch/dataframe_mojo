@@ -340,6 +340,9 @@ struct FakeDevice(AcceleratorBackend):
 
     var budget: Int
     var runs: Int
+    # When positive: the device's cost for a unit under 1,000 input rows,
+    # as a large fixed launch cost would make it.
+    var small_fixed_ns: Float64
 
     def run_pipeline(self, pipeline: LazyFrame, device: Int) raises -> Frame:
         ref runs = runs_at(self.runs)[]
@@ -378,6 +381,8 @@ struct FakeDevice(AcceleratorBackend):
     def pipeline_estimate(
         self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
     ) -> Float64:
+        if self.small_fixed_ns > 0 and features.input_rows < 1000:
+            return self.small_fixed_ns
         return 0.01 * Float64(max(features.input_rows, 0))
 
 
@@ -409,7 +414,7 @@ def test_explain_reports_the_placement_it_would_make() raises:
         keys.append(unit.key)
     # Without a CPU calibration nothing is compared and all stays on CPU.
     var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
-    var shown = summed.explain(accelerator=FakeDevice(-1, 0), engine="auto")
+    var shown = summed.explain(accelerator=FakeDevice(-1, 0, 0), engine="auto")
     assert_true("DEVICES cpu, fake:0 Fake GPU (discrete)" in shown, shown)
     assert_true("cpu not measured" in shown, shown)
     assert_false("on fake:0" in shown, shown)
@@ -418,17 +423,17 @@ def test_explain_reports_the_placement_it_would_make() raises:
     var path = String("build/test-device-placement-slow-cpu.json")
     calibrate(path, keys, 1e6)
     var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
-    shown = summed.explain(accelerator=FakeDevice(-1, 0), engine="auto")
+    shown = summed.explain(accelerator=FakeDevice(-1, 0, 0), engine="auto")
     assert_true("on fake:0" in shown, shown)
     assert_false("on cpu" in shown, shown)
     assert_true("PLACEMENT estimated" in shown, shown)
     # A budget too small for the unit keeps it on the CPU.
-    shown = summed.explain(accelerator=FakeDevice(1, 0), engine="auto")
+    shown = summed.explain(accelerator=FakeDevice(1, 0, 0), engine="auto")
     assert_false("on fake:0" in shown, shown)
     # The join's output rows are not estimated, so the aggregate above it
     # has no CPU cost, and the join's output cannot be moved by an unknown
     # number of bytes: both stay on the CPU.
-    shown = plan.explain(accelerator=FakeDevice(-1, 0), engine="auto")
+    shown = plan.explain(accelerator=FakeDevice(-1, 0, 0), engine="auto")
     assert_true("pipeline:agg" in shown and "rows -1" in shown, shown)
     var lines = shown.split("\n")
     for line in lines:
@@ -454,7 +459,7 @@ def test_collect_runs_placed_units_on_the_device() raises:
     calibrate(path, keys, 1e6)
     var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
     var runs = Runs()
-    var device = FakeDevice(-1, Int(Pointer(to=runs)))
+    var device = FakeDevice(-1, Int(Pointer(to=runs)), 0)
     # The sum runs on the device; its device-resident result is copied to
     # the host once, before collect returns.
     var result = summed.collect(accelerator=device, engine="auto")
@@ -477,10 +482,42 @@ def test_collect_runs_placed_units_on_the_device() raises:
     var failing = Runs(fail=True)
     with assert_raises(contains="fake device fault"):
         _ = summed.collect(
-            accelerator=FakeDevice(-1, Int(Pointer(to=failing))),
+            accelerator=FakeDevice(-1, Int(Pointer(to=failing)), 0),
             engine="auto",
         )
     assert_equal(failing.pipelines, 1)
     _ = calibrated^
     _ = runs^
     _ = failing^
+
+
+def test_a_unit_is_placed_again_when_it_starts() raises:
+    var values = List[Float64]()
+    for i in range(200_000):
+        values.append(Float64(i))
+    var frame = DataFrame([Series("v", Column[Float64](values^))])
+    # The filter keeps 9 rows. The sort's unit runs on the device; the sum
+    # over its output is planned from more rows than it gets.
+    var plan = (
+        frame.lazy()
+        .filter(col("v") > 199_990.0)
+        .sort("v")
+        .select(col("v").sum())
+    )
+    var keys = List[String]()
+    for unit in plan_pipelines(plan._optimized()._plan):
+        keys.append(unit.key)
+    var path = String("build/test-device-placement-start.json")
+    calibrate(path, keys, 1e6)
+    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var runs = Runs()
+    var device = FakeDevice(-1, Int(Pointer(to=runs)), 2e6)
+    var shown = plan.explain(accelerator=device, engine="auto")
+    assert_false("on cpu" in shown, shown)
+    var result = plan.collect(accelerator=device, engine="auto")
+    assert_true(result.equals(plan.collect(engine="cpu")))
+    # At its start the sum has 9 rows, where the device's 2 ms fixed cost
+    # loses to the CPU: only the sort ran on the device.
+    assert_equal(runs.pipelines, 1)
+    _ = calibrated^
+    _ = runs^

@@ -58,7 +58,7 @@ comptime _NEVER = Float64(1e300)
 comptime CPU = 0
 
 
-struct PlacementProblem(Movable):
+struct PlacementProblem(Copyable, Movable):
     """The numbers a placement is chosen from. Units are numbered with
     children before parents; devices with the CPU as 0."""
 
@@ -388,9 +388,16 @@ def plan_substitute(
 ):
     """Replace the unit's top with its result, so the rest of the plan
     reads it as an in-memory frame."""
+    plan_substitute_node(self, unit.top, result^)
+
+
+def plan_substitute_node(
+    mut self: QueryContext, index: Int, var result: DataFrame
+):
+    """Replace node `index` with a frame already computed for it."""
     self._frames.append(result^)
     self._schemas.append(Optional[CsvSchema]())
-    self._nodes[unit.top] = _frame_scan_node(slot=len(self._frames) - 1)
+    self._nodes[index] = _frame_scan_node(slot=len(self._frames) - 1)
 
 
 def _unit(
