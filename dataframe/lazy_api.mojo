@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.planning.node_builders import (
     _aggregate_node,
     _concat_node,
@@ -76,7 +77,7 @@ from dataframe.execution_settings import (
 )
 from dataframe.expr import (
     Expr,
-    changes_length,
+    group_sequence_rows,
     col,
     exclude,
     has_grouping,
@@ -2589,6 +2590,14 @@ trait AcceleratorBackend(Copyable):
         raise Error("provider does not run pipelines")
 
 
+def _group_edge_name(mut names: List[String], stem: String) -> String:
+    var name = stem.copy()
+    while name in names:
+        name += "_"
+    names.append(name.copy())
+    return name^
+
+
 @fieldwise_init
 struct _RegisteredProvider(AcceleratorBackend):
     """The provider chosen at build time (`_accel_provider`), seen through
@@ -2956,6 +2965,52 @@ struct LazyGroupBy(Copyable):
     # output names); empty when every key is a column under its own name.
     var _key_exprs: List[Expr]
 
+    def head(self, n: Int = 5) raises -> LazyFrame:
+        """First n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, False)
+
+    def tail(self, n: Int = 5) raises -> LazyFrame:
+        """Last n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, True)
+
+    def _edge_rows(self, n: Int, tail: Bool) raises -> LazyFrame:
+        if n < 0:
+            raise Error("GroupBy.head/tail count must be nonnegative")
+        var names = self._frame._input_schema().columns()
+        var original = names.copy()
+        var row = _group_edge_name(names, "__group_edge_row")
+        var first = _group_edge_name(names, "__group_edge_first")
+        var count = _group_edge_name(names, "__group_edge_count")
+        var frame = self._frame.with_row_index(row)
+        var partitions = self._keys.copy()
+        if len(self._key_exprs) > 0:
+            partitions = List[String]()
+            var computed = List[Expr]()
+            for key in self._key_exprs:
+                if _bare_column(key):
+                    partitions.append(key._name)
+                else:
+                    var name = _group_edge_name(names, "__group_edge_key")
+                    computed.append(key.alias(name))
+                    partitions.append(name)
+            frame = frame.with_columns(computed)
+        if len(partitions) == 0:
+            raise Error("GroupBy.head/tail requires grouping keys")
+        # The non-null row index counts every row, including null payloads.
+        # Group-first order matches eager first-occurrence grouping; the
+        # row index restores input order within each selected group.
+        return (
+            frame.with_columns(
+                [
+                    col(row).first().over(partitions).alias(first),
+                    col(row).cum_count(tail).over(partitions).alias(count),
+                ]
+            )
+            .filter(col(count) <= n)
+            .sort([first, row])
+            .select(original)
+        )
+
     def _grouped(
         self, reads: List[String], every_column: Bool
     ) -> Tuple[LazyFrame, List[String], Bool]:
@@ -3002,7 +3057,7 @@ struct LazyGroupBy(Copyable):
         var prepared = List[Expr](capacity=len(exprs))
         for expression in exprs:
             prepared.append(
-                expression.implode() if changes_length(
+                expression.implode() if group_sequence_rows(
                     expression
                 ) else expression.copy()
             )
@@ -3187,6 +3242,7 @@ def scan_csv(
     infer_schema_length: Int = 100,
     schema_overrides: Dict[String, String] = Dict[String, String](),
     try_parse_dates: Bool = False,
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
     collect; projection and head() are pushed into the reader.
@@ -3195,6 +3251,23 @@ def scan_csv(
     however the plan runs (eagerly, streaming, or for its schema); invalid
     ones raise here, as read_csv would raise them.
     """
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=True,
+        )
     var options = _CsvScanOptions(
         has_header,
         separator,
@@ -3230,10 +3303,26 @@ def scan_csv(
     ignore_errors: Bool = False,
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
+    glob: Bool = True,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an explicit schema, which labels the
     fields by position; the options are read_csv's (see the overload
     above)."""
+    if glob and has_pattern(path):
+        return scan_csv(
+            [path],
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=True,
+        )
     var options = _CsvScanOptions.defaults()
     options.has_header = has_header
     options.separator = separator
@@ -3295,10 +3384,19 @@ def scan_ipc(path: String, *, memory_map: Bool = True) raises -> LazyFrame:
     )
 
 
-def scan_parquet(path: String) raises -> LazyFrame:
+def scan_parquet(
+    path: String,
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
     """Lazily read a Parquet file. Nothing is read until collect; projection
     is pushed into the reader, and a filter directly above the scan decodes
     only the row groups whose footer statistics can hold a match."""
+    if glob and has_pattern(path):
+        return scan_parquet(
+            [path],
+            glob=True,
+        )
     return LazyFrame(
         [_parquet_scan_node(path=path, slot=0)],
         [DataFrame([])],
@@ -3409,3 +3507,110 @@ def _from_context(var context: QueryContext) -> LazyFrame:
     )
     result._plan = context^
     return result^
+
+
+def scan_csv(
+    paths: List[String],
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            schema,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_csv(
+    paths: List[String],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    try_parse_dates: Bool = False,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_csv(
+            path,
+            has_header=has_header,
+            separator=separator,
+            quote_char=quote_char,
+            comment_prefix=comment_prefix,
+            skip_rows=skip_rows,
+            null_values=null_values,
+            ignore_errors=ignore_errors,
+            truncate_ragged_lines=truncate_ragged_lines,
+            encoding=encoding,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
+
+
+def scan_parquet(
+    paths: List[String],
+    *,
+    glob: Bool = True,
+) raises -> LazyFrame:
+    """Scan sorted local file sources; input rows are read during collection.
+
+    Strict concatenation requires matching output names, order and dtypes.
+    Repeated sources retain repeated rows. Use glob=False for literal paths.
+    """
+    var files = resolve_paths(paths, glob)
+    var frames = List[LazyFrame](capacity=len(files))
+    for path in files:
+        var frame = scan_parquet(
+            path,
+            glob=False,
+        )
+        frames.append(frame^)
+    return _concat_plans(frames, "vertical")
