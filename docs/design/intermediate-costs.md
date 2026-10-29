@@ -101,3 +101,8 @@ work, paid work, the selected key strategy and its reason.
   on Linux and the live M1 host. Exercise shared Metal paths where affected.
 - Keep workload definitions, profiles and generated evidence outside the
   repository, and keep benchmark changes separate from engine changes.
+
+Distinct-count requests are independent of width requests. Routing and group
+cardinality use `distinct(...)`; only callers requesting both facts use
+`column(...)`. This avoids visiting variable-width data merely to return an
+NDV. NDV, copy width and payload width keep independent request memo entries.

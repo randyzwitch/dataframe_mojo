@@ -30,7 +30,7 @@ def test_nested_join_rows_and_alias_domains_propagate_without_execution() raises
     var index = len(query._plan._nodes) - 1
     var estimates = IntermediateEstimates(len(query._plan._nodes))
     assert_equal(estimates.rows(query._plan, index), 4)
-    assert_equal(estimates.column(query._plan, index, "key")[0], 2)
+    assert_equal(estimates.distinct(query._plan, index, "key"), 2)
     assert_true(not estimates.facts[index].exact)
     assert_equal(plan_known_height(query._plan, index), -1)
     assert_equal(plan_height_bound(query._plan, index), -1)
@@ -78,7 +78,9 @@ def test_payload_width_retains_source_string_lengths_and_projection_aliases() ra
     assert_equal(
         estimates.payload_copy_width(query._plan, index, ["label"]), 16.0
     )
+    assert_equal(estimates.distinct(query._plan, index, "label"), 2)
     assert_equal(estimates.payload_width(query._plan, index, ["label"]), 22.0)
+    assert_equal(estimates.column(query._plan, index, "label"), (2, 22.0))
     assert_equal(estimates.payload_width(query._plan, index, ["missing"]), 16.0)
     assert_true(_cost_rows(Float64(Int.MAX) * Float64(Int.MAX)) > 0)
 
@@ -88,7 +90,7 @@ def test_unknown_computed_domains_do_not_execute_expressions_for_statistics() ra
     var query = frame.lazy().select_exprs([(col("k") // 0).alias("bad")])
     var index = len(query._plan._nodes) - 1
     var estimates = IntermediateEstimates(len(query._plan._nodes))
-    assert_equal(estimates.column(query._plan, index, "bad")[0], -1)
+    assert_equal(estimates.distinct(query._plan, index, "bad"), -1)
     assert_equal(estimates.payload_width(query._plan, index, ["bad"]), 16.0)
 
 

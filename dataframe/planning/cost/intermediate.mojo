@@ -222,7 +222,7 @@ struct IntermediateEstimates(Movable):
     """Execution-independent, request-scoped memo for a fixed logical plan."""
 
     var facts: List[RowEstimate]
-    var columns: Dict[String, Tuple[Int, Float64]]
+    var columns: Dict[String, Int]
     var widths: Dict[String, Float64]
     var observed: Dict[Int, DataFrame]
     var used: Bool
@@ -231,7 +231,7 @@ struct IntermediateEstimates(Movable):
         self.facts = List[RowEstimate]()
         for _ in range(count):
             self.facts.append(RowEstimate(-2, "not_estimated", False))
-        self.columns = Dict[String, Tuple[Int, Float64]]()
+        self.columns = Dict[String, Int]()
         self.widths = Dict[String, Float64]()
         self.observed = Dict[Int, DataFrame]()
         self.used = False
@@ -254,18 +254,27 @@ struct IntermediateEstimates(Movable):
     def column(
         mut self, plan: QueryContext, index: Int, name: String
     ) raises -> Tuple[Int, Float64]:
-        """Estimated NDV and bytes/value; -1 means no usable lineage."""
+        """Estimated NDV and bytes/value when both facts are requested."""
+        return (
+            self.distinct(plan, index, name),
+            self.column_width(plan, index, name),
+        )
+
+    def distinct(
+        mut self, plan: QueryContext, index: Int, name: String
+    ) raises -> Int:
+        """Estimated NDV without preparing unused payload widths; -1 is unknown."""
         var key = String(index) + "/" + name
         self.used = True
         if key in self.columns:
             return self.columns[key]
-        var result = self._column(plan, index, name)
+        var result = self._distinct(plan, index, name)
         self.columns[key] = result
         return result
 
-    def _column(
+    def _distinct(
         mut self, plan: QueryContext, index: Int, name: String
-    ) raises -> Tuple[Int, Float64]:
+    ) raises -> Int:
         ref node = plan._nodes[index]
         if index in self.observed:
             ref frame = self.observed[index]
@@ -273,27 +282,21 @@ struct IntermediateEstimates(Movable):
                 name not in frame.columns()
                 or frame.column(name).dtype().is_nested()
             ):
-                return (-1, -1.0)
-            return (
-                frame._cost_distinct_count(
-                    name, "bounded-chao1-jitter4096-v1", bounded_distinct
-                ),
-                frame_column_width(frame, name),
+                return -1
+            return frame._cost_distinct_count(
+                name, "bounded-chao1-jitter4096-v1", bounded_distinct
             )
         if node.kind == SCAN_FRAME:
             ref frame = plan._frames[node.source_slot()]
             if name not in frame.columns():
-                return (-1, -1.0)
+                return -1
             if frame.column(name).dtype().is_nested():
-                return (-1, -1.0)
-            return (
-                frame._cost_distinct_count(
-                    name, "bounded-chao1-jitter4096-v1", bounded_distinct
-                ),
-                frame_column_width(frame, name),
+                return -1
+            return frame._cost_distinct_count(
+                name, "bounded-chao1-jitter4096-v1", bounded_distinct
             )
         if node.kind == DROP and name in node.names:
-            return (-1, -1.0)
+            return -1
         if node.kind == SELECT or node.kind == WITH_COLUMNS:
             for expression in node.exprs:
                 if expression._name == name:
@@ -301,31 +304,31 @@ struct IntermediateEstimates(Movable):
                         len(expression._nodes) == 1
                         and expression._nodes[0].op == COL
                     ):
-                        return self.column(
+                        return self.distinct(
                             plan, node.left, expression._nodes[0].text
                         )
-                    return (-1, -1.0)
+                    return -1
             if node.kind == SELECT:
-                return (-1, -1.0)
+                return -1
         if node.kind == AGG and name not in node.names:
-            return (-1, -1.0)
+            return -1
         if node.kind == JOIN:
             if (
                 node.coalesce
                 and name in node.right_keys
                 and name not in node.names
             ):
-                return (-1, -1.0)
-            var left = self.column(plan, node.left, name)
-            if left[0] >= 0 or left[1] >= 0:
+                return -1
+            var left = self.distinct(plan, node.left, name)
+            if left >= 0:
                 return left
             if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
-                return (-1, -1.0)
+                return -1
             # Coalesced keys inherit their corresponding source statistics.
             for k in range(len(node.names)):
                 if node.coalesce and name == node.names[k]:
-                    return self.column(plan, node.right, node.right_keys[k])
-            return self.column(plan, node.right, name)
+                    return self.distinct(plan, node.right, node.right_keys[k])
+            return self.distinct(plan, node.right, name)
         if node.kind in [
             DROP,
             SELECT,
@@ -336,15 +339,15 @@ struct IntermediateEstimates(Movable):
             AGG,
             UNIQUE,
         ]:
-            var result = self.column(plan, node.left, name)
+            var result = self.distinct(plan, node.left, name)
             var rows = (
                 self.rows(plan, index) if node.kind
                 in [FILTER, SLICE, AGG, UNIQUE] else -1
             )
-            if rows >= 0 and result[0] >= 0:
-                return (min(rows, result[0]), result[1])
+            if rows >= 0 and result >= 0:
+                return min(rows, result)
             return result
-        return (-1, -1.0)
+        return -1
 
     def rows(mut self, plan: QueryContext, index: Int) raises -> Int:
         self.used = True
@@ -438,7 +441,7 @@ struct IntermediateEstimates(Movable):
             if len(node.names) == 0:
                 return self._set(index, -1, "unknown_group_keys")
             for name in node.names:
-                var count = self.column(plan, node.left, name)[0]
+                var count = self.distinct(plan, node.left, name)
                 if count < 0:
                     return self._set(index, rows, "unknown_group_domain")
                 groups = min(
@@ -462,8 +465,8 @@ struct IntermediateEstimates(Movable):
             var known = False
             var empty_domain = False
             for k in range(len(node.names)):
-                var a = self.column(plan, node.left, node.names[k])[0]
-                var b = self.column(plan, node.right, node.right_keys[k])[0]
+                var a = self.distinct(plan, node.left, node.names[k])
+                var b = self.distinct(plan, node.right, node.right_keys[k])
                 empty_domain = empty_domain or a == 0 or b == 0
                 if a > 0 and b > 0:
                     domain = max(domain, max(a, b))

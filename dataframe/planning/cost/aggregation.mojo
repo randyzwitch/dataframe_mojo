@@ -177,9 +177,9 @@ def plan_row_number_shape(
         var probe = -1
         var build = -1
         for k in range(len(op.names)):
-            probe = max(probe, estimates.column(self, op.left, op.names[k])[0])
+            probe = max(probe, estimates.distinct(self, op.left, op.names[k]))
             build = max(
-                build, estimates.column(self, op.right, op.right_keys[k])[0]
+                build, estimates.distinct(self, op.right, op.right_keys[k])
             )
         if probe == 0 or build == 0:
             reached = 0.0
@@ -189,7 +189,7 @@ def plan_row_number_shape(
     for key in keys:
         if key in carried:
             continue
-        var count = estimates.column(self, input, key)[0]
+        var count = estimates.distinct(self, input, key)
         if count < 0:
             return (-1.0, -1.0)
         groups = min(rows, groups * Float64(max(1, count)))
