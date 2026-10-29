@@ -1557,7 +1557,7 @@ struct Expr(Copyable):
 
         `fill_value` follows conditional-expression dtype and broadcast rules.
         """
-        var occupied = lit(1).cum_count().shift(n).is_not_null()
+        var occupied = self.is_null().cum_count().shift(n).is_not_null()
         return when(occupied).then(self.shift(n)).otherwise(fill_value)
 
     def shift(self, fill_value: Self) -> Self:
