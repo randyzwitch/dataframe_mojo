@@ -285,3 +285,38 @@ def test_ordering_nan_signed_zero_nulls_and_categorical_labels() raises:
         categorical.select(col("label").sort_by("x")),
         DataFrame([Series("label", Column[String](["b", "d", "c", "a"]))]),
     )
+
+
+def test_expression_gather_uses_group_local_positions_and_null_indices() raises:
+    var frame = ordered_group_frame()
+    for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
+        var indices = col("r").arg_sort(descending=True).head(2)
+        assert_ordered_groups(
+            source,
+            col("x").gather(indices),
+            [0, 2, 4],
+            Series(
+                "", Column[Int64]([3, 0, 0, 20], [True, False, False, True])
+            ),
+        )
+    var source = DataFrame(
+        [
+            Series("x", Column[Int64]([10, 20, 30])),
+            Series("i", Column[Int64]([2, -1, 99], [True, True, False])),
+        ]
+    )
+    var expected = DataFrame(
+        [Series("x", Column[Int64]([30, 30, 0], [True, True, False]))]
+    )
+    for variant in [source.copy(), chunk_layout(source), offset_layout(source)]:
+        assert_frame(variant.select(col("x").gather(col("i"))), expected)
+        assert_frame(
+            variant.lazy()
+            .select(col("x").gather(col("i")))
+            .collect(engine="cpu", batch_size=1),
+            expected,
+        )
+    with assert_raises(contains="integer indices"):
+        _ = source.select(col("x").gather(col("i").cast("float64")))
+    with assert_raises(contains="out of bounds"):
+        _ = source.select(col("x").gather(col("i") + 10))

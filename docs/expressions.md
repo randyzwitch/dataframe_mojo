@@ -962,3 +962,6 @@ row has the same element count in each.
 Nested columns cannot yet be sort keys, be cast, be reduced (other than
 `implode`), be used in `when`/`then`, or be written to CSV; each raises an
 error that says so.
+
+See [expressions within groups](group-expressions.md) for filtered and ordered
+aggregates, row selection, distinct/top-k operations and `GroupBy.head/tail`.

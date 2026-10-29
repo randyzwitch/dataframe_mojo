@@ -1524,6 +1524,10 @@ struct Expr(Copyable):
         )
         return Self(nodes^, self._name)
 
+    def gather(self, indices: Self) -> Self:
+        """Values at expression-computed integer positions; null indices yield null."""
+        return self._binary(indices, EXPR_GATHER)
+
     def get(self, index: Int) -> Self:
         """One value at a position, returning a scalar per aggregation group."""
         return self._window(EXPR_GET, Int64(index))

@@ -1385,6 +1385,13 @@ def bind(
                         "Expression filter requires a Boolean predicate"
                     )
                 has_aggregate = has_aggregate or aggregated[node.right]
+            elif node.op == EXPR_GATHER and node.right >= 0:
+                if node.right >= i:
+                    raise Error("Invalid gather indices")
+                _default(nodes, types, node.right)
+                if not types[node.right].is_integer():
+                    raise Error("Expression gather requires integer indices")
+                has_aggregate = has_aggregate or aggregated[node.right]
             elif node.op == EXPR_SLICE:
                 if node.min_count < -1 or (
                     node.text != "" and node.min_count < 0

@@ -19,6 +19,7 @@ from dataframe.expr import (
     EXPR_REVERSE,
     split_names,
 )
+from dataframe.dtype import DataType
 from dataframe.series import Series, sort_indices
 from dataframe.categorical import sort_ranks as categorical_sort_ranks
 from dataframe.kernels.binary import validity
@@ -143,6 +144,16 @@ def select_sequence(node: Node, input: Series, other: Series) raises -> Series:
     elif node.op == EXPR_GET:
         picks.append(_position(Int(node.integer), n))
     elif node.op == EXPR_GATHER:
+        if node.right >= 0:
+            var indices = other.cast(DataType.INT64).rechunk()
+            ref values = indices._data[Column[Int64]]
+            for row in range(len(indices)):
+                picks.append(
+                    _position(Int(values._get(row)), n) if values._valid(
+                        row
+                    ) else -1
+                )
+            return input.take_or_null(picks)
         if node.min_count > 0:
             for index in split_names(node.text):
                 picks.append(_position(Int(index), n))

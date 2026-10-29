@@ -485,10 +485,7 @@ struct GroupingSets(Copyable):
 
 @fieldwise_init
 struct GroupBy(Copyable):
-    """An eager grouping request. No per-group dataframe materialization.
-
-    It owns a snapshot of the input and the evaluated key columns.
-    """
+    """An eager grouping request over a snapshot and evaluated key columns."""
 
     var _frame: DataFrame
     var _keys: List[Series]
