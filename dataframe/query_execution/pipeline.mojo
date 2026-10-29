@@ -495,8 +495,10 @@ def plan_stream_execute(
                         )
                     return plan._execute(index, False, True, batch_size)
             if (
-                node.how == JOIN_INNER or node.how == JOIN_LEFT
-            ) and node.coalesce:
+                (node.how == JOIN_INNER or node.how == JOIN_LEFT)
+                and node.coalesce
+                and not plan_progression_key(self, node.right, node.right_keys)
+            ):
                 # DuckDB's build side (`BuildProbeSideOptimizer`): the
                 # side of fewer rows times columns builds. The right
                 # side has run; when the left one, estimated, is the
@@ -507,8 +509,10 @@ def plan_stream_execute(
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
                 # cannot be smaller is never sampled. A left made by
-                # other joins has the join order's estimate (TPC-DS
-                # q40's left join over a three-table join).
+                # other joins has the join order's estimate. A right
+                # side whose one key is a progression builds no hash
+                # table (the join order costs it nothing), so the left
+                # cannot be cheaper.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
