@@ -1335,8 +1335,22 @@ def test_time_window_requests_reject_invalid_indices_and_bindings() raises:
         _ = source.group_by_dynamic("t", "1s").agg(col("x").sum().alias("t"))
     with assert_raises():
         _ = source.rolling("t", "1s").agg(col("x").sum(), batch_size=0)
+    # An unsorted index is not an error: windows come from time order and
+    # rolling results keep input row order.
+    var swapped = source.take([1, 0])
+    var rolled = swapped.rolling("t", "1s").agg(col("x").sum())
+    assert_ticks(rolled, "t", DataType.datetime("ms"), [1000, 0])
+    assert_ticks(rolled, "x", DataType.INT64, [2, 1])
+    var windows = swapped.group_by_dynamic("t", "1s").agg(col("x").sum())
+    assert_ticks(windows, "t", DataType.datetime("ms"), [0, 1000])
+    assert_ticks(windows, "x", DataType.INT64, [1, 2])
+    assert_ticks(
+        swapped.select(col("x").rolling_sum_by("t", "1s")),
+        "x",
+        DataType.INT64,
+        [2, 1],
+    )
     var invalid = List[DataFrame]()
-    invalid.append(source.take([1, 0]))
     invalid.append(
         DataFrame(
             [
@@ -1472,7 +1486,7 @@ def test_temporal_reference_calendar_and_membership_literal_anchors() raises:
     )
 
 
-def test_dynamic_time_groups_check_sortedness_within_nullable_partitions() raises:
+def test_dynamic_time_groups_sort_within_nullable_partitions() raises:
     var times: List[Int64] = [0, 1000, 5000, 2000]
     var source = DataFrame(
         [
@@ -1503,13 +1517,20 @@ def test_dynamic_time_groups_check_sortedness_within_nullable_partitions() raise
             assert_equal(grouped.item(row, "g").is_null(), row >= 2)
             if row < 2:
                 assert_equal(grouped.item(row, "g").string(), "a")
-        with assert_raises():
-            _ = frame.group_by_dynamic("t", "2s").agg(col("x").sum())
-        var malformed = frame.take([2, 1, 0, 3])
-        with assert_raises():
-            _ = malformed.group_by_dynamic("t", "2s", group_by="g").agg(
-                col("x").sum()
-            )
+        # Without groups the times 0, 1s, 5s, 2s are out of order; windows
+        # [0, 2s), [2s, 4s) and [4s, 6s) hold x 1 + 2, 4 and 3.
+        var ungrouped = frame.group_by_dynamic("t", "2s").agg(col("x").sum())
+        assert_ticks(ungrouped, "t", DataType.datetime("ms"), [0, 2000, 4000])
+        assert_ticks(ungrouped, "x", DataType.INT64, [3, 4, 3])
+        # Reordering rows within each group gives the same windows.
+        var shuffled = frame.take([2, 1, 0, 3])
+        var regrouped = shuffled.group_by_dynamic("t", "2s", group_by="g").agg(
+            col("x").sum()
+        )
+        assert_ticks(
+            regrouped, "t", DataType.datetime("ms"), [0, 4000, 0, 2000]
+        )
+        assert_ticks(regrouped, "x", DataType.INT64, [1, 3, 2, 4])
 
 
 def test_temporal_duration_totals_and_numeric_operators_include_negative_rounding() raises:

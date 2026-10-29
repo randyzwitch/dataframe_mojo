@@ -1,8 +1,10 @@
-"""Sorted as-of matching, retaining exact integer and temporal key ordering."""
+"""As-of matching by an ordered key, retaining exact integer and temporal key
+ordering. A side whose keys are out of order within a group is scanned in a
+stable sorted order and its matches are mapped back to input rows."""
 from std.collections import Optional
 from dataframe.storage.column import Column
 from .dtype import DataType, NUMERIC_DTYPES
-from .series import Series
+from .series import Series, sort_indices
 from .value import AnyValue
 
 
@@ -63,15 +65,10 @@ def _tolerance(
     return (True, integer, floating)
 
 
-def _check_sorted[
+def _is_sorted[
     D: DType
-](
-    column: Column[Scalar[D]],
-    ids: List[Int],
-    groups: Int,
-    side: String,
-    name: String,
-) raises:
+](column: Column[Scalar[D]], ids: List[Int], groups: Int) -> Bool:
+    """Whether non-null keys ascend within each group."""
     var previous = List[Int](length=groups, fill=-1)
     for row in range(len(column)):
         if not column._valid(row):
@@ -79,16 +76,25 @@ def _check_sorted[
         var group = ids[row] if len(ids) else 0
         var last = previous[group]
         if last >= 0 and _less(column._get(row), column._get(last)):
-            raise Error(
-                "join_asof "
-                + side
-                + " column '"
-                + name
-                + "' is not sorted within its group (row "
-                + String(row)
-                + ")"
-            )
+            return False
         previous[group] = row
+    return True
+
+
+def _sorted_order(key: Series, ids: List[Int]) raises -> List[Int]:
+    """Stable row order by (group, key), null keys last in each group."""
+    if len(ids) == 0:
+        return key.argsort(nulls_last=True)
+    return sort_indices([ids.copy(), key._sort_ranks(False, True)])
+
+
+def _gather_ids(ids: List[Int], order: List[Int]) -> List[Int]:
+    if len(ids) == 0:
+        return List[Int]()
+    var result = List[Int](capacity=len(order))
+    for row in order:
+        result.append(ids[row])
+    return result^
 
 
 def _scan[
@@ -99,14 +105,10 @@ def _scan[
     left_ids: List[Int],
     right_ids: List[Int],
     matchable: List[Bool],
-    left_name: String,
-    right_name: String,
     exact: Bool,
     tolerance: Tuple[Bool, Int128, Float64],
 ) raises -> List[Int]:
     var groups = len(matchable)
-    _check_sorted(left, left_ids, groups, "left", left_name)
-    _check_sorted(right, right_ids, groups, "right", right_name)
     # Stable CSR buckets: total storage and work are linear, even for many
     # groups or long runs of duplicate keys. Nearest retains null positions
     # to preserve Polars' duplicate-run boundaries; nulls cannot be matches.
@@ -235,6 +237,72 @@ def _scan[
     return result^
 
 
+def _match[
+    D: DType, strategy: Int
+](
+    left: Series,
+    right: Series,
+    left_ids: List[Int],
+    right_ids: List[Int],
+    matchable: List[Bool],
+    exact: Bool,
+    tolerance: Tuple[Bool, Int128, Float64],
+) raises -> List[Int]:
+    """Scan sorted sides in place; scan an unsorted side through a stable
+    sorted copy and map its positions back to input rows."""
+    var groups = len(matchable)
+    var left_sorted = _is_sorted(
+        left._data[Column[Scalar[D]]], left_ids, groups
+    )
+    var right_sorted = _is_sorted(
+        right._data[Column[Scalar[D]]], right_ids, groups
+    )
+    if left_sorted and right_sorted:
+        return _scan[D, strategy](
+            left._data[Column[Scalar[D]]],
+            right._data[Column[Scalar[D]]],
+            left_ids,
+            right_ids,
+            matchable,
+            exact,
+            tolerance,
+        )
+    var left_order = List[Int]()
+    var right_order = List[Int]()
+    var lhs = left.copy()
+    var rhs = right.copy()
+    var lids: List[Int]
+    var rids: List[Int]
+    if left_sorted:
+        lids = left_ids.copy()
+    else:
+        left_order = _sorted_order(left, left_ids)
+        lhs = left.take(left_order).rechunk()
+        lids = _gather_ids(left_ids, left_order)
+    if right_sorted:
+        rids = right_ids.copy()
+    else:
+        right_order = _sorted_order(right, right_ids)
+        rhs = right.take(right_order).rechunk()
+        rids = _gather_ids(right_ids, right_order)
+    var found = _scan[D, strategy](
+        lhs._data[Column[Scalar[D]]],
+        rhs._data[Column[Scalar[D]]],
+        lids,
+        rids,
+        matchable,
+        exact,
+        tolerance,
+    )
+    var result = List[Int](length=len(found), fill=-1)
+    for i in range(len(found)):
+        var chosen = found[i]
+        if chosen >= 0 and not right_sorted:
+            chosen = right_order[chosen]
+        result[i if left_sorted else left_order[i]] = chosen
+    return result^
+
+
 def asof_rows(
     left: Series,
     right: Series,
@@ -275,14 +343,12 @@ def asof_rows(
                 if strategy == (
                     "backward" if s == 0 else "forward" if s == 1 else "nearest"
                 ):
-                    return _scan[D, s](
-                        lhs._data[Column[Scalar[D]]],
-                        rhs._data[Column[Scalar[D]]],
+                    return _match[D, s](
+                        lhs,
+                        rhs,
                         left_ids,
                         right_ids,
                         matchable,
-                        left.name(),
-                        right.name(),
                         allow_exact_matches,
                         bound,
                     )

@@ -518,43 +518,39 @@ def test_asof_interleaved_composite_groups_skip_null_members_and_unify_categorie
             )
 
 
-def _assert_unsorted(
-    left: DataFrame,
-    right: DataFrame,
-    side: String,
-    row: Int,
-    grouped: Bool = False,
+def _check_grouped(
+    left: DataFrame, right: DataFrame, selected: List[Int]
 ) raises:
-    var by: List[String] = ["g"] if grouped else List[String]()
-    var failed = False
-    try:
-        _ = left.join_asof(right, on="k", by=by)
-    except error:
-        assert_true(String(error).find(side + " column 'k'") >= 0)
-        assert_true(String(error).find("row " + String(row)) >= 0)
-        failed = True
-    assert_true(failed)
-    # Building a lazy plan succeeds, validation belongs to execution in both
-    # materialized and requested-streaming paths, independent of optimization.
-    var plan = left.lazy().join_asof(right.lazy(), on="k", by=by)
+    """Backward matches within `g`, eager and lazy, in left row order."""
+    var names: List[String] = ["k", "g", "p", "p_right"]
+    var right_names: List[String] = ["p"]
+    assert_asof_rows(
+        left.join_asof(right, on="k", by="g"),
+        left,
+        right,
+        selected,
+        names,
+        right_names,
+    )
+    var plan = left.lazy().join_asof(right.lazy(), on="k", by=["g"])
     for streaming in [False, True]:
         for optimize in [False, True]:
-            failed = False
-            try:
-                _ = plan.collect(
+            assert_asof_rows(
+                plan.collect(
                     streaming=streaming,
                     optimize=optimize,
                     batch_size=2,
                     engine="cpu",
-                )
-            except error:
-                assert_true(String(error).find(side + " column 'k'") >= 0)
-                assert_true(String(error).find("row " + String(row)) >= 0)
-                failed = True
-            assert_true(failed)
+                ),
+                left,
+                right,
+                selected,
+                names,
+                right_names,
+            )
 
 
-def test_asof_sortedness_is_per_group_ignores_hidden_nulls_and_reports_execution_rows() raises:
+def test_asof_unsorted_sides_are_matched_per_group_ignoring_hidden_nulls() raises:
     var sorted = DataFrame(
         [
             Series("k", Column[Int64]([0, 999, 1], [True, False, True])),
@@ -567,23 +563,36 @@ def test_asof_sortedness_is_per_group_ignores_hidden_nulls_and_reports_execution
             Series("p", Column[Int64]([10, 11, 12])),
         ]
     )
+    # Sorted inputs take the direct scan; the rows are unchanged.
     _check(sorted, sorted, [0, -1, 2], "backward", True)
-    _assert_unsorted(descending, sorted, "left", 2)
-    _assert_unsorted(sorted, descending, "right", 2)
+    # Left keys 2, null, 1 against right keys 0, null, 1: both 2 and 1 take
+    # right row 2 (key 1), in left row order.
+    _check(descending, sorted, [2, -1, 2], "backward", True)
+    _check(descending, sorted, [-1, -1, 2], "forward", True)
+    # Left keys 0, null, 1 against right keys 2, null, 1: 0 has no smaller
+    # key; 1 matches right row 2. Forward picks row 2 (1) then row 0 (2).
+    _check(sorted, descending, [-1, -1, 2], "backward", True)
+    _check(sorted, descending, [2, -1, 2], "forward", True)
+    _check(sorted, descending, [2, -1, 0], "forward", False)
     var interleaved = DataFrame(
         [
             Series("k", Column[Int64]([0, 10, 2, 11, 1])),
             Series("g", Column[String](["a", "b", "a", "b", "a"])),
+            Series("p", Column[Int64]([0, 1, 2, 3, 4])),
         ]
     )
     var ordered = DataFrame(
         [
             Series("k", Column[Int64]([0, 10, 1, 11, 2])),
             Series("g", Column[String](["a", "b", "a", "b", "a"])),
+            Series("p", Column[Int64]([5, 6, 7, 8, 9])),
         ]
     )
-    _assert_unsorted(interleaved, ordered, "left", 4, True)
-    _assert_unsorted(ordered, interleaved, "right", 4, True)
+    # Group a keys 0, 2, 1 (rows 0, 2, 4) against 0, 1, 2 (rows 0, 2, 4);
+    # group b keys 10, 11 match rows 1 and 3 in either direction.
+    _check_grouped(interleaved, ordered, [0, 1, 4, 3, 2])
+    _check_grouped(ordered, interleaved, [0, 1, 4, 3, 2])
+    _check_grouped(interleaved, interleaved, [0, 1, 2, 3, 4])
 
 
 def test_asof_key_group_tolerance_and_output_schema_errors_validate_empty_inputs() raises:

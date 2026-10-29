@@ -1158,8 +1158,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Group rows into calendar-aligned, possibly overlapping windows of
         the index column; see DataFrame.group_by_dynamic.
 
-        The index must be sorted (within each `group_by` group) when the
-        plan runs. Filters and slices above the aggregation stay above it,
+        The index need not be sorted; see DataFrame.group_by_dynamic for the
+        output order. Filters and slices above the aggregation stay above it,
         and its input is read in full before any window is formed.
         """
         return LazyTimeGroupBy(
@@ -1222,8 +1222,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """Aggregate a duration window ending at each row's index value;
         see DataFrame.rolling.
 
-        The index must be sorted (within each `group_by` group) when the
-        plan runs. Filters and slices above the aggregation stay above it,
+        The index need not be sorted; output rows keep input row order within
+        each group. Filters and slices above the aggregation stay above it,
         and its input is read in full before any window is formed.
         """
         return LazyTimeGroupBy(
@@ -1276,7 +1276,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         suffix: String = "_right",
         allow_exact_matches: Bool = True,
     ) raises -> Self:
-        """As-of join with sortedness checked at execution; see DataFrame.join_asof.
+        """As-of join, sorting unsorted sides at execution; see DataFrame.join_asof.
 
         Inputs are materialized for a complete ordered scan. Optimizations
         do not push filters or slices across this order-sensitive join.
