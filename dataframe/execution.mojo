@@ -3148,10 +3148,10 @@ def _sequence_value[
         var input = _sequence_value[width](
             bound, columns, node.left, height, batch_size
         )
-        if input.dtype() != bound.dtypes[index]:
-            input = input.cast(bound.dtypes[index])
+        if input.dtype() != bound.dtypes[node.left]:
+            input = input.cast(bound.dtypes[node.left])
         var predicate = Series("", BoolColumn(List[Bool]()))
-        if node.op == EXPR_FILTER:
+        if node.right >= 0:
             predicate = _sequence_value[width](
                 bound, columns, node.right, height, batch_size
             )

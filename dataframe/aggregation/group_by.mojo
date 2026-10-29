@@ -50,7 +50,7 @@ from dataframe.expr import (
     Expr,
     N_UNIQUE,
     SELECTOR,
-    changes_length,
+    group_sequence_rows,
     col,
     is_reduction,
 )
@@ -494,6 +494,29 @@ struct GroupBy(Copyable):
     var _keys: List[Series]
     var _maintain_order: Bool
 
+    def head(self, n: Int = 5) raises -> DataFrame:
+        """First n rows of each group, retaining every original column."""
+        return self._edge_rows(n, False)
+
+    def tail(self, n: Int = 5) raises -> DataFrame:
+        """Last n rows of each group, retaining every original column."""
+        return self._edge_rows(n, True)
+
+    def _edge_rows(self, n: Int, tail: Bool) raises -> DataFrame:
+        if n < 0:
+            raise Error("GroupBy.head/tail count must be nonnegative")
+        var encoded = encode_rows(self._keys, nulls_equal=True)
+        var rows = List[List[Int]](length=encoded.count(), fill=List[Int]())
+        for row in range(self._frame.height()):
+            rows[encoded.ids[row]].append(row)
+        var selected = List[Int]()
+        for group in rows:
+            var start = max(0, len(group) - n) if tail else 0
+            var end = len(group) if tail else min(len(group), n)
+            for k in range(start, end):
+                selected.append(group[k])
+        return self._frame.take(selected)
+
     def _coded_keys(self) raises -> Optional[GroupBy]:
         """This grouping with each String key that carries dictionary codes
         replaced by those codes as a categorical; None when no key does."""
@@ -528,7 +551,7 @@ struct GroupBy(Copyable):
         var prepared = List[Expr](capacity=len(expressions))
         var changed = False
         for expression in expressions:
-            if changes_length(expression):
+            if group_sequence_rows(expression):
                 prepared.append(expression.implode())
                 changed = True
             else:
