@@ -21,8 +21,7 @@ retains those buffers as Series chunks. Eager reading still stores the whole
 output; temporary Arrow buffers are bounded by a row group instead of a file.
 
 Row-group pruning: `parquet_row_group_statistics` returns one row per row
-group with each column's minimum, maximum and null count from .file_sources import has_pattern, resolve_paths
-from the footer,
+group with each column's minimum, maximum and null count from the footer,
 and `_pruned_row_groups` turns a filter on constant bounds (`col > lit`,
 combined with `&` and `|`) into the row groups that can contain a match.
 The lazy `scan_parquet` uses both, so a filter decodes only those groups.
@@ -43,6 +42,7 @@ library's `OwnedDLHandle` closes on destruction, so the library is opened
 with `dlopen` directly and its handle is never closed; repeat opens only
 bump the loader's reference count.
 """
+from .file_sources import has_pattern, resolve_paths
 from dataframe.storage.buffer import _Buffer
 from std.collections import Optional
 from std.ffi import external_call

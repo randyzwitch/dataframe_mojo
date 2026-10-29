@@ -182,7 +182,7 @@ def test_multi_parquet_paths_globs_and_literal_brackets_preserve_row_groups() ra
             assert_frame(
                 scan_parquet([b, a], glob=False)
                 .filter(col("id") >= 8)
-                .select("val")
+                .select(col("val"))
                 .head(3)
                 .collect(
                     engine="cpu",

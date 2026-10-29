@@ -1,5 +1,4 @@
 """Deterministic local dataset path expansion shared by file readers."""
-from std.algorithm import sort
 from std.ffi import external_call
 from std.memory import Pointer
 from std.os import listdir
@@ -115,6 +114,6 @@ def resolve_paths(
         _expand("/" if source.startswith("/") else "", parts, 0, matched)
         if len(matched) == 0:
             raise Error("No files matched source: " + source)
-        paths.extend(matched)
+        paths.extend(matched^)
     sort(paths)
     return paths^
