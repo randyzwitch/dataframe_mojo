@@ -265,7 +265,7 @@ def test_ordered_over_composes_with_group_sequences_and_shift_defaults() raises:
     var expressions: List[Expr] = [
         col("x").head(2).sum().over("g", order_by="t").alias("head"),
         col("x")
-        .gather(List[Int](0, -1))
+        .gather([0, -1])
         .sum()
         .over("g", order_by="t")
         .alias("gather"),
