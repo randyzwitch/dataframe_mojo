@@ -419,3 +419,23 @@ def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
     )
     assert_true(eager.height() > 0)
     assert_frame(rows, eager)
+
+
+def test_build_side_estimates_combine_joins_the_order_did_not_build() raises:
+    # `plan_cardinality`: a left join yields its larger input's rows, a
+    # semi join its left input's, through steps that keep their rows; an
+    # inner join the order has not estimated is unknown.
+    var t = tables()
+    var left = t[0].join(
+        t[3], left_on=["f_store"], right_on=["s_id"], how="left"
+    )
+    assert_equal(left._cardinality(len(left._plan._nodes) - 1), 40_000)
+    var sorted = left.sort(["f_amount"]).select(["f_amount"])
+    assert_equal(sorted._cardinality(len(sorted._plan._nodes) - 1), 40_000)
+    var semi = t[1].join(
+        t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
+    )
+    assert_equal(semi._cardinality(len(semi._plan._nodes) - 1), 2000)
+    var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
+    assert_equal(inner._cardinality(len(inner._plan._nodes) - 1), -1)
+

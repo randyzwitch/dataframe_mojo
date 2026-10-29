@@ -196,6 +196,7 @@ from dataframe.planning.graph import (
     plan_projection_visits,
     plan_provider_scan,
     plan_relation_estimate,
+    plan_cardinality,
     plan_remember_schemas,
     plan_reorder,
     plan_repeats_a_scan,
@@ -2359,6 +2360,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _relation_estimate(self, index: Int) raises -> Int:
         return plan_relation_estimate(self._plan, index=index)
+
+    def _cardinality(self, index: Int) raises -> Int:
+        return plan_cardinality(self._plan, index=index)
 
     def _spine_frame(self, index: Int) -> Optional[DataFrame]:
         return plan_spine_frame(self._plan, index=index)

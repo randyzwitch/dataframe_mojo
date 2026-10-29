@@ -117,6 +117,12 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var asof_tolerance: Optional[AnyValue]
     var source_failure: String
     var json_schema: Optional[DataType]
+    # Rows the join order estimated this node yields (DuckDB's
+    # `estimated_cardinality`), -1 when it set none. It chooses
+    # algorithms only: never a capacity, a bound or a proof that no rows
+    # exist. Rewrites that change which rows a node yields build a new
+    # node, which starts without one (`plan_cardinality`).
+    var estimated_rows: Int
 
     # These views borrow the stored lists: reading a payload does not add a
     # copy-on-write owner. String elements share their list's element origin
@@ -456,6 +462,7 @@ def _plan_node(
         Optional[AnyValue](),
         source_failure,
         json_schema.copy(),
+        -1,
     )
 
 

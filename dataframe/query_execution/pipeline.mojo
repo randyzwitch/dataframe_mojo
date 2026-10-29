@@ -98,8 +98,8 @@ from dataframe.planning.context import (
     QueryContext,
 )
 from dataframe.planning.graph import (
+    plan_cardinality,
     plan_columns_of,
-    plan_estimated_rows,
     plan_filters_rows,
     plan_grouped_on,
     plan_height_bound,
@@ -506,12 +506,14 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
+                # cannot be smaller is never sampled. A left made by
+                # other joins has the join order's estimate (TPC-DS
+                # q40's left join over a three-table join).
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
                 if most < 0 or most * columns < right_cost:
-                    var rows = plan_estimated_rows(self, node.left)
+                    var rows = plan_cardinality(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # A left join under a consumer that ignores row
                         # order builds on the smaller left inside the

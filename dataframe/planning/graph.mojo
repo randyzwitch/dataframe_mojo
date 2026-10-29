@@ -928,6 +928,56 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
     return max(left, right)
 
 
+def plan_cardinality(self: QueryContext, index: Int) raises -> Int:
+    """Rows node `index` is estimated to yield, for choosing between
+    algorithms only: never a capacity, a bound or a proof that no rows
+    exist. -1 when unknown.
+
+    A join or filter the join order built keeps that order's estimate
+    (`estimated_rows`), as DuckDB's join order optimizer stores each
+    operator's `estimated_cardinality` for its build side optimizer to
+    read. Other nodes use `plan_estimated_rows`, pass through steps that
+    keep their input's rows, and combine a join the order did not build
+    as DuckDB's `CombineStatsOfNonReorderableOperator` does: a semi or
+    anti join keeps its left input's rows, other joins the larger
+    input's, and a UNION ALL the sum. Nothing here runs or samples a
+    join's inputs."""
+    ref node = self._nodes[index]
+    if node.estimated_rows >= 0:
+        return node.estimated_rows
+    var known = plan_estimated_rows(self, index)
+    if known >= 0:
+        return known
+    if (
+        node.kind == DROP
+        or node.kind == SORT
+        or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        )
+    ):
+        return plan_cardinality(self, node.left)
+    if node.kind == CONCAT:
+        var left = plan_cardinality(self, node.left)
+        var right = plan_cardinality(self, node.right)
+        if left < 0 or right < 0:
+            return -1
+        return left + right
+    if node.kind != JOIN or not (
+        node.how == JOIN_LEFT
+        or node.how == JOIN_SEMI
+        or node.how == JOIN_ANTI
+    ):
+        return -1
+    var left = plan_cardinality(self, node.left)
+    if left < 0 or node.how != JOIN_LEFT:
+        return left
+    var right = plan_cardinality(self, node.right)
+    if right < 0:
+        return -1
+    return max(left, right)
+
+
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     """The in-memory table under `index`, along the steps
     `_spine_rows` follows and a left, semi or anti join's left input,

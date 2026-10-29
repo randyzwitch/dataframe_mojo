@@ -839,6 +839,10 @@ def plan_cost_order_joins(
             var estimated = estimates[r]
             rows.append(Float64(estimated))
             domains.append(Float64(table if table > 0 else estimated))
+            # Kept for the build side decisions (`plan_cardinality`), so
+            # they read it rather than sample the relation again.
+            if self._nodes[relations[r]].kind != SCAN_FRAME:
+                self._nodes[relations[r]].estimated_rows = estimated
         # Filters comparing a column of one relation with a column of
         # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
         # which the estimate counts as join conditions.
@@ -949,6 +953,12 @@ def plan_cost_order_joins(
                 right_keys=right_keys,
                 suffix="_right",
             )
+            # The set's estimate, kept on the join and on the filters
+            # placed over it (their comparisons are edges the estimate
+            # counted), as DuckDB keeps `estimated_cardinality` on each
+            # operator for its build side optimizer.
+            var estimated = Int(min(tree.rows[e], Float64(Int.MAX // 2)))
+            join.estimated_rows = estimated
             added.append(join^)
             var current = base + len(added) - 1
             # Filters whose relations this join completes, while their
@@ -966,6 +976,7 @@ def plan_cost_order_joins(
                     continue
                 var filter = self._nodes[filters[f]].copy()
                 filter.left = current
+                filter.estimated_rows = estimated
                 added.append(filter^)
                 current = base + len(added) - 1
                 placed[f] = True
@@ -990,6 +1001,7 @@ def plan_cost_order_joins(
             added.append(last^)
             last = self._nodes[filters[f]].copy()
             last.left = base + len(added) - 1
+            last.estimated_rows = -1
         for node in added:
             self._nodes.append(node.copy())
         self._nodes[top] = last^
