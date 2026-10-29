@@ -139,7 +139,6 @@ from dataframe.planning.physical import (
 from dataframe.planning.properties import (
     _distinct_inputs,
     _is_scan,
-    _order_free_reductions,
     _same_names,
     _set_members,
     _stream_rows,
@@ -290,14 +289,6 @@ def plan_stream_execute(
     # aggregate. Batched, a grouped reduction over it ran on one thread
     # (TPC-DS q76's three channels). It is found and run before any
     # join below builds, so no build is made twice.
-    # Whether the stream's consumer ignores row order: a right join then
-    # streams, its unmatched build rows coming out last.
-    var order_free = (
-        len(keys) > 0
-        and len(expressions) > 0
-        and not ordered
-        and _order_free_reductions(keys, expressions)
-    )
     var first = cursor
     while first >= 0:
         ref step = self._nodes[first]
@@ -312,7 +303,7 @@ def plan_stream_execute(
                 JOIN_ANTI,
                 JOIN_CROSS,
             ]
-            or (step.how == JOIN_RIGHT and not step.coalesce and order_free)
+            or (step.how == JOIN_RIGHT and not step.coalesce)
         ):
             first = step.left
         else:
@@ -338,7 +329,7 @@ def plan_stream_execute(
                 JOIN_ANTI,
                 JOIN_CROSS,
             ]
-            or (node.how == JOIN_RIGHT and not node.coalesce and order_free)
+            or (node.how == JOIN_RIGHT and not node.coalesce)
         ):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
@@ -359,8 +350,7 @@ def plan_stream_execute(
                 and right_rows >= 524288
                 and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
             ):
-                # Under an unordered aggregation into the aggregate
-                # table the join's row order is free: build on the
+                # A join promises no row order: build on the
                 # small left and stream the large right through it in
                 # the pipeline, as DuckDB's build side optimizer does
                 # whatever side a join was written on, rather than run
@@ -371,8 +361,6 @@ def plan_stream_execute(
                 # position, which no swap beats.
                 if (
                     node.how == JOIN_INNER
-                    and not ordered
-                    and _order_free_reductions(keys, expressions)
                     and plan_direct_key(self, node.left, node.names)
                     and not plan_progression_key(
                         self, node.right, node.right_keys
@@ -457,10 +445,8 @@ def plan_stream_execute(
             var built = self._execute(node.right, False, True, batch_size)
             if (
                 node.how == JOIN_INNER
-                and not ordered
                 and bound >= 0
                 and built.height() > bound
-                and _order_free_reductions(keys, expressions)
                 and not plan_progression_key(self, node.right, node.right_keys)
             ):
                 # The built right side holds more rows than the left
@@ -468,9 +454,7 @@ def plan_stream_execute(
                 # instead and stream the right
                 # through it, as DuckDB's build/probe side optimizer
                 # and Polars' join both build on the smaller side.
-                # Under an unordered aggregation into the aggregate
-                # table the join's row order is free (other grouped
-                # states grow with how rows arrive), and the stream
+                # A join promises no row order, and the stream
                 # keeps every worker busy over the larger side, where
                 # probing from a small left ran its few morsels on one
                 # or two workers.
@@ -513,38 +497,37 @@ def plan_stream_execute(
                 if most < 0 or most * columns < right_cost:
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
-                        # A left join under a consumer that ignores row
-                        # order builds on the smaller left inside the
-                        # pipeline: the right streams through the left's
-                        # index and the left rows nothing matched come
-                        # out last. The join's output is then never
-                        # materialized outside the pipeline.
-                        if node.how == JOIN_LEFT and order_free:
-                            var swapped = plan_swap_left_join_sides(
-                                self, cursor, built, batch_size
-                            )
-                            if swapped:
-                                var plan = swapped.take()
-                                for k in range(len(operations)):
-                                    if operations[k].kind != JOIN:
-                                        continue
-                                    plan._frames.append(
-                                        joins[
-                                            operations[k].join_build_slot()
-                                        ].copy()
-                                    )
-                                    plan._schemas.append(Optional[CsvSchema]())
-                                    plan._nodes.append(
-                                        _frame_scan_node(
-                                            slot=len(plan._frames) - 1
-                                        )
-                                    )
-                                    plan._nodes[operation_nodes[k]].right = (
-                                        len(plan._nodes) - 1
-                                    )
-                                return plan._execute(
-                                    index, False, True, batch_size
+                        # The join builds on the smaller left inside the
+                        # pipeline (a join promises no row order): the
+                        # right streams through the left's index, a left
+                        # join's unmatched left rows coming out last, as
+                        # DuckDB flips a join's sides. The join's output
+                        # is then never materialized outside the
+                        # pipeline. The eager join below is left for a
+                        # swap that declines (a shared name).
+                        var swapped = plan_swap_left_join_sides(
+                            self, cursor, built, batch_size
+                        ) if node.how == JOIN_LEFT else plan_swap_join_sides(
+                            self, cursor, built, batch_size
+                        )
+                        if swapped:
+                            var plan = swapped.take()
+                            for k in range(len(operations)):
+                                if operations[k].kind != JOIN:
+                                    continue
+                                plan._frames.append(
+                                    joins[
+                                        operations[k].join_build_slot()
+                                    ].copy()
                                 )
+                                plan._schemas.append(Optional[CsvSchema]())
+                                plan._nodes.append(
+                                    _frame_scan_node(slot=len(plan._frames) - 1)
+                                )
+                                plan._nodes[operation_nodes[k]].right = (
+                                    len(plan._nodes) - 1
+                                )
+                            return plan._execute(index, False, True, batch_size)
                         trace_path("stream.smaller_left_build")
                         var left_frame = self._execute(
                             node.left, False, True, batch_size

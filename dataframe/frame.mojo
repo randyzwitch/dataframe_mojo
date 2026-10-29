@@ -2045,10 +2045,9 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Hash join on key columns of any dtype; null keys never match.
 
-        how: inner, left, right, full, semi, anti. Row order: inner, left,
-        semi, and anti follow left rows (each left row's matches in right
-        order); right follows right rows (matches in left order); full is the
-        left join followed by unmatched right rows in right order.
+        how: inner, left, right, full, semi, anti. The output's row order
+        is unspecified, as in DuckDB and Polars' default: the join may
+        build on either side. Sort the result when an order matters.
         Output: left columns, then right non-key columns, with suffix on
         names that collide with left names. Key columns keep left names and
         take whichever side is present. With coalesce=False (inner, left,
@@ -2066,6 +2065,7 @@ struct DataFrame(Copyable, Sized, Writable):
             how=join_type(how),
             suffix=suffix,
             coalesce=coalesce,
+            keep_order=False,
         )
 
     def _join_impl(
@@ -2115,7 +2115,8 @@ struct DataFrame(Copyable, Sized, Writable):
     def join(
         self, right: Self, *, how: String, suffix: String = "_right"
     ) raises -> Self:
-        """Cross join: every left row paired with every right row, left-major.
+        """Cross join: every left row paired with every right row, in an
+        unspecified order.
 
         Right names that collide with left names gain the suffix.
         """

@@ -266,15 +266,21 @@ once. Null keys never match, including another null. Empty strings are ordinary
 keys. Float64 keys match structurally: every NaN matches every NaN, and `-0.0`
 matches `0.0`. Duplicate keys emit every matching pair.
 
-| `how` | Rows | Row order |
-|---|---|---|
-| `inner` | matching pairs | left order; each left row's matches in right order |
-| `left` | every left row; unmatched right side null | as inner |
-| `right` | every right row; unmatched left side null | right order; each right row's matches in left order |
-| `full` | left join plus unmatched right rows | left join order, then unmatched right rows in right order |
-| `semi` | left rows with at least one match, once each | left order |
-| `anti` | left rows with no match (including null keys) | left order |
-| `cross` | every pair, via `join(right, how="cross")` | left-major |
+| `how` | Rows |
+|---|---|
+| `inner` | matching pairs |
+| `left` | every left row; unmatched right side null |
+| `right` | every right row; unmatched left side null |
+| `full` | left join plus unmatched right rows |
+| `semi` | left rows with at least one match, once each |
+| `anti` | left rows with no match (including null keys) |
+| `cross` | every pair, via `join(right, how="cross")` |
+
+A join's output row order is unspecified, eager or lazy, as in DuckDB and in
+Polars' default (`maintain_order="none"`): the engine may build on either side
+and stream the other. Sort the result when an order matters. `join_asof` is the
+exception: it keeps the left input's row order, and sorts its inputs itself
+when they are not already in key order.
 
 Output columns are the left columns, then the right non-key columns in right
 schema order. Right names that collide with left names gain `suffix`; any

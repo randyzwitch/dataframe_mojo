@@ -1,4 +1,5 @@
 """Explicit complete typed comparison; no production equality or aggregate checks."""
+from std.collections import Dict
 from std.math import isnan
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
@@ -87,6 +88,42 @@ def assert_frame(actual: DataFrame, expected: DataFrame) raises:
         )
         for row in range(expected.height()):
             assert_value(actual.item(row, name), expected.item(row, name))
+
+
+def _row_text(frame: DataFrame, row: Int) raises -> String:
+    var text = String()
+    for name in frame.columns():
+        var cell = frame.item(row, name)
+        text += "null" if cell.is_null() else "v:" + String(cell)
+        text += "\x1f"
+    return text^
+
+
+def assert_frame_unordered(actual: DataFrame, expected: DataFrame) raises:
+    """`assert_frame` up to row order: a join promises none. Every actual
+    row is paired with an unused expected row that prints alike, then
+    compared cell by cell under the same typed policy."""
+    assert_equal(actual.height(), expected.height())
+    assert_equal(actual.columns(), expected.columns())
+    for name in expected.columns():
+        assert_true(
+            actual.column(name).dtype() == expected.column(name).dtype()
+        )
+    var waiting = Dict[String, List[Int]]()
+    for row in range(expected.height()):
+        var text = _row_text(expected, row)
+        if text not in waiting:
+            waiting[text] = List[Int]()
+        waiting[text].append(row)
+    for row in range(actual.height()):
+        var text = _row_text(actual, row)
+        assert_true(
+            text in waiting and len(waiting[text]) > 0,
+            "No unused expected row matches output row " + String(row),
+        )
+        var match = waiting[text].pop()
+        for name in expected.columns():
+            assert_value(actual.item(row, name), expected.item(match, name))
 
 
 def assert_model(actual: DataFrame, expected: ReferenceTable) raises:

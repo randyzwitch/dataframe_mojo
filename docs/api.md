@@ -478,7 +478,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, right: Self, *, how: String, suffix: String = "_right") -> Self`
-  Cross join: every left row paired with every right row, left-major.
+  Cross join: every left row paired with every right row, in an unspecified order.
 - `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
   Hash join on key columns of any dtype; null keys never match.
 - `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
@@ -1486,7 +1486,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, other: Self, *, how: String, suffix: String = "_right") -> Self`
-  Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
+  Cross join: every row of this plan paired with every row of `other`, in an unspecified order; see DataFrame.join(right, how="cross").
 - `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
   Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join.
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`

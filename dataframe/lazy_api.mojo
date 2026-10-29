@@ -1574,7 +1574,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, other: Self, *, how: String, suffix: String = "_right"
     ) raises -> Self:
         """Cross join: every row of this plan paired with every row of
-        `other`, left-major; see DataFrame.join(right, how="cross")."""
+        `other`, in an unspecified order; see
+        DataFrame.join(right, how="cross")."""
         if join_code(how) != JOIN_CROSS:
             raise Error("Join how='" + how + "' requires key columns")
         return self.join(

@@ -688,6 +688,27 @@ def plan_live_parents(self: QueryContext, root: Int) -> List[Int]:
     return parents^
 
 
+def _order_from_join(self: QueryContext, index: Int) -> Bool:
+    """Whether node `index`'s rows come in a join's order, through steps
+    that keep their input's order: a join promises none."""
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == JOIN:
+            return True
+        if not (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _row_local(node.exprs)
+            )
+        ):
+            return False
+        cursor = node.left
+    return False
+
+
 def plan_order_free_above(
     self: QueryContext,
     top: Int,
@@ -696,24 +717,20 @@ def plan_order_free_above(
 ) -> Bool:
     """Whether the plan above `top` gives the same result whatever
     order `top`'s rows arrive in: row-local steps up to an aggregation
-    that reads no row position. With `through_joins`, inner, left, semi
-    and anti joins on the way pass any order on, as they keep their
-    inputs' rows."""
+    that reads no row position, or up to a join. A join promises no row
+    order (as DuckDB's and Polars' joins by default), so neither the
+    order of its inputs nor its own output's order can show; `top` made
+    by a join through row-local steps is free for the same reason.
+    `through_joins` is kept for callers and no longer changes the
+    answer."""
+    _ = through_joins
+    if _order_from_join(self, top):
+        return True
     var cursor = parents[top]
     while cursor >= 0:
         ref node = self._nodes[cursor]
-        if (
-            through_joins
-            and node.kind == JOIN
-            and (
-                node.how == JOIN_INNER
-                or node.how == JOIN_LEFT
-                or node.how == JOIN_SEMI
-                or node.how == JOIN_ANTI
-            )
-        ):
-            cursor = parents[cursor]
-            continue
+        if node.kind == JOIN:
+            return True
         if node.kind == AGG:
             return not node.maintain_order and _order_insensitive(node.exprs)
         if node.kind == SORT:
