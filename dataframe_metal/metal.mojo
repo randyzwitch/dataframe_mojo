@@ -14,9 +14,7 @@ from dataframe.storage.column import Column
 from dataframe.execution_settings import ExecutionSettings
 from dataframe.frame import DataFrame
 from dataframe.lazy import AcceleratorBackend, LazyFrame
-from dataframe.plan_types import PlanEstimate
 from dataframe.series import Series
-from .accelerator.cost import CalibrationKey
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.gpu.query_scope import DeviceService
 from .accelerator.gpu.target import METAL_TARGET
@@ -40,23 +38,6 @@ def default_runtime() raises -> MetalRuntime:
         if limit < 0:
             raise Error("DATAFRAME_ACCEL_MEMORY_LIMIT must be nonnegative")
     return MetalRuntime(device, memory_limit_bytes=limit)
-
-
-def calibration_runtime() raises -> MetalRuntime:
-    """Explicit runtime factory for the provider-neutral benchmark driver."""
-    return default_runtime()
-
-
-def calibration_key(
-    optimize: Bool, streaming: Bool, batch_size: Int
-) raises -> CalibrationKey:
-    """Provider metadata for the common calibration harness; no submission."""
-    return default_runtime().calibration_key(optimize, streaming, batch_size)
-
-
-def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
-    """Plan-time facts for the provider-neutral calibration runner."""
-    return default_runtime().estimate_auto(plan)
 
 
 def metal_installed() -> Bool:
@@ -103,24 +84,6 @@ struct MetalRuntime(AcceleratorBackend):
         from .accelerator.gpu.identity import device_count
 
         return device_count()
-
-    def calibration_key(
-        self, optimize: Bool, streaming: Bool, batch_size: Int
-    ) raises -> CalibrationKey:
-        from .accelerator.gpu.identity import key
-
-        return key(self._device, optimize, streaming, batch_size)
-
-    def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
-        raise Error(_unsupported(query))
-
-    def select_auto(
-        self, query: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
-    ) -> Tuple[String, String]:
-        _ = optimize
-        _ = streaming
-        _ = batch_size
-        return ("cpu", "auto uses CPU: " + _unsupported(query))
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         return self._execute(query, False)

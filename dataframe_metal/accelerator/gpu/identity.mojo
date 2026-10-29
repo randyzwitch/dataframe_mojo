@@ -10,8 +10,6 @@ from std.memory import Pointer
 from std.sys import CompilationTarget, size_of
 from max.gpu.host import DeviceContext
 from dataframe._build_identity import CPU_BUILD_ID
-from dataframe.parallel import configured_workers
-from dataframe_metal.accelerator.cost import CalibrationKey
 from .target import METAL_TARGET
 
 comptime PROVIDER_BUILD = "dataframe-mojo-metal-v1"
@@ -243,22 +241,3 @@ def runtime_build_id() -> String:
     # full `mojo --version` and compiler flags into CPU_BUILD_ID. This binds
     # the provider to actual compiler/SDK builds without duplicating pins.
     return PROVIDER_BUILD + ";source-compiler-sdk=" + CPU_BUILD_ID
-
-
-def key(
-    device: Int, optimize: Bool, streaming: Bool, batch_size: Int
-) raises -> CalibrationKey:
-    if batch_size < 1:
-        raise Error("Calibration batch_size must be positive")
-    var facts = hardware(device)
-    return CalibrationKey(
-        "metal",
-        facts.device.copy(),
-        runtime_build_id(),
-        CPU_BUILD_ID,
-        facts.host.copy(),
-        configured_workers(),
-        optimize,
-        streaming,
-        batch_size,
-    )

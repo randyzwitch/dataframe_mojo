@@ -93,67 +93,17 @@ CUDA runtime and kernel code remain in the NVIDIA extension. Existing providers
 can adopt the common lowering and estimates without changing the runtime trait
 or application syntax.
 
-## Shared analytical automatic placement (prepared; validation pending)
+## Automatic placement
 
-`dataframe_metal.accelerator.cost.select_auto` owns the CPU/accelerator comparison.
-Providers implement `estimate_auto(plan) -> PlanEstimate`: two feature vectors,
-peak requested bytes, dtype family, and candidate placement. Estimation binds
-metadata without reading source values or submitting device work. Runtime
-backends can expose the same method; the backend exports it for calibration. Existing third-party providers inherit a rejecting
-estimate and keep their CPU default.
+`engine="auto"` places each pipeline on the CPU or a device from this
+machine's measured costs, through the provider's device functions
+(`dataframe/planning/device_placement.mojo`); Metal also runs handed-off
+nodes by measured cost ([Apple Metal](../apple-metal.md)). No provider
+chooses a whole plan's engine; the analytical whole-plan selector that was
+prepared here was removed when per-pipeline placement replaced it.
 
-The ordered `COST_FEATURES` schema covers fixed overhead, rows, source bytes,
-projection/filter/reduction work, integer and cast work, launches, explicit
-synchronizations, upload/download bytes, allocation, cold first use, and CPU
-materialization stages. CPU work comes from the shared `cpu_features` binder.
-Providers supply hardware facts and coefficients, never independent CPU
-thresholds. Memory is checked before comparing finite cost bounds. A validated
-CPU lower estimate must exceed the accelerator upper estimate by at least
-1.5×. The decision reason reports both estimates and the largest deciding term;
-existing explain/profile selection reporting carries it to the user.
-
-Calibration records use `dataframe-analytical-cost-v1`, keyed by provider,
-device, runtime build, CPU build, host/affinity, workers, optimize/streaming/
-batch settings, and dtype family. They contain nonnegative coefficients,
-feature coverage bounds, residual envelopes, expiry and independent query
-validation counts and a zero failed-execution count. A held-out failure after
-estimate/identity emission invalidates that calibration identity; it cannot be
-hidden by the remaining successful cases. Unidentified builds, absent/stale/ambiguous records,
-extrapolation and unsupported candidates select CPU before submission. Device
-failures continue to propagate. CPU tails currently require additional cost
-terms and conservatively stay on CPU; region dynamic programming and learned
-corrections in #583 remain separate phases.
-
-CPU profiles now include `cpu_build_id`. Source execution uses a development
-sentinel and cannot produce deployable calibration. `scripts/build_package.py`
-stages a fingerprint of core Mojo sources, lockfile, compiler and compile
-settings; provider builders use `scripts/build_identity.py` for the same CPU
-identity before substituting their registration slot.
-
-The provider-neutral `benchmarks/bench_accelerator_cost.mojo` runner requires
-`calibration_runtime`, `calibration_key` and `estimate_auto` hooks from the
-backend (`dataframe_metal.metal` for Metal). They are not part of the core's provider
-contract. `benchmarks/tools/bench_accelerator_cost.py` writes a generated-plan
-manifest by default; `--collect --binary /path/to/runner` explicitly measures.
-Compile the runner against identified packages outside the source import path.
-The matrix varies 1–61 expression nodes, pipeline stages, dtype, filter
-position/selectivity, null density and 4K–32M rows. Failed/unsupported cases
-remain in JSONL. Warm samples alternate engines; cold observations include
-runtime creation. Measured automatic preflight overhead is included in GPU
-cost, and returned result parity is checked outside timings.
-
-Fit on generated queries; freeze coefficients and residual envelopes before
-validating named chain/count and other mechanisms. Canonical operation hashes
-prevent the same plan with another display name or row count from leaking into
-both sets. Reports replay choices against measured explicit-engine samples and preflight
-overhead; automatic-execution latency is not directly measured. Invalid
-calibrations report the CPU fallback while retaining hypothetical model choices
-for diagnosis. Reports include coverage, wrong choices, engine regret and total
-regret including planning overhead. Named mechanisms were previously used in
-development and are held out only from this fit. ClickBench policy in
-`benchmarks/tools/bench_policy.py` remains validation-only. No external-suite coverage or
-measured speedup is claimed by these source changes.
-
-Compilation, CPU/GPU tests, package checks, calibration and held-out runs are
-pending. A generated table remains unusable unless independent parity and
-residual-envelope validation succeed; no fitted coefficients ship by default.
+CPU profiles include `cpu_build_id`. Source execution uses a development
+sentinel. `scripts/build_package.py` stages a fingerprint of core Mojo
+sources, lockfile, compiler and compile settings; provider builders use
+`scripts/build_identity.py` for the same CPU identity before substituting
+their registration slot.
