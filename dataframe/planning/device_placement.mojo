@@ -247,6 +247,8 @@ struct PlacementPipeline(Copyable, Movable):
     var sink: Int
     # Row-local steps from the top down.
     var steps: List[Int]
+    # The node the steps read: `source`, or a child unit's top.
+    var input: Int
     # The scan the unit reads, or -1 when it reads a child unit.
     var source: Int
     # Child units, by index into the list `plan_pipelines` returns.
@@ -341,6 +343,56 @@ def _input(self: QueryContext, index: Int) raises -> DataFrame:
     return self._execute(index, True)
 
 
+def _region(
+    self: QueryContext,
+    input: DataFrame,
+    steps: List[Int],
+    sink: Int,
+    build: Optional[DataFrame],
+) -> QueryContext:
+    """Steps and sink as a plan over `input`, with `build` as the sink's
+    second input."""
+    var region = self.with_input(input)
+    for s in reversed(range(len(steps))):
+        region = region.push(self._nodes[steps[s]].copy())
+    if sink >= 0:
+        var node = self._nodes[sink].copy()
+        node.left = len(region._nodes) - 1
+        if build:
+            region._frames.append(build.value().copy())
+            region._schemas.append(Optional[CsvSchema]())
+            region._nodes.append(_frame_scan_node(slot=len(region._frames) - 1))
+            node.right = len(region._nodes) - 1
+        region._nodes.append(node^)
+    return region^
+
+
+def plan_unit_region(
+    self: QueryContext, unit: PlacementPipeline
+) raises -> QueryContext:
+    """The unit as a plan over its actual inputs, to run it: its source
+    read, or the child units' results. Children run first, so a child
+    placed on a device is already a frame in `self`; a child on the CPU
+    runs here, once, since nothing reads below this unit afterwards."""
+    var input = self._execute(
+        unit.input, False
+    ) if unit.input >= 0 else self._execute(unit.top, False)
+    var build = Optional[DataFrame]()
+    if unit.sink >= 0 and self._nodes[unit.sink].right >= 0:
+        build = self._execute(self._nodes[unit.sink].right, False)
+    return _region(self, input, unit.steps, unit.sink, build)
+
+
+def plan_substitute(
+    mut self: QueryContext, unit: PlacementPipeline, var result: DataFrame
+):
+    """Replace the unit's top with its result, so the rest of the plan
+    reads it as an in-memory frame."""
+    self._frames.append(result^)
+    self._schemas.append(Optional[CsvSchema]())
+    self._nodes[unit.top] = _frame_scan_node(slot=len(self._frames) - 1)
+
+
 def _unit(
     self: QueryContext, top: Int, mut units: List[PlacementPipeline]
 ) raises -> Int:
@@ -368,19 +420,12 @@ def _unit(
     var input = _input(self, cursor) if cursor >= 0 else self._execute(
         top, True
     )
-    var region = self.with_input(input)
-    for s in reversed(range(len(steps))):
-        region = region.push(self._nodes[steps[s]].copy())
+    var build = Optional[DataFrame]()
+    if right >= 0:
+        build = self._execute(self._nodes[sink].right, True)
+    var region = _region(self, input, steps, sink, build)
     var key = String("pipeline:")
     if sink >= 0:
-        var node = self._nodes[sink].copy()
-        node.left = len(region._nodes) - 1
-        if right >= 0:
-            region._frames.append(self._execute(self._nodes[sink].right, True))
-            region._schemas.append(Optional[CsvSchema]())
-            region._nodes.append(_frame_scan_node(slot=len(region._frames) - 1))
-            node.right = len(region._nodes) - 1
-        region._nodes.append(node^)
         key += _kind_name(self._nodes[sink].kind)
     else:
         key += "steps"
@@ -421,6 +466,7 @@ def _unit(
             top,
             sink,
             steps^,
+            cursor,
             source,
             children^,
             region^,
