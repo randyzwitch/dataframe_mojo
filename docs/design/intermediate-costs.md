@@ -13,6 +13,12 @@ they do not establish buffer capacity, uniqueness, join eligibility or the
 absence of output rows. Existing `plan_known_height` and
 `plan_height_bound` remain separate semantic interfaces.
 
+Device placement uses these semantic interfaces for row counts entering
+transfer-byte and working-memory accounting. An available join cost estimate
+does not make its output a resource bound. Expanding selections and explode
+steps keep unknown bounds, and an empty scalar/reduction selection reserves
+space for its one result row.
+
 A request memo visits a shared logical node once. Source column distinct
 counts observe at most 4,096 rows, using one deterministically jittered row
 per stratum for larger inputs. Exact sample-code frequencies feed a

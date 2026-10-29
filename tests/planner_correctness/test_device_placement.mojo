@@ -2,7 +2,9 @@
 must get right, how a plan is cut into units, and what explain reports."""
 # contract-group: planner.device_placement
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
-from dataframe import Column, DataFrame, LazyFrame, Series, col
+from dataframe import Column, DataFrame, LazyFrame, ListColumn, Series, col
+from dataframe.planning.graph import plan_estimated_rows
+from dataframe.planning.model import JOIN
 from dataframe.devices import (
     ByteCost,
     DeviceInfo,
@@ -439,6 +441,68 @@ def test_explain_reports_the_placement_it_would_make() raises:
     _ = calibrated^
     # Without devices there are no placement lines at all.
     assert_false("DEVICES" in summed.explain(engine="auto"))
+
+
+def test_cost_cardinalities_do_not_become_device_resource_bounds() raises:
+    var plan = joined()._optimized()._plan
+    var units = plan_pipelines(plan)
+    var saw_join = False
+    var saw_parent = False
+    for unit in units:
+        if unit.sink >= 0 and plan._nodes[unit.sink].kind == JOIN:
+            # A usable cost estimate does not prove the join's output size.
+            assert_true(plan_estimated_rows(plan, unit.sink) >= 0)
+            assert_equal(unit.features.output_rows, -1)
+            assert_equal(unit.output_bytes, -1)
+            assert_equal(unit.working_bytes, -1)
+            saw_join = True
+        elif unit.key.startswith("pipeline:agg"):
+            assert_equal(unit.features.input_rows, -1)
+            assert_equal(unit.working_bytes, -1)
+            saw_parent = True
+    assert_true(saw_join and saw_parent)
+
+
+def test_expanding_selections_and_explode_do_not_inherit_input_row_bounds() raises:
+    var frame = DataFrame([Series("x", Column[Int64]([7, 8]))])
+    var selected = frame.lazy().select(col("x").gather([0, 1, 0, 1, 0]))
+    assert_equal(selected.collect(engine="cpu").height(), 5)
+    var units = plan_pipelines(selected._optimized()._plan)
+    ref root = units[len(units) - 1]
+    assert_true(root.features.output_rows < 0 or root.features.output_rows >= 5)
+    if root.features.output_rows < 0:
+        assert_equal(root.working_bytes, -1)
+
+    var nested = DataFrame(
+        [
+            Series(
+                "xs",
+                ListColumn(
+                    [Int64(0), 3, 6],
+                    Series("item", Column[Int64]([1, 2, 3, 4, 5, 6])),
+                ),
+            )
+        ]
+    )
+    var exploded = nested.lazy().explode([String("xs")])
+    assert_equal(exploded.collect(engine="cpu").height(), 6)
+    var parts = plan_pipelines(exploded._optimized()._plan)
+    ref output = parts[len(parts) - 1]
+    assert_true(
+        output.features.output_rows < 0 or output.features.output_rows >= 6
+    )
+    if output.features.output_rows < 0:
+        assert_equal(output.working_bytes, -1)
+
+
+def test_empty_global_reduction_has_space_for_its_one_output_row() raises:
+    var frame = DataFrame([Series("x", Column[Int64](List[Int64]()))])
+    var plan = frame.lazy().select(col("x").sum())
+    assert_equal(plan.collect(engine="cpu").height(), 1)
+    var units = plan_pipelines(plan._optimized()._plan)
+    ref root = units[len(units) - 1]
+    assert_true(root.features.output_rows >= 1)
+    assert_true(root.output_bytes >= 8)
 
 
 def test_collect_runs_placed_units_on_the_device() raises:

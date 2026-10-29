@@ -30,14 +30,16 @@ from std.collections import Optional
 from dataframe.aggregation.expressions import _row_local
 from dataframe.devices import ByteCost, PipelineFeatures, TransferModel
 from dataframe.dtype import DataType
+from dataframe.expr import changes_length
 from dataframe.frame import DataFrame
 from dataframe.io.csv import CsvSchema
 from dataframe.planning.context import QueryContext
-from dataframe.planning.graph import plan_estimated_rows
+from dataframe.planning.graph import plan_height_bound, plan_known_height
 from dataframe.planning.model import (
     AGG,
     CONCAT,
     DROP,
+    EXPLODE,
     FILTER,
     GROUPING_SETS,
     HCONCAT,
@@ -306,23 +308,46 @@ def _is_step(self: QueryContext, index: Int) -> Bool:
     return node.kind == DROP or _stream_rows(node)
 
 
+def _resource_rows(self: QueryContext, index: Int) -> Int:
+    """Exact height or a proven upper bound, without cost-only sampling."""
+    var known = plan_known_height(self, index)
+    return known if known >= 0 else plan_height_bound(self, index)
+
+
 def _bounded_rows(
-    self: QueryContext, top: Int, sink: Int, input_rows: Int
+    self: QueryContext,
+    top: Int,
+    sink: Int,
+    input_rows: Int,
+    steps: List[Int],
 ) raises -> Int:
-    """The planner's estimate of a unit's output rows, or else an upper
-    bound: no row-local step, aggregate, unique, sort or slice produces
-    more rows than it reads. A bound overstates what moving the output
-    costs, never understates it. Joins have none; -1 when unknown."""
-    var estimated = plan_estimated_rows(self, top)
-    if estimated >= 0 or input_rows < 0:
-        return estimated
+    """A conservative row bound for transfer and device-budget accounting.
+
+    Cost estimates can understate cardinality. Resource accounting uses
+    separate known-height/bound interfaces; expanding steps stay unknown.
+    """
+    var bounded = _resource_rows(self, top)
+    if bounded >= 0 or input_rows < 0:
+        return bounded
+    for step in steps:
+        if self._nodes[step].kind == EXPLODE:
+            return -1
     if sink < 0:
         return input_rows
     var kind = self._nodes[sink].kind
     if kind == SLICE:
         var length = self._nodes[sink].slice_length()
         return min(length, input_rows) if length >= 0 else input_rows
-    if kind == AGG or kind == UNIQUE or kind == SORT or kind == SELECT:
+    if kind == AGG:
+        # A global aggregation still returns one row for an empty input.
+        return max(input_rows, 1)
+    if kind == SELECT:
+        for expression in self._nodes[sink].exprs:
+            if changes_length(expression):
+                return -1
+        # Scalar/reduction selections can produce a row from empty input.
+        return max(input_rows, 1)
+    if kind == UNIQUE or kind == SORT:
         return input_rows
     return -1
 
@@ -438,16 +463,14 @@ def _unit(
     if cursor >= 0:
         input_rows = units[
             children[0]
-        ].features.output_rows if source < 0 else plan_estimated_rows(
-            self, cursor
-        )
-    var output_rows = _bounded_rows(self, top, sink, input_rows)
+        ].features.output_rows if source < 0 else _resource_rows(self, cursor)
+    var output_rows = _bounded_rows(self, top, sink, input_rows, steps)
     var groups = -1
     if sink >= 0 and self._nodes[sink].kind == AGG:
         groups = output_rows
     var build_rows = -1
     if sink >= 0 and self._nodes[sink].kind == JOIN:
-        build_rows = plan_estimated_rows(self, self._nodes[sink].right)
+        build_rows = _resource_rows(self, self._nodes[sink].right)
     var input_bytes = -1
     if input_rows >= 0:
         input_bytes = input_rows * _row_bytes(input)
