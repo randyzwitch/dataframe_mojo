@@ -18,6 +18,8 @@ from .expr import (
     DROP_NULLS,
     DROP_NANS,
     is_drop,
+    is_sequence,
+    EXPR_FILTER,
     _node,
     _set_node_children,
     LIT_INT,
@@ -136,6 +138,7 @@ from dataframe.storage.column import (
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.predicates import _flip
 from .series import Series
+from .sequence import select_sequence
 from dataframe.kernels.binary import (
     binary,
     unary,
@@ -3088,7 +3091,7 @@ def _sequence_emit[
     boundaries at their own height, with the original source columns."""
     var node = bound.expr._nodes[index].copy()
     if index != root and (
-        is_drop(node.op)
+        is_sequence(node.op)
         or is_reduction(node.op)
         or is_window(node.op)
         or node.op == OVER
@@ -3141,6 +3144,18 @@ def _sequence_value[
     ref node = bound.expr._nodes[index]
     if node.op == OVER:
         return _over[width](bound, columns, index, height, batch_size, 0)
+    if is_sequence(node.op) and not is_drop(node.op):
+        var input = _sequence_value[width](
+            bound, columns, node.left, height, batch_size
+        )
+        if input.dtype() != bound.dtypes[node.left]:
+            input = input.cast(bound.dtypes[node.left])
+        var predicate = Series("", BoolColumn(List[Bool]()))
+        if node.right >= 0:
+            predicate = _sequence_value[width](
+                bound, columns, node.right, height, batch_size
+            )
+        return select_sequence(node, input, predicate).renamed(bound.expr._name)
     if is_drop(node.op):
         var input = _sequence_value[width](
             bound, columns, node.left, height, batch_size
@@ -3273,7 +3288,7 @@ def evaluate[
     var root = count - 1
     var sequence = False
     for node in bound.expr._nodes:
-        sequence = sequence or is_drop(node.op)
+        sequence = sequence or is_sequence(node.op)
     if sequence:
         return _sequence_grouped[width](
             bound, columns, height, batch_size, groups, group_count

@@ -9,6 +9,23 @@ from .expr import (
     DROP_NULLS,
     DROP_NANS,
     is_drop,
+    is_sequence,
+    EXPR_FILTER,
+    EXPR_SLICE,
+    EXPR_GATHER,
+    EXPR_GET,
+    EXPR_SORT,
+    EXPR_SORT_BY,
+    EXPR_UNIQUE,
+    EXPR_UNIQUE_COUNTS,
+    EXPR_TOP_K,
+    EXPR_BOTTOM_K,
+    EXPR_TOP_K_BY,
+    EXPR_BOTTOM_K_BY,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
+    EXPR_ARG_SORT,
+    EXPR_REVERSE,
     LIT_INT,
     UNTYPED,
     Node,
@@ -1352,6 +1369,58 @@ def bind(
             if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown null literal dtype: " + node.text)
             dtype = node.dtypes[0].value()
+        elif is_sequence(node.op) and not is_drop(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid sequence input")
+            _default(nodes, types, node.left)
+            dtype = types[node.left]
+            shape = ROWS
+            has_aggregate = aggregated[node.left]
+            if node.op == EXPR_FILTER:
+                if node.right < 0 or node.right >= i:
+                    raise Error("Invalid filter predicate")
+                _default(nodes, types, node.right)
+                if types[node.right] != DataType.BOOL:
+                    raise Error(
+                        "Expression filter requires a Boolean predicate"
+                    )
+                has_aggregate = has_aggregate or aggregated[node.right]
+            elif node.op == EXPR_GATHER and node.right >= 0:
+                if node.right >= i:
+                    raise Error("Invalid gather indices")
+                _default(nodes, types, node.right)
+                if not types[node.right].is_integer():
+                    raise Error("Expression gather requires integer indices")
+                has_aggregate = has_aggregate or aggregated[node.right]
+            elif node.op == EXPR_SLICE:
+                if node.min_count < -1 or (
+                    node.text != "" and node.min_count < 0
+                ):
+                    raise Error(
+                        "Expression slice length and head/tail count must be nonnegative"
+                    )
+            if node.op in [
+                EXPR_SORT_BY,
+                EXPR_TOP_K_BY,
+                EXPR_BOTTOM_K_BY,
+                EXPR_MAX_BY,
+                EXPR_MIN_BY,
+            ]:
+                if node.right < 0 or node.right >= i:
+                    raise Error("Invalid sequence ordering key")
+                _default(nodes, types, node.right)
+                has_aggregate = has_aggregate or aggregated[node.right]
+            if (
+                node.op
+                in [EXPR_TOP_K, EXPR_BOTTOM_K, EXPR_TOP_K_BY, EXPR_BOTTOM_K_BY]
+                and node.integer < 0
+            ):
+                raise Error("top/bottom k must be nonnegative")
+            if node.op in [EXPR_UNIQUE_COUNTS, EXPR_ARG_SORT]:
+                dtype = DataType.INT64
+            if node.op in [EXPR_GET, EXPR_MAX_BY, EXPR_MIN_BY]:
+                shape = AGGREGATE
+                has_aggregate = True
         elif is_reduction(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid aggregate input")

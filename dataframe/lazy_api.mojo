@@ -71,7 +71,7 @@ from dataframe.execution_settings import (
 )
 from dataframe.expr import (
     Expr,
-    changes_length,
+    group_sequence_rows,
     col,
     exclude,
     has_grouping,
@@ -2571,6 +2571,14 @@ trait AcceleratorBackend(Copyable):
         raise Error("provider does not run pipelines")
 
 
+def _group_edge_name(mut names: List[String], stem: String) -> String:
+    var name = stem.copy()
+    while name in names:
+        name += "_"
+    names.append(name.copy())
+    return name^
+
+
 @fieldwise_init
 struct _RegisteredProvider(AcceleratorBackend):
     """The provider chosen at build time (`_accel_provider`), seen through
@@ -2708,6 +2716,52 @@ struct LazyGroupBy(Copyable):
     # output names); empty when every key is a column under its own name.
     var _key_exprs: List[Expr]
 
+    def head(self, n: Int = 5) raises -> LazyFrame:
+        """First n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, False)
+
+    def tail(self, n: Int = 5) raises -> LazyFrame:
+        """Last n rows of each group, retaining the original column schema."""
+        return self._edge_rows(n, True)
+
+    def _edge_rows(self, n: Int, tail: Bool) raises -> LazyFrame:
+        if n < 0:
+            raise Error("GroupBy.head/tail count must be nonnegative")
+        var names = self._frame._input_schema().columns()
+        var original = names.copy()
+        var row = _group_edge_name(names, "__group_edge_row")
+        var first = _group_edge_name(names, "__group_edge_first")
+        var count = _group_edge_name(names, "__group_edge_count")
+        var frame = self._frame.with_row_index(row)
+        var partitions = self._keys.copy()
+        if len(self._key_exprs) > 0:
+            partitions = List[String]()
+            var computed = List[Expr]()
+            for key in self._key_exprs:
+                if _bare_column(key):
+                    partitions.append(key._name)
+                else:
+                    var name = _group_edge_name(names, "__group_edge_key")
+                    computed.append(key.alias(name))
+                    partitions.append(name)
+            frame = frame.with_columns(computed)
+        if len(partitions) == 0:
+            raise Error("GroupBy.head/tail requires grouping keys")
+        # The non-null row index counts every row, including null payloads.
+        # Group-first order matches eager first-occurrence grouping; the
+        # row index restores input order within each selected group.
+        return (
+            frame.with_columns(
+                [
+                    col(row).first().over(partitions).alias(first),
+                    col(row).cum_count(tail).over(partitions).alias(count),
+                ]
+            )
+            .filter(col(count) <= n)
+            .sort([first, row])
+            .select(original)
+        )
+
     def _grouped(
         self, reads: List[String], every_column: Bool
     ) -> Tuple[LazyFrame, List[String], Bool]:
@@ -2754,7 +2808,7 @@ struct LazyGroupBy(Copyable):
         var prepared = List[Expr](capacity=len(exprs))
         for expression in exprs:
             prepared.append(
-                expression.implode() if changes_length(
+                expression.implode() if group_sequence_rows(
                     expression
                 ) else expression.copy()
             )
