@@ -3,6 +3,7 @@ from dataframe.expr import (
     COL,
     Expr,
     OVER,
+    OVER_GLOBAL,
     SELECTOR,
     split_names,
 )
@@ -19,7 +20,7 @@ def _references(expr: Expr) -> Optional[List[String]]:
             return None
         if node.op == COL:
             names.append(node.text)
-        if node.op == OVER and node.text2.byte_length() > 0:
+        if node.op == OVER and (node.integer & OVER_GLOBAL) == 0:
             # over() partitions read their key columns. Other operators
             # keep other text there (a strptime dtype, cut labels).
             for part in split_names(node.text2):

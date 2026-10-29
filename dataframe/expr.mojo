@@ -231,6 +231,8 @@ comptime FORWARD_FILL = 120
 comptime BACKWARD_FILL = 121
 # Evaluate the child per partition of the SEP-joined key names in text2.
 comptime OVER = 122
+# An empty partition list and a partition column named "" encode differently.
+comptime OVER_GLOBAL = 4
 # Fill interior nulls in row position, or using a second numeric expression.
 comptime INTERPOLATE = 123
 comptime INTERPOLATE_BY = 124
@@ -1933,6 +1935,18 @@ struct Expr(Copyable):
             partition_by, order_by, descending, nulls_last
         )
 
+    def over(
+        self,
+        *,
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        """One globally ordered partition, accepting multiple ordering columns."""
+        return self._over_ordered(
+            List[String](), order_by, descending, nulls_last
+        )
+
     def _over_ordered(
         self,
         partition_by: List[String],
@@ -1948,7 +1962,9 @@ struct Expr(Copyable):
                 text=_joined(order_by),
                 text2=_joined(partition_by),
                 min_count=len(order_by),
-                integer=Int64(descending) + 2 * Int64(nulls_last),
+                integer=Int64(descending)
+                + 2 * Int64(nulls_last)
+                + OVER_GLOBAL * Int64(len(partition_by) == 0),
             )
         )
         return Self(nodes^, self._name)

@@ -204,3 +204,51 @@ def test_shift_fill_only_replaces_vacated_partition_positions() raises:
             ]
         ),
     )
+
+
+def test_global_multi_key_windows_and_empty_partition_names_keep_distinct_dependencies() raises:
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([2, 1, 1, 2])),
+            Series("r", Column[Int64]([0, 1, 2, 3])),
+            Series("x", Column[Int64]([10, 20, 30, 40])),
+            Series("", Column[Int64]([0, 1, 0, 1])),
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("x").cum_sum().over(order_by=[String("t"), "r"]).alias("global"),
+        col("x")
+        .cum_sum()
+        .over([String("")], order_by=[String("t")])
+        .alias("partition"),
+        col("x").sum().over("").alias("sum"),
+        col("x").cum_sum().over(order_by=[String("")]).alias("empty_order"),
+        col("x")
+        .cum_sum()
+        .over(order_by=[String("t"), "r"], descending=True)
+        .alias("descending"),
+    ]
+    var expected = DataFrame(
+        [
+            Series("global", Column[Int64]([60, 20, 50, 100])),
+            Series("partition", Column[Int64]([40, 20, 30, 60])),
+            Series("sum", Column[Int64]([40, 60, 40, 60])),
+            Series("empty_order", Column[Int64]([10, 60, 40, 100])),
+            Series("descending", Column[Int64]([50, 100, 80, 40])),
+        ]
+    )
+    for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
+        assert_frame(source.select_exprs(expressions), expected)
+        for optimize in [False, True]:
+            for streaming in [False, True]:
+                assert_frame(
+                    source.lazy()
+                    .select_exprs(expressions)
+                    .collect(
+                        engine="cpu",
+                        optimize=optimize,
+                        streaming=streaming,
+                        batch_size=1,
+                    ),
+                    expected,
+                )

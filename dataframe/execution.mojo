@@ -81,6 +81,7 @@ from .expr import (
     STR_CONCAT,
     CAST,
     OVER,
+    OVER_GLOBAL,
     INTERPOLATE_BY,
     is_rolling_by,
     is_dt_op,
@@ -3005,7 +3006,7 @@ def _over[
         )
         return scalar._broadcast(height)
     var keys = List[Series]()
-    if node.text2.byte_length() > 0:
+    if (node.integer & OVER_GLOBAL) == 0:
         for part in split_names(node.text2):
             for column in columns:
                 if column.name() == part:
