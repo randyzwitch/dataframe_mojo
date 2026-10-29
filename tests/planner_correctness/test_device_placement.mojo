@@ -444,7 +444,7 @@ def test_explain_reports_the_placement_it_would_make() raises:
 
 
 def test_cost_cardinalities_do_not_become_device_resource_bounds() raises:
-    var plan = joined()._optimized()._plan
+    var plan = joined()._optimized()._plan.copy()
     var units = plan_pipelines(plan)
     var saw_join = False
     var saw_parent = False
