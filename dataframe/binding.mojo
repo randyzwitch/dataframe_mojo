@@ -122,6 +122,7 @@ from .expr import (
     CUT,
     QCUT,
     OVER,
+    OVER_GLOBAL,
     FLOORDIV,
     DT_DAY,
     DT_NANOSECOND,
@@ -1696,14 +1697,20 @@ def bind(
         elif node.op == OVER:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid over input")
-            if node.text2.byte_length() == 0:
-                raise Error("over requires at least one partition column")
-            for part in split_names(node.text2):
+            if (node.integer & OVER_GLOBAL) != 0 and node.min_count == 0:
+                raise Error("over requires partition columns or order_by")
+            var window_keys = List[String]()
+            if (node.integer & OVER_GLOBAL) == 0:
+                window_keys = split_names(node.text2)
+            if node.min_count > 0:
+                for part in split_names(node.text):
+                    window_keys.append(part)
+            for part in window_keys:
                 var found = False
                 for column in columns:
                     found = found or column.name() == part
                 if not found:
-                    raise Error("Unknown partition column: " + part)
+                    raise Error("Unknown window column: " + part)
             if _reaches(nodes, node.left, MODE) or _reaches(
                 nodes, node.left, VALUE_COUNTS
             ):

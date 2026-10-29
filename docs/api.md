@@ -1070,6 +1070,11 @@ A flat, topologically ordered tree; composition never evaluates data.
   True at each value's last row; see is_duplicated for equality.
 - `def shift(self, n: Int = Int(1)) -> Self`
   Move values n rows later (earlier when negative); vacated rows are null.
+- `def shift(self, n: Int, fill_value: Self) -> Self`
+  Shift values, filling only vacated positions; source nulls stay null.
+- `def shift(self, fill_value: Self) -> Self`
+- `def shift(self, n: Int, fill_value: String) -> Self`
+- `def shift(self, fill_value: String) -> Self`
 - `def diff(self, n: Int = Int(1)) -> Self`
   Difference from the value n rows earlier.
 - `def pct_change(self, n: Int = Int(1)) -> Self`
@@ -1120,9 +1125,13 @@ A flat, topologically ordered tree; composition never evaluates data.
   Bin numeric values at explicit sorted edges, including open-ended outer bins.
 - `def qcut(self, quantiles: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False, allow_duplicates: Bool = False) -> Self`
   Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true.
-- `def over(self, partition_by: String) -> Self`
-- `def over(self, partition_by: List[String]) -> Self`
-  Evaluate within partitions of the key columns, keeping row order.
+- `def over(self, partition_by: String, order_by: String = "", descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, partition_by: List[String] = List(), order_by: String = "", descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Evaluate per partition, optionally ordered, then restore input rows.
+- `def over(self, partition_by: String, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, partition_by: List[String], order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, *, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+  One globally ordered partition, accepting multiple ordering columns.
 - `def list(self) -> ListNamespace`
   Operations on list columns.
 - `def implode(self) -> Self`
@@ -1752,18 +1761,6 @@ def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overri
 ```
 
 ```mojo
-def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
-```
-
-```mojo
-def read_csv(paths: List[String], schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
-```
-
-```mojo
-def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
-```
-
-```mojo
 def read_csv(source: CsvBuffer, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
@@ -1773,6 +1770,18 @@ def read_csv(source: CsvBuffer, schema: List[Tuple[String, DataType]], *, has_he
 
 ```mojo
 def read_csv(source: CsvBuffer, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ## `read_geojson`
