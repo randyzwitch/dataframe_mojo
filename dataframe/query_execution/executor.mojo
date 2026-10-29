@@ -1,6 +1,11 @@
 """CPU plan interpretation, eager operators, and execution reporting."""
+from dataframe.io.dataset_scan import read_dataset, dataset_schema_frame
+from dataframe.io.csv_types import _CsvScanOptions, CsvSchema
+from dataframe.io.csv_reader import _open_csv_batches
+
 from dataframe.expr import (
     COL,
+    Expr,
 )
 from dataframe.frame import (
     DataFrame,
@@ -51,6 +56,7 @@ from dataframe.planning.inputs import (
 )
 from dataframe.planning.model import (
     AGG,
+    PlanNode,
     ASOF,
     CONCAT,
     EXPLODE,
@@ -191,6 +197,8 @@ def plan_execute_node(
     batch_size: Int,
 ) raises -> DataFrame:
     ref node = self._nodes[index]
+    if node.has_dataset():
+        return _execute_dataset_scan(self, node, empty, batch_size)
     if node.kind == SCAN_FRAME:
         if not empty:
             if node.source_failure:
@@ -204,20 +212,26 @@ def plan_execute_node(
         if empty:
             # Metadata probes must not use eager n_rows=0: that API
             # intentionally decodes a source chunk before truncation.
-            var mapping = _map_file(node.text)
-            if mapping.address != 0:
-                var batches = _CsvBatches(
-                    mapping^,
-                    self._schemas[node.source_slot()],
-                    node.scan_projection(),
-                    0,
-                    batch_size,
-                    _scan_options(node),
-                )
-                var next = batches.next()
-                var job = next.take()
-                job.run()
-                return job^.into_frame()
+            var opened = _open_csv_batches(
+                node.text,
+                self._schemas[node.source_slot()],
+                node.scan_projection(),
+                0,
+                batch_size,
+                _scan_options(node),
+            )
+            if opened:
+                var batches = opened.take()
+                try:
+                    var next = batches.next()
+                    var job = next.take()
+                    job.run()
+                    var result = job^.into_frame()
+                    batches.finish()
+                    return result^
+                except error:
+                    batches.finish()
+                    raise error^
         var rows = 0 if empty else node.scan_row_limit()
         var scan = _scan_options(node)
         if self._schemas[node.source_slot()]:
@@ -332,16 +346,24 @@ def plan_execute_node(
     # materialization order, so retain the eager path for those cases.
     if node.kind == FILTER and not empty and _row_local(node.exprs):
         ref source = self._nodes[node.left]
+        if source.has_dataset() and source.scan_row_limit() < 0:
+            return _execute_dataset_scan(
+                self, source, False, batch_size, Optional(node.exprs[0].copy())
+            ).filter(node.exprs[0])
         # Decode only the row groups whose footer bounds admit a match;
         # the filter still runs on what was read.
-        if source.kind == SCAN_PARQUET:
+        if source.kind == SCAN_PARQUET and not source.has_dataset():
             var groups = _pruned_row_groups(
                 parquet_row_group_statistics(source.text), node.exprs[0]
             )
             return read_parquet(
                 source.text, columns=source.names, row_groups=groups, glob=False
             ).filter(node.exprs[0])
-        if source.kind == SCAN_CSV and source.scan_row_limit() < 0:
+        if (
+            source.kind == SCAN_CSV
+            and not source.has_dataset()
+            and source.scan_row_limit() < 0
+        ):
             var scan = _scan_options(source)
             if self._schemas[source.source_slot()]:
                 return read_csv_explicit(
@@ -568,3 +590,40 @@ def plan_concat(
     parts.append(input^)
     parts.append(right.select(names))
     return concat(parts)
+
+
+def _execute_dataset_scan(
+    plan: QueryContext,
+    node: PlanNode,
+    empty: Bool,
+    batch_size: Int,
+    predicate: Optional[Expr] = None,
+) raises -> DataFrame:
+    var columns = Optional[List[String]]()
+    if node.dataset_projected:
+        columns = node.scan_projection().copy()
+    var scan = _CsvScanOptions.defaults()
+    var schema = Optional[CsvSchema]()
+    if node.kind == SCAN_CSV:
+        scan = _scan_options(node)
+        schema = plan._schemas[node.source_slot()].copy()
+    if empty:
+        return dataset_schema_frame(
+            node.dataset_spec(),
+            node.kind == SCAN_PARQUET,
+            schema=schema,
+            scan=scan,
+            columns=columns,
+            batch_size=batch_size,
+        )
+    node._record_execution()
+    return read_dataset(
+        node.dataset_spec(),
+        node.kind == SCAN_PARQUET,
+        schema=schema,
+        scan=scan,
+        columns=columns,
+        limit=node.scan_row_limit(),
+        batch_size=batch_size,
+        predicate=predicate,
+    )

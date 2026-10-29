@@ -11,3 +11,11 @@ _dfq_ipc_writer_open
 _dfq_ipc_writer_write
 _dfq_ipc_writer_close
 _dfq_ipc_writer_abort
+_dfq_parquet_writer_open
+_dfq_parquet_writer_write
+_dfq_parquet_writer_close
+_dfq_parquet_writer_abort
+_dfq_csv_input_open_path
+_dfq_csv_input_open_buffer
+_dfq_csv_input_read
+_dfq_csv_input_close

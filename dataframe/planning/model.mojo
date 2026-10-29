@@ -5,6 +5,7 @@ from dataframe.dtype import (
 from dataframe.expr import (
     Expr,
 )
+from dataframe.io.dataset_options import DatasetSpec
 from dataframe.value import (
     AnyValue,
 )
@@ -117,6 +118,17 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var asof_tolerance: Optional[AnyValue]
     var source_failure: String
     var json_schema: Optional[DataType]
+    var dataset: Optional[DatasetSpec]
+    var dataset_projected: Bool
+
+    def has_dataset(self) -> Bool:
+        return Bool(self.dataset)
+
+    def set_dataset(mut self, spec: DatasetSpec):
+        self.dataset = spec.copy()
+
+    def dataset_spec(self) -> ref[self.dataset._value] DatasetSpec:
+        return self.dataset.value()
 
     # These views borrow the stored lists: reading a payload does not add a
     # copy-on-write owner. String elements share their list's element origin
@@ -290,6 +302,8 @@ struct PlanNode(Copyable, Deinitable, Movable):
 
     def set_scan_projection(mut self, var columns: List[String]):
         self.names = columns^
+        if self.has_dataset():
+            self.dataset_projected = True
         if self.kind == SCAN_IPC:
             self.flags[1] = True
 
@@ -436,6 +450,8 @@ def _plan_node(
     coalesce: Bool = True,
     source_failure: String = "",
     json_schema: Optional[DataType] = None,
+    dataset: Optional[DatasetSpec] = None,
+    dataset_projected: Bool = False,
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -456,6 +472,8 @@ def _plan_node(
         Optional[AnyValue](),
         source_failure,
         json_schema.copy(),
+        dataset.copy(),
+        dataset_projected,
     )
 
 

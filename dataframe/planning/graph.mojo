@@ -310,6 +310,9 @@ def plan_node_hash(
     h = _mix_text(h, node.source_failure)
     if node.json_schema:
         h = _mix_text(h, node.json_schema.value().name())
+    if node.dataset:
+        h = _mix_text(h, node.dataset.value().signature())
+    h = _mix(h, UInt64(node.dataset_projected))
     for e in node.exprs:
         h = _mix_expr(h, e)
     h = _mix(h, UInt64(classes[node.left] + 1) if node.left >= 0 else 0)
@@ -352,6 +355,8 @@ def plan_same_node(
         or x.source_failure != y.source_failure
         or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
         or Bool(x.json_schema) != Bool(y.json_schema)
+        or Bool(x.dataset) != Bool(y.dataset)
+        or x.dataset_projected != y.dataset_projected
         or len(x.exprs) != len(y.exprs)
     ):
         return False
@@ -365,6 +370,11 @@ def plan_same_node(
     ):
         return False
     if x.json_schema and x.json_schema.value() != y.json_schema.value():
+        return False
+    if (
+        x.dataset
+        and x.dataset.value().signature() != y.dataset.value().signature()
+    ):
         return False
     for k in range(len(x.exprs)):
         if not _same_expr(x.exprs[k], y.exprs[k]):

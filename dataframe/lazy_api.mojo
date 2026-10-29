@@ -1,5 +1,7 @@
 """Public lazy query construction and backend dispatch."""
 from dataframe.io.file_sources import has_pattern, resolve_paths
+from dataframe.io.dataset_options import DatasetOptions, DatasetSpec
+from dataframe.io.sinks import FileSink
 from dataframe.planning.node_builders import (
     _aggregate_node,
     _concat_node,
@@ -128,6 +130,7 @@ from dataframe.optimizer.passes import (
     plan_push_predicates,
     plan_push_predicates_now,
     plan_push_projections,
+    plan_prepare_dataset_projections,
     plan_push_slices,
     plan_slice_over_ipc,
     plan_split_filters,
@@ -322,6 +325,7 @@ from std.io import (
 )
 from std.memory import (
     ArcPointer,
+    Pointer,
 )
 from std.os import (
     getenv,
@@ -1600,6 +1604,111 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             decision = _automatic_decision(selected)
         return decision^
 
+    def sink_parquet(
+        self,
+        path: String,
+        *,
+        compression: String = "zstd",
+        row_group_size: Int = 1_000_000,
+        batch_size: Int = 65536,
+        optimize: Bool = True,
+    ) raises:
+        """Execute batches into an atomic Parquet output without collecting them.
+
+        Row groups span executor batches. Existing materializing operators
+        and aggregate states retain their usual memory requirements.
+        """
+        self._sink_file(
+            path,
+            "parquet",
+            compression=compression,
+            row_group_size=row_group_size,
+            batch_size=batch_size,
+            optimize=optimize,
+        )
+
+    def sink_csv(
+        self,
+        path: String,
+        *,
+        has_header: Bool = True,
+        separator: String = ",",
+        quote_style: String = "necessary",
+        null_value: String = "",
+        line_terminator: String = "\n",
+        buffer_size: Int = 65536,
+        batch_size: Int = 65536,
+        optimize: Bool = True,
+    ) raises:
+        """Execute ordered batches into CSV, publishing after successful close.
+
+        Formatting options match write_csv. One header is written, including
+        for an empty result. A scan may safely replace its own source path.
+        """
+        self._sink_file(
+            path,
+            "csv",
+            has_header=has_header,
+            separator=separator,
+            quote_style=quote_style,
+            null_value=null_value,
+            line_terminator=line_terminator,
+            buffer_size=buffer_size,
+            batch_size=batch_size,
+            optimize=optimize,
+        )
+
+    def _sink_file(
+        self,
+        path: String,
+        format: String,
+        *,
+        compression: String = "zstd",
+        row_group_size: Int = 1_000_000,
+        has_header: Bool = True,
+        separator: String = ",",
+        quote_style: String = "necessary",
+        null_value: String = "",
+        line_terminator: String = "\n",
+        buffer_size: Int = 65536,
+        batch_size: Int = 65536,
+        optimize: Bool = True,
+    ) raises:
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var plan = self._optimized() if optimize else self.copy()
+        if not optimize:
+            plan_prepare_dataset_projections(plan._plan)
+        if optimize:
+            plan._push_join_key_sets(True, batch_size)
+            plan._share_subplans(True, batch_size)
+            plan._order_joins(True, batch_size)
+        plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        var index = len(plan._plan._nodes) - 1
+        var schema = plan._execute(index, True, False, batch_size).clear()
+        var output = FileSink(
+            schema,
+            path,
+            format,
+            compression=compression,
+            row_group_size=row_group_size,
+            has_header=has_header,
+            separator=separator,
+            quote_style=quote_style,
+            null_value=null_value,
+            line_terminator=line_terminator,
+            buffer_size=buffer_size,
+        )
+        var final = plan_stream_execute(
+            plan._plan, index, batch_size, Int(Pointer(to=output))
+        )
+        var frame = final.take() if final else plan._execute(
+            index, False, True, batch_size
+        )
+        for offset in range(0, frame.height(), batch_size):
+            output.append(frame.slice(offset, batch_size))
+        output.finish()
+
     def collect(
         self,
         *,
@@ -1825,6 +1934,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )
         var plan = self._optimized() if optimize else self.copy()
+        if not optimize:
+            plan_prepare_dataset_projections(plan._plan)
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
@@ -1919,6 +2030,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if engine == "auto" and backend.engine != "cpu":
             return backend.describe()
         var plan = self._optimized() if optimize else self.copy()
+        if not optimize:
+            plan_prepare_dataset_projections(plan._plan)
         var out = String()
         if engine != "cpu":
             out = backend.describe()
@@ -1978,6 +2091,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 )
             return profiled[0].copy()
         var plan = self._optimized() if optimize else self.copy()
+        if not optimize:
+            plan_prepare_dataset_projections(plan._plan)
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
@@ -3243,6 +3358,12 @@ def scan_csv(
     schema_overrides: Dict[String, String] = Dict[String, String](),
     try_parse_dates: Bool = False,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an inferred schema. Nothing is read until
     collect; projection and head() are pushed into the reader.
@@ -3251,6 +3372,34 @@ def scan_csv(
     however the plan runs (eagerly, streaming, or for its schema); invalid
     ones raise here, as read_csv would raise them.
     """
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        var scan = _CsvScanOptions(
+            has_header,
+            separator,
+            quote_char,
+            comment_prefix,
+            skip_rows,
+            null_values.copy(),
+            ignore_errors,
+            truncate_ragged_lines,
+            encoding,
+            infer_schema_length,
+            schema_overrides.copy(),
+            try_parse_dates,
+        )
+        return _scan_dataset_csv(
+            [path], Optional[CsvSchema](), dataset_options, scan
+        )
+
     if glob and has_pattern(path):
         return scan_csv(
             [path],
@@ -3304,10 +3453,44 @@ def scan_csv(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Lazily read a CSV file with an explicit schema, which labels the
     fields by position; the options are read_csv's (see the overload
     above)."""
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        var scan = _CsvScanOptions(
+            has_header,
+            separator,
+            quote_char,
+            comment_prefix,
+            skip_rows,
+            null_values.copy(),
+            ignore_errors,
+            truncate_ragged_lines,
+            encoding,
+            100,
+            Dict[String, String](),
+            False,
+        )
+        return _scan_dataset_csv(
+            [path], Optional(schema.copy()), dataset_options, scan
+        )
+
     if glob and has_pattern(path):
         return scan_csv(
             [path],
@@ -3388,10 +3571,28 @@ def scan_parquet(
     path: String,
     *,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Lazily read a Parquet file. Nothing is read until collect; projection
     is pushed into the reader, and a filter directly above the scan decodes
     only the row groups whose footer statistics can hold a match."""
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    if dataset_options.active():
+        return _scan_dataset_parquet([path], dataset_options)
+
     if glob and has_pattern(path):
         return scan_parquet(
             [path],
@@ -3523,31 +3724,44 @@ def scan_csv(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Scan sorted local file sources; input rows are read during collection.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
-    var files = resolve_paths(paths, glob)
-    var frames = List[LazyFrame](capacity=len(files))
-    for path in files:
-        var frame = scan_csv(
-            path,
-            schema,
-            has_header=has_header,
-            separator=separator,
-            quote_char=quote_char,
-            comment_prefix=comment_prefix,
-            skip_rows=skip_rows,
-            null_values=null_values,
-            ignore_errors=ignore_errors,
-            truncate_ragged_lines=truncate_ragged_lines,
-            encoding=encoding,
-            glob=False,
-        )
-        frames.append(frame^)
-    return _concat_plans(frames, "vertical")
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    var scan = _CsvScanOptions(
+        has_header,
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        100,
+        Dict[String, String](),
+        False,
+    )
+    return _scan_dataset_csv(
+        paths, Optional(schema.copy()), dataset_options, scan
+    )
 
 
 def scan_csv(
@@ -3566,51 +3780,91 @@ def scan_csv(
     schema_overrides: Dict[String, String] = Dict[String, String](),
     try_parse_dates: Bool = False,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Scan sorted local file sources; input rows are read during collection.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
-    var files = resolve_paths(paths, glob)
-    var frames = List[LazyFrame](capacity=len(files))
-    for path in files:
-        var frame = scan_csv(
-            path,
-            has_header=has_header,
-            separator=separator,
-            quote_char=quote_char,
-            comment_prefix=comment_prefix,
-            skip_rows=skip_rows,
-            null_values=null_values,
-            ignore_errors=ignore_errors,
-            truncate_ragged_lines=truncate_ragged_lines,
-            encoding=encoding,
-            infer_schema_length=infer_schema_length,
-            schema_overrides=schema_overrides,
-            try_parse_dates=try_parse_dates,
-            glob=False,
-        )
-        frames.append(frame^)
-    return _concat_plans(frames, "vertical")
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    var scan = _CsvScanOptions(
+        has_header,
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        infer_schema_length,
+        schema_overrides.copy(),
+        try_parse_dates,
+    )
+    return _scan_dataset_csv(
+        paths, Optional[CsvSchema](), dataset_options, scan
+    )
 
 
 def scan_parquet(
     paths: List[String],
     *,
     glob: Bool = True,
+    hive_partitioning: Bool = False,
+    hive_schema: Dict[String, String] = Dict[String, String](),
+    include_file_paths: String = "",
+    missing_columns: String = "raise",
+    extra_columns: String = "raise",
+    union_by_name: Bool = False,
 ) raises -> LazyFrame:
     """Scan sorted local file sources; input rows are read during collection.
 
     Strict concatenation requires matching output names, order and dtypes.
     Repeated sources retain repeated rows. Use glob=False for literal paths.
     """
-    var files = resolve_paths(paths, glob)
-    var frames = List[LazyFrame](capacity=len(files))
-    for path in files:
-        var frame = scan_parquet(
-            path,
-            glob=False,
-        )
-        frames.append(frame^)
-    return _concat_plans(frames, "vertical")
+    var dataset_options = DatasetOptions(
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        include_file_paths=include_file_paths,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+        union_by_name=union_by_name,
+        glob=glob,
+    )
+    return _scan_dataset_parquet(paths, dataset_options)
+
+
+def _scan_dataset_csv(
+    paths: List[String],
+    schema: Optional[CsvSchema],
+    options: DatasetOptions,
+    scan: _CsvScanOptions,
+) raises -> LazyFrame:
+    _ = scan.reader()
+    var spec = DatasetSpec(paths, options)
+    var node = _csv_scan_node(spec.paths[0], scan)
+    node.set_dataset(spec)
+    return LazyFrame([node^], [DataFrame([])], [schema.copy()])
+
+
+def _scan_dataset_parquet(
+    paths: List[String], options: DatasetOptions
+) raises -> LazyFrame:
+    var spec = DatasetSpec(paths, options)
+    var node = _parquet_scan_node(path=spec.paths[0], slot=0)
+    node.set_dataset(spec)
+    return LazyFrame([node^], [DataFrame([])], [Optional[CsvSchema]()])

@@ -7,8 +7,14 @@ array-reference reassembly.
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.collections import Dict, Optional
-from .csv_infer import infer_csv_schema
+from .csv_infer import infer_csv_schema, _CsvInferenceState, _header_names
 from .csv_input import CsvBuffer
+from .csv_source import (
+    _CsvCompressedInput,
+    _CsvRecords,
+    _csv_compression,
+    _csv_span,
+)
 from std.memory import ArcPointer, Pointer
 from .csv_types import (
     CsvSchema,
@@ -56,6 +62,7 @@ struct _DecodeJob(Job):
     var rows: Int
     var record: Int
     var result: DataFrame
+    var owned: List[UInt8]
 
     def __init__(
         out self,
@@ -65,6 +72,7 @@ struct _DecodeJob(Job):
         rows: Int,
         record: Int,
     ) raises:
+        self.owned = List[UInt8]()
         self.context = context.copy()
         self.address = address
         self.length = length
@@ -72,11 +80,23 @@ struct _DecodeJob(Job):
         self.record = record
         self.result = DataFrame(List[Series](), height=0)
 
+    @staticmethod
+    def from_owned(
+        context: ArcPointer[_ReadContext],
+        var bytes: List[UInt8],
+        rows: Int,
+        record: Int,
+    ) raises -> Self:
+        var job = Self(context, 0, len(bytes), rows, record)
+        job.owned = bytes^
+        return job^
+
     def run(mut self) raises:
+        var address = Int(self.owned.unsafe_ptr()) if len(
+            self.owned
+        ) else self.address
         var bytes = Span[UInt8, ImmutAnyOrigin](
-            unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
-                unsafe_from_address=self.address
-            )
+            unsafe_ptr=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
             .unsafe_mut_cast[False]()
             .unsafe_origin_cast[ImmutAnyOrigin](),
             length=self.length,
@@ -332,8 +352,21 @@ def read_csv_explicit(
         encoding,
         buffer_size,
     )
-    var keep = _projection(schema, columns)
     var mapping = _map_file(path)
+    var codec = _csv_compression(mapping.span(), path)
+    if codec:
+        return _read_compressed_csv(
+            _CsvCompressedInput(path, codec),
+            Optional(schema.copy()),
+            columns,
+            options,
+            has_header,
+            100,
+            Dict[String, String](),
+            False,
+            predicate,
+        )
+    var keep = _projection(schema, columns)
     if mapping.address == 0:
         # Open establishes the same missing-file error. Apply the exact mmap
         # prelude before synchronous decoding; decoding the raw file here
@@ -471,6 +504,19 @@ def read_csv_inferred(
         buffer_size,
     )
     var mapping = _map_file(path)
+    var codec = _csv_compression(mapping.span(), path)
+    if codec:
+        return _read_compressed_csv(
+            _CsvCompressedInput(path, codec),
+            Optional[CsvSchema](),
+            columns,
+            options,
+            has_header,
+            infer_schema_length,
+            schema_overrides,
+            try_parse_dates,
+            predicate,
+        )
     if mapping.address != 0:
         var inferred = infer_csv_schema(
             mapping.span(),
@@ -558,6 +604,19 @@ def read_csv_buffer_explicit(
         encoding,
         buffer_size,
     )
+    var codec = _csv_compression(source._span())
+    if codec:
+        return _read_compressed_csv(
+            _CsvCompressedInput(source, codec),
+            Optional(schema.copy()),
+            columns,
+            options,
+            has_header,
+            100,
+            Dict[String, String](),
+            False,
+            predicate,
+        )
     var keep = _projection(schema, columns)
     var bytes = source._span()
     _validate_explicit_header(bytes, schema, options, has_header)
@@ -600,6 +659,19 @@ def read_csv_buffer_inferred(
         encoding,
         buffer_size,
     )
+    var codec = _csv_compression(source._span())
+    if codec:
+        return _read_compressed_csv(
+            _CsvCompressedInput(source, codec),
+            Optional[CsvSchema](),
+            columns,
+            options,
+            has_header,
+            infer_schema_length,
+            schema_overrides,
+            try_parse_dates,
+            predicate,
+        )
     var bytes = source._span()
     var inferred = infer_csv_schema(
         bytes,
@@ -642,7 +714,7 @@ def _decode_buffer_body(
     return result^
 
 
-struct _CsvBatches(Movable):
+struct _MappedCsvBatches(Movable):
     """A mapped CSV cursor; only a bounded wave of decode jobs is retained."""
 
     var mapping: _Mapping
@@ -759,3 +831,355 @@ struct _CsvBatches(Movable):
                 self.offset -= end
                 if self.mapping.length == 0:
                     self.mapping.address = 0
+
+
+@fieldwise_init
+struct _CsvReplayRecord(Copyable, Movable):
+    var bytes: List[UInt8]
+    var number: Int
+
+
+def _compressed_prelude(
+    mut records: _CsvRecords, options: CsvOptions, has_header: Bool
+) raises -> Tuple[Optional[_CsvReplayRecord], Int]:
+    """Discard skipped input incrementally; retain only the header/first row."""
+    var number = 1
+    var first = True
+    var skip_empty = has_header
+    var remaining = options.skip_rows
+    while True:
+        var next = records.next()
+        if not next:
+            return (Optional[_CsvReplayRecord](), number)
+        var raw = next.take()
+        if first:
+            first = False
+            var bytes = _csv_span(raw)
+            if (
+                len(bytes) >= 3
+                and bytes[0] == 239
+                and bytes[1] == 187
+                and bytes[2] == 191
+            ):
+                var stripped = List[UInt8]()
+                stripped.extend(bytes[3:])
+                raw = stripped^
+        var bytes = _csv_span(raw)
+        if skip_empty and _empty_record(bytes, 0, len(bytes)):
+            number += 1
+            continue
+        skip_empty = False
+        if _comment_at(bytes, 0, options.comment_prefix):
+            number += 1
+            continue
+        if remaining > 0:
+            remaining -= 1
+            number += 1
+            continue
+        return (_CsvReplayRecord(raw^, number), number + 1)
+
+
+def _next_compressed_record(
+    mut records: _CsvRecords,
+    mut pending: Optional[_CsvReplayRecord],
+    mut number: Int,
+) raises -> Optional[_CsvReplayRecord]:
+    if pending:
+        return pending.take()
+    var next = records.next()
+    if not next:
+        return None
+    var at = number
+    number += 1
+    return _CsvReplayRecord(next.take(), at)
+
+
+struct _CompressedCsvBatches(Movable):
+    """Bounded owned CSV jobs over an incremental decompressed transport.
+
+    Finite inference retains sampled data records, never skipped/comment
+    prefixes. Full inference reduces type masks on the first pass and reopens
+    the same compressed source for decoding on the second pass.
+    """
+
+    var records: _CsvRecords
+    var context: ArcPointer[_ReadContext]
+    var replay: List[_CsvReplayRecord]
+    var replay_offset: Int
+    var pending: Optional[_CsvReplayRecord]
+    var live_record: Int
+    var remaining: Int
+    var batch_size: Int
+    var emitted: Bool
+    var ended: Bool
+
+    def __init__(
+        out self,
+        var input: _CsvCompressedInput,
+        schema: Optional[CsvSchema],
+        columns: List[String],
+        options: CsvOptions,
+        has_header: Bool,
+        infer_schema_length: Int,
+        schema_overrides: Dict[String, String],
+        try_parse_dates: Bool,
+        batch_size: Int,
+    ) raises:
+        if infer_schema_length < -1:
+            raise Error("infer_schema_length must be nonnegative or -1")
+        self.records = _CsvRecords(input^, options.quote_char)
+        self.replay = List[_CsvReplayRecord]()
+        self.replay_offset = 0
+        self.pending = Optional[_CsvReplayRecord]()
+        var prelude = _compressed_prelude(self.records, options, has_header)
+        self.live_record = prelude[1]
+        var first = prelude[0].take() if prelude[0] else _CsvReplayRecord(
+            List[UInt8](), prelude[1]
+        )
+        var names = List[String]()
+        var selected: CsvSchema
+        if has_header:
+            if schema:
+                var header_options = options.copy()
+                header_options.skip_rows = 0
+                _validate_explicit_header(
+                    _csv_span(first.bytes), schema.value(), header_options, True
+                )
+            elif len(first.bytes):
+                names = _header_names(_csv_span(first.bytes), options)
+        elif len(first.bytes):
+            self.pending = first.copy()
+        if schema:
+            selected = schema.value().copy()
+        else:
+            var inference = _CsvInferenceState(
+                names, has_header, infer_schema_length, try_parse_dates
+            )
+            var sampled = 0
+            var limit = max(1, infer_schema_length)
+            while infer_schema_length < 0 or sampled < limit:
+                var next = _next_compressed_record(
+                    self.records, self.pending, self.live_record
+                )
+                if not next:
+                    break
+                var item = next.take()
+                var bytes = _csv_span(item.bytes)
+                if _comment_at(bytes, 0, options.comment_prefix):
+                    continue
+                inference.add(bytes, options)
+                if infer_schema_length >= 0:
+                    self.replay.append(item^)
+                sampled += 1
+            selected = inference.finish(schema_overrides)
+            if infer_schema_length < 0:
+                self.records.reset()
+                var again = _compressed_prelude(
+                    self.records, options, has_header
+                )
+                self.live_record = again[1]
+                if not has_header and again[0]:
+                    self.pending = again[0].take()
+            else:
+                # During sampling, _next_record consumes live records only.
+                self.replay_offset = 0
+        self.context = ArcPointer(
+            _ReadContext(
+                selected,
+                options,
+                _projection(selected, columns),
+                Optional[Expr](),
+            )
+        )
+        var comments = options.comment_prefix.byte_length() > 0
+        self.remaining = (
+            -1 if comments and options.n_rows > 0 else options.n_rows
+        )
+        self.batch_size = max(1, batch_size)
+        self.emitted = False
+        self.ended = False
+
+    def _next_record(mut self) raises -> Optional[_CsvReplayRecord]:
+        if self.pending:
+            return self.pending.take()
+        if self.replay_offset < len(self.replay):
+            var item = self.replay[self.replay_offset].copy()
+            self.replay_offset += 1
+            return item^
+        return self._next_live_record()
+
+    def _next_live_record(mut self) raises -> Optional[_CsvReplayRecord]:
+        return _next_compressed_record(
+            self.records, self.pending, self.live_record
+        )
+
+    def next(mut self) raises -> Optional[_DecodeJob]:
+        if self.ended:
+            return None
+        var bytes = List[UInt8]()
+        var count = 0
+        var start = self.live_record
+        var size = self.batch_size if self.remaining < 0 else min(
+            self.batch_size, self.remaining
+        )
+        # A very wide record is indivisible; otherwise each job is also
+        # bounded in bytes, even when the requested row batch is enormous.
+        while count < size and len(bytes) < 1024 * 1024:
+            var next = self._next_record()
+            if not next:
+                self.ended = True
+                break
+            var item = next.take()
+            if count and item.number != start + count:
+                # Sampled comments were discarded. Split at their gap to
+                # preserve original CSV record numbers in decoder errors.
+                self.pending = item^
+                break
+            if count == 0:
+                start = item.number
+            bytes.extend(_csv_span(item.bytes))
+            count += 1
+        if self.remaining >= 0:
+            self.remaining -= count
+            if self.remaining == 0:
+                self.finish()
+        if count == 0 and self.emitted:
+            return None
+        self.emitted = True
+        return _DecodeJob.from_owned(self.context, bytes^, count, start)
+
+    def finish(mut self) raises:
+        self.records.close()
+        self.replay.clear()
+        self.pending = Optional[_CsvReplayRecord]()
+        self.ended = True
+
+
+def _read_compressed_csv(
+    var input: _CsvCompressedInput,
+    schema: Optional[CsvSchema],
+    columns: List[String],
+    options: CsvOptions,
+    has_header: Bool,
+    infer_schema_length: Int,
+    schema_overrides: Dict[String, String],
+    try_parse_dates: Bool,
+    predicate: Optional[Expr],
+) raises -> DataFrame:
+    var batches = _CompressedCsvBatches(
+        input^,
+        schema,
+        columns,
+        options,
+        has_header,
+        infer_schema_length,
+        schema_overrides,
+        try_parse_dates,
+        65536,
+    )
+    var frames = List[DataFrame]()
+    var rows = 0
+    while True:
+        var next = batches.next()
+        if not next:
+            break
+        var job = next.take()
+        job.run()
+        var frame = job^.into_frame()
+        rows += frame.height()
+        frames.append(frame^)
+        if options.n_rows >= 0 and rows >= options.n_rows:
+            break
+    batches.finish()
+    var result = concat(frames) if len(frames) > 1 else frames.pop(0)
+    if options.n_rows >= 0 and result.height() > options.n_rows:
+        result = result.head(options.n_rows)
+    if predicate:
+        return result.filter(predicate.value())
+    return result^
+
+
+struct _CsvBatches(Movable):
+    """Mapped or compressed source, sharing the existing worker-job interface."""
+
+    var mapped: List[_MappedCsvBatches]
+    var compressed: List[_CompressedCsvBatches]
+
+    def __init__(
+        out self,
+        var mapping: _Mapping,
+        schema: Optional[CsvSchema],
+        columns: List[String],
+        limit: Int,
+        batch_size: Int,
+        scan: _CsvScanOptions = _CsvScanOptions.defaults(),
+    ) raises:
+        self.mapped = List[_MappedCsvBatches]()
+        self.compressed = List[_CompressedCsvBatches]()
+        self.mapped.append(
+            _MappedCsvBatches(
+                mapping^, schema, columns, limit, batch_size, scan
+            )
+        )
+
+    def __init__(out self, var compressed: _CompressedCsvBatches):
+        self.mapped = List[_MappedCsvBatches]()
+        self.compressed = List[_CompressedCsvBatches]()
+        self.compressed.append(compressed^)
+
+    def next(mut self) raises -> Optional[_DecodeJob]:
+        if len(self.compressed):
+            return self.compressed[0].next()
+        return self.mapped[0].next()
+
+    def project_none(mut self):
+        # Dataset scans can request only virtual/path columns. Preserve the
+        # physical record count without parsing any unneeded typed values.
+        if len(self.compressed):
+            ref keep = self.compressed[0].context[].keep
+            for index in range(len(keep)):
+                keep[index] = False
+        else:
+            ref keep = self.mapped[0].context[].keep
+            for index in range(len(keep)):
+                keep[index] = False
+
+    def discard(mut self):
+        if len(self.mapped):
+            self.mapped[0].discard()
+
+    def finish(mut self) raises:
+        if len(self.compressed):
+            self.compressed[0].finish()
+
+
+def _open_csv_batches(
+    path: String,
+    schema: Optional[CsvSchema],
+    columns: List[String],
+    limit: Int,
+    batch_size: Int,
+    scan: _CsvScanOptions = _CsvScanOptions.defaults(),
+) raises -> Optional[_CsvBatches]:
+    """Open either transport; None retains the plain unmapped fallback."""
+    var mapping = _map_file(path)
+    var codec = _csv_compression(mapping.span(), path)
+    if codec:
+        var options = scan.reader()
+        options.n_rows = limit
+        return _CsvBatches(
+            _CompressedCsvBatches(
+                _CsvCompressedInput(path, codec),
+                schema,
+                columns,
+                options,
+                scan.has_header,
+                scan.infer_schema_length,
+                scan.schema_overrides,
+                scan.try_parse_dates,
+                batch_size,
+            )
+        )
+    if mapping.address == 0:
+        return None
+    return _CsvBatches(mapping^, schema, columns, limit, batch_size, scan)
