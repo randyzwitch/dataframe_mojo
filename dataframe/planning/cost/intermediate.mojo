@@ -39,6 +39,12 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.properties import _stream_rows
 from dataframe.storage.boolean import true_count
+from dataframe.storage.column import (
+    Column,
+    SCALAR_DTYPES,
+    _append_validity_bit,
+    _validity_bit,
+)
 from dataframe.storage.string import StringColumn
 
 
@@ -121,6 +127,43 @@ def frame_column_width(
     return Float64(max(1, column.dtype().bit_width() // 8))
 
 
+def _sample_chunks(column: Series, count: Int) raises -> Series:
+    """Read ordered numeric strata into one bounded sample, retaining metadata.
+
+    The caller supplies a chunked column with 0 < count < its height. One
+    row per disjoint stratum is already ordered, so no per-chunk gathers,
+    merged sample or restoring permutation are needed for numeric storage.
+    Other storage keeps the existing sparse gather.
+    """
+    var height = len(column)
+    ref chunks = column._chunked.value()[]
+    comptime for D in SCALAR_DTYPES:
+        if column._data.isa[Column[Scalar[D]]]():
+            var values = List[Scalar[D]](capacity=count)
+            var bits = List[UInt8]()
+            var chunk = 0
+            for k in range(count):
+                var row = _sample_row(height, count, k)
+                while row >= chunks.ends[chunk]:
+                    chunk += 1
+                var first = 0 if chunk == 0 else chunks.ends[chunk - 1]
+                ref source = chunks.arrays[chunk][Column[Scalar[D]]]
+                var at = row - first
+                var valid = _validity_bit(source._bits[], source._offset + at)
+                values.append(source._ptr()[unsafe_offset=at] if valid else 0)
+                _append_validity_bit(bits, k, valid, count)
+            var sample = Series(
+                column.name(), Column[Scalar[D]](values=values^, bits=bits^)
+            )
+            sample._dtype = column._dtype
+            sample._field_metadata = column._field_metadata
+            return sample^
+    var rows = List[Int](capacity=count)
+    for k in range(count):
+        rows.append(_sample_row(height, count, k))
+    return column._take_from_chunks(rows)
+
+
 def bounded_distinct(column: Series) raises -> Int:
     """At most 4,096 observations, including frames without table statistics.
 
@@ -136,16 +179,12 @@ def bounded_distinct(column: Series) raises -> Int:
         return 0
     var sample = column.copy()
     if height > count:
-        var rows = List[Int](capacity=count)
-        for k in range(count):
-            rows.append(_sample_row(height, count, k))
         if column.is_chunked():
-            # Gather each source chunk's selected rows together, preserving
-            # metadata without expanding the sample into 4,096 tiny arrays.
-            # The explicit sparse adapter avoids the full-merge alternative
-            # that Series.take may choose for relatively dense samples.
-            sample = column._take_from_chunks(rows)
+            sample = _sample_chunks(column, count)
         else:
+            var rows = List[Int](capacity=count)
+            for k in range(count):
+                rows.append(_sample_row(height, count, k))
             sample = column.take(rows)
     var codes = encode_rows([sample^], nulls_equal=False)
     var unique = codes.count()

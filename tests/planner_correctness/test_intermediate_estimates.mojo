@@ -5,6 +5,7 @@ from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.planning.cost.intermediate import (
     IntermediateEstimates,
     _cost_rows,
+    _sample_chunks,
     bounded_distinct,
     frame_column_width,
 )
@@ -197,6 +198,66 @@ def test_bounded_sampling_preserves_fragmented_and_sliced_input_domains() raises
     assert_true(series.is_chunked())
     assert_true(sliced.is_chunked())
     assert_equal(len(series), 85_000)
+
+
+def test_numeric_strata_sample_preserves_sliced_validity_and_logical_metadata() raises:
+    var values = List[UInt64]()
+    var valid = List[Bool]()
+    for row in range(24):
+        values.append(UInt64(0x8000000000000000) + UInt64(row))
+        valid.append(row % 3 != 0)
+    var source = Series("k", Column[UInt64](values^, valid)).slice(3, 17)
+    var chunked = Series._from_chunks(
+        [
+            source.slice(0, 0),
+            source.slice(0, 2),
+            source.slice(2, 5),
+            source.slice(7, 0),
+            source.slice(7, 1),
+            source.slice(8, 9),
+        ]
+    )
+    # Frozen jitter positions for 17 rows / 8 strata, independently fixed
+    # before replacing the gather route. Include null and boundary rows.
+    var expected = source.take([1, 3, 5, 8, 10, 12, 14, 15])
+    var actual = _sample_chunks(chunked, 8)
+    assert_frame(DataFrame([actual^]), DataFrame([expected^]))
+    assert_true(chunked.is_chunked())
+    assert_equal(chunked._chunked.value()[].cache[].state.load(), 0)
+
+    var dates = Series(
+        "d",
+        Column[Int64](
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        ),
+    ).cast("date")
+    var dated = Series._from_chunks([dates.slice(0, 3), dates.slice(3, 14)])
+    assert_frame(
+        DataFrame([_sample_chunks(dated, 8)]),
+        DataFrame([dates.take([1, 3, 5, 8, 10, 12, 14, 15])]),
+    )
+
+
+def test_numeric_strata_estimates_match_contiguous_null_nan_and_signed_zero_keys() raises:
+    var values = List[Float64]()
+    var valid = List[Bool]()
+    var nan = Float64(0) / Float64(0)
+    for row in range(20_003):
+        values.append(
+            nan if row % 11
+            == 0 else (Float64(-0.0) if row % 7 == 0 else Float64(row % 23))
+        )
+        valid.append(row % 13 != 0)
+    var source = Series("k", Column[Float64](values^, valid)).slice(13, 19_973)
+    var chunks = List[Series]()
+    for k in range(257):
+        var first = k * len(source) // 257
+        var last = (k + 1) * len(source) // 257
+        chunks.append(source.slice(first, last - first))
+    var chunked = Series._from_chunks(chunks)
+    assert_equal(bounded_distinct(chunked), bounded_distinct(source))
+    assert_true(chunked.is_chunked())
+    assert_equal(chunked._chunked.value()[].cache[].state.load(), 0)
 
 
 def _unknown_estimate(series: Series) raises -> Int:
