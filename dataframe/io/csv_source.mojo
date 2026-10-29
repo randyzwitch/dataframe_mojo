@@ -15,6 +15,57 @@ comptime _Read = def(Int, Int, Int64, Int, Int) thin abi("C") -> Int32
 comptime _Close = def(Int) thin abi("C") -> None
 
 
+def _open_path(
+    entry: Int, path: String, codec: Int, mut handle: Int, mut error: Int
+) -> Int32:
+    var name = List[UInt8]()
+    name.extend(path.as_bytes())
+    name.append(0)
+    var status = Pointer(to=entry).unsafe_bitcast[_OpenPath]()[](
+        Int(name.unsafe_ptr()),
+        Int32(codec),
+        Int(Pointer(to=handle)),
+        Int(Pointer(to=error)),
+    )
+    # Raw integer addresses do not retain the filename's byte owner.
+    _ = name^
+    return status
+
+
+def _open_buffer(
+    entry: Int,
+    source: CsvBuffer,
+    codec: Int,
+    mut handle: Int,
+    mut error: Int,
+) -> Int32:
+    var bytes = source._span()
+    return Pointer(to=entry).unsafe_bitcast[_OpenBuffer]()[](
+        Int(bytes.unsafe_ptr()),
+        Int64(len(bytes)),
+        Int32(codec),
+        Int(Pointer(to=handle)),
+        Int(Pointer(to=error)),
+    )
+
+
+def _read_input(
+    entry: Int,
+    handle: Int,
+    mut bytes: List[UInt8],
+    mut count: Int64,
+    mut error: Int,
+) -> Int32:
+    # Explicit mut boundaries expose C's output writes to Mojo's optimizer.
+    return Pointer(to=entry).unsafe_bitcast[_Read]()[](
+        handle,
+        Int(bytes.unsafe_ptr()),
+        Int64(len(bytes)),
+        Int(Pointer(to=count)),
+        Int(Pointer(to=error)),
+    )
+
+
 def _csv_compression(
     bytes: Span[UInt8, ImmutAnyOrigin], path: String = ""
 ) -> Int:
@@ -103,28 +154,17 @@ struct _CsvCompressedInput(Movable):
             var entry = _Library._symbol(
                 self.library.handle, "dfq_csv_input_open_buffer"
             )
-            var bytes = self.owner[0]._span()
-            status = Pointer(to=entry).unsafe_bitcast[_OpenBuffer]()[](
-                Int(bytes.unsafe_ptr()),
-                Int64(len(bytes)),
-                Int32(self.codec),
-                Int(Pointer(to=self.handle)),
-                Int(Pointer(to=error)),
+            status = _open_buffer(
+                entry, self.owner[0], self.codec, self.handle, error
             )
         else:
             if "\x00" in self.path:
                 raise Error("CSV path must not contain NUL bytes")
-            var name = List[UInt8]()
-            name.extend(self.path.as_bytes())
-            name.append(0)
             var entry = _Library._symbol(
                 self.library.handle, "dfq_csv_input_open_path"
             )
-            status = Pointer(to=entry).unsafe_bitcast[_OpenPath]()[](
-                Int(name.unsafe_ptr()),
-                Int32(self.codec),
-                Int(Pointer(to=self.handle)),
-                Int(Pointer(to=error)),
+            status = _open_path(
+                entry, self.path, self.codec, self.handle, error
             )
         if status != 0:
             _raise_backend_error(
@@ -135,6 +175,8 @@ struct _CsvCompressedInput(Movable):
         if self.handle != 0:
             var entry = self.close_entry
             Pointer(to=entry).unsafe_bitcast[_Close]()[](self.handle)
+        # Native buffer streams borrow these bytes until after close.
+        _ = self.owner^
 
     def reset(mut self) raises:
         var entry = self.close_entry
@@ -150,13 +192,7 @@ struct _CsvCompressedInput(Movable):
         var count = Int64(0)
         var error = 0
         var entry = self.read_entry
-        var status = Pointer(to=entry).unsafe_bitcast[_Read]()[](
-            self.handle,
-            Int(bytes.unsafe_ptr()),
-            Int64(len(bytes)),
-            Int(Pointer(to=count)),
-            Int(Pointer(to=error)),
-        )
+        var status = _read_input(entry, self.handle, bytes, count, error)
         if status != 0:
             _raise_backend_error(
                 self.library, error, "read_csv compressed input"

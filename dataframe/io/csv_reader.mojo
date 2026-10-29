@@ -101,14 +101,20 @@ struct _DecodeJob(Job):
             .unsafe_origin_cast[ImmutAnyOrigin](),
             length=self.length,
         )
-        self.result = decode_chunk(
-            bytes,
-            self.context[].schema,
-            self.context[].options,
-            self.context[].keep,
-            self.rows,
-            self.record,
-        )
+        var selected = False
+        for keep in self.context[].keep:
+            selected = selected or keep
+        if selected:
+            self.result = decode_chunk(
+                bytes,
+                self.context[].schema,
+                self.context[].options,
+                self.context[].keep,
+                self.rows,
+                self.record,
+            )
+        else:
+            self.result = _count_csv_chunk(bytes, self.context[].options)
         # read_impl validates CountLines' estimate after decoding. Comments
         # make an undershoot expected, but an overshoot is always malformed.
         var actual = self.result.height()
@@ -140,6 +146,28 @@ struct _DecodeJob(Job):
 
     def into_frame(deinit self) -> DataFrame:
         return self.result^
+
+
+def _count_csv_chunk(
+    bytes: Span[UInt8, ImmutAnyOrigin], options: CsvOptions
+) raises -> DataFrame:
+    """Count projected-away records without constructing typed columns.
+
+    Match the decoder's comment handling and quote-aware record boundaries.
+    Values in physical columns are never parsed for a virtual-only dataset
+    projection or a free-standing row count.
+    """
+    var offset = 0
+    var rows = 0
+    while offset < len(bytes):
+        if _comment_at(bytes, offset, options.comment_prefix):
+            while offset < len(bytes) and bytes[offset] != 10:
+                offset += 1
+            offset += Int(offset < len(bytes))
+        else:
+            offset = _line_end(bytes, offset, options)
+            rows += 1
+    return DataFrame(List[Series](), height=rows)
 
 
 def _line_end(

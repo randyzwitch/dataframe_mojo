@@ -94,6 +94,9 @@ def _abandon_csv(path: String) raises -> String:
     var temporary = sink.csv[0].output.temporary
     sink.append(source)
     assert_true(exists(temporary))
+    # Mojo destroys a value at its last use; retain the owner through the
+    # existence assertion, then deliberately abandon it without publishing.
+    _ = sink ^
     return temporary
 
 

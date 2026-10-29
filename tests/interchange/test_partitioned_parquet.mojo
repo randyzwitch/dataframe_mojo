@@ -62,10 +62,17 @@ def test_partition_directories_escape_names_values_and_distinguish_literal_null(
     # Decode the actual written paths separately from their retained file keys.
     var spec = DatasetSpec(files, DatasetOptions(hive_partitioning=True))
     assert_equal(spec.hive_names, List[String](["group/name", "j"]))
-    assert_equal(spec.hive_values[0][0], "a/b")
-    assert_equal(spec.hive_values[2][0], HIVE_NULL)
-    assert_true(not spec.hive_nulls[2][0])
-    assert_true(spec.hive_nulls[3][0])
+    # The manifest sorts paths; check each path against its physical key.
+    # Physical file values above were checked against the original rows.
+    for k in range(len(spec.paths)):
+        var physical = read_parquet(spec.paths[k])
+        var key = physical.item(0, "group/name")
+        assert_equal(spec.hive_nulls[k][0], key.is_null())
+        if not key.is_null():
+            assert_equal(spec.hive_values[k][0], key.string())
+        assert_equal(
+            spec.hive_values[k][1], String(physical.item(0, "j").int64())
+        )
 
 
 def test_categorical_partition_values_are_decoded_and_rows_remain_in_input_order() raises:
