@@ -3040,7 +3040,7 @@ def _over[
         for at in range(height):
             inverse[order[at]] = at
             ordered_ids.append(ids[order[at]])
-        var gathered = take_parallel(columns, order, configured_workers())
+        var gathered = take_parallel(columns, order^, configured_workers())
         var ordered_inner = bind(subtree(bound.expr, node.left), gathered)
         var result = evaluate[width](
             ordered_inner,

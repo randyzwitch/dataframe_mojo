@@ -1,7 +1,7 @@
 """Ordered windows preserve typed cells and restore every original row."""
 # contract-group: expr.ordered_over
 from std.testing import assert_raises
-from dataframe import Column, DataFrame, Series, col
+from dataframe import Column, DataFrame, Expr, Series, col
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import chunk_layout, offset_layout
 
@@ -20,7 +20,7 @@ def test_ordered_over_scatter_ties_partitions_and_lazy_key_dependencies() raises
             Series("x", Column[Int64]([10, 20, 30, 40, 50, 60])),
         ]
     )
-    var expressions = [
+    var expressions: List[Expr] = [
         col("x").cum_sum().over("g", order_by="t").alias("sum"),
         col("x").shift().over([String("g")], order_by="t").alias("previous"),
         col("x")
@@ -51,12 +51,12 @@ def test_ordered_over_scatter_ties_partitions_and_lazy_key_dependencies() raises
         ]
     )
     for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
-        assert_frame(source.select(expressions, batch_size=2), expected)
+        assert_frame(source.select_exprs(expressions, batch_size=2), expected)
         for optimize in [False, True]:
             for streaming in [False, True]:
                 assert_frame(
                     source.lazy()
-                    .select(expressions)
+                    .select_exprs(expressions)
                     .collect(
                         engine="cpu",
                         optimize=optimize,
@@ -66,7 +66,7 @@ def test_ordered_over_scatter_ties_partitions_and_lazy_key_dependencies() raises
                     expected,
                 )
         var empty = source.head(0)
-        assert_frame(empty.select(expressions), expected.head(0))
+        assert_frame(empty.select_exprs(expressions), expected.head(0))
 
 
 def test_ordered_over_nan_null_placement_and_escaped_order_names() raises:
@@ -83,7 +83,7 @@ def test_ordered_over_nan_null_placement_and_escaped_order_names() raises:
             Series("x", Column[Int64]([1, 2, 4, 8, 16, 32])),
         ]
     )
-    var expressions = [
+    var expressions: List[Expr] = [
         col("x").cum_sum().over(order_by=order_name).alias("first"),
         col("x")
         .cum_sum()
@@ -102,10 +102,10 @@ def test_ordered_over_nan_null_placement_and_escaped_order_names() raises:
         ]
     )
     for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
-        assert_frame(source.select(expressions), expected)
+        assert_frame(source.select_exprs(expressions), expected)
         assert_frame(
             source.lazy()
-            .select(expressions)
+            .select_exprs(expressions)
             .collect(engine="cpu", batch_size=1),
             expected,
         )
@@ -154,7 +154,7 @@ def test_shift_fill_only_replaces_vacated_partition_positions() raises:
             ),
         ]
     )
-    var expressions = [
+    var expressions: List[Expr] = [
         col("x").shift(1, fill_value=-1).over("g", order_by="t").alias("lag"),
         col("x").shift(-1, fill_value=-1).over("g", order_by="t").alias("lead"),
         col("x").shift(0, fill_value=-1).over("g", order_by="t").alias("same"),
@@ -184,10 +184,10 @@ def test_shift_fill_only_replaces_vacated_partition_positions() raises:
         ]
     )
     for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
-        assert_frame(source.select(expressions), expected)
+        assert_frame(source.select_exprs(expressions), expected)
         assert_frame(
             source.lazy()
-            .select(expressions)
+            .select_exprs(expressions)
             .collect(engine="cpu", batch_size=1),
             expected,
         )
