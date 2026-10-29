@@ -252,3 +252,61 @@ def test_global_multi_key_windows_and_empty_partition_names_keep_distinct_depend
                     ),
                     expected,
                 )
+
+
+def test_ordered_over_composes_with_group_sequences_and_shift_defaults() raises:
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 1, 0, 1, 0, 1])),
+            Series("t", Column[Int64]([2, 2, 1, 1, 2, 0])),
+            Series("x", Column[Int64]([10, 20, 30, 40, 50, 60])),
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("x").head(2).sum().over("g", order_by="t").alias("head"),
+        col("x")
+        .gather(List[Int](0, -1))
+        .sum()
+        .over("g", order_by="t")
+        .alias("gather"),
+        col("x")
+        .sort(descending=True)
+        .first()
+        .over("g", order_by="t")
+        .alias("sort"),
+        col("x")
+        .filter(col("x") >= 20)
+        .first()
+        .over("g", order_by="t")
+        .alias("filter"),
+        col("x")
+        .shift(fill_value=-1)
+        .head(2)
+        .sum()
+        .over("g", order_by="t")
+        .alias("shift"),
+    ]
+    var expected = DataFrame(
+        [
+            Series("head", Column[Int64]([40, 100, 40, 100, 40, 100])),
+            Series("gather", Column[Int64]([80, 80, 80, 80, 80, 80])),
+            Series("sort", Column[Int64]([50, 60, 50, 60, 50, 60])),
+            Series("filter", Column[Int64]([30, 60, 30, 60, 30, 60])),
+            Series("shift", Column[Int64]([29, 59, 29, 59, 29, 59])),
+        ]
+    )
+    for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
+        assert_frame(source.select_exprs(expressions), expected)
+        for optimize in [False, True]:
+            for streaming in [False, True]:
+                assert_frame(
+                    source.lazy()
+                    .select_exprs(expressions)
+                    .collect(
+                        engine="cpu",
+                        optimize=optimize,
+                        streaming=streaming,
+                        batch_size=1,
+                    ),
+                    expected,
+                )

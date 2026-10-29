@@ -1,12 +1,15 @@
 """Decoder scratch and reusable builders cannot mutate completed owned output."""
 # contract-group: storage.isolation
+# contract-group: io.csv_builders
 from std.testing import assert_equal, assert_true
 from dataframe import CsvField, DataType, Series
-from dataframe.io.csv_buffers import CsvBuffer
+from dataframe.io.csv_buffers import _CsvColumnBuffer
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES
 
 
-def _append(mut builder: CsvBuffer, text: String, escaped: Bool = False) raises:
+def _append(
+    mut builder: _CsvColumnBuffer, text: String, escaped: Bool = False
+) raises:
     builder.add(
         Span[UInt8, ImmutAnyOrigin](
             unsafe_ptr=text.as_bytes()
@@ -22,7 +25,7 @@ def _append(mut builder: CsvBuffer, text: String, escaped: Bool = False) raises:
 
 def _numeric_outputs[D: DType]() raises -> List[Series]:
     var outputs = List[Series]()
-    var builder = CsvBuffer(CsvField("value", DataType.of(D)), 1)
+    var builder = _CsvColumnBuffer(CsvField("value", DataType.of(D)), 1)
     for round in range(5):
         for row in range(17):
             if (row + round) % 3 == 1:
@@ -55,7 +58,7 @@ def test_numeric_csv_builder_finish_transfers_every_width_and_validity_without_a
 def _string_outputs() raises -> Tuple[List[Series], List[List[String]]]:
     var outputs = List[Series]()
     var models = List[List[String]]()
-    var builder = CsvBuffer(CsvField.string("value"), 1)
+    var builder = _CsvColumnBuffer(CsvField.string("value"), 1)
     for round in range(5):
         var expected: List[String] = [
             "",

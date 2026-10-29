@@ -6,6 +6,29 @@ infers their types. Both use one native Mojo pipeline derived from Polars
 typed builders, and chunk-preserving assembly. There is no alternate legacy
 reader and no Python, Arrow, Polars, Rayon or jemalloc runtime dependency.
 
+## In-memory input
+
+Use `CsvBuffer` to distinguish CSV text from a filesystem path:
+
+```mojo
+from dataframe import CsvBuffer, read_csv
+
+var source = CsvBuffer("id,label\n1,alpha\n2,beta\n")
+var frame = read_csv(source)
+```
+
+A `List[UInt8]` also converts to a CSV buffer when passed to `read_csv`.
+Explicit `CsvSchema` and ordered name/type pairs work with either memory
+source, as do inference, projection, row limits, delimiters, quoting,
+comments, null tokens and conversion options. String arguments continue to
+identify paths; wrap CSV text explicitly in `CsvBuffer`.
+
+Constructing a buffer snapshots a byte list; buffer copies then share those
+owned immutable bytes. Decoding is synchronous through
+the same typed builders as the file fallback, and returned columns own their
+values after the source is destroyed. `buffer_size` is still validated but
+does not divide a memory source into separate decode jobs.
+
 ## Schema and records
 
 For a concise explicit schema, pass ordered `(name, dtype)` pairs:
@@ -151,3 +174,6 @@ also occur as literal values cannot be distinguished by quoting alone.
 
 Compression, remote URLs, per-column null tokens, custom input EOL bytes and
 Arrow stream export are not exposed by this API.
+
+`read_csv` and `scan_csv` also accept path lists and glob patterns; see
+[multiple local files](datasets.md) for ordering and combined row limits.

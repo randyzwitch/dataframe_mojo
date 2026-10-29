@@ -369,6 +369,24 @@ comptime DROP_NULLS = 285
 comptime DROP_NANS = 286
 comptime _SCALAR_SOURCE = 287
 
+# Per-expression row selection, materialized at sequence boundaries.
+comptime EXPR_FILTER = 288
+comptime EXPR_SLICE = 289
+comptime EXPR_GATHER = 290
+comptime EXPR_GET = 291
+comptime EXPR_SORT = 292
+comptime EXPR_SORT_BY = 293
+comptime EXPR_UNIQUE = 294
+comptime EXPR_UNIQUE_COUNTS = 295
+comptime EXPR_TOP_K = 296
+comptime EXPR_BOTTOM_K = 297
+comptime EXPR_TOP_K_BY = 298
+comptime EXPR_BOTTOM_K_BY = 299
+comptime EXPR_MAX_BY = 300
+comptime EXPR_MIN_BY = 301
+comptime EXPR_ARG_SORT = 302
+comptime EXPR_REVERSE = 303
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -441,6 +459,9 @@ def is_reduction(op: Int) -> Bool:
         or op == VALUE_COUNTS
         or op == PRODUCT
         or op == APPROX_N_UNIQUE
+        or op == EXPR_GET
+        or op == EXPR_MAX_BY
+        or op == EXPR_MIN_BY
     )
 
 
@@ -499,11 +520,26 @@ def is_drop(op: Int) -> Bool:
     return op == DROP_NULLS or op == DROP_NANS
 
 
+def is_sequence(op: Int) -> Bool:
+    """Whole-expression operations evaluated at their own row boundary."""
+    return is_drop(op) or (op >= EXPR_FILTER and op <= EXPR_REVERSE)
+
+
 def changes_length(expr: Expr) -> Bool:
     """Whether the output's row axis can differ from the input's."""
     var changing = List[Bool]()
     for node in expr._nodes:
-        var changed = is_drop(node.op)
+        var changed = is_drop(node.op) or node.op in [
+            EXPR_FILTER,
+            EXPR_SLICE,
+            EXPR_GATHER,
+            EXPR_UNIQUE,
+            EXPR_UNIQUE_COUNTS,
+            EXPR_TOP_K,
+            EXPR_BOTTOM_K,
+            EXPR_TOP_K_BY,
+            EXPR_BOTTOM_K_BY,
+        ]
         if not is_reduction(node.op) and node.op != OVER:
             for child in node_children(node):
                 changed = changed or changing[child]
@@ -511,12 +547,24 @@ def changes_length(expr: Expr) -> Bool:
     return len(changing) > 0 and changing[len(changing) - 1]
 
 
+def group_sequence_rows(expr: Expr) -> Bool:
+    """Whether an unreduced sequence should collect into a list per group."""
+    var rows = List[Bool]()
+    for node in expr._nodes:
+        var sequence = is_sequence(node.op) and not is_reduction(node.op)
+        if not is_reduction(node.op) and node.op != OVER:
+            for child in node_children(node):
+                sequence = sequence or rows[child]
+        rows.append(sequence)
+    return len(rows) > 0 and rows[len(rows) - 1]
+
+
 def is_window(op: Int) -> Bool:
     return (
         (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
         or is_distinct_flag(op)
-        or is_drop(op)
+        or is_sequence(op)
     )
 
 
@@ -1428,6 +1476,231 @@ struct Expr(Copyable):
         of cardinality, and saturates at UInt32.MAX.
         """
         return self._unary(APPROX_N_UNIQUE)
+
+    def filter(self, predicate: Self) -> Self:
+        """Keep values whose corresponding predicate is true; null is false.
+
+        Inside aggregation, filter each group's values before reducing or
+        collecting them. Outside aggregation, the result can change height.
+        """
+        return self._binary(predicate, EXPR_FILTER)
+
+    def slice(self, offset: Int, length: Int = -1) -> Self:
+        """Select a range; negative offsets count from the end, -1 means rest."""
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EXPR_SLICE,
+                len(nodes) - 1,
+                integer=Int64(offset),
+                min_count=length,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def head(self, n: Int = 5) -> Self:
+        """First n values, independently in each aggregation group."""
+        var result = self.slice(0, n)
+        result._nodes[len(result._nodes) - 1].text = "head"
+        return result^
+
+    def tail(self, n: Int = 5) -> Self:
+        """Last n values, independently in each aggregation group."""
+        var result = self.slice(-n, n)
+        result._nodes[len(result._nodes) - 1].text = "tail"
+        return result^
+
+    def gather(self, indices: List[Int]) -> Self:
+        """Values at the given positions; negative indices count from the end."""
+        var encoded = List[String](capacity=len(indices))
+        for index in indices:
+            encoded.append(String(index))
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EXPR_GATHER,
+                len(nodes) - 1,
+                text=_joined(encoded),
+                min_count=len(indices),
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def gather(self, indices: Self) -> Self:
+        """Values at expression-computed integer positions; null indices yield null."""
+        return self._binary(indices, EXPR_GATHER)
+
+    def get(self, index: Int) -> Self:
+        """One value at a position, returning a scalar per aggregation group."""
+        return self._window(EXPR_GET, Int64(index))
+
+    def sort(self, descending: Bool = False, nulls_last: Bool = False) -> Self:
+        """Sort values stably, per group inside aggregation."""
+        return self._window(EXPR_SORT, Int64(nulls_last), reverse=descending)
+
+    def arg_sort(
+        self, descending: Bool = False, nulls_last: Bool = False
+    ) -> Self:
+        """Int64 positions in stable sorted order, relative to each group."""
+        return self._window(
+            EXPR_ARG_SORT, Int64(nulls_last), reverse=descending
+        )
+
+    def reverse(self) -> Self:
+        """Reverse value order, independently within each aggregation group."""
+        return self._window(EXPR_REVERSE)
+
+    def unique(self, maintain_order: Bool = False) -> Self:
+        """Distinct values, including one null; optionally keep first appearance."""
+        return self._window(EXPR_UNIQUE, Int64(maintain_order))
+
+    def unique_counts(self) -> Self:
+        """Int64 frequencies of distinct values in first-appearance order."""
+        return self._window(EXPR_UNIQUE_COUNTS)
+
+    def top_k(self, k: Int = 5) -> Self:
+        """Largest k values, preferring non-null values and keeping ties stable."""
+        return self._window(EXPR_TOP_K, Int64(k))
+
+    def bottom_k(self, k: Int = 5) -> Self:
+        """Smallest k values, preferring non-null values and keeping ties stable."""
+        return self._window(EXPR_BOTTOM_K, Int64(k))
+
+    def _sequence_by(
+        self, by: Self, op: Int, integer: Int64 = 0, descending: Bool = False
+    ) -> Self:
+        var result = self._binary(by, op)
+        result._nodes[len(result._nodes) - 1].integer = integer
+        result._nodes[len(result._nodes) - 1].min_count = Int(descending)
+        return result^
+
+    def sort_by(
+        self, by: Self, descending: Bool = False, nulls_last: Bool = False
+    ) -> Self:
+        """Order these values by a corresponding expression, keeping ties stable."""
+        return self._sequence_by(
+            by, EXPR_SORT_BY, Int64(nulls_last), descending
+        )
+
+    def top_k_by(self, by: Self, k: Int = 5) -> Self:
+        """Values at the k largest non-null-preferred ordering keys."""
+        return self._sequence_by(by, EXPR_TOP_K_BY, Int64(k))
+
+    def bottom_k_by(self, by: Self, k: Int = 5) -> Self:
+        """Values at the k smallest non-null-preferred ordering keys."""
+        return self._sequence_by(by, EXPR_BOTTOM_K_BY, Int64(k))
+
+    def max_by(self, by: Self) -> Self:
+        """Value at the largest non-null key; first input row wins ties."""
+        return self._sequence_by(by, EXPR_MAX_BY)
+
+    def min_by(self, by: Self) -> Self:
+        """Value at the smallest non-null key; first input row wins ties."""
+        return self._sequence_by(by, EXPR_MIN_BY)
+
+    def sort_by(
+        self, by: String, descending: Bool = False, nulls_last: Bool = False
+    ) -> Self:
+        return self.sort_by(col(by), descending, nulls_last)
+
+    def sort_by(
+        self,
+        by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(col(by[i]).alias(String(i)))
+        var result = self.sort_by(as_struct(fields), descending, nulls_last)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def sort_by(
+        self, by: List[Expr], descending: Bool = False, nulls_last: Bool = False
+    ) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(by[i].alias(String(i)))
+        var result = self.sort_by(as_struct(fields), descending, nulls_last)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def top_k_by(self, by: String, k: Int = 5) -> Self:
+        return self.top_k_by(col(by), k)
+
+    def top_k_by(self, by: List[String], k: Int = 5) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(col(by[i]).alias(String(i)))
+        var result = self.top_k_by(as_struct(fields), k)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def top_k_by(self, by: List[Expr], k: Int = 5) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(by[i].alias(String(i)))
+        var result = self.top_k_by(as_struct(fields), k)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def bottom_k_by(self, by: String, k: Int = 5) -> Self:
+        return self.bottom_k_by(col(by), k)
+
+    def bottom_k_by(self, by: List[String], k: Int = 5) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(col(by[i]).alias(String(i)))
+        var result = self.bottom_k_by(as_struct(fields), k)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def bottom_k_by(self, by: List[Expr], k: Int = 5) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(by[i].alias(String(i)))
+        var result = self.bottom_k_by(as_struct(fields), k)
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def max_by(self, by: String) -> Self:
+        return self.max_by(col(by))
+
+    def max_by(self, by: List[String]) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(col(by[i]).alias(String(i)))
+        var result = self.max_by(as_struct(fields))
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def max_by(self, by: List[Expr]) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(by[i].alias(String(i)))
+        var result = self.max_by(as_struct(fields))
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def min_by(self, by: String) -> Self:
+        return self.min_by(col(by))
+
+    def min_by(self, by: List[String]) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(col(by[i]).alias(String(i)))
+        var result = self.min_by(as_struct(fields))
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
+
+    def min_by(self, by: List[Expr]) raises -> Self:
+        var fields = List[Expr](capacity=len(by))
+        for i in range(len(by)):
+            fields.append(by[i].alias(String(i)))
+        var result = self.min_by(as_struct(fields))
+        result._nodes[len(result._nodes) - 1].text = "keys"
+        return result^
 
     def drop_nulls(self) -> Self:
         """Remove null values, preserving the order of the remaining values.

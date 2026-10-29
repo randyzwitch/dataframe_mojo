@@ -273,6 +273,19 @@ Return canonical CRS JSON (object or string), or `null` if unknown.
 def crs(series: Series) -> String
 ```
 
+## `CsvBuffer`
+
+Reusable CSV bytes. A String constructor treats its text as CSV data.
+
+Byte lists convert implicitly; String paths remain unambiguous because
+the String constructor requires an explicit CsvBuffer(...). Copies share
+immutable bytes. Readers borrow them only while decoding; output columns
+own their values independently.
+
+- `def __init__(out self, bytes: List[UInt8])`
+- `def __init__(out self, text: String)`
+- `def __len__(self) -> Int`
+
 ## `CsvField`
 
 One CSV output field. Names and dtypes are always explicit.
@@ -976,6 +989,59 @@ A flat, topologically ordered tree; composition never evaluates data.
   Number of null values, as Int64.
 - `def approx_n_unique(self) -> Self`
   Estimate distinct values as UInt32 using 256 HyperLogLog registers.
+- `def filter(self, predicate: Self) -> Self`
+  Keep values whose corresponding predicate is true; null is false.
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
+  Select a range; negative offsets count from the end, -1 means rest.
+- `def head(self, n: Int = Int(5)) -> Self`
+  First n values, independently in each aggregation group.
+- `def tail(self, n: Int = Int(5)) -> Self`
+  Last n values, independently in each aggregation group.
+- `def gather(self, indices: List[Int]) -> Self`
+  Values at the given positions; negative indices count from the end.
+- `def gather(self, indices: Self) -> Self`
+  Values at expression-computed integer positions; null indices yield null.
+- `def get(self, index: Int) -> Self`
+  One value at a position, returning a scalar per aggregation group.
+- `def sort(self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Sort values stably, per group inside aggregation.
+- `def arg_sort(self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Int64 positions in stable sorted order, relative to each group.
+- `def reverse(self) -> Self`
+  Reverse value order, independently within each aggregation group.
+- `def unique(self, maintain_order: Bool = False) -> Self`
+  Distinct values, including one null; optionally keep first appearance.
+- `def unique_counts(self) -> Self`
+  Int64 frequencies of distinct values in first-appearance order.
+- `def top_k(self, k: Int = Int(5)) -> Self`
+  Largest k values, preferring non-null values and keeping ties stable.
+- `def bottom_k(self, k: Int = Int(5)) -> Self`
+  Smallest k values, preferring non-null values and keeping ties stable.
+- `def sort_by(self, by: Self, descending: Bool = False, nulls_last: Bool = False) -> Self`
+  Order these values by a corresponding expression, keeping ties stable.
+- `def sort_by(self, by: String, descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def sort_by(self, by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def sort_by(self, by: List[Self], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def top_k_by(self, by: Self, k: Int = Int(5)) -> Self`
+  Values at the k largest non-null-preferred ordering keys.
+- `def top_k_by(self, by: String, k: Int = Int(5)) -> Self`
+- `def top_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
+- `def top_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: Self, k: Int = Int(5)) -> Self`
+  Values at the k smallest non-null-preferred ordering keys.
+- `def bottom_k_by(self, by: String, k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[String], k: Int = Int(5)) -> Self`
+- `def bottom_k_by(self, by: List[Self], k: Int = Int(5)) -> Self`
+- `def max_by(self, by: Self) -> Self`
+  Value at the largest non-null key; first input row wins ties.
+- `def max_by(self, by: String) -> Self`
+- `def max_by(self, by: List[String]) -> Self`
+- `def max_by(self, by: List[Self]) -> Self`
+- `def min_by(self, by: Self) -> Self`
+  Value at the smallest non-null key; first input row wins ties.
+- `def min_by(self, by: String) -> Self`
+- `def min_by(self, by: List[String]) -> Self`
+- `def min_by(self, by: List[Self]) -> Self`
 - `def drop_nulls(self) -> Self`
   Remove null values, preserving the order of the remaining values.
 - `def drop_nans(self) -> Self`
@@ -1162,10 +1228,12 @@ Axis-aligned XY coordinate extent, in the geometry's existing CRS.
 
 ## `GroupBy`
 
-An eager grouping request. No per-group dataframe materialization.
+An eager grouping request over a snapshot and evaluated key columns.
 
-It owns a snapshot of the input and the evaluated key columns.
-
+- `def head(self, n: Int = Int(5)) -> DataFrame`
+  First n rows of each group, retaining every original column.
+- `def tail(self, n: Int = Int(5)) -> DataFrame`
+  Last n rows of each group, retaining every original column.
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def len(self, name: String = "len") -> DataFrame`
@@ -1447,6 +1515,10 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 
 A pending lazy grouping; finish it with agg, len or a reduction of every other column such as sum.
 
+- `def head(self, n: Int = Int(5)) -> LazyFrame`
+  First n rows of each group, retaining the original column schema.
+- `def tail(self, n: Int = Int(5)) -> LazyFrame`
+  Last n rows of each group, retaining the original column schema.
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
   One row per group: the keys, then the aggregations; see GroupBy.agg.
 - `def agg(self, expr: Expr) -> LazyFrame`
@@ -1677,15 +1749,39 @@ def parquet_row_group_statistics(path: String) -> DataFrame
 Read CSV through the range-splitting scanner and typed builders.
 
 ```mojo
-def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ```mojo
-def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(source: CsvBuffer, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536), glob: Bool = True) -> DataFrame
 ```
 
 ## `read_geojson`
@@ -1749,7 +1845,11 @@ def read_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema
 Read a local Parquet file into a DataFrame.
 
 ```mojo
-def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
+def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True, glob: Bool = True) -> DataFrame
+```
+
+```mojo
+def read_parquet(paths: List[String], *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True, glob: Bool = True) -> DataFrame
 ```
 
 ## `read_shapefile`
@@ -1786,11 +1886,19 @@ An owned row reference; cells convert to AnyValue when accessed.
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
 
 ```mojo
-def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False) -> LazyFrame
+def scan_csv(path: String, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
 ```
 
 ```mojo
-def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8") -> LazyFrame
+def scan_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_csv(paths: List[String], schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_csv(paths: List[String], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, glob: Bool = True) -> LazyFrame
 ```
 
 ## `scan_ipc`
@@ -1814,7 +1922,11 @@ def scan_ndjson(path: String, schema: Optional[DataType] = None, *, infer_schema
 Lazily read a Parquet file. Nothing is read until collect; projection is pushed into the reader, and a filter directly above the scan decodes only the row groups whose footer statistics can hold a match.
 
 ```mojo
-def scan_parquet(path: String) -> LazyFrame
+def scan_parquet(path: String, *, glob: Bool = True) -> LazyFrame
+```
+
+```mojo
+def scan_parquet(paths: List[String], *, glob: Bool = True) -> LazyFrame
 ```
 
 ## `Series`

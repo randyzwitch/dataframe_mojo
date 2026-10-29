@@ -1,14 +1,14 @@
 """Chunk-local CSV decoding.
 
 ``decode_chunk`` receives record-aligned, header-free input from read_impl.
-It holds only projected CsvBuffer instances, forwards borrowed SplitFields
+It holds only projected _CsvColumnBuffer instances, forwards borrowed SplitFields
 spans to typed buffers, and delegates omitted tails to a quote-aware skip rule. Prelude removal and global n_rows bounds
 belong to orchestration, never to an individual chunk.
 """
 from std.bit import count_trailing_zeros
 from .csv_bits import _mask64
 from .csv_types import CsvOptions, CsvSchema
-from .csv_buffers import CsvBuffer, CsvCell
+from .csv_buffers import _CsvColumnBuffer, CsvCell
 from .csv_splitfields import CsvSplitFields
 from ..dtype import DataType
 from ..frame import DataFrame
@@ -50,7 +50,7 @@ def _comment_at(
 @always_inline
 def _append_cell(
     bytes: Span[UInt8, ImmutAnyOrigin],
-    mut buffers: List[CsvBuffer],
+    mut buffers: List[_CsvColumnBuffer],
     mut staged: List[List[CsvCell]],
     mut staged_counts: List[Int],
     index: Int,
@@ -91,7 +91,7 @@ def _append_cell(
 
 def _flush_staged(
     bytes: Span[UInt8, ImmutAnyOrigin],
-    mut buffers: List[CsvBuffer],
+    mut buffers: List[_CsvColumnBuffer],
     mut staged: List[List[CsvCell]],
     mut staged_counts: List[Int],
     ignore_errors: Bool,
@@ -175,13 +175,15 @@ def decode_chunk(
     var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(34)
     var lossy = options.encoding == "utf8-lossy"
     var projection = List[Int](capacity=selected)
-    var buffers = List[CsvBuffer](capacity=selected)
+    var buffers = List[_CsvColumnBuffer](capacity=selected)
     var staged = List[List[CsvCell]](capacity=selected)
     var staged_counts = List[Int](capacity=selected)
     for i in range(len(schema)):
         if keep[i]:
             projection.append(i)
-            buffers.append(CsvBuffer(schema._fields[i], rows + 1, quote, lossy))
+            buffers.append(
+                _CsvColumnBuffer(schema._fields[i], rows + 1, quote, lossy)
+            )
             var cells = List[CsvCell](
                 capacity=_STAGED_ROWS if selected > 1 else 0
             )
