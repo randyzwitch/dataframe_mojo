@@ -217,7 +217,7 @@ struct CsvCell(Copyable):
     var record: Int
 
 
-struct CsvBuffer(Movable):
+struct _CsvColumnBuffer(Movable):
     var field: CsvField
     var storage: _Buffers
     # A zone-aware datetime field's zone, loaded once (UTC otherwise).

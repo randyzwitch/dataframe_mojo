@@ -8,6 +8,7 @@ from std.atomic import Atomic
 from std.ffi import external_call
 from std.collections import Dict, Optional
 from .csv_infer import infer_csv_schema
+from .csv_input import CsvBuffer
 from std.memory import ArcPointer, Pointer
 from .csv_types import (
     CsvSchema,
@@ -524,6 +525,121 @@ def read_csv_inferred(
             result = result.filter(predicate.value())
         _ = input^
         return result^
+
+
+def read_csv_buffer_explicit(
+    source: CsvBuffer,
+    schema: CsvSchema,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    predicate: Optional[Expr] = Optional[Expr](),
+) raises -> DataFrame:
+    """Decode owned CSV bytes through the same typed builders as files."""
+    var options = _options(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        n_rows,
+        null_values,
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        buffer_size,
+    )
+    var keep = _projection(schema, columns)
+    var bytes = source._span()
+    _validate_explicit_header(bytes, schema, options, has_header)
+    var prelude = _prelude(bytes, options, has_header)
+    return _decode_buffer_body(
+        bytes, schema, options, keep, prelude[0], prelude[1], predicate
+    )
+
+
+def read_csv_buffer_inferred(
+    source: CsvBuffer,
+    *,
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    try_parse_dates: Bool = False,
+    predicate: Optional[Expr] = Optional[Expr](),
+) raises -> DataFrame:
+    """Infer and decode a reusable in-memory source with file-reader options."""
+    var options = _options(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        n_rows,
+        null_values,
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        buffer_size,
+    )
+    var bytes = source._span()
+    var inferred = infer_csv_schema(
+        bytes,
+        options,
+        has_header=has_header,
+        infer_schema_length=infer_schema_length,
+        schema_overrides=schema_overrides,
+        try_parse_dates=try_parse_dates,
+    )
+    if len(inferred.schema) == 0:
+        return DataFrame([])
+    var keep = _projection(inferred.schema, columns)
+    return _decode_buffer_body(
+        bytes,
+        inferred.schema,
+        options,
+        keep,
+        inferred.data_offset,
+        inferred.record_start,
+        predicate,
+    )
+
+
+def _decode_buffer_body(
+    bytes: Span[UInt8, ImmutAnyOrigin],
+    schema: CsvSchema,
+    options: CsvOptions,
+    keep: List[Bool],
+    offset: Int,
+    record: Int,
+    predicate: Optional[Expr],
+) raises -> DataFrame:
+    # Decoding is synchronous. The caller retains its byte owner through
+    # this call; numeric and string builders own the resulting columns.
+    var result = decode_chunk(bytes[offset:], schema, options, keep, 0, record)
+    if options.n_rows >= 0 and result.height() > options.n_rows:
+        result = result.head(options.n_rows)
+    if predicate:
+        return result.filter(predicate.value())
+    return result^
 
 
 struct _CsvBatches(Movable):
