@@ -9,7 +9,7 @@ from std.math import isinf, isnan, trunc
 from std.sys import size_of
 from std.bit import count_trailing_zeros
 from dataframe.storage.boolean import BoolColumn, _bits64
-from dataframe.storage.column import Column, _copy_validity
+from dataframe.storage.column import Column, _append_validity, _copy_validity
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.text.parse import parse_bool, parse_float64, parse_integer
@@ -607,11 +607,89 @@ def _cast_exact(input: Series, target: DataType) raises -> Optional[Series]:
     return None
 
 
+def _cast_chunk_values[S: DType, T: DType](input: Series) raises -> Series:
+    """Convert non-failing numeric spans into one output without merging input."""
+    var values = List[Scalar[T]](unsafe_uninit_length=len(input))
+    var bits = List[UInt8]()
+    var to = values.unsafe_ptr()
+    var base = 0
+    ref chunks = input._chunked.value()[]
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[S]]]
+        var n = len(column)
+        var source = column._ptr()
+        for row in range(n):
+            to[unsafe_offset=base + row] = source[unsafe_offset=row].cast[T]()
+        if len(column._bits[]) != 0:
+            # Match the contiguous path's null payloads while copying only
+            # the sliced validity window, including unaligned boundaries.
+            var row = 0
+            while row < n:
+                var word = _bits64(
+                    column._bits[], column._offset + row, column._offset + n
+                )
+                var rows = min(64, n - row)
+                var full = (
+                    UInt64(0xFFFFFFFFFFFFFFFF) if rows
+                    == 64 else (UInt64(1) << UInt64(rows)) - 1
+                )
+                var missing = ~word & full
+                while missing != 0:
+                    var bit = Int(count_trailing_zeros(missing))
+                    to[unsafe_offset=base + row + bit] = 0
+                    missing &= missing - 1
+                row += 64
+        _append_validity(bits, base, column._bits[], column._offset, n)
+        base += n
+    return Series(input.name(), Column[Scalar[T]](values=values^, bits=bits^))
+
+
+def _cast_chunk_exact(
+    input: Series, target: DataType
+) raises -> Optional[Series]:
+    # Logical types sharing numeric storage (categoricals, decimals and
+    # temporal values) retain their existing converters and metadata rules.
+    if input.dtype() != input.dtype().physical():
+        return None
+    comptime for j in range(len(NUMERIC_DTYPES)):
+        comptime S = NUMERIC_DTYPES[j]
+        if input._data.isa[Column[Scalar[S]]]():
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime T = NUMERIC_DTYPES[k]
+                comptime wider = size_of[Scalar[T]]() >= size_of[Scalar[S]]()
+                comptime if S != T and (
+                    (
+                        T.is_floating_point()
+                        and (not S.is_floating_point() or wider)
+                    )
+                    or (
+                        not T.is_floating_point()
+                        and not S.is_floating_point()
+                        and (
+                            (S.is_signed() == T.is_signed() and wider)
+                            or (
+                                not S.is_signed()
+                                and T.is_signed()
+                                and size_of[Scalar[T]]() > size_of[Scalar[S]]()
+                            )
+                        )
+                    )
+                ):
+                    if target == DataType.of(T):
+                        return _cast_chunk_values[S, T](input)
+            return None
+    return None
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
     """Convert every valid, observed row; others become null."""
     if input.is_chunked():
+        if len(mask) == 0:
+            var exact = _cast_chunk_exact(input, target)
+            if exact:
+                return exact.take()
         return cast_series(input.rechunk(), target, strict, offset, mask)
     if input.dtype().is_nested() or target.is_nested():
         raise Error(
