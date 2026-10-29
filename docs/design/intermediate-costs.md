@@ -57,9 +57,10 @@ the fixed string descriptor width and skips text-length sampling entirely;
 its memo entries remain separate from hashing/payload width estimates.
 Width lookup does not sample distinct values. Numeric NDV samples read
 ordered strata directly from borrowed chunk arrays into one bounded output,
-retaining logical types and nulls. Other storage uses the existing sparse
-gather to collect each chunk's selected rows together, rather than
-constructing thousands of one-row views. Neither route populates the full
+retaining logical types and nulls. Other storage gathers the selected rows
+of each visited chunk once in increasing stratum order, then assembles the
+bounded sample. It needs neither an index table for all source chunks nor
+a second gather to restore order. Neither route populates the full
 input merge cache. Unsupported computed or nested
 payloads use a declared cost-model fallback, rather than inventing a
 physical layout guarantee.

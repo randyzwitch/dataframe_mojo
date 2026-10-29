@@ -133,7 +133,7 @@ def _sample_chunks(column: Series, count: Int) raises -> Series:
     The caller supplies a chunked column with 0 < count < its height. One
     row per disjoint stratum is already ordered, so no per-chunk gathers,
     merged sample or restoring permutation are needed for numeric storage.
-    Other storage keeps the existing sparse gather.
+    Other storage gathers each visited chunk once, in stratum order.
     """
     var height = len(column)
     ref chunks = column._chunked.value()[]
@@ -158,10 +158,35 @@ def _sample_chunks(column: Series, count: Int) raises -> Series:
             sample._dtype = column._dtype
             sample._field_metadata = column._field_metadata
             return sample^
-    var rows = List[Int](capacity=count)
-    for k in range(count):
-        rows.append(_sample_row(height, count, k))
-    return column._take_from_chunks(rows)
+    # Strata are ordered for every storage type. Group only the selected
+    # rows of each visited chunk, without an all-chunk index table or a
+    # second gather to restore an order the sample already has.
+    var parts = List[Series]()
+    var k = 0
+    var chunk = 0
+    while k < count:
+        var row = _sample_row(height, count, k)
+        while row >= chunks.ends[chunk]:
+            chunk += 1
+        var first = 0 if chunk == 0 else chunks.ends[chunk - 1]
+        var rows = List[Int]()
+        while row < chunks.ends[chunk]:
+            rows.append(row - first)
+            k += 1
+            if k == count:
+                break
+            row = _sample_row(height, count, k)
+        var part = Series(
+            column.name(),
+            chunks.arrays[chunk].copy(),
+            column._dtype,
+            column._field_metadata,
+        )
+        parts.append(part.take(rows))
+    return (
+        parts[0].copy() if len(parts)
+        == 1 else Series._from_chunks(parts).rechunk()
+    )
 
 
 def bounded_distinct(column: Series) raises -> Int:

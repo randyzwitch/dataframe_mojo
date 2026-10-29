@@ -260,6 +260,105 @@ def test_numeric_strata_estimates_match_contiguous_null_nan_and_signed_zero_keys
     assert_equal(chunked._chunked.value()[].cache[].state.load(), 0)
 
 
+def test_ordered_sparse_strata_preserve_mixed_string_storage_and_binary_bytes() raises:
+    var strings = Series(
+        "text",
+        StringColumn(
+            [
+                "padding",
+                "padding",
+                "padding",
+                "zero",
+                "",
+                "two",
+                "abcdefghijkl",
+                "four",
+                "a-long-external-value",
+                "six",
+                "seven",
+                "é漢字",
+                "nine",
+                "ten",
+                "eleven",
+                "twelve",
+                "thirteen",
+                "fourteen-with-a-valid-external-payload",
+                "fifteen",
+                "sixteen",
+            ],
+            [
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                False,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                False,
+                True,
+            ],
+        ),
+    ).slice(3, 17)
+    # A gather creates view storage; mix it with sliced offset storage,
+    # empty chunks, and boundaries coinciding with fixed jitter positions.
+    var views = strings.take(
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    )
+    var chunked = Series._from_chunks(
+        [
+            strings.slice(0, 0),
+            strings.slice(0, 2),
+            views.slice(2, 5),
+            strings.slice(7, 0),
+            strings.slice(7, 1),
+            views.slice(8, 9),
+        ]
+    )
+    var sample = _sample_chunks(chunked, 8)
+    assert_frame(
+        DataFrame([sample^]),
+        DataFrame([strings.take([1, 3, 5, 8, 10, 12, 14, 15])]),
+    )
+    assert_equal(chunked._chunked.value()[].cache[].state.load(), 0)
+
+    var bytes = List[List[UInt8]]()
+    var valid = List[Bool]()
+    for row in range(20):
+        var value = List[UInt8]()
+        value.append(255)
+        value.append(UInt8(row))
+        value.append(0)
+        value.append(128)
+        bytes.append(value^)
+        valid.append(row % 3 != 0)
+    var binary = Series("raw", StringColumn.from_bytes(bytes, valid))
+    binary._dtype = DataType.BINARY
+    binary = binary.slice(3, 17)
+    var binary_chunks = Series._from_chunks(
+        [
+            binary.slice(0, 3),
+            binary.slice(3, 0),
+            binary.slice(3, 14),
+        ]
+    )
+    assert_frame(
+        DataFrame([_sample_chunks(binary_chunks, 8)]),
+        DataFrame([binary.take([1, 3, 5, 8, 10, 12, 14, 15])]),
+    )
+    assert_equal(binary_chunks._chunked.value()[].cache[].state.load(), 0)
+
+
 def _unknown_estimate(series: Series) raises -> Int:
     return -1
 
