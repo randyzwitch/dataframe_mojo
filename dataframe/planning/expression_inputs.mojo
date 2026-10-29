@@ -24,4 +24,7 @@ def _references(expr: Expr) -> Optional[List[String]]:
             # keep other text there (a strptime dtype, cut labels).
             for part in split_names(node.text2):
                 names.append(part)
+        if node.op == OVER and node.min_count > 0:
+            for part in split_names(node.text):
+                names.append(part)
     return names^

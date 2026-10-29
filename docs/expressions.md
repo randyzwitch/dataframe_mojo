@@ -157,6 +157,14 @@ operations likewise run per group, so `col("x").cum_sum().max()` is each
 group's running peak. Rolling min/max are O(n x window); other kernels are
 linear apart from `rank`, which sorts each partition.
 
+`over(partition_by, order_by="time", descending=False, nulls_last=False)`
+sorts within each partition before evaluating the expression, then scatters
+results back to their original rows. Ties keep input order; NaN and nulls
+follow frame sorting. `order_by` also accepts a list of names. Omit
+`partition_by` for one partition spanning the whole frame, for example
+`col("amount").cum_sum().over(order_by="date")`. Ordering keys remain lazy
+plan dependencies even when they are absent from the output.
+
 ### Temporal types
 
 `DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit, time_zone)`

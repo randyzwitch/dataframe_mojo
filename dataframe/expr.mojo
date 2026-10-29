@@ -1861,17 +1861,79 @@ struct Expr(Copyable):
         )
         return Self(nodes^, self._name)
 
-    def over(self, partition_by: String) -> Self:
-        return self.over([partition_by])
+    def over(
+        self,
+        partition_by: String,
+        order_by: String = "",
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            [partition_by],
+            [order_by] if order_by != "" else List[String](),
+            descending,
+            nulls_last,
+        )
 
-    def over(self, partition_by: List[String]) -> Self:
-        """Evaluate within partitions of the key columns, keeping row order.
+    def over(
+        self,
+        partition_by: List[String] = List[String](),
+        order_by: String = "",
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        """Evaluate per partition, optionally ordered, then restore input rows.
 
-        Aggregates broadcast back to every row of their partition; window
-        operations restart in each partition. Nulls form their own key.
+        Ties keep input order. NaN and null placement follow frame sorting.
+        With only `order_by`, the whole frame is one partition.
         """
+        return self._over_ordered(
+            partition_by,
+            [order_by] if order_by != "" else List[String](),
+            descending,
+            nulls_last,
+        )
+
+    def over(
+        self,
+        partition_by: String,
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            [partition_by], order_by, descending, nulls_last
+        )
+
+    def over(
+        self,
+        partition_by: List[String],
+        order_by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = False,
+    ) -> Self:
+        return self._over_ordered(
+            partition_by, order_by, descending, nulls_last
+        )
+
+    def _over_ordered(
+        self,
+        partition_by: List[String],
+        order_by: List[String],
+        descending: Bool,
+        nulls_last: Bool,
+    ) -> Self:
         var nodes = self._nodes.copy()
-        nodes.append(_node(OVER, len(nodes) - 1, text2=_joined(partition_by)))
+        nodes.append(
+            _node(
+                OVER,
+                len(nodes) - 1,
+                text=_joined(order_by),
+                text2=_joined(partition_by),
+                min_count=len(order_by),
+                integer=Int64(descending) + 2 * Int64(nulls_last),
+            )
+        )
         return Self(nodes^, self._name)
 
     def list(self) -> ListNamespace:

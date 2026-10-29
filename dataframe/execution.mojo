@@ -112,7 +112,12 @@ from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.kernels.cast import cast_series
-from .categorical import decode, encode, gather
+from .categorical import (
+    decode,
+    encode,
+    gather,
+    sort_ranks as categorical_sort_ranks,
+)
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from dataframe.kernels.hashing import (
     RowKeys,
@@ -135,7 +140,7 @@ from dataframe.storage.column import (
 )
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.predicates import _flip
-from .series import Series
+from .series import Series, sort_indices
 from dataframe.kernels.binary import (
     binary,
     unary,
@@ -3000,10 +3005,53 @@ def _over[
         )
         return scalar._broadcast(height)
     var keys = List[Series]()
-    for part in split_names(node.text2):
-        for column in columns:
-            if column.name() == part:
-                keys.append(column.copy())
+    if node.text2.byte_length() > 0:
+        for part in split_names(node.text2):
+            for column in columns:
+                if column.name() == part:
+                    keys.append(column.copy())
+    if node.min_count > 0:
+        # Sort row positions by partition then by the requested keys. The
+        # stable frame sorter preserves input order on ties. Gather all
+        # columns so nested windows retain their own key dependencies.
+        var ids = List[Int](length=height, fill=0)
+        var count = 1 if height > 0 else 0
+        if len(keys) > 0:
+            var encoded = _partition_ids(keys, height)
+            ids = encoded.ids.copy()
+            count = encoded.count()
+        var ranks = List[List[Int]]()
+        ranks.append(ids.copy())
+        for name in split_names(node.text):
+            for column in columns:
+                if column.name() == name:
+                    var key = categorical_sort_ranks(
+                        column
+                    ) if column.dtype().is_categorical() else column.copy()
+                    ranks.append(
+                        key._sort_ranks(
+                            (node.integer & 1) != 0,
+                            (node.integer & 2) != 0,
+                        )
+                    )
+        var order = sort_indices(ranks)
+        var inverse = List[Int](length=height, fill=0)
+        var ordered_ids = List[Int](capacity=height)
+        for at in range(height):
+            inverse[order[at]] = at
+            ordered_ids.append(ids[order[at]])
+        var gathered = take_parallel(columns, order, configured_workers())
+        var ordered_inner = bind(subtree(bound.expr, node.left), gathered)
+        var result = evaluate[width](
+            ordered_inner,
+            gathered,
+            height,
+            batch_size=batch_size,
+            grouped=True,
+            groups=ordered_ids,
+            group_count=count,
+        )
+        return result.take(inverse if inner.shape() == ROWS else ids)
     # Whole partitions laid out contiguously and evaluated many at once,
     # when the rows fill more than one block per thread. A nested over()
     # partitions differently, so it keeps the row-order route.
