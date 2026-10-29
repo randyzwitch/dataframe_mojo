@@ -57,25 +57,43 @@ def truncate_time(
     return _truncate(value, dtype, every)
 
 
-def check_time_index(index: Series, groups: List[List[Int]]) raises:
+def check_time_index(index: Series, groups: List[List[Int]]) raises -> Bool:
+    """Raise on a non-temporal or null index; return whether each group's
+    rows already appear in index order."""
     if not (index.dtype().is_date() or index.dtype().is_datetime()):
         raise Error(
             "time windows require a Date or Datetime index: " + index.name()
         )
     ref values = index._data[Column[Int64]]
+    var ordered = True
     for rows in groups:
         for j in range(len(rows)):
             var row = rows[j]
             if not values._valid(row):
                 raise Error("time window index contains nulls: " + index.name())
             if j > 0 and values._get(row) < values._get(rows[j - 1]):
-                raise Error(
-                    "time window index '"
-                    + index.name()
-                    + "' is not sorted within its group (row "
-                    + String(row)
-                    + ")"
-                )
+                ordered = False
+    return ordered
+
+
+def sort_time_groups(index: Series, mut groups: List[List[Int]]) raises:
+    """Put each group's rows in stable index order (equal times keep row
+    order), so unsorted input forms the same windows as sorted input."""
+    ref values = index._data[Column[Int64]]
+    for g in range(len(groups)):
+        ref rows = groups[g]
+        var ordered = True
+        for j in range(1, len(rows)):
+            if values._get(rows[j]) < values._get(rows[j - 1]):
+                ordered = False
+                break
+        if ordered:
+            continue
+        var order = index.take(rows).argsort()
+        var sorted = List[Int](capacity=len(rows))
+        for k in order:
+            sorted.append(rows[k])
+        groups[g] = sorted^
 
 
 def search_time(
@@ -95,15 +113,21 @@ def search_time(
 
 def rolling_bounds(
     index: Series,
-    groups: List[List[Int]],
+    mut groups: List[List[Int]],
     period: String,
     offset: String,
     closed: String,
 ) raises -> Tuple[List[Int], List[Int]]:
+    """Each row's window as [lower, upper) positions in its group's rows.
+
+    Groups not already in index order are reordered in place first, and the
+    positions refer to that order.
+    """
     positive_period(period)
     _ = parse_interval(offset)
     var sides = closed_sides(closed)
-    check_time_index(index, groups)
+    if not check_time_index(index, groups):
+        sort_time_groups(index, groups)
     var lower = List[Int](length=len(index), fill=0)
     var upper = List[Int](length=len(index), fill=0)
     var dtype = index.dtype()

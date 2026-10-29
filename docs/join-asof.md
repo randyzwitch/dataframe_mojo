@@ -12,9 +12,11 @@ var matched = trades.join_asof(
 
 `on` is the shared key name; use `left_on` and `right_on` when names differ.
 `by` accepts a column name, a list of names, or `None` (the default is no
-grouping). Both inputs must be sorted ascending by the ordered key within each
-group. Groups may be interleaved. The check ignores null ordered keys and raises
-an error naming the side, column and offending row when ordering is violated.
+grouping). Inputs need not be sorted. A side that is already ascending by the
+ordered key within each group (ignoring null keys; groups may be interleaved)
+is scanned as is. Otherwise the join scans that side in a stable order by group
+and key, with null keys last in each group, and maps matches back to the
+original rows. The output always keeps left row order.
 
 Keys must have identical integer, float, Date, Datetime or Duration dtypes.
 Temporal units and time zones must agree. Key comparisons retain the full
@@ -55,11 +57,11 @@ ordered/grouping keys appear once. Differently named right ordered keys remain
 in the output. Colliding right names gain `suffix` (default `_right`); a suffix
 that still produces duplicate names raises.
 
-`LazyFrame.join_asof` accepts the same arguments. Sortedness is checked when
-the plan executes, including when streaming collection is requested. This
-operator materializes its inputs and performs a complete merge scan; filters
-and slices are not pushed across it because that can change nearest matches
-or hide unsorted input. Hash grouping and ordered scans take linear work in
+`LazyFrame.join_asof` accepts the same arguments. Ordering is checked, and
+unsorted sides are sorted, when the plan executes. This operator materializes
+its inputs and performs a complete merge scan; filters and slices are not
+pushed across it because that can change matches. Sorting an unsorted side
+adds an O(n log n) step. Hash grouping and ordered scans take linear work in
 the input row counts, with linear auxiliary storage.
 
 ## Validation and measurement
@@ -68,7 +70,9 @@ the input row counts, with linear auxiliary storage.
 with independently enumerated nearest-match pairs, including strategies, ties,
 exact-match settings, grouped/null keys, tolerances and numeric/temporal types.
 [`test_asof_errors.mojo`](../tests/public_contracts/test_asof_errors.mojo) checks
-invalid types, names, tolerances and sortedness. The planner's
+that an empty input still joins when the other side is unsorted, and
+[`test_asof_unsorted.mojo`](../tests/public_contracts/test_asof_unsorted.mojo)
+compares unsorted inputs with the same joins on presorted inputs. The planner's
 [`test_asof_boundaries.mojo`](../tests/planner_correctness/test_asof_boundaries.mojo)
 holds execution fixed while checking filter/slice boundaries and lazy errors.
 Run `pixi run test --contracts table.join planner.relational`. The

@@ -519,11 +519,11 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> TimeGroupBy`
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
 - `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> TimeGroupBy`
-  Group sorted temporal rows into calendar-aligned, possibly overlapping windows.
+  Group temporal rows into calendar-aligned, possibly overlapping windows.
 - `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> TimeGroupBy`
 - `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> TimeGroupBy`
 - `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", group_by: List[String] = List()) -> TimeGroupBy`
-  Aggregate a duration window for each sorted temporal input row.
+  Aggregate a duration window for each temporal input row.
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> GroupBy`
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
@@ -1091,29 +1091,29 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
   Rolling var with stable sliding moments and count minus ddof.
 - `def rolling_sum_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling sum over a sorted Date/Datetime duration window.
+  Rolling sum over a Date/Datetime duration window (any row order).
 - `def rolling_sum_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling sum over a sorted Date/Datetime duration window.
+  Rolling sum over a Date/Datetime duration window (any row order).
 - `def rolling_mean_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling mean over a sorted Date/Datetime duration window.
+  Rolling mean over a Date/Datetime duration window (any row order).
 - `def rolling_mean_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling mean over a sorted Date/Datetime duration window.
+  Rolling mean over a Date/Datetime duration window (any row order).
 - `def rolling_min_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling min over a sorted Date/Datetime duration window.
+  Rolling min over a Date/Datetime duration window (any row order).
 - `def rolling_min_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling min over a sorted Date/Datetime duration window.
+  Rolling min over a Date/Datetime duration window (any row order).
 - `def rolling_max_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling max over a sorted Date/Datetime duration window.
+  Rolling max over a Date/Datetime duration window (any row order).
 - `def rolling_max_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
-  Rolling max over a sorted Date/Datetime duration window.
+  Rolling max over a Date/Datetime duration window (any row order).
 - `def rolling_std_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
-  Rolling std over a sorted Date/Datetime duration window.
+  Rolling std over a Date/Datetime duration window (any row order).
 - `def rolling_std_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
-  Rolling std over a sorted Date/Datetime duration window.
+  Rolling std over a Date/Datetime duration window (any row order).
 - `def rolling_var_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
-  Rolling var over a sorted Date/Datetime duration window.
+  Rolling var over a Date/Datetime duration window (any row order).
 - `def rolling_var_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
-  Rolling var over a sorted Date/Datetime duration window.
+  Rolling var over a Date/Datetime duration window (any row order).
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`
@@ -1490,7 +1490,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
-  As-of join with sortedness checked at execution; see DataFrame.join_asof.
+  As-of join, sorting unsorted sides at execution; see DataFrame.join_asof.
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`

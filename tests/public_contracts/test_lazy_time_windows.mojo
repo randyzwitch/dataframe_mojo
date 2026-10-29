@@ -258,15 +258,7 @@ def test_lazy_time_windows_empty_input_and_errors() raises:
         .height(),
         0,
     )
-    # Settings and order are checked when the plan runs, not when built.
-    var unsorted = _source().take([2, 0, 1, 3, 4, 5]).lazy()
-    var dynamic = unsorted.group_by_dynamic("t", "1h").agg(_aggregates())
-    var rolling = unsorted.rolling("t", "1h").agg(_aggregates())
-    for streaming in [False, True]:
-        with assert_raises(contains="not sorted"):
-            _ = dynamic.collect(streaming=streaming, engine="cpu")
-        with assert_raises(contains="not sorted"):
-            _ = rolling.collect(streaming=streaming, engine="cpu")
+    # Settings are checked when the plan runs, not when built.
     var bad = _source().lazy().group_by_dynamic("t", "1h", closed="bad")
     with assert_raises():
         _ = bad.agg(_aggregates()).collect(engine="cpu")
@@ -283,6 +275,204 @@ def test_lazy_time_windows_empty_input_and_errors() raises:
     )
     with assert_raises(contains="nulls"):
         _ = nulls.rolling("t", "1h").agg(_aggregates()).collect(engine="cpu")
+    # A null still raises when the index is also out of order.
+    var shuffled = nulls.collect(engine="cpu").take([5, 2, 0, 4, 1, 3]).lazy()
+    with assert_raises(contains="nulls"):
+        _ = shuffled.rolling("t", "1h").agg(_aggregates()).collect(engine="cpu")
+    with assert_raises(contains="nulls"):
+        _ = (
+            shuffled.group_by_dynamic("t", "1h", group_by="g")
+            .agg(_aggregates())
+            .collect(engine="cpu")
+        )
+
+
+def _indexed(frame: DataFrame) raises -> DataFrame:
+    var ids = List[Int64]()
+    for row in range(frame.height()):
+        ids.append(Int64(row))
+    return frame.with_column(Series("i", Column[Int64](ids^)))
+
+
+def _duplicates() raises -> DataFrame:
+    """Unsorted times with ties inside and across groups."""
+    var x: List[Int64] = [1, 2, 3, 0, 5, 6, 7]
+    var valid: List[Bool] = [True, True, True, False, True, True, True]
+    return _indexed(
+        DataFrame(
+            [
+                _times(
+                    "t",
+                    [2 * HOUR, 0, 2 * HOUR, HOUR, 0, 2 * HOUR, 4 * HOUR],
+                ),
+                Series("g", Column[Int64]([1, 0, 0, 1, 0, 1, 0])),
+                Series("x", Column[Int64](x^, valid)),
+            ]
+        )
+    )
+
+
+def _unsorted_frames() raises -> List[DataFrame]:
+    # Group 1 appears first here, group 0 first once sorted by t.
+    return [_indexed(_source()).take([5, 2, 4, 1, 3, 0]), _duplicates()]
+
+
+def _group_order(frame: DataFrame, by: List[String]) raises -> List[Int64]:
+    """Group key values in first-appearance order (one entry if no by)."""
+    var seen = List[Int64]()
+    for row in range(frame.height()):
+        var key = (
+            Int64(0) if len(by) == 0 else frame.item(row, "g").to_physical()
+        )
+        if key not in seen:
+            seen.append(key)
+    return seen^
+
+
+def _rows_by_group(
+    frame: DataFrame, by: List[String], groups: List[Int64], name: String
+) raises -> List[Int]:
+    """Rows of `frame` grouped in `groups` order, keeping frame order inside
+    each group; `name` is the column that holds the group key."""
+    var rows = List[Int]()
+    for key in groups:
+        for row in range(frame.height()):
+            if len(by) == 0 or frame.item(row, name).to_physical() == key:
+                rows.append(row)
+    return rows^
+
+
+def _presorted(frame: DataFrame) raises -> DataFrame:
+    return frame.sort("t", maintain_order=True)
+
+
+def _rolling_expected(
+    frame: DataFrame, offset: String, closed: String, by: List[String]
+) raises -> DataFrame:
+    """Rolling on presorted input, rows put in the order rolling gives the
+    unsorted input: groups by first appearance, input order inside each."""
+    var sorted = _presorted(frame)
+    var result = sorted.rolling(
+        "t", "2h", offset=offset, closed=closed, group_by=by
+    ).agg(_aggregates())
+    # Output row r of the presorted run belongs to input row `owner[r]`.
+    var owner = List[Int]()
+    for row in _rows_by_group(sorted, by, _group_order(sorted, by), "g"):
+        owner.append(Int(sorted.item(row, "i").to_physical()))
+    var position = List[Int](length=frame.height(), fill=-1)
+    for r in range(len(owner)):
+        position[owner[r]] = r
+    var order = List[Int]()
+    for row in _rows_by_group(frame, by, _group_order(frame, by), "g"):
+        order.append(position[Int(frame.item(row, "i").to_physical())])
+    return result.take(order)
+
+
+def _dynamic_expected(
+    frame: DataFrame, closed: String, label: String, by: List[String]
+) raises -> DataFrame:
+    """Dynamic windows of presorted input, groups in the unsorted input's
+    first-appearance order and windows in time order."""
+    var result = (
+        _presorted(frame)
+        .group_by_dynamic(
+            "t", "2h", period="3h", closed=closed, label=label, group_by=by
+        )
+        .agg(_aggregates())
+    )
+    return result.take(_rows_by_group(result, by, _group_order(frame, by), "g"))
+
+
+def test_time_windows_accept_an_unsorted_index() raises:
+    for frame in _unsorted_frames():
+        for grouped in range(2):
+            var by: List[String] = ["g"] if grouped else []
+            for closed in [
+                String("left"),
+                String("right"),
+                String("both"),
+                String("none"),
+            ]:
+                for offset in [String("-2h"), String("-1h")]:
+                    var expected = _rolling_expected(frame, offset, closed, by)
+                    assert_frame(
+                        frame.rolling(
+                            "t",
+                            "2h",
+                            offset=offset,
+                            closed=closed,
+                            group_by=by,
+                        ).agg(_aggregates()),
+                        expected,
+                    )
+                    _assert_collects(
+                        frame.lazy()
+                        .rolling(
+                            "t",
+                            "2h",
+                            offset=offset,
+                            closed=closed,
+                            group_by=by,
+                        )
+                        .agg(_aggregates()),
+                        expected,
+                    )
+                for label in [String("left"), String("datapoint")]:
+                    var expected = _dynamic_expected(frame, closed, label, by)
+                    assert_frame(
+                        frame.group_by_dynamic(
+                            "t",
+                            "2h",
+                            period="3h",
+                            closed=closed,
+                            label=label,
+                            group_by=by,
+                        ).agg(_aggregates()),
+                        expected,
+                    )
+                    _assert_collects(
+                        frame.lazy()
+                        .group_by_dynamic(
+                            "t",
+                            "2h",
+                            period="3h",
+                            closed=closed,
+                            label=label,
+                            group_by=by,
+                        )
+                        .agg(_aggregates()),
+                        expected,
+                    )
+
+
+def test_rolling_by_expressions_accept_an_unsorted_index() raises:
+    var expressions: List[Expr] = [
+        col("x").rolling_sum_by("t", "2h").alias("sum"),
+        col("x").rolling_mean_by("t", "2h", closed="both").alias("mean"),
+        col("x").rolling_min_by("t", "2h").alias("min"),
+        col("x").rolling_max_by("t", "3h", closed="left").alias("max"),
+        col("x").rolling_std_by("t", "3h").alias("std"),
+        col("x").rolling_var_by("t", "2h", ddof=0).alias("var"),
+        col("x").rolling_sum_by("t", "2h").over("g").alias("sum_g"),
+        col("x").rolling_max_by("t", "3h").over("g").alias("max_g"),
+    ]
+    for frame in _unsorted_frames():
+        var sorted = _presorted(frame).with_columns(expressions)
+        var position = List[Int](length=frame.height(), fill=-1)
+        for row in range(sorted.height()):
+            position[Int(sorted.item(row, "i").to_physical())] = row
+        var order = List[Int]()
+        for row in range(frame.height()):
+            order.append(position[Int(frame.item(row, "i").to_physical())])
+        var expected = sorted.take(order)
+        assert_frame(frame.with_columns(expressions), expected)
+        for streaming in [False, True]:
+            assert_frame(
+                frame.lazy()
+                .with_columns(expressions)
+                .collect(streaming=streaming, engine="cpu"),
+                expected,
+            )
 
 
 def test_lazy_time_windows_run_on_the_cpu_under_automatic_placement() raises:
