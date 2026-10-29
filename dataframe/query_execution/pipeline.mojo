@@ -511,7 +511,6 @@ def plan_stream_execute(
                 if most < 0 or most * columns < right_cost:
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
-<<<<<<< HEAD
                         # The join builds on the smaller left inside the
                         # pipeline (a join promises no row order): the
                         # right streams through the left's index, a left
@@ -534,39 +533,6 @@ def plan_stream_execute(
                                     joins[
                                         operations[k].join_build_slot()
                                     ].copy()
-=======
-                        # A left join under a consumer that ignores row
-                        # order builds on the smaller left inside the
-                        # pipeline: the right streams through the left's
-                        # index and the left rows nothing matched come
-                        # out last. The join's output is then never
-                        # materialized outside the pipeline.
-                        if node.how == JOIN_LEFT and order_free:
-                            var swapped = plan_swap_left_join_sides(
-                                self, cursor, built, batch_size
-                            )
-                            if swapped:
-                                var plan = swapped.take()
-                                for k in range(len(operations)):
-                                    if operations[k].kind != JOIN:
-                                        continue
-                                    plan._frames.append(
-                                        joins[
-                                            operations[k].join_build_slot()
-                                        ].copy()
-                                    )
-                                    plan._schemas.append(Optional[CsvSchema]())
-                                    plan._nodes.append(
-                                        _frame_scan_node(
-                                            slot=len(plan._frames) - 1
-                                        )
-                                    )
-                                    plan._nodes[operation_nodes[k]].right = (
-                                        len(plan._nodes) - 1
-                                    )
-                                return _stream_after_materialization(
-                                    plan, index, batch_size, sink
->>>>>>> origin/main
                                 )
                                 plan._schemas.append(Optional[CsvSchema]())
                                 plan._nodes.append(
@@ -575,7 +541,9 @@ def plan_stream_execute(
                                 plan._nodes[operation_nodes[k]].right = (
                                     len(plan._nodes) - 1
                                 )
-                            return plan._execute(index, False, True, batch_size)
+                            return _stream_after_materialization(
+                                plan, index, batch_size, sink
+                            )
                         trace_path("stream.smaller_left_build")
                         var left_frame = self._execute(
                             node.left, False, True, batch_size
