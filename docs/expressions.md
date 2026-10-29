@@ -162,8 +162,12 @@ sorts within each partition before evaluating the expression, then scatters
 results back to their original rows. Ties keep input order; NaN and nulls
 follow frame sorting. `order_by` also accepts a list of names. Omit
 `partition_by` for one partition spanning the whole frame, for example
-`col("amount").cum_sum().over(order_by="date")`. Ordering keys remain lazy
-plan dependencies even when they are absent from the output.
+`col("amount").cum_sum().over(order_by="date")` or
+`col("amount").cum_sum().over(order_by=[String("date"), "sequence"])`.
+An empty partition list means one global partition; `[String("")]` instead
+partitions by the column named `""`. Use a list to order by that empty-named
+column too. Partition and ordering keys remain lazy plan dependencies even
+when they are absent from the output.
 
 `shift(n, fill_value=...)` fills only vacated positions. Nulls moved from
 the input remain null; the fill value follows conditional expression type

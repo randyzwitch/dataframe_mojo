@@ -1064,6 +1064,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Evaluate per partition, optionally ordered, then restore input rows.
 - `def over(self, partition_by: String, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
 - `def over(self, partition_by: List[String], order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, *, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+  One globally ordered partition, accepting multiple ordering columns.
 - `def list(self) -> ListNamespace`
   Operations on list columns.
 - `def implode(self) -> Self`
