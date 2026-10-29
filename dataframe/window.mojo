@@ -27,6 +27,7 @@ from .expr import (
     IS_LAST_DISTINCT,
     is_distinct_flag,
     SHIFT,
+    SHIFT_IGNORE_NULLS,
     RANK,
     ROLLING_SUM,
     ROLLING_STD,
@@ -327,10 +328,27 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         var m = len(rows)
         if op == SHIFT:
             var k = Int(node.integer)
-            for j in range(m):
-                var from_index = j - k
-                if from_index >= 0 and from_index < m:
-                    source[rows[j]] = rows[from_index]
+            if (node.min_count & SHIFT_IGNORE_NULLS) != 0 and k != 0:
+                # Only valid predecessors/successors count toward the offset.
+                # Record the current row after selecting its source so a NULL
+                # output row still looks strictly before/after itself.
+                var history = List[Int](capacity=m)
+                for row in _ordered(rows, k < 0):
+                    var seen = len(history)
+                    if k > 0:
+                        if k <= seen:
+                            source[row] = history[seen - k]
+                    elif k >= -seen:
+                        # Keeping k negative also handles the minimum Int
+                        # offset without trying to negate it.
+                        source[row] = history[seen + k]
+                    if valid[row]:
+                        history.append(row)
+            else:
+                for j in range(m):
+                    var from_index = j - k
+                    if from_index >= 0 and from_index < m:
+                        source[rows[j]] = rows[from_index]
         elif op == CUM_MIN or op == CUM_MAX:
             var best = -1
             for row in _ordered(rows, reverse):

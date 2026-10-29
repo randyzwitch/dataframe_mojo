@@ -74,6 +74,7 @@ from dataframe.expr import (
     VAR,
     col,
     is_reduction,
+    is_sequence,
     is_window,
     lit,
     subtree,
@@ -526,7 +527,7 @@ def _partitioned_order_free(exprs: List[Expr]) -> Bool:
     shift, rank, rolling) or a positional reduction does not."""
     for e in exprs:
         for node in e._nodes:
-            if is_window(node.op):
+            if is_window(node.op) or is_sequence(node.op):
                 return False
             if is_reduction(node.op) and node.op not in [
                 SUM,
@@ -556,7 +557,7 @@ def _order_insensitive(exprs: List[Expr]) -> Bool:
     (so not first, last, arg_min, arg_max or a list of the rows)."""
     for e in exprs:
         for node in e._nodes:
-            if is_window(node.op) or node.op == OVER:
+            if is_window(node.op) or is_sequence(node.op) or node.op == OVER:
                 return False
             if is_reduction(node.op) and node.op not in [
                 SUM,

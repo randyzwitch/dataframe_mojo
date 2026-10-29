@@ -1068,13 +1068,13 @@ A flat, topologically ordered tree; composition never evaluates data.
   True at each value's first row; see is_duplicated for equality.
 - `def is_last_distinct(self) -> Self`
   True at each value's last row; see is_duplicated for equality.
-- `def shift(self, fill_value: Self) -> Self`
-- `def shift(self, fill_value: String) -> Self`
-- `def shift(self, n: Int = Int(1)) -> Self`
-  Move values n rows later (earlier when negative); vacated rows are null.
-- `def shift(self, n: Int, fill_value: Self) -> Self`
-  Shift values, filling only vacated positions; source nulls stay null.
-- `def shift(self, n: Int, fill_value: String) -> Self`
+- `def shift(self, fill_value: Self, *, ignore_nulls: Bool = False) -> Self`
+- `def shift(self, fill_value: String, *, ignore_nulls: Bool = False) -> Self`
+- `def shift(self, n: Int = Int(1), *, ignore_nulls: Bool = False) -> Self`
+  Move values by n rows, or n non-null values when ignoring nulls.
+- `def shift(self, n: Int, fill_value: Self, *, ignore_nulls: Bool = False) -> Self`
+  Shift, filling only positions without a source; keep source nulls.
+- `def shift(self, n: Int, fill_value: String, *, ignore_nulls: Bool = False) -> Self`
 - `def diff(self, n: Int = Int(1)) -> Self`
   Difference from the value n rows earlier.
 - `def pct_change(self, n: Int = Int(1)) -> Self`
@@ -1125,13 +1125,13 @@ A flat, topologically ordered tree; composition never evaluates data.
   Bin numeric values at explicit sorted edges, including open-ended outer bins.
 - `def qcut(self, quantiles: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False, allow_duplicates: Bool = False) -> Self`
   Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true.
-- `def over(self, *, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, *, order_by: List[String], descending: Bool = False, nulls_last: Bool = False, mapping_strategy: String = "group_to_rows") -> Self`
   One globally ordered partition, accepting multiple ordering columns.
-- `def over(self, partition_by: List[String] = List(), order_by: String = "", descending: Bool = False, nulls_last: Bool = False) -> Self`
-  Evaluate per partition, optionally ordered, then restore input rows.
-- `def over(self, partition_by: List[String], order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
-- `def over(self, partition_by: String, order_by: List[String], descending: Bool = False, nulls_last: Bool = False) -> Self`
-- `def over(self, partition_by: String, order_by: String = "", descending: Bool = False, nulls_last: Bool = False) -> Self`
+- `def over(self, partition_by: List[String] = List(), order_by: String = "", descending: Bool = False, nulls_last: Bool = False, mapping_strategy: String = "group_to_rows") -> Self`
+  Evaluate per partition, optionally ordered, with a result mapping.
+- `def over(self, partition_by: List[String], order_by: List[String], descending: Bool = False, nulls_last: Bool = False, mapping_strategy: String = "group_to_rows") -> Self`
+- `def over(self, partition_by: String, order_by: List[String], descending: Bool = False, nulls_last: Bool = False, mapping_strategy: String = "group_to_rows") -> Self`
+- `def over(self, partition_by: String, order_by: String = "", descending: Bool = False, nulls_last: Bool = False, mapping_strategy: String = "group_to_rows") -> Self`
 - `def list(self) -> ListNamespace`
   Operations on list columns.
 - `def implode(self) -> Self`
@@ -1148,10 +1148,10 @@ A flat, topologically ordered tree; composition never evaluates data.
   Largest non-null value. NaN is skipped, so it is the maximum only when every valid value is NaN.
 - `def mean(self) -> Self`
   Arithmetic mean of non-null values as Float64; null when empty. A Bool's mean is the share of true values.
-- `def first(self) -> Self`
-  The first row's value, which may be null. Order-dependent.
-- `def last(self) -> Self`
-  The last row's value, which may be null. Order-dependent.
+- `def first(self, *, ignore_nulls: Bool = False) -> Self`
+  First value, optionally skipping nulls; null for an empty selection.
+- `def last(self, *, ignore_nulls: Bool = False) -> Self`
+  Last value, optionally skipping nulls; null for an empty selection.
 - `def n_unique(self, *, ignore_nulls: Bool = False) -> Self`
   Distinct values, counting null once unless ignore_nulls=True.
 - `def std(self, ddof: Int = Int(1)) -> Self`
@@ -1330,6 +1330,18 @@ def import_arrow_series(array_address: Int, schema_address: Int, *, copy: Bool =
 
 ```mojo
 def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema, *, copy: Bool = True) -> Series
+```
+
+## `int_range`
+
+Int64 values from start to exclusive end, using a nonzero signed step.
+
+```mojo
+def int_range(end: Expr, *, step: Int = Int(1)) -> Expr
+```
+
+```mojo
+def int_range(start: Expr, end: Expr, step: Int = Int(1)) -> Expr
 ```
 
 ## `last`
@@ -1558,6 +1570,14 @@ A pending lazy `group_by_dynamic` or `rolling`; finish it with agg.
 - `def agg(self, expr: Expr, *, batch_size: Int = Int(1024)) -> LazyFrame`
 - `def agg(self, exprs: List[Expr], *, batch_size: Int = Int(1024)) -> LazyFrame`
   One row per window: the `group_by` keys, the index column (the window's label) and the aggregations; see TimeGroupBy.agg.
+
+## `len`
+
+Number of input rows, including nulls, as an Int64 aggregate.
+
+```mojo
+def len() -> Expr
+```
 
 ## `ListColumn`
 
