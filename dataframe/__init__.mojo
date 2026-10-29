@@ -59,6 +59,7 @@ from .expr import (
     sum_horizontal,
     when,
 )
+from .row_expressions import len, int_range
 from .io.arrow import (
     ArrowArray,
     ArrowSchema,

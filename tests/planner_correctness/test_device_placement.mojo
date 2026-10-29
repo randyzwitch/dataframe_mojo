@@ -2,7 +2,15 @@
 must get right, how a plan is cut into units, and what explain reports."""
 # contract-group: planner.device_placement
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
-from dataframe import Column, DataFrame, LazyFrame, Series, col
+from dataframe import (
+    Column,
+    DataFrame,
+    LazyFrame,
+    Series,
+    col,
+    int_range,
+    len as row_len,
+)
 from dataframe.devices import (
     ByteCost,
     DeviceInfo,
@@ -250,6 +258,49 @@ def test_a_plan_is_cut_into_units_children_first() raises:
     var region = units[join].region.copy()
     assert_equal(region._nodes[len(region._nodes) - 1].kind, 6)
     assert_true(units[0].features.input_rows >= 0)
+
+
+def test_length_changing_select_has_unknown_device_capacity() raises:
+    var frame = DataFrame([Series("k", Column[Int64]([1, 1]))])
+    for expression in [
+        int_range(0, 100).alias("expanded"),
+        int_range(0, 100)
+        .over("k", mapping_strategy="explode")
+        .alias("expanded"),
+    ]:
+        var units = plan_pipelines(frame.lazy().select(expression)._plan)
+        ref unit = units[len(units) - 1]
+        assert_equal(unit.features.input_rows, 2)
+        assert_equal(unit.features.output_rows, -1)
+        assert_equal(unit.output_bytes, -1)
+        assert_equal(unit.working_bytes, -1)
+        # A measured, cheap device still cannot claim a finite budget can
+        # hold an output whose expansion is unknown.
+        var problem = PlacementProblem(1, 2)
+        problem.run_ns[0][CPU] = 1000
+        problem.run_ns[0][1] = 1
+        problem.working_bytes[0] = unit.working_bytes
+        problem.budgets[1] = 1024
+        assert_false(problem.allowed(0, 1))
+        assert_equal(solve_placement(problem).devices, [CPU])
+
+
+def test_empty_scalar_select_accounts_for_its_one_output_row() raises:
+    var frame = DataFrame([Series("k", Column[Int64](List[Int64]()))])
+    var units = plan_pipelines(frame.lazy().select(row_len().alias("n"))._plan)
+    ref unit = units[len(units) - 1]
+    assert_equal(unit.features.input_rows, 0)
+    assert_equal(unit.features.output_rows, 1)
+    assert_true(unit.output_bytes > 0)
+    assert_equal(unit.working_bytes, unit.output_bytes)
+    var problem = PlacementProblem(1, 2)
+    problem.run_ns[0][CPU] = 1000
+    problem.run_ns[0][1] = 1
+    problem.working_bytes[0] = unit.working_bytes
+    problem.budgets[1] = 0
+    assert_false(problem.allowed(0, 1))
+    problem.budgets[1] = unit.working_bytes
+    assert_true(problem.allowed(0, 1))
 
 
 struct Runs(Movable):

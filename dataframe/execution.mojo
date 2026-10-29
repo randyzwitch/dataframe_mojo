@@ -15,11 +15,16 @@ from .expr import (
     Expr,
     COL,
     _SCALAR_SOURCE,
+    ROW_LEN,
+    INT_RANGE,
     DROP_NULLS,
     DROP_NANS,
     is_drop,
     is_sequence,
     EXPR_FILTER,
+    EXPR_ARG_SORT,
+    EXPR_UNIQUE_COUNTS,
+    SHIFT,
     _node,
     _set_node_children,
     LIT_INT,
@@ -84,6 +89,9 @@ from .expr import (
     CAST,
     OVER,
     OVER_GLOBAL,
+    OVER_JOIN,
+    OVER_EXPLODE,
+    OVER_MAPPING_MASK,
     INTERPOLATE_BY,
     is_rolling_by,
     is_dt_op,
@@ -108,6 +116,7 @@ from .expr import (
     horizontal_inputs,
 )
 from dataframe.kernels.horizontal import horizontal
+from dataframe.window_mapping import assemble_window_mapping
 from dataframe.text.kernels import string_op, concat_strings
 from dataframe.text.functions import text_function
 from dataframe.kernels.binary import integer_is_in
@@ -253,6 +262,17 @@ def _empty_output(
         ref column = columns[bound.sources[index]]
         if column.dtype() == bound.dtypes[index]:
             return column.slice(0, 0).renamed("")
+    # Value selections preserve source field owners even when no partition
+    # is evaluated. Position/count-generating sequences create fresh fields.
+    if node.left >= 0 and bound.dtypes[index] == bound.dtypes[node.left]:
+        if node.op == SHIFT or (
+            is_sequence(node.op)
+            and node.op not in [INT_RANGE, EXPR_ARG_SORT, EXPR_UNIQUE_COUNTS]
+        ):
+            return _empty_output(bound, columns, node.left)
+    if node.op == IMPLODE:
+        var child = _empty_output(bound, columns, node.left).renamed("item")
+        return Series("", ListColumn([Int64(0)], child^))
     if node.op == CAST and bound.dtypes[index] == bound.dtypes[node.left]:
         return _empty_output(bound, columns, node.left)
     if (
@@ -2338,6 +2358,8 @@ def direct_reductions(
 def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
     """Whether an ungrouped reduction runs as one SIMD scan of a numeric
     column: Float64 sum and mean, integer sum, mean, min and max."""
+    if node.left < 0:
+        return False
     var input = node.left
     if _widening_cast(bound, columns, node):
         input = bound.expr._nodes[input].left
@@ -2990,6 +3012,83 @@ def _over_contiguous[
     return spread[0].copy()
 
 
+def _ordered_window_rows(
+    node: Node, columns: List[Series], ids: List[Int]
+) raises -> List[Int]:
+    var ranks = List[List[Int]]()
+    ranks.append(ids.copy())
+    for name in split_names(node.text):
+        for column in columns:
+            if column.name() == name:
+                var key = categorical_sort_ranks(
+                    column
+                ) if column.dtype().is_categorical() else column.copy()
+                ranks.append(
+                    key._sort_ranks(
+                        (node.integer & 1) != 0, (node.integer & 2) != 0
+                    )
+                )
+    return sort_indices(ranks)
+
+
+def _over_mapped[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+) raises -> Series:
+    ref node = bound.expr._nodes[index]
+    var inner = bind(subtree(bound.expr, node.left), columns)
+    var keys = List[Series]()
+    if (node.integer & OVER_GLOBAL) == 0:
+        for name in split_names(node.text2):
+            for column in columns:
+                if column.name() == name:
+                    keys.append(column.copy())
+    var ids = List[Int](length=height, fill=0)
+    var count = 1 if height > 0 else 0
+    if len(keys) > 0:
+        var encoded = _partition_ids(keys, height)
+        ids = encoded.ids.copy()
+        count = encoded.count()
+    var rows = List[List[Int]](length=count, fill=List[Int]())
+    if node.min_count > 0:
+        var order = _ordered_window_rows(node, columns, ids)
+        for row in order:
+            rows[ids[row]].append(row)
+    else:
+        for row in range(height):
+            rows[ids[row]].append(row)
+    var parts = List[Series](capacity=count)
+    for group in rows:
+        var input = List[Series](capacity=len(columns))
+        for column in columns:
+            input.append(column.take(group))
+        var local = bind(subtree(bound.expr, node.left), input)
+        var value = evaluate[width](
+            local, input, len(group), batch_size=batch_size
+        )
+        if value.dtype() != bound.dtypes[node.left]:
+            value = value.cast(bound.dtypes[node.left])
+        parts.append(value^)
+    var prototype = parts[0].slice(0, 0) if len(parts) > 0 else _empty_output(
+        inner, columns, len(inner.expr._nodes) - 1
+    )
+    if prototype.dtype() != bound.dtypes[node.left]:
+        prototype = prototype.cast(bound.dtypes[node.left])
+    prototype._name = bound.expr._name
+    return assemble_window_mapping(
+        parts,
+        ids,
+        "join" if (node.integer & OVER_JOIN) != 0 else "explode",
+        inner.shape() != ROWS,
+        prototype,
+    )
+
+
 def _over[
     width: Int
 ](
@@ -3003,6 +3102,8 @@ def _over[
     """Evaluate a node's child per partition and align results to rows."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
+    if (node.integer & OVER_MAPPING_MASK) != 0:
+        return _over_mapped[width](bound, columns, index, height, batch_size)
     if inner.shape() == SCALAR:
         var scalar = evaluate[width](
             inner, columns, height, batch_size=batch_size
@@ -3024,21 +3125,7 @@ def _over[
             var encoded = _partition_ids(keys, height)
             ids = encoded.ids.copy()
             count = encoded.count()
-        var ranks = List[List[Int]]()
-        ranks.append(ids.copy())
-        for name in split_names(node.text):
-            for column in columns:
-                if column.name() == name:
-                    var key = categorical_sort_ranks(
-                        column
-                    ) if column.dtype().is_categorical() else column.copy()
-                    ranks.append(
-                        key._sort_ranks(
-                            (node.integer & 1) != 0,
-                            (node.integer & 2) != 0,
-                        )
-                    )
-        var order = sort_indices(ranks)
+        var order = _ordered_window_rows(node, columns, ids)
         var inverse = List[Int](length=height, fill=0)
         var ordered_ids = List[Int](capacity=height)
         for at in range(height):
@@ -3191,6 +3278,37 @@ def _sequence_value[
     batch_size: Int,
 ) raises -> Series:
     ref node = bound.expr._nodes[index]
+    if node.op == ROW_LEN:
+        return Series(bound.expr._name, Column[Int64]([Int64(height)]))
+    if node.op == INT_RANGE:
+        var first = _sequence_value[width](
+            bound, columns, node.left, height, batch_size
+        )
+        var last = _sequence_value[width](
+            bound, columns, node.right, height, batch_size
+        )
+        if (
+            len(first) != 1
+            or len(last) != 1
+            or first.get(0).is_null()
+            or last.get(0).is_null()
+        ):
+            raise Error("int_range bounds must each be one non-null integer")
+        first = first.cast(DataType.INT64)
+        last = last.cast(DataType.INT64)
+        var at = first._data[Column[Int64]]._get(0)
+        var stop = last._data[Column[Int64]]._get(0)
+        var step = node.integer
+        var values = List[Int64]()
+        while at < stop if step > 0 else at > stop:
+            values.append(at)
+            if step > 0:
+                if at > Int64.MAX - step:
+                    break
+            elif at < Int64.MIN - step:
+                break
+            at += step
+        return Series(bound.expr._name, Column[Int64](values^))
     if node.op == OVER:
         return _over[width](bound, columns, index, height, batch_size, 0)
     if is_sequence(node.op) and not is_drop(node.op):
@@ -3337,7 +3455,11 @@ def evaluate[
     var root = count - 1
     var sequence = False
     for node in bound.expr._nodes:
-        sequence = sequence or is_sequence(node.op)
+        sequence = (
+            sequence
+            or is_sequence(node.op)
+            or (node.op == OVER and (node.integer & OVER_EXPLODE) != 0)
+        )
     if sequence:
         return _sequence_grouped[width](
             bound, columns, height, batch_size, groups, group_count
@@ -3430,7 +3552,20 @@ def evaluate[
         if inside_over[node_index]:
             continue
         var node = bound.expr._nodes[node_index].copy()
-        if node.op == IMPLODE:
+        if node.op == ROW_LEN:
+            var counts = List[Int64](
+                length=group_count if grouped else 1, fill=0
+            )
+            if grouped:
+                for group in groups:
+                    counts[group] += 1
+            else:
+                counts[0] = Int64(height)
+            var state = Series("", Column[Int64](counts^))
+            if row_mode:
+                state = state.take(groups)
+            states[node_index] = state^
+        elif node.op == IMPLODE:
             var state = _implode[width](
                 bound,
                 prepared_columns,

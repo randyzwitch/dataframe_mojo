@@ -233,6 +233,10 @@ comptime BACKWARD_FILL = 121
 comptime OVER = 122
 # An empty partition list and a partition column named "" encode differently.
 comptime OVER_GLOBAL = 4
+comptime OVER_JOIN = 8
+comptime OVER_EXPLODE = 16
+comptime OVER_MAPPING_MASK = OVER_JOIN + OVER_EXPLODE
+comptime SHIFT_IGNORE_NULLS = 2
 # Fill interior nulls in row position, or using a second numeric expression.
 comptime INTERPOLATE = 123
 comptime INTERPOLATE_BY = 124
@@ -386,6 +390,8 @@ comptime EXPR_MAX_BY = 300
 comptime EXPR_MIN_BY = 301
 comptime EXPR_ARG_SORT = 302
 comptime EXPR_REVERSE = 303
+comptime ROW_LEN = 304
+comptime INT_RANGE = 305
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -462,6 +468,7 @@ def is_reduction(op: Int) -> Bool:
         or op == EXPR_GET
         or op == EXPR_MAX_BY
         or op == EXPR_MIN_BY
+        or op == ROW_LEN
     )
 
 
@@ -522,7 +529,11 @@ def is_drop(op: Int) -> Bool:
 
 def is_sequence(op: Int) -> Bool:
     """Whole-expression operations evaluated at their own row boundary."""
-    return is_drop(op) or (op >= EXPR_FILTER and op <= EXPR_REVERSE)
+    return (
+        is_drop(op)
+        or (op >= EXPR_FILTER and op <= EXPR_REVERSE)
+        or op == INT_RANGE
+    )
 
 
 def changes_length(expr: Expr) -> Bool:
@@ -530,6 +541,7 @@ def changes_length(expr: Expr) -> Bool:
     var changing = List[Bool]()
     for node in expr._nodes:
         var changed = is_drop(node.op) or node.op in [
+            INT_RANGE,
             EXPR_FILTER,
             EXPR_SLICE,
             EXPR_GATHER,
@@ -540,6 +552,8 @@ def changes_length(expr: Expr) -> Bool:
             EXPR_TOP_K_BY,
             EXPR_BOTTOM_K_BY,
         ]
+        if node.op == OVER and (node.integer & OVER_EXPLODE) != 0:
+            changed = True
         if not is_reduction(node.op) and node.op != OVER:
             for child in node_children(node):
                 changed = changed or changing[child]
@@ -1822,27 +1836,41 @@ struct Expr(Copyable):
         """True at each value's last row; see is_duplicated for equality."""
         return self._window(IS_LAST_DISTINCT)
 
-    def shift(self, n: Int = 1) -> Self:
-        """Move values n rows later (earlier when negative); vacated rows
-        are null."""
-        return self._window(SHIFT, Int64(n))
+    def shift(self, n: Int = 1, *, ignore_nulls: Bool = False) -> Self:
+        """Move values by n rows, or n non-null values when ignoring nulls.
 
-    def shift(self, n: Int, fill_value: Self) -> Self:
-        """Shift values, filling only vacated positions; source nulls stay null.
-
-        `fill_value` follows conditional-expression dtype and broadcast rules.
+        Positive offsets look backward, negative offsets forward. Offset
+        zero keeps the current value, including null. Vacated rows are null.
         """
-        var occupied = self.is_null().cum_count().shift(n).is_not_null()
-        return when(occupied).then(self.shift(n)).otherwise(fill_value)
+        var result = self._window(SHIFT, Int64(n))
+        if ignore_nulls:
+            result._nodes[len(result._nodes) - 1].min_count = SHIFT_IGNORE_NULLS
+        return result^
 
-    def shift(self, fill_value: Self) -> Self:
-        return self.shift(1, fill_value)
+    def shift(
+        self, n: Int, fill_value: Self, *, ignore_nulls: Bool = False
+    ) -> Self:
+        """Shift, filling only positions without a source; keep source nulls.
 
-    def shift(self, n: Int, fill_value: String) -> Self:
-        return self.shift(n, lit(fill_value))
+        `fill_value` follows conditional-expression dtype/broadcast rules.
+        """
+        var shifted = self.shift(n, ignore_nulls=ignore_nulls)
+        var occupied = (
+            shifted.is_not_null() if ignore_nulls
+            and n != 0 else self.is_null().cum_count().shift(n).is_not_null()
+        )
+        return when(occupied).then(shifted).otherwise(fill_value)
 
-    def shift(self, fill_value: String) -> Self:
-        return self.shift(1, lit(fill_value))
+    def shift(self, fill_value: Self, *, ignore_nulls: Bool = False) -> Self:
+        return self.shift(1, fill_value, ignore_nulls=ignore_nulls)
+
+    def shift(
+        self, n: Int, fill_value: String, *, ignore_nulls: Bool = False
+    ) -> Self:
+        return self.shift(n, lit(fill_value), ignore_nulls=ignore_nulls)
+
+    def shift(self, fill_value: String, *, ignore_nulls: Bool = False) -> Self:
+        return self.shift(1, lit(fill_value), ignore_nulls=ignore_nulls)
 
     def diff(self, n: Int = 1) -> Self:
         """Difference from the value n rows earlier."""
@@ -2159,12 +2187,14 @@ struct Expr(Copyable):
         order_by: String = "",
         descending: Bool = False,
         nulls_last: Bool = False,
+        mapping_strategy: String = "group_to_rows",
     ) -> Self:
         return self._over_ordered(
             [partition_by],
             [order_by] if order_by != "" else List[String](),
             descending,
             nulls_last,
+            mapping_strategy,
         )
 
     def over(
@@ -2173,9 +2203,12 @@ struct Expr(Copyable):
         order_by: String = "",
         descending: Bool = False,
         nulls_last: Bool = False,
+        mapping_strategy: String = "group_to_rows",
     ) -> Self:
-        """Evaluate per partition, optionally ordered, then restore input rows.
+        """Evaluate per partition, optionally ordered, with a result mapping.
 
+        group_to_rows restores input rows; join broadcasts collected lists;
+        explode emits partition results consecutively and may change height.
         Ties keep input order. NaN and null placement follow frame sorting.
         With only `order_by`, the whole frame is one partition.
         """
@@ -2184,6 +2217,7 @@ struct Expr(Copyable):
             [order_by] if order_by != "" else List[String](),
             descending,
             nulls_last,
+            mapping_strategy,
         )
 
     def over(
@@ -2192,9 +2226,10 @@ struct Expr(Copyable):
         order_by: List[String],
         descending: Bool = False,
         nulls_last: Bool = False,
+        mapping_strategy: String = "group_to_rows",
     ) -> Self:
         return self._over_ordered(
-            [partition_by], order_by, descending, nulls_last
+            [partition_by], order_by, descending, nulls_last, mapping_strategy
         )
 
     def over(
@@ -2203,9 +2238,10 @@ struct Expr(Copyable):
         order_by: List[String],
         descending: Bool = False,
         nulls_last: Bool = False,
+        mapping_strategy: String = "group_to_rows",
     ) -> Self:
         return self._over_ordered(
-            partition_by, order_by, descending, nulls_last
+            partition_by, order_by, descending, nulls_last, mapping_strategy
         )
 
     def over(
@@ -2214,10 +2250,11 @@ struct Expr(Copyable):
         order_by: List[String],
         descending: Bool = False,
         nulls_last: Bool = False,
+        mapping_strategy: String = "group_to_rows",
     ) -> Self:
         """One globally ordered partition, accepting multiple ordering columns."""
         return self._over_ordered(
-            List[String](), order_by, descending, nulls_last
+            List[String](), order_by, descending, nulls_last, mapping_strategy
         )
 
     def _over_ordered(
@@ -2226,7 +2263,15 @@ struct Expr(Copyable):
         order_by: List[String],
         descending: Bool,
         nulls_last: Bool,
+        mapping_strategy: String,
     ) -> Self:
+        var mapping = Int64(0)
+        if mapping_strategy == "join":
+            mapping = OVER_JOIN
+        elif mapping_strategy == "explode":
+            mapping = OVER_EXPLODE
+        elif mapping_strategy != "group_to_rows":
+            mapping = OVER_MAPPING_MASK
         var nodes = self._nodes.copy()
         nodes.append(
             _node(
@@ -2237,7 +2282,8 @@ struct Expr(Copyable):
                 min_count=len(order_by),
                 integer=Int64(descending)
                 + 2 * Int64(nulls_last)
-                + OVER_GLOBAL * Int64(len(partition_by) == 0),
+                + OVER_GLOBAL * Int64(len(partition_by) == 0)
+                + mapping,
             )
         )
         return Self(nodes^, self._name)
@@ -2280,13 +2326,17 @@ struct Expr(Copyable):
         A Bool's mean is the share of true values."""
         return self._unary(MEAN)
 
-    def first(self) -> Self:
-        """The first row's value, which may be null. Order-dependent."""
-        return self._unary(FIRST)
+    def first(self, *, ignore_nulls: Bool = False) -> Self:
+        """First value, optionally skipping nulls; null for an empty selection."""
+        return self.drop_nulls()._unary(FIRST) if ignore_nulls else self._unary(
+            FIRST
+        )
 
-    def last(self) -> Self:
-        """The last row's value, which may be null. Order-dependent."""
-        return self._unary(LAST)
+    def last(self, *, ignore_nulls: Bool = False) -> Self:
+        """Last value, optionally skipping nulls; null for an empty selection."""
+        return self.drop_nulls()._unary(LAST) if ignore_nulls else self._unary(
+            LAST
+        )
 
     def n_unique(self, *, ignore_nulls: Bool = False) -> Self:
         """Distinct values, counting null once unless ignore_nulls=True.
