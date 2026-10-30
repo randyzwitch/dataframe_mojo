@@ -26,19 +26,17 @@ forces CPU execution and `engine="accel"` requires an accelerator provider.
 In a CPU-only build (the default), auto uses CPU without accelerator dependencies or
 device discovery. Eager operations retain their existing behavior.
 
-The core exposes an `AcceleratorBackend` extension interface. A separately
-built provider owns automatic capability, memory and cost checks through
-`select_auto(plan, optimize, streaming, batch_size)`, returning a placement (`cpu`, `accel`, or `mixed`) and a
-reason before execution. Providers without a policy inherit CPU selection.
-The core delegates selected accelerator/mixed plans to `execute_auto`, which
-receives the CPU optimization, streaming and batch-size options for any CPU
-portion. Provider execution errors propagate; collection never retries them
-on CPU. `explain(engine="auto")` shows the placement reason and automatic
-profiles add a `selection_reason` column.
+The core exposes an `AcceleratorBackend` extension interface. Under
+`engine="auto"` the core cuts the plan into pipelines and places each on the
+CPU or a provider's device by this machine's measured costs
+([design](design/accelerator-contract.md)); without a provider or a
+calibration everything runs on the CPU. Provider execution errors
+propagate; collection never retries them on CPU. `explain(engine="auto")`
+shows each pipeline's estimates and where it runs.
 
 `engine="accel"` raises a missing-provider error unless a provider is registered
 or explicitly passed with `accelerator=...`. Explicit acceleration never
-falls back to CPU. An explicitly passed provider owns automatic selection
+falls back to CPU. An explicitly passed provider's devices are placed on
 when `engine="auto"` is supplied; omitting `engine` on these explicit-provider
 overloads retains forced acceleration for compatibility.
 

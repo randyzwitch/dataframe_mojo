@@ -31,9 +31,9 @@ def _select_backend(engine: String) raises -> _BackendDecision:
         return _BackendDecision("cpu", True, "explicit CPU execution")
     if engine == "auto":
         return _BackendDecision(
-            "cpu",
+            "auto",
             True,
-            "automatic placement policy has not been consulted",
+            "placed by measured cost; unmeasured work stays on the CPU",
         )
     if engine == "accel":
         return _BackendDecision(

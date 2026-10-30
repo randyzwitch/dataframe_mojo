@@ -70,29 +70,15 @@ def assert_backend_rows(
 
 
 struct BackendTrace(Movable):
-    var selections: Int
     var executes: Int
     var profiled: Int
-    var automatic: Int
     var descriptions: Int
-    var optimize: Bool
-    var streaming: Bool
-    var batch: Int
-    var profiling: Bool
-    var selected: String
     var failure: String
 
-    def __init__(out self, selected: String = "accel", failure: String = ""):
-        self.selections = 0
+    def __init__(out self, failure: String = ""):
         self.executes = 0
         self.profiled = 0
-        self.automatic = 0
         self.descriptions = 0
-        self.optimize = True
-        self.streaming = True
-        self.batch = 65536
-        self.profiling = False
-        self.selected = selected
         self.failure = failure
 
 
@@ -121,16 +107,6 @@ struct CountedBackend(AcceleratorBackend):
     def __init__(out self, address: Int):
         self.address = address
 
-    def select_auto(
-        self, plan: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
-    ) -> Tuple[String, String]:
-        ref trace = trace_at(self.address)[]
-        trace.selections += 1
-        trace.optimize = optimize
-        trace.streaming = streaming
-        trace.batch = batch_size
-        return (trace.selected.copy(), "counted placement " + trace.selected)
-
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         ref trace = trace_at(self.address)[]
         trace.executes += 1
@@ -146,24 +122,6 @@ struct CountedBackend(AcceleratorBackend):
         if trace.failure:
             raise Error(trace.failure)
         return provider_result(plan, True, True, 65536)
-
-    def execute_auto(
-        self,
-        plan: LazyFrame,
-        optimize: Bool,
-        streaming: Bool,
-        batch_size: Int,
-        profiling: Bool,
-    ) raises -> Tuple[DataFrame, DataFrame]:
-        ref trace = trace_at(self.address)[]
-        trace.automatic += 1
-        trace.optimize = optimize
-        trace.streaming = streaming
-        trace.batch = batch_size
-        trace.profiling = profiling
-        if trace.failure:
-            raise Error(trace.failure)
-        return provider_result(plan, optimize, streaming, batch_size)
 
     def describe(self, plan: LazyFrame) -> String:
         trace_at(self.address)[].descriptions += 1
