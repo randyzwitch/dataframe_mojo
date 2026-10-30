@@ -1,6 +1,6 @@
-"""An inner join whose executed right side holds more rows than its left can
-is run with the sides swapped: the left is hashed and the right streams
-through it. A join promises no row order, so the swap applies whatever
+"""An inner join whose executed right side costs more to hash, in rows times
+columns, than its left can is run with the sides swapped: the left is hashed
+and the right streams through it. A join promises no row order, so the swap applies whatever
 consumes the join, an ordered group-by included. The swap must not change
 the result, the join's column names (the left key's own name), its key type,
 or which rows join; it is declined where a shared non-key name would be
@@ -159,6 +159,73 @@ def test_larger_built_right_side_is_swapped_with_the_same_groups_either_optimiza
         assert_true(swapped(observed.text()), "the join was not swapped")
         _ = observed^
         assert_by_name_and_group(actual)
+    _ = trace^
+    _ = workers^
+
+
+def test_a_built_side_of_more_rows_but_fewer_cells_is_not_swapped() raises:
+    """Rows times columns decides, as the planner's build side and
+    DuckDB's build/probe side optimizer count it: 640 two-column facts
+    (about 620 kept) build cheaper than 500 three-column dimension rows,
+    so the join keeps its sides (TPC-DS q12 restarted its pipeline to
+    flip such a join)."""
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    comptime ROWS = 640
+    var keys = List[Int32]()
+    var values = List[Int64]()
+    for row in range(ROWS):
+        keys.append(Int32(fact_key(row)))
+        values.append(fact_value(row))
+    var few = DataFrame(
+        [
+            Series("fd", Column[Int32](keys^)),
+            Series("v", Column[Int64](values^)),
+        ]
+    )
+    var totals = List[Int64](length=7, fill=0)
+    var counts = List[Int64](length=7, fill=0)
+    var kept_rows = 0
+    for row in range(ROWS):
+        if not kept(row):
+            continue
+        kept_rows += 1
+        var d = fact_key(row)
+        if d < DIMENSIONS:
+            totals[d % 7] += fact_value(row)
+            counts[d % 7] += 1
+    assert_true(kept_rows > DIMENSIONS and 2 * kept_rows < 3 * DIMENSIONS)
+    var observed = StrategyTrace()
+    var actual = (
+        dimension()
+        .lazy()
+        .join(
+            few.lazy().filter(col("v") >= lit(Int64(3))),
+            left_on=["d"],
+            right_on=["fd"],
+        )
+        .group_by("grp")
+        .agg(
+            [
+                col("v").sum().alias("total"),
+                col("v").count().alias("rows"),
+                # Reads the name: the dimension keeps its three columns.
+                col("name").max().alias("last_name"),
+            ]
+        )
+        .collect()
+    )
+    assert_true(not swapped(observed.text()), "the join was swapped")
+    _ = observed^
+    var present = 0
+    for g in range(7):
+        if counts[g] > 0:
+            present += 1
+    assert_equal(actual.height(), present)
+    for r in range(actual.height()):
+        var g = Int(num(actual.item(r, "grp")))
+        assert_equal(num(actual.item(r, "total")), totals[g])
+        assert_equal(num(actual.item(r, "rows")), counts[g])
     _ = trace^
     _ = workers^
 
