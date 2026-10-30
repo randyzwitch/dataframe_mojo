@@ -8,7 +8,13 @@ from std.memory import pack_bits
 from dataframe.kernels.float_ops import arithmetic, compare
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.storage.boolean import BoolColumn
-from dataframe.storage.column import Column, _bit, _copy_validity, _pack_bits
+from dataframe.storage.column import (
+    Column,
+    _bit,
+    _copy_validity,
+    _pack_bits,
+    _append_validity,
+)
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.kernels.cast import _decimal_to_float
 from dataframe.decimal import (
@@ -1370,9 +1376,10 @@ def _unary_block[
     decimals: Int,
     valid: List[UInt8],
     mut values: List[Scalar[D]],
+    output_start: Int = 0,
 ) where D.is_floating_point():
     var x = input._ptr().unsafe_load[width=width](start)
-    var mask = _packed_mask[width](Span(valid), start)
+    var mask = _packed_mask[width](Span(valid), output_start + start)
     var result: SIMD[D, width]
     comptime if op == NEG:
         result = -x
@@ -1404,7 +1411,7 @@ def _unary_block[
             result[lane] = _round_half_away(
                 x[lane].cast[DType.float64](), decimals
             ).cast[D]()
-    values.unsafe_ptr().unsafe_offset(start).unsafe_store(
+    values.unsafe_ptr().unsafe_offset(output_start + start).unsafe_store(
         mask.select(result, SIMD[D, width](0))
     )
 
@@ -1420,10 +1427,28 @@ def _unary_int[
     comptime floating = op == SQRT or op == EXP or op == LOG
     var values = List[Scalar[D]](length=0 if floating else n, fill=0)
     var floats = List[Float64](length=n if floating else 0, fill=0)
-    for i in range(n):
+    _write_unary_int[op, D](input, 0, valid, values, floats)
+    comptime if floating:
+        return Series("", Column[Float64](values=floats^, bits=valid^))
+    else:
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
+@always_inline
+def _write_unary_int[
+    op: Int, D: DType
+](
+    input: Column[Scalar[D]],
+    output_start: Int,
+    valid: List[UInt8],
+    mut values: List[Scalar[D]],
+    mut floats: List[Float64],
+) raises:
+    for row in range(len(input)):
+        var i = output_start + row
         if len(valid) > 0 and not _bit(Span(valid), i):
             continue
-        var x = input._get(i)
+        var x = input._get(row)
         comptime if op == NEG or op == ABS:
             comptime if D.is_signed():
                 if op == ABS and x >= 0:
@@ -1452,6 +1477,30 @@ def _unary_int[
             floats[i] = _log_value[DType.float64](x.cast[DType.float64]())
         else:
             values[i] = x
+
+
+def _chunk_unary_int[
+    op: Int, D: DType
+](input: Series, mask: List[Bool]) raises -> Series:
+    var n = len(input)
+    var valid = List[UInt8]()
+    var output_start = 0
+    ref chunks = input._chunked.value()[]
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[D]]]
+        _append_validity(
+            valid, output_start, column._bits[], column._offset, len(column)
+        )
+        output_start += len(column)
+    _apply_mask(valid, n, mask)
+    comptime floating = op == SQRT or op == EXP or op == LOG
+    var values = List[Scalar[D]](length=0 if floating else n, fill=0)
+    var floats = List[Float64](length=n if floating else 0, fill=0)
+    output_start = 0
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[D]]]
+        _write_unary_int[op, D](column, output_start, valid, values, floats)
+        output_start += len(column)
     comptime if floating:
         return Series("", Column[Float64](values=floats^, bits=valid^))
     else:
@@ -1555,9 +1604,10 @@ def _math_block[
     base: Scalar[D],
     valid: List[UInt8],
     mut values: List[Scalar[D]],
+    output_start: Int = 0,
 ) where D.is_floating_point():
     var x = input._ptr().unsafe_load[width=width](start)
-    var mask = _packed_mask[width](Span(valid), start)
+    var mask = _packed_mask[width](Span(valid), output_start + start)
     var zero = SIMD[D, width](0)
     var result: SIMD[D, width]
     comptime if op == SIGN:
@@ -1577,7 +1627,7 @@ def _math_block[
         comptime for lane in range(width):
             if mask[lane]:
                 result[lane] = _math_value[op, D](x[lane], base)
-    values.unsafe_ptr().unsafe_offset(start).unsafe_store(
+    values.unsafe_ptr().unsafe_offset(output_start + start).unsafe_store(
         mask.select(result, zero)
     )
 
@@ -1601,6 +1651,43 @@ def _math_float[
     return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
+def _chunk_float[
+    math: Bool, op: Int, width: Int, D: DType
+](
+    input: Series, base: Float64, decimals: Int = 0
+) raises -> Series where D.is_floating_point():
+    """Read physical windows into one owned output, without merging input."""
+    var values = List[Scalar[D]](unsafe_uninit_length=len(input))
+    var valid = List[UInt8]()
+    var output_start = 0
+    ref chunks = input._chunked.value()[]
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[D]]]
+        var n = len(column)
+        _append_validity(valid, output_start, column._bits[], column._offset, n)
+        var main = n - n % width
+        for start in range(0, main, width):
+            comptime if math:
+                _math_block[op, width, D](
+                    column, start, base.cast[D](), valid, values, output_start
+                )
+            else:
+                _unary_block[op, width, D](
+                    column, start, decimals, valid, values, output_start
+                )
+        for start in range(main, n):
+            comptime if math:
+                _math_block[op, 1, D](
+                    column, start, base.cast[D](), valid, values, output_start
+                )
+            else:
+                _unary_block[op, 1, D](
+                    column, start, decimals, valid, values, output_start
+                )
+        output_start += n
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
 def _sign_ints[D: DType](input: Column[Scalar[D]]) raises -> Series:
     """-1, 0 or 1 in the input's integer type; nulls stay null."""
     var n = len(input)
@@ -1617,6 +1704,29 @@ def _sign_ints[D: DType](input: Column[Scalar[D]]) raises -> Series:
         else:
             values[i] = Scalar[D](1) if value > 0 else Scalar[D](0)
     return Series("", Column[Scalar[D]](values^, valid))
+
+
+def _chunk_sign_ints[D: DType](input: Series) raises -> Series:
+    var values = List[Scalar[D]](unsafe_uninit_length=len(input))
+    var valid = List[UInt8]()
+    var output_start = 0
+    ref chunks = input._chunked.value()[]
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[D]]]
+        var n = len(column)
+        for row in range(n):
+            var value = column._get(row)
+            comptime if D.is_signed():
+                values[output_start + row] = Scalar[D](1) if value > 0 else (
+                    Scalar[D](-1) if value < 0 else Scalar[D](0)
+                )
+            else:
+                values[output_start + row] = Scalar[D](
+                    1
+                ) if value > 0 else Scalar[D](0)
+        _append_validity(valid, output_start, column._bits[], column._offset, n)
+        output_start += n
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
 def _decimal_sign_or_truncate(op: Int, input: Series) raises -> Series:
@@ -1653,6 +1763,26 @@ def _math_fn[
     op: Int, width: Int
 ](input: Series, base: Float64) raises -> Series:
     var dtype = input.dtype()
+    if input.is_chunked():
+        if dtype == DataType.FLOAT32:
+            return _chunk_float[True, op, width, DType.float32](input, base)
+        if dtype == DataType.FLOAT64:
+            return _chunk_float[True, op, width, DType.float64](input, base)
+        if dtype.is_integer():
+            comptime if op == SIGN:
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    comptime if not D.is_floating_point():
+                        if dtype == DataType.of(D):
+                            return _chunk_sign_ints[D](input)
+            elif op == TRUNCATE:
+                return input.copy()
+            else:
+                # The existing integer-to-Float64 conversion already reads
+                # chunks. Retain its owned conversion buffer, without first
+                # making a second contiguous copy of the integer input.
+                return _math_fn[op, width](input.cast(DataType.FLOAT64), base)
+        return _math_fn[op, width](input.rechunk(), base)
     comptime if op == SIGN or op == TRUNCATE:
         if dtype.is_decimal():
             return _decimal_sign_or_truncate(op, input)
@@ -1685,8 +1815,6 @@ def math_unary[
     """An elementwise math function (`is_math`) of a numeric series; `base`
     is LOG_BASE's base. Float64 results, or Float32 for Float32 input;
     sign and truncate keep the input's type."""
-    if input.is_chunked():
-        return math_unary[width](op, input.rechunk(), base)
     if op == LOG_BASE:
         return _math_fn[LOG_BASE, width](input, base)
     if op == LOG1P:
@@ -2290,6 +2418,22 @@ def unary[
             return _null_test[op == IS_NOT_NULL](input.rechunk())
         return _null_test[op == IS_NOT_NULL](input)
     if input.is_chunked():
+        comptime if op != NOT and not (op >= IS_NAN and op <= IS_INFINITE):
+            if input.dtype() == DataType.FLOAT32:
+                return _chunk_float[False, op, width, DType.float32](
+                    input, 0, Int(integer)
+                )
+            if input.dtype() == DataType.FLOAT64:
+                return _chunk_float[False, op, width, DType.float64](
+                    input, 0, Int(integer)
+                )
+        comptime if op != NOT and not (op >= IS_NAN and op <= IS_INFINITE):
+            if input.dtype().is_integer():
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    comptime if not D.is_floating_point():
+                        if input.dtype() == DataType.of(D):
+                            return _chunk_unary_int[op, D](input, mask)
         return unary[op, width](input.rechunk(), integer, mask)
     comptime if op == NEG or op == ABS:
         if input.dtype().is_decimal():
