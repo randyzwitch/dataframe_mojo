@@ -489,6 +489,46 @@ def test_estimates_wait_until_a_device_can_run_a_unit() raises:
     _ = calibrated^
 
 
+def test_estimates_cover_compared_units_and_those_below() raises:
+    var plan = joined()._optimized()
+    var estimated = plan_pipelines(plan._plan)
+    # Only the scans' units have a CPU cost, so only they are compared.
+    var leaves = List[String]()
+    for unit in estimated:
+        if len(unit.children) == 0:
+            leaves.append(unit.key)
+    var path = String("build/test-device-placement-leaves.json")
+    calibrate(path, leaves, 1e6)
+    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var device = FakeDevice(-1, 0, 0)
+    var solved = _solve_devices(plan, device, device.devices())
+    var skipped = 0
+    for p in range(len(solved.units)):
+        ref unit = solved.units[p]
+        if len(unit.children) == 0:
+            assert_equal(
+                unit.features.input_rows, estimated[p].features.input_rows
+            )
+            assert_equal(unit.output_bytes, estimated[p].output_bytes)
+        else:
+            assert_equal(unit.features.input_rows, -1)
+            skipped += 1
+    assert_true(skipped > 0)
+    _ = calibrated^
+    # A compared unit's children are estimated with it. Costs are read
+    # once per path, so this calibration has its own.
+    var root = String("build/test-device-placement-root.json")
+    calibrate(root, [estimated[len(estimated) - 1].key], 1e6)
+    calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", root)
+    solved = _solve_devices(plan, device, device.devices())
+    for p in range(len(solved.units)):
+        assert_equal(
+            solved.units[p].features.input_rows,
+            estimated[p].features.input_rows,
+        )
+    _ = calibrated^
+
+
 def test_explain_reports_the_placement_it_would_make() raises:
     var frames = sources()
     var summed = frames[0].lazy().filter(col("v") > 1).select(col("v").sum())

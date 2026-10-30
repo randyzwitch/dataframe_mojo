@@ -356,7 +356,20 @@ def plan_pipeline_estimates(
 ) raises:
     """Fill in each unit's rows and bytes, children before parents, so a
     unit over a child reads the child's estimated output."""
+    plan_pipeline_estimates(
+        self, units, List[Bool](length=len(units), fill=True)
+    )
+
+
+def plan_pipeline_estimates(
+    self: QueryContext, mut units: List[PlacementPipeline], wanted: List[Bool]
+) raises:
+    """Estimate only the units `wanted` marks; each must have its children
+    marked too, since a unit reads their estimated output. The others keep
+    -1, as cut."""
     for p in range(len(units)):
+        if not wanted[p]:
+            continue
         var top = units[p].top
         var sink = units[p].sink
         var cursor = units[p].input
