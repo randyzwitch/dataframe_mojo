@@ -17,6 +17,7 @@ from dataframe.storage.column import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.kernels.cast import _decimal_to_float
+from dataframe.kernels.numeric_input import _NumericInput
 from dataframe.decimal import (
     common_decimal,
     decimal_add_type,
@@ -2546,9 +2547,76 @@ def _decimal_pair(left: Series, right: Series) raises -> Tuple[Series, Series]:
     return (left.cast(target), right.cast(target))
 
 
+@always_inline
+def _write_chunk_choice[
+    D: DType, W: Int
+](
+    selected: List[Bool],
+    then: _NumericInput[D],
+    other: _NumericInput[D],
+    relative: Int,
+    output: Int,
+    mut values: List[Scalar[D]],
+    mut bits: List[UInt8],
+):
+    var take = _mask[W](selected, output)
+    values.unsafe_ptr().unsafe_store(
+        output, take.select(then.values[W](relative), other.values[W](relative))
+    )
+    if len(bits) != 0:
+        var valid = take.select(
+            then.valid[W](relative), other.valid[W](relative)
+        )
+        # Segments can start at any bit. Each output row is written once;
+        # preserve the neighboring rows when a segment splits a byte.
+        comptime for lane in range(W):
+            var row = output + lane
+            bits[row // 8] |= UInt8(valid[lane]) << UInt8(row % 8)
+
+
+def _choose_chunked_numeric[
+    D: DType
+](selected: List[Bool], then: Series, other: Series) raises -> Series:
+    var n = len(selected)
+    if n == 0:
+        return Series("", Column[Scalar[D]](List[Scalar[D]]()))
+    if (len(then) != 1 and len(then) < n) or (
+        len(other) != 1 and len(other) < n
+    ):
+        raise Error("Incompatible expression lengths")
+    var a = _NumericInput[D](then)
+    var b = _NumericInput[D](other)
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var nullable = then.null_count() > 0 or other.null_count() > 0
+    var bits = List[UInt8](length=(n + 7) // 8 if nullable else 0, fill=0)
+    var output = 0
+    while output < n:
+        var count = min(a.available(n - output), b.available(n - output))
+        var relative = 0
+        while relative + 16 <= count:
+            _write_chunk_choice[D, 16](
+                selected, a, b, relative, output + relative, values, bits
+            )
+            relative += 16
+        while relative < count:
+            _write_chunk_choice[D, 1](
+                selected, a, b, relative, output + relative, values, bits
+            )
+            relative += 1
+        a.advance(count)
+        b.advance(count)
+        output += count
+    return Series("", Column[Scalar[D]](values=values^, bits=bits^))
+
+
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
     if then.is_chunked() or other.is_chunked():
+        if then.dtype() == other.dtype():
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                if then.dtype() == DataType.of(D):
+                    return _choose_chunked_numeric[D](selected, then, other)
         return choose(selected, then.rechunk(), other.rechunk())
     if then.dtype().is_decimal() and other.dtype().is_decimal():
         # Decimals are stored as Int32, Int64 or Int128 by declared width.
