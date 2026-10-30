@@ -141,8 +141,18 @@ Each contract area is one compiled program, and compiling dominates the suite
 (6 to 13 minutes per program on a 64-core machine against 90 seconds of test
 execution in total), so CI runs the areas as parallel jobs:
 `pixi run test --areas AREA` once per area on Linux, after the native Parquet
-library is built once and its exported ABI checked. The `interchange` job then
-validates the actual writer artifacts with
+library is built once and its exported ABI checked. The Linux public area uses
+four module shards to bound individual compiler resource use:
+`pixi run test-cpu --areas public --shard-count 4 --shard-index 0`, repeated
+with indices `1`, `2` and `3`. Sorted modules cycle between shards; all
+tests in a module stay together. Their union covers ordinary tests, isolated
+expected failures and capability skips exactly once. Run metadata records
+the shard index and count. The unsharded command remains the default.
+An empty selection is an error, so use fewer shards when narrowing contracts.
+CI also passes `--compiler scripts/ci_mojo_public.sh` for these public shards
+to cap compiler workers at two. Optimization remains at the compiler's default
+`-O3`; the cap limits compilation concurrency, not runtime test threads.
+The `interchange` job then validates the actual writer artifacts with
 `pixi run -e oracle test-interchange-oracles`. On pull requests macOS runs the
 `public` and `interchange` areas; pushes to main, the nightly schedule and
 manual runs cover every area there. Runner failure handling, formatting,
