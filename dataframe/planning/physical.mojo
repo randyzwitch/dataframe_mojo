@@ -72,6 +72,7 @@ from dataframe.planning.graph import (
     plan_collect_graph,
     plan_columns_of,
     plan_compact_scan_slots,
+    plan_filters_rows,
     plan_estimated_rows,
     plan_filtered_table,
     plan_graph_step,
@@ -230,6 +231,7 @@ def plan_swap_join_sides(
     join.right = build
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_join_sides")
@@ -296,6 +298,7 @@ def plan_swap_left_join_sides(
     join.how = JOIN_RIGHT
     join.text = "right"
     join.coalesce = False
+    join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_left_join_sides")
@@ -797,10 +800,73 @@ def plan_cost_order_joins(
         var aggregated = List[Bool](capacity=n)
         for r in range(n):
             tables.append(plan_spine_rows(self, relations[r]))
-            estimates.append(plan_relation_estimate(self, relations[r]))
             aggregated.append(plan_aggregated(self, relations[r]))
+        # A relation that narrows its table becomes a build side, which
+        # runs in full whatever the order, unless it is the largest input
+        # and streams: run it now and count it, rather than sample its
+        # filter and then run it anyway. Its result replaces it, so
+        # nothing runs twice, and its keys can then narrow the scans that
+        # probe it (`_push_join_key_sets`), as the measured chain order
+        # (`_order_chain`) does. A relation that narrows nothing yields
+        # exactly its table's rows, and a narrowing one at most its
+        # table's: one whose table is no larger than some relation that
+        # narrows nothing can never be the largest input. A narrowing
+        # relation larger than all of those is estimated instead; when
+        # every relation narrows, the one of the largest table is.
+        var narrows = List[Bool](capacity=n)
+        var widest_plain = -1
+        var largest = 0
+        for r in range(n):
+            narrows.append(
+                self._nodes[relations[r]].kind != SCAN_FRAME
+                and plan_filters_rows(self, relations[r])
+            )
+            if not narrows[r]:
+                widest_plain = max(widest_plain, tables[r])
+            if tables[r] > tables[largest]:
+                largest = r
+        for r in range(n):
+            if narrows[r] and (
+                (tables[r] >= 0 and tables[r] <= widest_plain)
+                or (widest_plain < 0 and r != largest)
+            ):
+                estimates.append(-1)
+            else:
+                estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
                 runs.append(r)
+        # Filters comparing a column of one relation with a column of
+        # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
+        # which the estimate counts as join conditions.
+        var compares = List[FilterEdge]()
+        for f in filters:
+            for part in conjuncts(self._nodes[f].exprs[0]):
+                var compare = _comparison_edge(part, provider)
+                if compare:
+                    compares.append(compare.take())
+        # Each compared column's distinct count, where its relation's
+        # table keeps statistics: DuckDB's estimator then takes a set's
+        # domain as the largest count among its columns. Read before any
+        # relation runs, from the tables under them: DuckDB keeps a
+        # column's base-table count whatever filters narrow it.
+        var compared = List[Tuple[Int, String]]()
+        for e in edges:
+            for i in range(len(e.a_keys)):
+                compared.append((e.a, e.a_keys[i]))
+                compared.append((e.b, e.b_keys[i]))
+        for f in compares:
+            compared.append((f.a, f.a_column))
+            compared.append((f.b, f.b_column))
+        var distinct = Dict[String, Float64]()
+        for pair in compared:
+            var key = String(pair[0]) + "/" + pair[1]
+            if key in distinct:
+                continue
+            # Through renames: a relation's key is often an alias of its
+            # table's column (TPC-DS's d1_sk for d_date_sk).
+            var count = plan_spine_distinct(self, relations[pair[0]], pair[1])
+            if count > 0:
+                distinct[key] = Float64(count)
         # Relations that must run to be counted are independent
         # pipelines: run them at once, as Polars and DuckDB run
         # independent pipelines (`_prefetch_breakers`), not one after
@@ -839,27 +905,9 @@ def plan_cost_order_joins(
             var estimated = estimates[r]
             rows.append(Float64(estimated))
             domains.append(Float64(table if table > 0 else estimated))
-        # Filters comparing a column of one relation with a column of
-        # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
-        # which the estimate counts as join conditions.
-        var compares = List[FilterEdge]()
-        for f in filters:
-            for part in conjuncts(self._nodes[f].exprs[0]):
-                var compare = _comparison_edge(part, provider)
-                if compare:
-                    compares.append(compare.take())
-        # Each compared column's distinct count, where its relation's
-        # table keeps statistics: DuckDB's estimator then takes a set's
-        # domain as the largest count among its columns.
-        var compared = List[Tuple[Int, String]]()
-        for e in edges:
-            for i in range(len(e.a_keys)):
-                compared.append((e.a, e.a_keys[i]))
-                compared.append((e.b, e.b_keys[i]))
-        for f in compares:
-            compared.append((f.a, f.a_column))
-            compared.append((f.b, f.b_column))
-        var distinct = Dict[String, Float64]()
+        # An aggregate relation that ran is a new table with statistics
+        # of its own (`ExtractAggregationStats`): its columns' counts are
+        # read now.
         for pair in compared:
             var key = String(pair[0]) + "/" + pair[1]
             if key in distinct:

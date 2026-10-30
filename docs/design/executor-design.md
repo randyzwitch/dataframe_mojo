@@ -205,11 +205,12 @@ once. The main thread does no per-morsel work.
 
 ### Order
 
-Joins keep the documented left-major order only where the plan above
-can see it (`_order_free_above` decides today); otherwise output morsels
-take probe order, as Polars does without `preserve_order_probe`. Ordered
-sinks use the morsel sequence. A sort or top-k above a join sees ties in
-probe order, which is the same contract Polars has had since 1.0.
+Joins promise no row order (since 2026-10-29), as DuckDB's and Polars'
+default joins do: output morsels take probe order and either side may
+build, so `_order_free_above` treats any join as the end of order
+significance. Ordered sinks use the morsel sequence. A sort or top-k
+above a join sees ties in probe order, which is the same contract Polars
+has had since 1.0.
 
 ### What it replaces
 

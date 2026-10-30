@@ -120,6 +120,11 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var json_schema: Optional[DataType]
     var dataset: Optional[DatasetSpec]
     var dataset_projected: Bool
+    # A JOIN whose build side a swap already chose: no swap rule flips it
+    # again, as DuckDB's build/probe optimizer decides a join's sides
+    # once. Without this a swap made on a low estimate could flip back
+    # once the other side's real height is known, and again after that.
+    var sides_fixed: Bool
 
     def has_dataset(self) -> Bool:
         return Bool(self.dataset)
@@ -474,6 +479,7 @@ def _plan_node(
         json_schema.copy(),
         dataset.copy(),
         dataset_projected,
+        False,
     )
 
 

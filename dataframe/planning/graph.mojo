@@ -698,6 +698,27 @@ def plan_live_parents(self: QueryContext, root: Int) -> List[Int]:
     return parents^
 
 
+def _order_from_join(self: QueryContext, index: Int) -> Bool:
+    """Whether node `index`'s rows come in a join's order, through steps
+    that keep their input's order: a join promises none."""
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == JOIN:
+            return True
+        if not (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _row_local(node.exprs)
+            )
+        ):
+            return False
+        cursor = node.left
+    return False
+
+
 def plan_order_free_above(
     self: QueryContext,
     top: Int,
@@ -706,24 +727,20 @@ def plan_order_free_above(
 ) -> Bool:
     """Whether the plan above `top` gives the same result whatever
     order `top`'s rows arrive in: row-local steps up to an aggregation
-    that reads no row position. With `through_joins`, inner, left, semi
-    and anti joins on the way pass any order on, as they keep their
-    inputs' rows."""
+    that reads no row position, or up to a join. A join promises no row
+    order (as DuckDB's and Polars' joins by default), so neither the
+    order of its inputs nor its own output's order can show; `top` made
+    by a join through row-local steps is free for the same reason.
+    `through_joins` is kept for callers and no longer changes the
+    answer."""
+    _ = through_joins
+    if _order_from_join(self, top):
+        return True
     var cursor = parents[top]
     while cursor >= 0:
         ref node = self._nodes[cursor]
-        if (
-            through_joins
-            and node.kind == JOIN
-            and (
-                node.how == JOIN_INNER
-                or node.how == JOIN_LEFT
-                or node.how == JOIN_SEMI
-                or node.how == JOIN_ANTI
-            )
-        ):
-            cursor = parents[cursor]
-            continue
+        if node.kind == JOIN:
+            return True
         if node.kind == AGG:
             return not node.maintain_order and _order_insensitive(node.exprs)
         if node.kind == SORT:
@@ -938,29 +955,29 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
     return max(left, right)
 
 
-def plan_spine_distinct(
+def plan_spine_source(
     self: QueryContext, index: Int, name: String
-) raises -> Int:
-    """Column `name`'s distinct count from the statistics of the table
-    under `index`, along the steps `plan_spine_frame` follows and through
-    renames: a projection naming a plain column reference reads its
-    source column's count, as DuckDB's `ExtractProjectionStats` carries a
-    column's distinct count through a projection by its binding. -1 for
-    a computed column, no table under it, or a table without
-    statistics."""
+) raises -> Optional[Tuple[Int, String]]:
+    """The table slot and column that column `name` of node `index` reads,
+    along the steps `plan_spine_frame` follows and through renames: a
+    projection naming a plain column reference reads its source column,
+    as DuckDB binds a projected column to its child's. None for a
+    computed column or no table under it."""
     var column = name
     var cursor = index
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == SCAN_FRAME:
-            return self._frames[node.source_slot()]._distinct_count(column)
+            if column not in self._frames[node.source_slot()].columns():
+                return None
+            return Optional((node.source_slot(), column))
         if (node.kind == SELECT or node.kind == WITH_COLUMNS) and _stream_rows(
             node
         ):
             for expr in node.exprs:
                 if expr._name == column:
                     if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
-                        return -1
+                        return None
                     column = expr._nodes[0].text
                     break
             cursor = node.left
@@ -980,8 +997,23 @@ def plan_spine_distinct(
         ):
             cursor = node.left
             continue
+        return None
+    return None
+
+
+def plan_spine_distinct(
+    self: QueryContext, index: Int, name: String
+) raises -> Int:
+    """Column `name`'s distinct count from the statistics of the table
+    under `index`, through renames (`plan_spine_source`), as DuckDB's
+    `ExtractProjectionStats` carries a column's distinct count through a
+    projection by its binding. -1 for a computed column, no table under
+    it, or a table without statistics."""
+    var source = plan_spine_source(self, index, name)
+    if not source:
         return -1
-    return -1
+    var found = source.value()
+    return self._frames[found[0]]._distinct_count(found[1])
 
 
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:

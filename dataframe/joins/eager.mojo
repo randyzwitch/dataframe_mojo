@@ -133,6 +133,7 @@ def join_frames(
             coalesce=coalesce,
             prepared=None,
             range_filtered=range_filtered,
+            keep_order=keep_order,
         )
     var left_keys = List[Int]()
     var right_keys = List[Int]()
@@ -205,6 +206,7 @@ def join_frames(
             how=how,
             suffix=suffix,
             coalesce=coalesce,
+            keep_order=keep_order,
         ).drop(helpers)
     var keep_right_keys = not coalesce and how != JOIN_SEMI and how != JOIN_ANTI
     var right_output = List[Int]()
@@ -245,6 +247,7 @@ def join_frames(
                     suffix=suffix,
                     coalesce=coalesce,
                     range_filtered=True,
+                    keep_order=keep_order,
                 )
     if prepared:
         var sources = List[Series](capacity=len(left_keys))
