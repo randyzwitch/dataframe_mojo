@@ -456,14 +456,17 @@ def plan_stream_execute(
                 node.how == JOIN_INNER
                 and not node.sides_fixed
                 and bound >= 0
-                and built.height() > bound
+                and built.height() * max(built.width(), 1)
+                > bound * max(len(plan_columns_of(self, node.left)), 1)
                 and not plan_progression_key(self, node.right, node.right_keys)
             ):
-                # The built right side holds more rows than the left
-                # can, and is no progression (above): hash the left
-                # instead and stream the right
-                # through it, as DuckDB's build/probe side optimizer
-                # and Polars' join both build on the smaller side.
+                # The built right side costs more to hash than the left
+                # can, in rows times columns as the planner's build side
+                # and DuckDB's build/probe side optimizer count it, and
+                # is no progression (above): hash the left instead and
+                # stream the right through it. Rows alone flipped TPC-DS
+                # q12's planned build of 6,693 three-column rows for
+                # 5,323 six-column items, restarting the pipeline.
                 # A join promises no row order, and the stream
                 # keeps every worker busy over the larger side, where
                 # probing from a small left ran its few morsels on one
