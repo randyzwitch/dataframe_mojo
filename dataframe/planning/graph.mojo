@@ -938,6 +938,52 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
     return max(left, right)
 
 
+def plan_spine_distinct(
+    self: QueryContext, index: Int, name: String
+) raises -> Int:
+    """Column `name`'s distinct count from the statistics of the table
+    under `index`, along the steps `plan_spine_frame` follows and through
+    renames: a projection naming a plain column reference reads its
+    source column's count, as DuckDB's `ExtractProjectionStats` carries a
+    column's distinct count through a projection by its binding. -1 for
+    a computed column, no table under it, or a table without
+    statistics."""
+    var column = name
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.source_slot()]._distinct_count(column)
+        if (node.kind == SELECT or node.kind == WITH_COLUMNS) and _stream_rows(
+            node
+        ):
+            for expr in node.exprs:
+                if expr._name == column:
+                    if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                        return -1
+                    column = expr._nodes[0].text
+                    break
+            cursor = node.left
+            continue
+        if (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                node.kind == JOIN
+                and (
+                    node.how == JOIN_INNER
+                    or node.how == JOIN_LEFT
+                    or node.how == JOIN_SEMI
+                    or node.how == JOIN_ANTI
+                )
+            )
+        ):
+            cursor = node.left
+            continue
+        return -1
+    return -1
+
+
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     """The in-memory table under `index`, along the steps
     `_spine_rows` follows and a left, semi or anti join's left input,
