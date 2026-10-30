@@ -25,9 +25,12 @@ from dataframe.lazy import AcceleratorBackend
 from dataframe.planning.device_placement import (
     CPU,
     PlacementProblem,
+    plan_pipeline_cuts,
+    plan_pipeline_estimates,
     plan_pipelines,
     solve_placement,
 )
+from dataframe.lazy_api import _solve_devices
 from tests.support.group_strategy_reference import ScopedEnvironment
 from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
@@ -452,6 +455,38 @@ def calibrate(path: String, keys: List[String], fixed_ns: Float64) raises:
     text += "}}"
     with open(path, "w") as target:
         target.write(text)
+
+
+def test_estimates_wait_until_a_device_can_run_a_unit() raises:
+    var plan = joined()._optimized()
+    var cuts = plan_pipeline_cuts(plan._plan)
+    var estimated = plan_pipelines(plan._plan)
+    assert_equal(len(cuts), len(estimated))
+    for p in range(len(cuts)):
+        assert_equal(cuts[p].key, estimated[p].key)
+        assert_equal(cuts[p].features.input_rows, -1)
+        assert_equal(cuts[p].output_bytes, -1)
+    plan_pipeline_estimates(plan._plan, cuts)
+    for p in range(len(cuts)):
+        assert_equal(
+            cuts[p].features.input_rows, estimated[p].features.input_rows
+        )
+        assert_equal(cuts[p].output_bytes, estimated[p].output_bytes)
+        assert_equal(cuts[p].working_bytes, estimated[p].working_bytes)
+    # No unit has a CPU cost, so none is compared and nothing is
+    # estimated, though the device would run every unit.
+    var path = String("build/test-device-placement-unrelated.json")
+    calibrate(path, ["pipeline:unrelated"], 1e6)
+    var calibrated = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var device = FakeDevice(-1, 0, 0)
+    var solved = _solve_devices(plan, device, device.devices())
+    for p in range(len(solved.units)):
+        assert_equal(solved.units[p].features.input_rows, -1)
+        assert_equal(solved.placement.devices[p], CPU)
+    # Explain still reports every unit's estimates.
+    solved = _solve_devices(plan, device, device.devices(), estimate_all=True)
+    assert_true(solved.units[0].features.input_rows >= 0)
+    _ = calibrated^
 
 
 def test_explain_reports_the_placement_it_would_make() raises:

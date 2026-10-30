@@ -53,7 +53,8 @@ from dataframe.planning.device_placement import (
     Placement,
     PlacementPipeline,
     PlacementProblem,
-    plan_pipelines,
+    plan_pipeline_cuts,
+    plan_pipeline_estimates,
     plan_substitute,
     plan_substitute_node,
     plan_unit_region,
@@ -1056,7 +1057,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         limit: Optional[Int] = None,
         subset: List[String] = List[String](),
     ) raises -> Self:
-        """Fill nulls by strategy over the whole input; see DataFrame.fill_null."""
+        """Fill nulls by strategy over the whole input; see DataFrame.fill_null.
+        """
         var run_limit = self._input_schema()._fill_strategy_limit(
             strategy, limit, subset
         )
@@ -1067,7 +1069,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
 
     def fill_nan(self, value: Float64) raises -> Self:
-        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes.
+        """
         return self.fill_nan(lit(value))
 
     def fill_nan(self, value: Expr) raises -> Self:
@@ -2635,12 +2638,32 @@ struct _DevicePlacement(Movable):
 def _solve_devices[
     B: AcceleratorBackend
 ](
-    plan: LazyFrame, backend: B, var devices: List[DeviceInfo]
+    plan: LazyFrame,
+    backend: B,
+    var devices: List[DeviceInfo],
+    estimate_all: Bool = False,
 ) raises -> _DevicePlacement:
-    var units = plan_pipelines(plan._plan)
+    """Cut the plan into units, ask each device which it runs, and estimate
+    rows and bytes only when one does: with nothing to compare, every unit
+    stays on the CPU and the estimates (which sample filters) are skipped,
+    unless `estimate_all` asks for them, as `explain` does."""
+    var units = plan_pipeline_cuts(plan._plan)
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
     var cpu_costs = load_costs("cpu")
+    # A device is compared only against a measured CPU cost.
+    var supported = List[List[Bool]]()
+    var any_supported = False
+    for p in range(len(units)):
+        var row = List[Bool](length=len(devices), fill=False)
+        if units[p].key in cpu_costs:
+            var region = _from_context(units[p].region.copy())
+            for d in range(len(devices)):
+                row[d] = backend.pipeline_supports(region, devices[d].ordinal)
+                any_supported |= row[d]
+        supported.append(row^)
+    if any_supported or estimate_all:
+        plan_pipeline_estimates(plan._plan, units)
     for d in range(len(devices)):
         var model = backend.transfer_model(devices[d].ordinal)
         problem.transfers[d + 1] = model.copy()
@@ -2660,10 +2683,9 @@ def _solve_devices[
             ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var region = _from_context(unit.region.copy())
         for d in range(len(devices)):
-            # A device is compared only against a measured CPU cost.
             if problem.run_ns[p][_PLACE_CPU] < 0:
                 continue
-            if backend.pipeline_supports(region, devices[d].ordinal):
+            if supported[p][d]:
                 problem.run_ns[p][d + 1] = backend.pipeline_estimate(
                     region, devices[d].ordinal, unit.features
                 )
@@ -2680,7 +2702,7 @@ def _device_placement_lines[
     var found = backend.devices()
     if len(found) == 0:
         return String()
-    var solved = _solve_devices(plan, backend, found^)
+    var solved = _solve_devices(plan, backend, found^, estimate_all=True)
     ref devices = solved.devices
     ref units = solved.units
     ref problem = solved.problem
@@ -3569,7 +3591,8 @@ def _handoff_context(plan: QueryContext) raises -> DataFrame:
 
 
 def _from_context(var context: QueryContext) -> LazyFrame:
-    """Move internal plan state into the public facade without copying buffers."""
+    """Move internal plan state into the public facade without copying buffers.
+    """
     # Initialize through the existing constructor, then transfer the context
     # whole. Empty lists need no source storage or intermediate plan copies.
     var result = LazyFrame(
