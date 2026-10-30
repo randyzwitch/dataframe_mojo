@@ -1434,6 +1434,7 @@ def _unary_int[
         return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
+@always_inline
 def _write_unary_int[
     op: Int, D: DType
 ](
