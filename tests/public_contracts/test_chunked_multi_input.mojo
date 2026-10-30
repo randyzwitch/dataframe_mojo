@@ -326,6 +326,8 @@ def _binary_poison[D: DType]() raises:
     observed[17] = False
     var scalar = Series("x", Column[Scalar[D]]([Scalar[D](1)]))
     var output = binary[ADD](source, scalar, observed)
+    assert_equal(output._data[Column[Scalar[D]]]._get(17), Scalar[D](0))
+    assert_equal(output._data[Column[Scalar[D]]]._get(23), Scalar[D](0))
     for row in range(41):
         assert_equal(output.get(row).is_null(), row == 17 or row == 23)
         if row != 17 and row != 23:
@@ -386,3 +388,230 @@ def test_chunked_binary_zero_divisors_powers_and_one_row_physical_chunks() raise
     assert_equal(base._chunked.value()[].cache[].state.load(), Int64(0))
     assert_equal(exponent._chunked.value()[].cache[].state.load(), Int64(0))
     assert_equal(poison._chunked.value()[].cache[].state.load(), Int64(0))
+
+
+def _dense_numeric_windows[D: DType]() raises:
+    var av = List[Scalar[D]]()
+    var bv = List[Scalar[D]]()
+    for row in range(60):
+        av.append(Scalar[D](3 + row % 5))
+        bv.append(Scalar[D](2 + row % 3))
+    var flat_a = Series("x", Column[Scalar[D]](av^)).slice(13, 41)
+    var flat_b = Series("x", Column[Scalar[D]](bv^)).slice(13, 41)
+    var a = _pieces(flat_a, [3, 21, 17])
+    var b = _pieces(flat_b, [5, 17, 19])
+    comptime if D == DType.int8 or D == DType.int16 or D == DType.int32:
+        comptime ops = (ADD, SUB, MUL)
+        comptime for k in range(len(ops)):
+            comptime op = ops[k]
+            var want = List[Scalar[D]]()
+            for row in range(41):
+                var x = 3 + (row + 13) % 5
+                var y = 2 + (row + 13) % 3
+                want.append(
+                    Scalar[D](
+                        x + y if op == ADD else x - y if op == SUB else x * y
+                    )
+                )
+            assert_frame(
+                DataFrame([binary[op](a, b).renamed("x")]),
+                DataFrame([Series("x", Column[Scalar[D]](want^))]),
+            )
+    var comparisons = List[Bool]()
+    for row in range(41):
+        comparisons.append(3 + (row + 13) % 5 > 2 + (row + 13) % 3)
+    assert_frame(
+        DataFrame([binary[GT](a, b).renamed("x")]),
+        DataFrame([Series("x", BoolColumn(comparisons))]),
+    )
+    for chunk_a in [False, True]:
+        for chunk_b in [False, True]:
+            for kind in [H_MIN, H_MAX]:
+                var inputs = List[Series]()
+                inputs.append(a.copy() if chunk_a else flat_a.copy())
+                inputs.append(b.copy() if chunk_b else flat_b.copy())
+                var actual = horizontal(
+                    kind,
+                    True,
+                    inputs^,
+                    DataType.of(D),
+                    DataType.of(D),
+                    0,
+                    41,
+                    List[Bool](),
+                )
+                var want = List[Scalar[D]]()
+                for row in range(41):
+                    var x = 3 + (row + 13) % 5
+                    var y = 2 + (row + 13) % 3
+                    want.append(
+                        Scalar[D](min(x, y) if kind == H_MIN else max(x, y))
+                    )
+                assert_frame(
+                    DataFrame([actual.renamed("x")]),
+                    DataFrame([Series("x", Column[Scalar[D]](want^))]),
+                )
+    assert_equal(a._chunked.value()[].cache[].state.load(), Int64(0))
+    assert_equal(b._chunked.value()[].cache[].state.load(), Int64(0))
+
+
+def test_dense_multi_input_simd_and_extrema_keep_contiguous_and_chunked_inputs() raises:
+    _dense_numeric_windows[DType.int8]()
+    _dense_numeric_windows[DType.int16]()
+    _dense_numeric_windows[DType.int32]()
+    _dense_numeric_windows[DType.int64]()
+    _dense_numeric_windows[DType.uint8]()
+    _dense_numeric_windows[DType.uint16]()
+    _dense_numeric_windows[DType.uint32]()
+    _dense_numeric_windows[DType.uint64]()
+    _dense_numeric_windows[DType.float32]()
+    _dense_numeric_windows[DType.float64]()
+
+
+def _mixed_bitmap_source[D: DType](left: Bool) raises -> Series:
+    var parts = List[Series]()
+    var base = 0
+    var sizes: List[Int] = [3, 17, 21] if left else [5, 9, 27]
+    for chunk in range(3):
+        var values = List[Scalar[D]]()
+        var valid = List[Bool]()
+        for relative in range(sizes[chunk] + 2):
+            var row = base + relative - 1
+            values.append(Scalar[D](row % 9 + 12 if left else row % 3 + 1))
+            valid.append(row % 7 != 0 if left else row % 5 != 0)
+        var part = Series("x", Column[Scalar[D]](values^, valid)).slice(
+            1, sizes[chunk]
+        ) if chunk == 1 else Series("x", Column[Scalar[D]](values^)).slice(
+            1, sizes[chunk]
+        )
+        parts.append(part^)
+        base += sizes[chunk]
+    return Series._from_chunks(parts)
+
+
+def _mixed_bitmap_inputs[D: DType]() raises:
+    var a = _mixed_bitmap_source[D](True)
+    var b = _mixed_bitmap_source[D](False)
+    var selected = List[Bool]()
+    var sum_values = List[Scalar[D]]()
+    var sum_valid = List[Bool]()
+    var picked = List[Scalar[D]]()
+    var pick_valid = List[Bool]()
+    for row in range(41):
+        var av = row < 3 or row >= 20 or row % 7 != 0
+        var bv = row < 5 or row >= 14 or row % 5 != 0
+        var x = row % 9 + 12
+        var y = row % 3 + 1
+        var take = row % 2 == 0
+        selected.append(take)
+        sum_values.append(Scalar[D](x + y))
+        sum_valid.append(av and bv)
+        picked.append(Scalar[D](x if take else y))
+        pick_valid.append(av if take else bv)
+    assert_frame(
+        DataFrame([binary[ADD](a, b).renamed("x")]),
+        DataFrame([Series("x", Column[Scalar[D]](sum_values^, sum_valid))]),
+    )
+    assert_frame(
+        DataFrame([choose(selected, a, b).renamed("x")]),
+        DataFrame([Series("x", Column[Scalar[D]](picked^, pick_valid))]),
+    )
+    var null = Series("x", Column[Scalar[D]]([Scalar[D](99)], [False]))
+    var all_null = binary[ADD](a, null)
+    for row in range(41):
+        assert_true(all_null.get(row).is_null())
+        assert_equal(all_null._data[Column[Scalar[D]]]._get(row), Scalar[D](0))
+    assert_equal(a._chunked.value()[].cache[].state.load(), Int64(0))
+    assert_equal(b._chunked.value()[].cache[].state.load(), Int64(0))
+
+
+def test_multi_input_bitless_nullable_bitless_windows_and_null_scalar() raises:
+    _mixed_bitmap_inputs[DType.int64]()
+    _mixed_bitmap_inputs[DType.float32]()
+    _mixed_bitmap_inputs[DType.float64]()
+
+
+def _floating_multi_edges[D: DType]() raises:
+    var nan = Scalar[D](0) / Scalar[D](0)
+    var inf = Scalar[D](1) / Scalar[D](0)
+    var xs: List[Scalar[D]] = [nan, inf, -inf, -0.0, 0.0, -2, 4, 1]
+    var ys: List[Scalar[D]] = [nan, 0.5, 2, 0.0, -0.0, 0.5, 0, nan]
+    var av = List[Scalar[D]]()
+    var bv = List[Scalar[D]]()
+    for row in range(50):
+        av.append(xs[row % 8])
+        bv.append(ys[row % 8])
+    var flat_a = Series("x", Column[Scalar[D]](av^)).slice(1, 33)
+    var flat_b = Series("x", Column[Scalar[D]](bv^)).slice(1, 33)
+    var a = _pieces(flat_a, [2, 17, 14])
+    var b = _pieces(flat_b, [3, 16, 14])
+    comptime ops = (
+        ADD,
+        SUB,
+        MUL,
+        DIV,
+        FLOORDIV,
+        MOD,
+        POW,
+        CLIP_LOW,
+        CLIP_HIGH,
+        GT,
+        LT,
+        GE,
+        LE,
+        EQ,
+        NE,
+    )
+    comptime for k in range(len(ops)):
+        comptime op = ops[k]
+        assert_frame(
+            DataFrame([binary[op](a, b).renamed("x")]),
+            DataFrame([binary[op](flat_a, flat_b).renamed("x")]),
+        )
+    var neq = List[Bool]()
+    for row in range(33):
+        var slot = (row + 1) % 8
+        neq.append(slot != 3 and slot != 4)
+    assert_frame(
+        DataFrame([binary[NE](a, b).renamed("x")]),
+        DataFrame([Series("x", BoolColumn(neq))]),
+    )
+    var selected = List[Bool]()
+    var picked = List[Scalar[D]]()
+    for row in range(33):
+        var take = row % 2 == 0
+        selected.append(take)
+        picked.append(xs[(row + 1) % 8] if take else ys[(row + 1) % 8])
+    assert_frame(
+        DataFrame([choose(selected, a, b).renamed("x")]),
+        DataFrame([Series("x", Column[Scalar[D]](picked^))]),
+    )
+    var mins: List[Scalar[D]] = [nan, 0.5, -inf, -0.0, 0.0, -2, 0, 1]
+    var maxs: List[Scalar[D]] = [nan, inf, 2, -0.0, 0.0, 0.5, 4, 1]
+    for kind in [H_MIN, H_MAX]:
+        var want = List[Scalar[D]]()
+        for row in range(33):
+            want.append(
+                mins[(row + 1) % 8] if kind == H_MIN else maxs[(row + 1) % 8]
+            )
+        var actual = horizontal(
+            kind,
+            True,
+            [a.copy(), b.copy()],
+            DataType.of(D),
+            DataType.of(D),
+            0,
+            33,
+            List[Bool](),
+        )
+        assert_frame(
+            DataFrame([actual.renamed("x")]),
+            DataFrame([Series("x", Column[Scalar[D]](want^))]),
+        )
+    assert_equal(a._chunked.value()[].cache[].state.load(), Int64(0))
+    assert_equal(b._chunked.value()[].cache[].state.load(), Int64(0))
+
+
+def test_multi_input_float_nan_infinity_signed_zero_and_power_edges() raises:
+    _floating_multi_edges[DType.float32]()
+    _floating_multi_edges[DType.float64]()

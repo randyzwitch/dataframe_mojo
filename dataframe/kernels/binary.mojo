@@ -2384,6 +2384,10 @@ def _chunk_binary_block[
         values.unsafe_ptr().unsafe_store(output, result.cast[D]())
     else:
         if len(valid) != 0 and not _bit(Span(valid), output):
+            comptime if op == DIV:
+                floats[output] = 0
+            else:
+                values[output] = 0
             return
         var x = left.values[1](relative)[0]
         var y = right.values[1](relative)[0]
@@ -2393,6 +2397,7 @@ def _chunk_binary_block[
             floats[output] = x.cast[DType.float64]() / y.cast[DType.float64]()
         elif op == FLOORDIV or op == MOD:
             if y == 0:
+                values[output] = 0
                 _clear_validity(valid, n, output)
             else:
                 values[output] = _int_binary[op, D](x, y)
@@ -2487,10 +2492,8 @@ def _chunk_numeric_binary[
     comptime predicate = is_comparison(op)
     comptime floating = not D.is_floating_point() and op == DIV
     var count = 0 if predicate or floating else n
-    var values = List[Scalar[D]](
-        unsafe_uninit_length=count
-    ) if D.is_floating_point() else List[Scalar[D]](length=count, fill=0)
-    var floats = List[Float64](length=n if floating else 0, fill=0)
+    var values = List[Scalar[D]](unsafe_uninit_length=count)
+    var floats = List[Float64](unsafe_uninit_length=n if floating else 0)
     var predicates = List[UInt8](
         length=(n + 7) // 8 if predicate else 0, fill=0
     )
