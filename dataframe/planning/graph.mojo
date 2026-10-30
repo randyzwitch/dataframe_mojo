@@ -955,6 +955,67 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
     return max(left, right)
 
 
+def plan_spine_source(
+    self: QueryContext, index: Int, name: String
+) raises -> Optional[Tuple[Int, String]]:
+    """The table slot and column that column `name` of node `index` reads,
+    along the steps `plan_spine_frame` follows and through renames: a
+    projection naming a plain column reference reads its source column,
+    as DuckDB binds a projected column to its child's. None for a
+    computed column or no table under it."""
+    var column = name
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == SCAN_FRAME:
+            if column not in self._frames[node.source_slot()].columns():
+                return None
+            return Optional((node.source_slot(), column))
+        if (node.kind == SELECT or node.kind == WITH_COLUMNS) and _stream_rows(
+            node
+        ):
+            for expr in node.exprs:
+                if expr._name == column:
+                    if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                        return None
+                    column = expr._nodes[0].text
+                    break
+            cursor = node.left
+            continue
+        if (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                node.kind == JOIN
+                and (
+                    node.how == JOIN_INNER
+                    or node.how == JOIN_LEFT
+                    or node.how == JOIN_SEMI
+                    or node.how == JOIN_ANTI
+                )
+            )
+        ):
+            cursor = node.left
+            continue
+        return None
+    return None
+
+
+def plan_spine_distinct(
+    self: QueryContext, index: Int, name: String
+) raises -> Int:
+    """Column `name`'s distinct count from the statistics of the table
+    under `index`, through renames (`plan_spine_source`), as DuckDB's
+    `ExtractProjectionStats` carries a column's distinct count through a
+    projection by its binding. -1 for a computed column, no table under
+    it, or a table without statistics."""
+    var source = plan_spine_source(self, index, name)
+    if not source:
+        return -1
+    var found = source.value()
+    return self._frames[found[0]]._distinct_count(found[1])
+
+
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     """The in-memory table under `index`, along the steps
     `_spine_rows` follows and a left, semi or anti join's left input,
