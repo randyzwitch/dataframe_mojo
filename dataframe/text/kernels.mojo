@@ -70,6 +70,10 @@ def _slice(text: String, offset: Int, length: Int) -> String:
 def string_op(
     node: Node, input: Series, compiled: Optional[Regex] = None
 ) raises -> Series:
+    if node.op == STR_LEN_BYTES:
+        return string_lengths[False](input)
+    if node.op == STR_LEN_CHARS:
+        return string_lengths[True](input)
     if input.is_chunked():
         return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
@@ -137,10 +141,6 @@ def string_op(
         return Series(
             "", slice_strings(column, Int(node.integer), node.min_count)
         )
-    if node.op == STR_LEN_BYTES:
-        return string_lengths[False](column)
-    if node.op == STR_LEN_CHARS:
-        return string_lengths[True](column)
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):

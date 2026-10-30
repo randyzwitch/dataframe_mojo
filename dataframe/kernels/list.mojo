@@ -3,7 +3,7 @@ and struct field access. Nulls propagate: a null list row gives a null
 result, and a null struct row makes every field null."""
 from std.math import isnan
 from dataframe.storage.boolean import BoolColumn
-from dataframe.storage.column import Column
+from dataframe.storage.column import Column, _append_validity
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     LIST_CONTAINS,
@@ -19,7 +19,7 @@ from dataframe.expr import (
     STRUCT_FIELD,
     Node,
 )
-from dataframe.storage.nested import ListColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.regex import Regex
 from dataframe.text.regex_adapter import (
     compile_pattern,
@@ -39,7 +39,26 @@ def nested_op(
     input_dtype: DataType,
     compiled: Optional[Regex] = None,
 ) raises -> Series:
+    from dataframe.storage.nested_merge import _child
+
     if input.is_chunked():
+        if node.op == LIST_LEN:
+            return _chunked_list_len(input)
+        if node.op == STRUCT_FIELD and input.dtype().is_struct():
+            var fields = List[Series]()
+            ref chunks = input._chunked.value()[]
+            for storage in chunks.arrays:
+                fields.append(
+                    _struct_field_column(storage[StructColumn], node.text)
+                )
+            if fields[0].dtype().is_categorical():
+                for field in fields:
+                    if field.dtype() != fields[0].dtype():
+                        # Struct schemas encode the categorical type without
+                        # its domain. Reconcile different child dictionaries
+                        # once, without merging any unselected fields.
+                        return _child(fields)
+            return Series._from_chunks(fields)
         return nested_op(node, input.rechunk(), input_dtype, compiled)
     if node.op == STR_SPLIT:
         if node.min_count > 0:
@@ -72,6 +91,21 @@ def nested_op(
     if node.op == LIST_JOIN:
         return _join(lists, node.text)
     return _reduce(lists, node.op)
+
+
+def _chunked_list_len(input: Series) raises -> Series:
+    """Read only list offsets and parent validity into one numeric output."""
+    var lengths = List[Int64](unsafe_uninit_length=len(input))
+    var bits = List[UInt8]()
+    var base = 0
+    ref chunks = input._chunked.value()[]
+    for storage in chunks.arrays:
+        ref lists = storage[ListColumn]
+        for row in range(len(lists)):
+            lengths[base + row] = Int64(lists.element_count(row))
+        _append_validity(bits, base, lists._bits[], lists._offset, len(lists))
+        base += len(lists)
+    return Series("", Column[Int64](values=lengths^, bits=bits^))
 
 
 def _split_regex(
@@ -323,7 +357,10 @@ def _reduce(lists: ListColumn, op: Int) raises -> Series:
 
 def _struct_field(input: Series, name: String) raises -> Series:
     """One field, null wherever the struct row itself is null."""
-    var structs = input.struct_column()
+    return _struct_field_column(input.struct_column(), name)
+
+
+def _struct_field_column(structs: StructColumn, name: String) raises -> Series:
     var field = structs.field(name)
     if structs.null_count() == 0:
         return field.renamed("")
