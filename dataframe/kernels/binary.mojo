@@ -2281,12 +2281,268 @@ def _missing_compare[equal: Bool](left: Series, right: Series) raises -> Series:
     return Series("", BoolColumn(values=values^, bits=List[UInt8](), length=n))
 
 
+def _numeric_operand_bits[D: DType](input: Series, n: Int) -> List[UInt8]:
+    if input.is_chunked() and len(input) == 1:
+        var scalar = _NumericInput[D](input)
+        if len(scalar.column._bits[]) == 0:
+            return List[UInt8]()
+        return List[UInt8](
+            length=(n + 7) // 8,
+            fill=UInt8(255) if scalar.column._valid(0) else UInt8(0),
+        )
+    if not input.is_chunked():
+        ref column = input._data[Column[Scalar[D]]]
+        if len(column._bits[]) == 0:
+            return List[UInt8]()
+        return _window_bytes(
+            column._bits[], column._offset, len(column), n, 255
+        )
+    var bits = List[UInt8]()
+    var length = 0
+    ref chunks = input._chunked.value()[]
+    for chunk in range(len(chunks.arrays)):
+        ref column = chunks.arrays[chunk][Column[Scalar[D]]]
+        _append_validity(
+            bits, length, column._bits[], column._offset, len(column)
+        )
+        length += len(column)
+    return bits^
+
+
+def _joined_numeric_bits[
+    D: DType
+](left: Series, right: Series, n: Int) -> List[UInt8]:
+    var a = _numeric_operand_bits[D](left, n)
+    var b = _numeric_operand_bits[D](right, n)
+    if len(a) == 0:
+        return b^
+    if len(b) == 0:
+        return a^
+    for k in range(len(a)):
+        a[k] &= b[k]
+    return a^
+
+
+@always_inline
+def _chunk_binary_block[
+    op: Int, D: DType, W: Int
+](
+    left: _NumericInput[D],
+    right: _NumericInput[D],
+    relative: Int,
+    output: Int,
+    n: Int,
+    mut valid: List[UInt8],
+    mut values: List[Scalar[D]],
+    mut floats: List[Float64],
+    mut predicates: List[UInt8],
+) raises:
+    comptime if is_comparison(op):
+        var result = _compare_lanes[op, D, W](
+            left.values[W](relative), right.values[W](relative)
+        ) & _packed_mask[W](Span(valid), output)
+        comptime if W == 8:
+            predicates[output // 8] = pack_bits[DType.uint8](result)
+        else:
+            comptime assert W == 1
+            predicates[output // 8] |= UInt8(result[0]) << UInt8(output % 8)
+    elif D.is_floating_point():
+        var x = left.values[W](relative)
+        var y = right.values[W](relative)
+        var result: SIMD[D, W]
+        comptime if op == ADD or op == SUB or op == MUL or op == DIV:
+            result = arithmetic[D, W](op, x, y)
+        else:
+            result = SIMD[D, W](0)
+            comptime for lane in range(W):
+                result[lane] = _float_scalar[op, D](x[lane], y[lane])
+        values.unsafe_ptr().unsafe_store(
+            output,
+            _packed_mask[W](Span(valid), output).select(result, SIMD[D, W](0)),
+        )
+    elif W > 1:
+        # Preserve the existing checked widening kernel for narrow signed
+        # arithmetic, including scalar rechecks of observed overflow lanes.
+        comptime L = DType.int32 if size_of[Scalar[D]]() <= 2 else DType.int64
+        var x = left.values[W](relative).cast[L]()
+        var y = right.values[W](relative).cast[L]()
+        if len(valid) != 0:
+            var active = _packed_mask[W](Span(valid), output)
+            x = active.select(x, SIMD[L, W](0))
+            y = active.select(y, SIMD[L, W](0))
+        var result = _lane_op[op, L, W](x, y)
+        if (
+            result.lt(SIMD[L, W](Scalar[L](Scalar[D].MIN)))
+            | result.gt(SIMD[L, W](Scalar[L](Scalar[D].MAX)))
+        ).reduce_or():
+            for lane in range(W):
+                if len(valid) == 0 or _bit(Span(valid), output + lane):
+                    _ = _int_binary[op, D](
+                        left.values[1](relative + lane)[0],
+                        right.values[1](relative + lane)[0],
+                    )
+        values.unsafe_ptr().unsafe_store(output, result.cast[D]())
+    else:
+        if len(valid) != 0 and not _bit(Span(valid), output):
+            return
+        var x = left.values[1](relative)[0]
+        var y = right.values[1](relative)[0]
+        comptime if op == ADD or op == SUB or op == MUL or op == POW:
+            values[output] = _int_binary[op, D](x, y)
+        elif op == DIV:
+            floats[output] = x.cast[DType.float64]() / y.cast[DType.float64]()
+        elif op == FLOORDIV or op == MOD:
+            if y == 0:
+                _clear_validity(valid, n, output)
+            else:
+                values[output] = _int_binary[op, D](x, y)
+        elif op == CLIP_LOW:
+            values[output] = max(x, y)
+        else:
+            values[output] = min(x, y)
+
+
+def _chunk_binary_walk[
+    op: Int, D: DType, W: Int
+](
+    left: Series,
+    right: Series,
+    n: Int,
+    mut valid: List[UInt8],
+    mut values: List[Scalar[D]],
+    mut floats: List[Float64],
+    mut predicates: List[UInt8],
+) raises:
+    var a = _NumericInput[D](left)
+    var b = _NumericInput[D](right)
+    var output = 0
+    while output < n:
+        var count = min(a.available(n - output), b.available(n - output))
+        var relative = 0
+        comptime if is_comparison(op):
+            while relative < count and (output + relative) % 8 != 0:
+                _chunk_binary_block[op, D, 1](
+                    a,
+                    b,
+                    relative,
+                    output + relative,
+                    n,
+                    valid,
+                    values,
+                    floats,
+                    predicates,
+                )
+                relative += 1
+        while relative + W <= count:
+            _chunk_binary_block[op, D, W](
+                a,
+                b,
+                relative,
+                output + relative,
+                n,
+                valid,
+                values,
+                floats,
+                predicates,
+            )
+            relative += W
+        while relative < count:
+            _chunk_binary_block[op, D, 1](
+                a,
+                b,
+                relative,
+                output + relative,
+                n,
+                valid,
+                values,
+                floats,
+                predicates,
+            )
+            relative += 1
+        a.advance(count)
+        b.advance(count)
+        output += count
+
+
+def _chunk_numeric_binary[
+    op: Int, width: Int, D: DType
+](left: Series, right: Series, mask: List[Bool]) raises -> Series:
+    var n = _length(len(left), len(right))
+    var dense_narrow = False
+    comptime narrow = (op == ADD or op == SUB or op == MUL) and (
+        D == DType.int8 or D == DType.int16 or D == DType.int32
+    )
+    comptime if narrow:
+        dense_narrow = (
+            len(mask) == 0
+            and n > 0
+            and left.null_count() == 0
+            and right.null_count() == 0
+        )
+    var valid = List[UInt8]()
+    if not dense_narrow:
+        valid = _joined_numeric_bits[D](left, right, n)
+        comptime if not D.is_floating_point():
+            _apply_mask(valid, n, mask)
+    comptime predicate = is_comparison(op)
+    comptime floating = not D.is_floating_point() and op == DIV
+    var count = 0 if predicate or floating else n
+    var values = List[Scalar[D]](
+        unsafe_uninit_length=count
+    ) if D.is_floating_point() else List[Scalar[D]](length=count, fill=0)
+    var floats = List[Float64](length=n if floating else 0, fill=0)
+    var predicates = List[UInt8](
+        length=(n + 7) // 8 if predicate else 0, fill=0
+    )
+    if n > 0:
+        comptime if predicate:
+            _chunk_binary_walk[op, D, 8](
+                left, right, n, valid, values, floats, predicates
+            )
+        elif D.is_floating_point():
+            _chunk_binary_walk[op, D, width](
+                left, right, n, valid, values, floats, predicates
+            )
+        elif narrow:
+            if dense_narrow:
+                _chunk_binary_walk[op, D, 16](
+                    left, right, n, valid, values, floats, predicates
+                )
+            else:
+                comptime L = DType.int32 if size_of[
+                    Scalar[D]
+                ]() <= 2 else DType.int64
+                _chunk_binary_walk[op, D, simd_width_of[L]()](
+                    left, right, n, valid, values, floats, predicates
+                )
+        else:
+            _chunk_binary_walk[op, D, 1](
+                left, right, n, valid, values, floats, predicates
+            )
+    comptime if predicate:
+        return Series("", BoolColumn(values=predicates^, bits=valid^, length=n))
+    elif floating:
+        return Series("", Column[Float64](values=floats^, bits=valid^))
+    else:
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
 def binary[
     op: Int, width: Int = 4
 ](
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
+        comptime if is_comparison(
+            op
+        ) or op == ADD or op == SUB or op == MUL or op == DIV or op == FLOORDIV or op == MOD or op == POW or op == CLIP_LOW or op == CLIP_HIGH:
+            if left.dtype() == right.dtype():
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    if left.dtype() == DataType.of(D):
+                        return _chunk_numeric_binary[op, width, D](
+                            left, right, mask
+                        )
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
     comptime if op == EQ_MISSING or op == NE_MISSING:
         return _missing_compare[op == EQ_MISSING](left, right)
