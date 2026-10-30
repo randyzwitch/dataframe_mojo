@@ -2687,7 +2687,12 @@ def _solve_devices[
     output they read. A unit only the CPU runs costs the same wherever its
     neighbours run, so its estimate (which may sample filters) cannot change
     the placement; `estimate_all` estimates every unit, as `explain` does."""
-    var units = plan_pipeline_cuts(plan._plan)
+    # Each unit reads its input's schema and every unit above reads it
+    # again; remembered, each node's schema is derived once. Cutting and
+    # estimating change no node.
+    var context = plan._plan.copy()
+    _ = plan_remember_schemas(context)
+    var units = plan_pipeline_cuts(context)
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
     var cpu_costs = load_costs("cpu")
@@ -2708,7 +2713,7 @@ def _solve_devices[
         if wanted[p]:
             for c in units[p].children:
                 wanted[c] = True
-    plan_pipeline_estimates(plan._plan, units, wanted)
+    plan_pipeline_estimates(context, units, wanted)
     for d in range(len(devices)):
         var model = backend.transfer_model(devices[d].ordinal)
         problem.transfers[d + 1] = model.copy()
