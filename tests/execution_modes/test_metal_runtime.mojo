@@ -34,9 +34,6 @@ def test_metal_runtime_places_every_plan_on_the_cpu_automatically() raises:
     var runtime = MetalRuntime(device_id=999999)
     for plan in plans:
         assert_true("ENGINE accel: CPU executor" in runtime.describe(plan))
-        assert_equal(runtime.select_auto(plan, True, True, 65536)[0], "cpu")
-        with assert_raises(contains="unsupported"):
-            _ = runtime.estimate_auto(plan)
         assert_true(
             plan.collect(engine="auto", accelerator=runtime).equals(
                 plan.collect(engine="cpu")

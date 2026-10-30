@@ -912,6 +912,8 @@ def plan_cost_order_joins(
             var key = String(pair[0]) + "/" + pair[1]
             if key in distinct:
                 continue
+            # Through renames: a relation's key is often an alias of its
+            # table's column (TPC-DS's d1_sk for d_date_sk).
             var count = plan_spine_distinct(self, relations[pair[0]], pair[1])
             if count > 0:
                 distinct[key] = Float64(count)

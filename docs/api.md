@@ -1517,7 +1517,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def profile[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
   Execute with a provider and report its observed execution regions.
 - `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> String`
-  The (optimized) plan, one operator per line, root first. With `engine="auto"` (what `collect` uses), an `ENGINE` line naming the selected engine and why comes first.
+  The (optimized) plan, one operator per line, root first. With `engine="auto"` (what `collect` uses), an `ENGINE` line comes first, then where each pipeline runs and why.
 - `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
   Describe provider capability without submitting device work.
 - `def fetch(self, n: Int = Int(5), *, engine: String = "auto") -> DataFrame`

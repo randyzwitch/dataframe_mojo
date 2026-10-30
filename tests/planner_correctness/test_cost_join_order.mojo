@@ -425,3 +425,33 @@ def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
     )
     assert_true(eager.height() > 0)
     assert_frame(rows, eager)
+
+
+def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
+    # A dimension's key is often an alias of its table's column (TPC-DS's
+    # d1_sk for d_date_sk). The join order reads that column's distinct
+    # count through the rename, as DuckDB carries a column's count through
+    # a projection by its binding. Without it the key had no count, and a
+    # set's domain fell to the other side's foreign key count: TPC-DS q72's
+    # sales chain was estimated at 16K rows for 1.1K.
+    var table = tables()[1].collect()._with_statistics()
+    var renamed = (
+        table.lazy()
+        .filter(col("p_category") < lit(Int64(5)))
+        .select_exprs([col("p_id").alias("pk"), col("p_category")])
+    )
+    var top = len(renamed._plan._nodes) - 1
+    assert_equal(
+        renamed._spine_distinct(top, "pk"), table._distinct_count("p_id")
+    )
+    assert_equal(
+        renamed._spine_distinct(top, "p_category"),
+        table._distinct_count("p_category"),
+    )
+    # A computed column has no table column's count.
+    var computed = table.lazy().with_columns(
+        [(col("p_id") + lit(Int64(1))).alias("pk")]
+    )
+    assert_equal(
+        computed._spine_distinct(len(computed._plan._nodes) - 1, "pk"), -1
+    )

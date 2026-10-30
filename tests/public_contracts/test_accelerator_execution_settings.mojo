@@ -11,11 +11,6 @@ from dataframe.lazy import AcceleratorBackend, LazyFrame
 struct _LegacySettingsBackend(AcceleratorBackend):
     var observed: ArcPointer[List[ExecutionSettings]]
 
-    def select_auto(
-        self, plan: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
-    ) -> Tuple[String, String]:
-        return ("accel", "settings test provider")
-
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         assert_true(Bool(plan._plan._accelerator_settings))
         self.observed[].append(plan._plan._accelerator_settings.value().copy())
@@ -43,14 +38,14 @@ def test_accelerator_settings_preserve_legacy_provider_dispatch_and_plan_copy() 
     )
     _ = query.collect(
         accelerator=backend,
-        engine="auto",
+        engine="accel",
         optimize=False,
         streaming=True,
         batch_size=11,
     )
     _ = query.profile(
         accelerator=backend,
-        engine="auto",
+        engine="accel",
         optimize=True,
         streaming=False,
         batch_size=13,

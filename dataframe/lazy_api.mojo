@@ -37,13 +37,11 @@ from dataframe.planning.node_builders import (
 from dataframe._accel_provider import (
     describe as _describe_accel,
     execute as _execute_accel,
-    execute_auto as _execute_auto_accel,
     execute_profiled as _profile_accel,
     handoff_estimate as _handoff_estimate,
     handoff_execute as _handoff_execute,
     handoff_supports as _handoff_supports,
     installed as _accel_installed,
-    select_auto as _select_auto_accel,
     devices as _accel_devices,
     transfer_model as _accel_transfer_model,
     pipeline_supports as _accel_pipeline_supports,
@@ -155,9 +153,6 @@ from dataframe.devices import (
     PipelineFeatures,
     TransferModel,
 )
-from dataframe.plan_types import (
-    PlanEstimate,
-)
 from dataframe.planning.context import (
     QueryContext,
 )
@@ -204,6 +199,7 @@ from dataframe.planning.graph import (
     plan_repeats_a_scan,
     plan_same_node,
     plan_share_copy_schemas,
+    plan_spine_distinct,
     plan_spine_frame,
     plan_spine_rows,
     plan_subplan_classes,
@@ -1590,21 +1586,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             suffix=suffix,
         )
 
-    def _backend(
-        self,
-        engine: String,
-        optimize: Bool,
-        streaming: Bool,
-        batch_size: Int,
-    ) raises -> _BackendDecision:
-        var decision = _select_backend(engine)
-        if engine == "auto":
-            var selected = _select_auto_accel(
-                self, optimize, streaming, batch_size
-            )
-            decision = _automatic_decision(selected)
-        return decision^
-
     def sink_parquet(
         self,
         path: String,
@@ -1727,24 +1708,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         Parallel work inside runs on one crew of threads started for the
         query (`parallel.Crew`) and joined before this returns.
 
-        engine='auto' lets the optional provider select before execution.
-        Without a provider, auto uses CPU. 'cpu' forces CPU;
-        'accel' uses an optional registered provider or an explicit runtime.
+        engine='auto' places work on the CPU or an installed provider's
+        device by this machine's measured costs; without a provider or a
+        calibration it uses the CPU. 'cpu' forces CPU; 'accel' uses an
+        optional registered provider or an explicit runtime.
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        var backend = self._backend(engine, optimize, streaming, batch_size)
+        var backend = _select_backend(engine)
         backend.require_available()
-        if engine == "auto" and backend.engine != "cpu":
-            return _execute_auto_accel(
-                self._with_accelerator_settings(
-                    optimize, streaming, batch_size
-                ),
-                optimize,
-                streaming,
-                batch_size,
-                False,
-            )[0].copy()
         if engine == "accel":
             return _execute_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
@@ -1798,20 +1770,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
-            var selected = accelerator.select_auto(
-                self, optimize, streaming, batch_size
-            )
-            _ = _automatic_decision(selected)
-            if selected[0] != "cpu":
-                return accelerator.execute_auto(
-                    self._with_accelerator_settings(
-                        optimize, streaming, batch_size
-                    ),
-                    optimize,
-                    streaming,
-                    batch_size,
-                    False,
-                )[0].copy()
             var placed = _collect_placed(
                 self, accelerator, optimize, streaming, batch_size
             )
@@ -1852,31 +1810,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
-            var selected = accelerator.select_auto(
-                self, optimize, streaming, batch_size
-            )
-            _ = _automatic_decision(selected)
-            if selected[0] != "cpu":
-                var result = accelerator.execute_auto(
-                    self._with_accelerator_settings(
-                        optimize, streaming, batch_size
-                    ),
-                    optimize,
-                    streaming,
-                    batch_size,
-                    True,
-                )
-                return (
-                    result[0].copy(),
-                    _selection_report(result[1], selected[1]),
-                )
-            var result = self.profile(
+            return self.profile(
                 engine="cpu",
                 optimize=optimize,
                 streaming=streaming,
                 batch_size=batch_size,
             )
-            return (result[0].copy(), _selection_report(result[1], selected[1]))
         if engine != "accel":
             return self.profile(
                 engine=engine,
@@ -1909,27 +1848,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         eager node's wall time including its inputs; on a stream's last
         node, the whole stream's). Counts are observed, never estimated,
         and the result is the one `collect` returns.
-        Engine selection follows `collect`. Auto mode adds selection_reason;
-        accelerator providers may append device and timing diagnostics.
+        Engine selection follows `collect`; accelerator providers may
+        append device and timing diagnostics.
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        var backend = self._backend(engine, optimize, streaming, batch_size)
+        var backend = _select_backend(engine)
         backend.require_available()
-        if engine == "auto" and backend.engine != "cpu":
-            var result = _execute_auto_accel(
-                self._with_accelerator_settings(
-                    optimize, streaming, batch_size
-                ),
-                optimize,
-                streaming,
-                batch_size,
-                True,
-            )
-            return (
-                result[0].copy(),
-                _selection_report(result[1], backend.reason),
-            )
         if engine == "accel":
             return _profile_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
@@ -1948,8 +1873,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             len(plan._plan._nodes) - 1, False, streaming, batch_size
         )
         var report = plan._plan._report.value()[].frame()
-        if engine == "auto":
-            report = _selection_report(report, backend.reason)
         return (result^, report^)
 
     def explain[
@@ -1968,28 +1891,17 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             raise Error("batch_size must be positive")
         _ = _select_backend(engine)
         if engine == "auto":
-            var selected = accelerator.select_auto(
-                self, optimize, streaming, batch_size
-            )
-            _ = _automatic_decision(selected)
             return (
-                "ENGINE "
-                + selected[0]
-                + ": "
-                + selected[1]
-                + "\n"
+                _select_backend(engine).describe()
                 + _device_placement_lines(
                     self._optimized() if optimize else self.copy(),
                     accelerator,
                 )
-                + (
-                    self.explain(
-                        engine="cpu",
-                        optimize=optimize,
-                        streaming=streaming,
-                        batch_size=batch_size,
-                    ) if selected[0]
-                    == "cpu" else ""
+                + self.explain(
+                    engine="cpu",
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
                 )
             )
         if engine != "accel":
@@ -2012,8 +1924,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         engine: String = "cpu",
     ) raises -> String:
         """The (optimized) plan, one operator per line, root first. With
-        `engine="auto"` (what `collect` uses), an `ENGINE` line naming the
-        selected engine and why comes first.
+        `engine="auto"` (what `collect` uses), an `ENGINE` line comes first,
+        then where each pipeline runs and why.
 
         Streaming annotations show batch-capable operators, aggregate state
         and materialization boundaries. streaming=False omits annotations.
@@ -2023,13 +1935,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        var backend = self._backend(engine, optimize, streaming, batch_size)
+        var backend = _select_backend(engine)
         if engine == "accel" and backend.available:
             return _describe_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )
-        if engine == "auto" and backend.engine != "cpu":
-            return backend.describe()
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
@@ -2479,6 +2389,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _spine_frame(self, index: Int) -> Optional[DataFrame]:
         return plan_spine_frame(self._plan, index=index)
 
+    def _spine_distinct(self, index: Int, name: String) raises -> Int:
+        return plan_spine_distinct(self._plan, index=index, name=name)
+
     def _aggregated(self, index: Int) -> Bool:
         return plan_aggregated(self._plan, index=index)
 
@@ -2625,53 +2538,8 @@ def _automatic_handoff() -> Bool:
     return _accel_installed() and Bool(calibration_path())
 
 
-def _automatic_decision(
-    selected: Tuple[String, String]
-) raises -> _BackendDecision:
-    if (
-        selected[0] != "cpu"
-        and selected[0] != "accel"
-        and selected[0] != "mixed"
-    ):
-        raise Error("Invalid automatic provider decision: " + selected[0])
-    return _BackendDecision(selected[0], True, selected[1])
-
-
-def _selection_report(report: DataFrame, reason: String) raises -> DataFrame:
-    return report.with_column(
-        Series(
-            "selection_reason",
-            Column[String](List[String](length=report.height(), fill=reason)),
-        )
-    )
-
-
 trait AcceleratorBackend(Copyable):
     """Optional execution provider; importing dataframe needs no GPU SDK."""
-
-    def estimate_auto(self, plan: LazyFrame) raises -> PlanEstimate:
-        """Optional plan-time facts; no device submission or source-value reads."""
-        raise Error("provider has no analytical plan estimate")
-
-    def select_auto(
-        self,
-        plan: LazyFrame,
-        optimize: Bool,
-        streaming: Bool,
-        batch_size: Int,
-    ) -> Tuple[String, String]:
-        """Default keeps existing third-party providers on CPU in auto mode."""
-        return ("cpu", "provider has no automatic placement policy")
-
-    def execute_auto(
-        self,
-        plan: LazyFrame,
-        optimize: Bool,
-        streaming: Bool,
-        batch_size: Int,
-        profiling: Bool,
-    ) raises -> Tuple[DataFrame, DataFrame]:
-        return self.execute_profiled(plan) if profiling else self.execute(plan)
 
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         ...

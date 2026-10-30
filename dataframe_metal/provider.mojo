@@ -51,39 +51,6 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     return execute(plan)
 
 
-def select_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) -> Tuple[String, String]:
-    """Select before execution; providers supply facts to the shared analytical cost selector."""
-    if installed():
-        try:
-            return _runtime().select_auto(plan, optimize, streaming, batch_size)
-        except error:
-            return (
-                "cpu",
-                "automatic analytical preflight rejected: " + String(error),
-            )
-    return ("cpu", "auto uses CPU; accelerator provider is not installed")
-
-
-def execute_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-    profiling: Bool,
-) raises -> Tuple[DataFrame, DataFrame]:
-    """Execute a selected region; execution errors must propagate to callers."""
-    return (
-        _runtime()
-        .execute_profiled(plan) if profiling else _runtime()
-        .execute(plan)
-    )
-
-
 def handoff_supports(region: LazyFrame) -> Bool:
     """Whether Metal runs `region`, a node the CPU executor offers with its
     input already computed; decided from the region's plan and types."""

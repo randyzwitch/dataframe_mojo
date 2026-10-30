@@ -1,6 +1,6 @@
 """The CPU-only accelerator provider: no backend is installed.
 
-`dataframe/_accel_provider.mojo` imports the fourteen functions below. Put this
+`dataframe/_accel_provider.mojo` imports the twelve functions below. Put this
 package first on the import path (`-I providers/cpu -I .`) for a build that
 compiles no GPU code. The default `dataframe_provider` in the repository root
 is the Metal provider.
@@ -25,25 +25,6 @@ def describe(plan: LazyFrame) -> String:
 
 
 def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-    return execute(plan)
-
-
-def select_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) -> Tuple[String, String]:
-    return ("cpu", "auto uses CPU; accelerator provider is not installed")
-
-
-def execute_auto(
-    plan: LazyFrame,
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-    profiling: Bool,
-) raises -> Tuple[DataFrame, DataFrame]:
     return execute(plan)
 
 
