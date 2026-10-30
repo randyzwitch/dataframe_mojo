@@ -199,6 +199,7 @@ from dataframe.planning.graph import (
     plan_repeats_a_scan,
     plan_same_node,
     plan_share_copy_schemas,
+    plan_spine_distinct,
     plan_spine_frame,
     plan_spine_rows,
     plan_subplan_classes,
@@ -2386,6 +2387,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _spine_frame(self, index: Int) -> Optional[DataFrame]:
         return plan_spine_frame(self._plan, index=index)
+
+    def _spine_distinct(self, index: Int, name: String) raises -> Int:
+        return plan_spine_distinct(self._plan, index=index, name=name)
 
     def _aggregated(self, index: Int) -> Bool:
         return plan_aggregated(self._plan, index=index)
