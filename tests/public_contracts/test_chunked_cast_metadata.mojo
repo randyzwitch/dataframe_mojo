@@ -24,9 +24,8 @@ from tests.support.spatial_reference import point
 
 def _metadata(var source: Series) -> Series:
     # One ordinary Arrow application metadata entry: k -> v.
-    source._field_metadata = ArcPointer(
-        List[UInt8]([1, 0, 0, 0, 1, 0, 0, 0, 107, 1, 0, 0, 0, 118])
-    )
+    var metadata: List[UInt8] = [1, 0, 0, 0, 1, 0, 0, 0, 107, 1, 0, 0, 0, 118]
+    source._field_metadata = ArcPointer(metadata^)
     return source^
 
 
