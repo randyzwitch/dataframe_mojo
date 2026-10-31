@@ -2863,6 +2863,34 @@ def _chunk_numeric_binary[
         return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
+def _comparison_storage[boolean: Bool](input: Series) -> Bool:
+    """Check physical windows before taking comparison-only shortcuts.
+
+    Private constructors can combine unlike storage under one dtype tag.
+    Published caches have already merged those windows; inspect the actual
+    cached storage without scanning chunks or materializing a new cache.
+    """
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if chunks.cache[].state.load() == 2:
+            comptime if boolean:
+                return chunks.cache[].merged.value().isa[BoolColumn]()
+            else:
+                return chunks.cache[].merged.value().isa[StringColumn]()
+        for array in chunks.arrays:
+            comptime if boolean:
+                if not array.isa[BoolColumn]():
+                    return False
+            else:
+                if not array.isa[StringColumn]():
+                    return False
+        return True
+    comptime if boolean:
+        return input._data.isa[BoolColumn]()
+    else:
+        return input._data.isa[StringColumn]()
+
+
 def binary[
     op: Int, width: Int = 4
 ](
@@ -2873,8 +2901,8 @@ def binary[
             if (
                 left.dtype() == DataType.BOOL
                 and right.dtype() == DataType.BOOL
-                and left._data.isa[BoolColumn]()
-                and right._data.isa[BoolColumn]()
+                and _comparison_storage[True](left)
+                and _comparison_storage[True](right)
             ):
                 # Reuse published caches independently, without creating or
                 # waiting for a cache on the other operand.
@@ -2926,8 +2954,8 @@ def binary[
             if (
                 left.dtype() == DataType.STRING
                 and right.dtype() == DataType.STRING
-                and left._data.isa[StringColumn]()
-                and right._data.isa[StringColumn]()
+                and _comparison_storage[False](left)
+                and _comparison_storage[False](right)
             ):
                 return compare_chunked_strings[op](left, right)
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
