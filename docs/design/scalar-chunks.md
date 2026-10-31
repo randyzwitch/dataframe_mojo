@@ -612,6 +612,13 @@ remain under measurement; this initial change does not complete #1003.
 [Metadata-only casts](scalar-cast-chunks.md) also retain source arrays for
 accepted identities and String-to-Binary retags, including whole expressions.
 
+[Checked and masked integer casts](scalar-integer-checked-cast-chunks.md)
+also consume cold host chunks for plain integer sources and numeric targets.
+Their exact bounds, global error rows, mask-length rules and Float32 rounding
+modes are preserved. Published caches and contiguous inputs retain the old
+converters. Float-source, Bool, parsing and logical conversions remain in the
+full #1003 inventory.
+
 ## Initial cast measurements
 
 The frozen paired comparison at implementation revision `b7c8d971` completed
