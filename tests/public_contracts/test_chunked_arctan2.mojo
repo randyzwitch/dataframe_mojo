@@ -432,19 +432,24 @@ def test_arctan2_private_cast_errors_precede_length_and_empty_rules() raises:
     var empty = Series("y", Column[Float64]([]))
     var one = Series("x", Column[Float64]([1]))
     var two = Series("x", Column[Float64]([1, 2]))
-    for reverse in [False, True]:
-        with assert_raises(contains="Incompatible expression lengths"):
-            _ = arctan2_series(
-                two if reverse else empty,
-                empty if reverse else two,
-                DataType.FLOAT64,
-            )
-        var result = arctan2_series(
-            one if reverse else empty,
-            empty if reverse else one,
-            DataType.FLOAT64,
-        )
-        _check(result, DataType.FLOAT64, "", [], [])
+    with assert_raises(contains="Incompatible expression lengths"):
+        _ = arctan2_series(two, empty, DataType.FLOAT64)
+    with assert_raises(contains="Incompatible expression lengths"):
+        _ = arctan2_series(empty, two, DataType.FLOAT64)
+    _check(
+        arctan2_series(one, empty, DataType.FLOAT64),
+        DataType.FLOAT64,
+        "",
+        [],
+        [],
+    )
+    _check(
+        arctan2_series(empty, one, DataType.FLOAT64),
+        DataType.FLOAT64,
+        "",
+        [],
+        [],
+    )
     _check(
         arctan2_series(empty, empty, DataType.FLOAT64),
         DataType.FLOAT64,
