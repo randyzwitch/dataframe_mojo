@@ -413,6 +413,34 @@ def test_public_choice_nullable_predicate_otherwise_variants_and_batches() raise
             False,
         )
 
+        var bool_omitted = (
+            bool_frame.lazy()
+            .select(when(col("take")).then(col("a")).end().alias("x"))
+            .collect(engine="cpu", batch_size=batch)
+        )
+        _check_bool(
+            bool_omitted.column("x"),
+            [True, False, False],
+            [True, False, False],
+            False,
+        )
+        var bool_null = (
+            bool_frame.lazy()
+            .select(
+                when(col("take"))
+                .then(col("a"))
+                .otherwise(null(DataType.BOOL))
+                .alias("x")
+            )
+            .collect(engine="cpu", batch_size=batch)
+        )
+        _check_bool(
+            bool_null.column("x"),
+            [True, False, False],
+            [True, False, False],
+            False,
+        )
+
 
 def test_choice_nested_masks_binding_errors_and_checked_branch_observation() raises:
     var frame = DataFrame(
