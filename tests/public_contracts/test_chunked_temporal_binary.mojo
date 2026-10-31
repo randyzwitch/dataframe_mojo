@@ -17,9 +17,9 @@ def _source(
     right: Bool = False,
 ) raises -> Series:
     var raw = List[Int64](length=13, fill=777)
-    raw.extend(values)
+    raw.extend(values.copy())
     var flags = List[Bool](length=13, fill=True)
-    flags.extend(valid)
+    flags.extend(valid.copy())
     var column = Column[Int64](raw^) if len(valid) == 0 else Column[Int64](
         raw^, flags
     )
@@ -52,8 +52,8 @@ def _assert(
 ) raises:
     var expected = Series(
         "result",
-        Column[Int64](values) if len(valid)
-        == 0 else Column[Int64](values, valid),
+        Column[Int64](values.copy()) if len(valid)
+        == 0 else Column[Int64](values.copy(), valid),
     ).with_dtype(dtype)
     assert_frame(DataFrame([actual.renamed("result")]), DataFrame([expected^]))
     var output = actual.rechunk()

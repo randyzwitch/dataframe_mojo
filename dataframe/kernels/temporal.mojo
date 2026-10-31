@@ -235,8 +235,11 @@ def _temporal_chunk_adapter(
         )
     # Reject private heterogeneous storage through the original merge before
     # length/mask shortcuts or checked arithmetic can change its error order.
+    # Cold nested logical tags also select a distinct legacy merge adapter.
     if not (
-        _has_physical_storage[Column[Int64]](a)
+        not (a.is_chunked() and a.dtype().is_nested())
+        and not (b.is_chunked() and b.dtype().is_nested())
+        and _has_physical_storage[Column[Int64]](a)
         and _has_physical_storage[Column[Int64]](b)
         and _temporal_host_input(a)
         and _temporal_host_input(b)
