@@ -1057,8 +1057,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         limit: Optional[Int] = None,
         subset: List[String] = List[String](),
     ) raises -> Self:
-        """Fill nulls by strategy over the whole input; see DataFrame.fill_null.
-        """
+        """Fill nulls by strategy over the whole input; see DataFrame.fill_null."""
         var run_limit = self._input_schema()._fill_strategy_limit(
             strategy, limit, subset
         )
@@ -1069,8 +1068,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
 
     def fill_nan(self, value: Float64) raises -> Self:
-        """Replace floating NaNs with a numeric scalar, preserving column dtypes.
-        """
+        """Replace floating NaNs with a numeric scalar, preserving column dtypes."""
         return self.fill_nan(lit(value))
 
     def fill_nan(self, value: Expr) raises -> Self:
@@ -3647,8 +3645,7 @@ def _handoff_context(plan: QueryContext) raises -> DataFrame:
 
 
 def _from_context(var context: QueryContext) -> LazyFrame:
-    """Move internal plan state into the public facade without copying buffers.
-    """
+    """Move internal plan state into the public facade without copying buffers."""
     # Initialize through the existing constructor, then transfer the context
     # whole. Empty lists need no source storage or intermediate plan copies.
     var result = LazyFrame(
