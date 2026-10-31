@@ -75,6 +75,9 @@ def string_op(
     if node.op == STR_LEN_CHARS:
         return string_lengths[True](input)
     if input.is_chunked():
+        # Keep unsupported storage on the old error path before decoding.
+        if node.op == STR_IS_IN and input._data.isa[StringColumn]():
+            return is_in_literals(input, decode_values(node.text))
         if node.op == STR_STARTS_WITH:
             return string_starts_with(input, node.text)
         if node.op == STR_ENDS_WITH:
