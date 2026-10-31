@@ -140,6 +140,7 @@ def _identity(master: Series, expected: Series) raises:
     )
     assert_frame(public_result, DataFrame([expected.copy()]))
     _field_owner(public_result.column(source.name()), source)
+    _array_owners(public_result.column(source.name()), source)
     _cold(source)
 
 
@@ -534,6 +535,7 @@ def test_chunked_string_to_binary_shares_offset_and_view_owners_but_drops_field_
         )
         assert_frame(public_result, DataFrame([_binary_expected()]))
         assert_false(Bool(public_result.column("value")._field_metadata))
+        _array_owners(public_result.column("value"), source)
         _cold(source)
 
 
@@ -681,3 +683,88 @@ def test_cast_metadata_results_outlive_sources_and_explicit_contiguous_access_st
     _array_owners(cached_identity, result)
     _field_owner(cached_identity, result)
     assert_equal(result._chunked.value()[].cache[].state.load(), Int64(2))
+
+
+def test_public_metadata_cast_chains_and_prepared_states_avoid_batch_assembly() raises:
+    for views in [False, True]:
+        var source = _pieces(_text_master(views).slice(1, 6))
+        var frame = DataFrame([source.copy()])
+        var actual = frame.select_exprs(
+            [col("value").cast(DataType.STRING).cast(DataType.BINARY)],
+            batch_size=2,
+        )
+        assert_frame(actual, DataFrame([_binary_expected()]))
+        _array_owners(actual.column("value"), source)
+        assert_false(Bool(actual.column("value")._field_metadata))
+        _cold(source)
+        var shifted = frame.select_exprs(
+            [col("value").shift(1).cast(DataType.BINARY)], batch_size=2
+        )
+        var wanted = Series.binary(
+            "value",
+            [
+                [],
+                [UInt8(195), 169],
+                [],
+                [],
+                [
+                    UInt8(108),
+                    111,
+                    110,
+                    103,
+                    32,
+                    101,
+                    120,
+                    116,
+                    101,
+                    114,
+                    110,
+                    97,
+                    108,
+                    32,
+                    115,
+                    116,
+                    114,
+                    105,
+                    110,
+                    103,
+                    32,
+                    112,
+                    97,
+                    121,
+                    108,
+                    111,
+                    97,
+                    100,
+                ],
+                [],
+            ],
+            [False, True, False, True, True, False],
+        )
+        assert_frame(shifted, DataFrame([wanted^]))
+    var numbers = _pieces(
+        Series(
+            "value",
+            Column[Int64](
+                [2, 99, 0, 7, 9, 5], [True, False, True, True, False, True]
+            ),
+        )
+    )
+    var summed = DataFrame([numbers^]).select_exprs(
+        [col("value").cum_sum().cast(DataType.INT64).cast(DataType.INT64)],
+        batch_size=2,
+    )
+    assert_frame(
+        summed,
+        DataFrame(
+            [
+                Series(
+                    "value",
+                    Column[Int64](
+                        [2, 0, 2, 9, 0, 14],
+                        [True, False, True, True, False, True],
+                    ),
+                )
+            ]
+        ),
+    )
