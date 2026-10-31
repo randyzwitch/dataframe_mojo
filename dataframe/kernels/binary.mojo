@@ -18,6 +18,7 @@ from dataframe.storage.column import (
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.kernels.cast import _decimal_to_float
 from dataframe.kernels.numeric_input import _NumericInput
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.kernels.bitmap_input import (
     _ValidityInput,
     _BoolInput,
@@ -1887,8 +1888,22 @@ def math_unary[
 def arctan2_series(y: Series, x: Series, dtype: DataType) raises -> Series:
     """atan2(y, x) per row in `dtype` (Float32 or Float64); either side may
     be one row, broadcast. Null when either side is null."""
-    var ys = y.cast(dtype).rechunk()
-    var xs = x.cast(dtype).rechunk()
+    if dtype != DataType.FLOAT32 and dtype != DataType.FLOAT64:
+        # Preserve the existing conversion and failure path for private
+        # callers outside this function's documented floating result types.
+        var ys = y.cast(dtype).rechunk()
+        var xs = x.cast(dtype).rechunk()
+        return _arctan2[DType.float64](
+            ys._data[Column[Float64]], xs._data[Column[Float64]]
+        )
+    # Identity conversion needs no materialization. Other conversions stay
+    # strict, in y-before-x order, before any length check.
+    var ys = _arctan2_operand(y, dtype)
+    var xs = _arctan2_operand(x, dtype)
+    if ys.is_chunked() or xs.is_chunked():
+        if dtype == DataType.FLOAT32:
+            return _chunk_arctan2[DType.float32](ys, xs)
+        return _chunk_arctan2[DType.float64](ys, xs)
     if dtype == DataType.FLOAT32:
         return _arctan2[DType.float32](
             ys._data[Column[Float32]], xs._data[Column[Float32]]
@@ -1896,6 +1911,52 @@ def arctan2_series(y: Series, x: Series, dtype: DataType) raises -> Series:
     return _arctan2[DType.float64](
         ys._data[Column[Float64]], xs._data[Column[Float64]]
     )
+
+
+def _arctan2_operand(input: Series, dtype: DataType) raises -> Series:
+    var value = input.copy() if input.dtype() == dtype else input.cast(dtype)
+    if (
+        value.is_chunked()
+        and value._chunked.value()[].cache[].state.load() == 2
+    ):
+        # Reuse a published immutable cache; do not initiate or wait for one.
+        return value.rechunk()
+    return value^
+
+
+def _chunk_arctan2[
+    D: DType
+](y: Series, x: Series) raises -> Series where D.is_floating_point():
+    var n = _length(len(y), len(x))
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var a = _NumericInput[D](y)
+    var b = _NumericInput[D](x)
+    var y_step = 0 if a.scalar else 1
+    var x_step = 0 if b.scalar else 1
+    var output = 0
+    while output < n:
+        var count = min(a.available(n - output), b.available(n - output))
+        for relative in range(count):
+            var row = output + relative
+            var yi = a.row + relative * y_step
+            var xi = b.row + relative * x_step
+            valid[row] = a.column._valid(yi) and b.column._valid(xi)
+            if valid[row]:
+                comptime if D == DType.float32:
+                    values[row] = external_call["atan2f", Float32](
+                        a.column._get(yi).cast[DType.float32](),
+                        b.column._get(xi).cast[DType.float32](),
+                    ).cast[D]()
+                else:
+                    values[row] = external_call["atan2", Float64](
+                        a.column._get(yi).cast[DType.float64](),
+                        b.column._get(xi).cast[DType.float64](),
+                    ).cast[D]()
+        a.advance(count)
+        b.advance(count)
+        output += count
+    return Series("", Column[Scalar[D]](values^, valid))
 
 
 def _arctan2[
@@ -2347,6 +2408,9 @@ def _bool_bitmap_result[
         value = (~(x ^ y) & av & bv) | (~av & ~bv)
         comptime if op == NE_MISSING:
             value = ~value
+    elif op == EQ:
+        m = av & bv
+        value = ~(x ^ y) & m
     elif op == FILL_NULL:
         m = av | bv
         value = ((x & av) | (y & ~av)) & m
@@ -2926,9 +2990,33 @@ def binary[
         # observation-mask behavior: their outputs do not apply that mask.
         comptime if is_logical(
             op
-        ) or op == FILL_NULL or op == EQ_MISSING or op == NE_MISSING:
+        ) or op == EQ or op == FILL_NULL or op == EQ_MISSING or op == NE_MISSING:
             if left.dtype() == DataType.BOOL and right.dtype() == DataType.BOOL:
-                return _chunk_bool_binary[op](left, right)
+                comptime if op == EQ:
+                    # Private Storage constructors can carry a Bool tag over
+                    # other storage. Keep their existing physical dispatch.
+                    if _has_physical_storage[BoolColumn](
+                        left
+                    ) and _has_physical_storage[BoolColumn](right):
+                        # A published cache is already contiguous. Reuse each
+                        # ready operand without creating or waiting for one.
+                        var a = left.copy()
+                        var b = right.copy()
+                        if (
+                            left.is_chunked()
+                            and left._chunked.value()[].cache[].state.load()
+                            == 2
+                        ):
+                            a = left.rechunk()
+                        if (
+                            right.is_chunked()
+                            and right._chunked.value()[].cache[].state.load()
+                            == 2
+                        ):
+                            b = right.rechunk()
+                        return _chunk_bool_binary[EQ](a, b)
+                else:
+                    return _chunk_bool_binary[op](left, right)
         comptime if op == KEEP_NULLS:
             if right.dtype() == DataType.BOOL:
                 return _chunk_keep_bools(left, right)
@@ -3351,10 +3439,75 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     return Series("", out^.finish())
 
 
+@no_inline
+def _chunk_integer_is_in[
+    D: DType
+](input: Series, text: String) raises -> Series:
+    var parts = text.split(",")
+    var wanted = List[Int64](capacity=len(parts))
+    for part in parts:
+        wanted.append(Int64(atol(part)))
+    var targets = List[Scalar[D]](capacity=len(wanted))
+    for value in wanted:
+        targets.append(Scalar[D](value))
+    var count = len(targets)
+    var table = targets.unsafe_ptr()
+    var packed = List[UInt8](length=(len(input) + 7) // 8, fill=0)
+    var has_nulls = False
+    for storage in input._chunked.value()[].arrays:
+        if storage[Column[Scalar[D]]].null_count() > 0:
+            has_nulls = True
+            break
+    var bits = List[UInt8](capacity=(len(input) + 7) // 8 if has_nulls else 0)
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        ref column = storage[Column[Scalar[D]]]
+        var n = len(column)
+        var xs = column._ptr()
+        var row = 0
+        while row + 8 <= n:
+            var values = xs.unsafe_load[width=8](row)
+            var hits = SIMD[DType.bool, 8](fill=False)
+            for t in range(count):
+                hits |= values.eq(SIMD[D, 8](table.unsafe_offset(t)[]))
+            _write_bitmap_byte(
+                packed, base + row, pack_bits[DType.uint8](hits), 8
+            )
+            row += 8
+        if row < n:
+            var byte = UInt8(0)
+            for i in range(row, n):
+                for t in range(count):
+                    if xs.unsafe_offset(i)[] == table.unsafe_offset(t)[]:
+                        byte |= UInt8(1) << UInt8(i - row)
+                        break
+            _write_bitmap_byte(packed, base + row, byte, n - row)
+        # Membership historically compares invalid payloads too; attach the
+        # validity separately, without clearing matching null value bits.
+        if has_nulls:
+            _append_validity(bits, base, column._bits[], column._offset, n)
+        base += n
+    return Series(
+        input.name(), BoolColumn(values=packed^, bits=bits^, length=len(input))
+    )
+
+
 def integer_is_in(input: Series, text: String) raises -> Series:
     """Whether each row of an integer column equals one of the values
     `text` lists (decimal, comma separated); null rows stay null. One pass
     over the rows, the values compared in registers."""
+    if input.is_chunked():
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            comptime if D.is_integral():
+                if input.dtype() == DataType.of(D) and _has_physical_storage[
+                    Column[Scalar[D]]
+                ](input):
+                    if input._chunked.value()[].cache[].state.load() == 2:
+                        return integer_is_in(input.rechunk(), text)
+                    return _chunk_integer_is_in[D](input, text)
+    # Logical/private physical-storage routes retain their existing adapter,
+    # parsing order and admission. Only plain integer chunks use the new path.
     var column_input = input.rechunk() if input.is_chunked() else input.copy()
     var parts = text.split(",")
     var wanted = List[Int64](capacity=len(parts))

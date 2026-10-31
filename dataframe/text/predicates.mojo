@@ -17,6 +17,7 @@ from dataframe.expr import EQ, GE, GT, LE, LT, NE
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes
 from dataframe.series import Series
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.text.bytes import (
     _Bytes,
     _find_bytes,
@@ -367,7 +368,9 @@ struct _ChunkPredicateJob[op: Int](Job):
                             continue
                     var value = rows.get(local)
                     var hit: Bool
-                    comptime if Self.op == EQ:
+                    comptime if Self.op == IS_IN:
+                        hit = self.literals.contains(value)
+                    elif Self.op == EQ:
                         hit = _same_bytes(value, literal)
                     elif Self.op == NE:
                         hit = not _same_bytes(value, literal)
@@ -479,6 +482,62 @@ def compare_with_literal(
     if actual == GT:
         return _predicate[GT](column, literals)
     return _predicate[GE](column, literals)
+
+
+def is_in_literals(input: Series, values: List[String]) raises -> Series:
+    """One prepared lookup over owned physical strings, without merging."""
+    if not input.is_chunked():
+        return is_in_literals(input._data[StringColumn], values)
+    if not _has_physical_storage[StringColumn](input):
+        var merged = input.rechunk()
+        return is_in_literals(merged._data[StringColumn], values)
+    ref storage = input._chunked.value()[]
+    if storage.cache[].state.load() == 2:
+        var merged = input.rechunk()
+        return is_in_literals(merged._data[StringColumn], values)
+    var n = len(input)
+    var valid = List[UInt8](capacity=(n + 7) // 8)
+    var chunks = List[_Bytes](
+        capacity=0 if len(values) == 0 else len(storage.arrays)
+    )
+    var start = 0
+    for array in storage.arrays:
+        ref column = array[StringColumn]
+        _append_validity(
+            valid, start, column._bits[], column._offset, len(column)
+        )
+        if len(values) != 0:
+            chunks.append(_Bytes(column))
+        start += len(column)
+    if len(values) == 0:
+        return Series(
+            "",
+            BoolColumn(
+                values=List[UInt8](length=(n + 7) // 8, fill=0),
+                bits=valid^,
+                length=n,
+            ),
+        )
+    # Decode happens in string_op once, and the lookup is prepared once here.
+    # Jobs own their copies; no lookup is rebuilt at a physical boundary.
+    var literals = _Literals(values)
+    var packed = List[UInt8](unsafe_uninit_length=(n + 7) // 8)
+    var shared = ArcPointer(chunks^)
+    var workers = worker_count(n)
+    var jobs = List[_ChunkPredicateJob[IS_IN]](capacity=workers)
+    for w in range(workers):
+        var first = (n * w // workers) // 8 * 8
+        var last = n if w == workers - 1 else (n * (w + 1) // workers) // 8 * 8
+        jobs.append(
+            _ChunkPredicateJob[IS_IN](
+                shared, literals, Int(Pointer(to=packed)), first, last
+            )
+        )
+    if workers == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    return Series("", BoolColumn(values=packed^, bits=valid^, length=n))
 
 
 def compare_with_literal(

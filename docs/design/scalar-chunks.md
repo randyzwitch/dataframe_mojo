@@ -23,6 +23,10 @@ the latter are candidates for aligned chunk-window evaluation.
 | `kernels/list.nested_op` | List length and struct selection covered by #1082; other list/string operations still merge | Child offsets, sliced children, empty/null rows, struct field validity |
 | `execution` scalar/text paths | Several preparation and result rechunks | Separate actual required contiguous adapters from avoidable input/result copies |
 
+Plain integer and String set membership, shared Boolean equality, retained
+adapters and measured tradeoffs are documented in
+[scalar-membership-chunks.md](scalar-membership-chunks.md).
+
 ## Measurement plan
 
 Compare identical values as contiguous input, nonzero slices and uneven
@@ -675,3 +679,7 @@ consumer inventory or external-suite/held-out validation.
 
 Literal string predicate chunk processing, retained cache/regex adapters and
 measured allocation costs are documented in [scalar-literal-predicates.md](scalar-literal-predicates.md).
+
+The remaining two-input math adapter is documented in
+[scalar-arctan2-chunks.md](scalar-arctan2-chunks.md), including identity-cast
+handling, retained strict conversions and cold/published-cache controls.
