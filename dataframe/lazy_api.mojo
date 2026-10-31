@@ -53,7 +53,8 @@ from dataframe.planning.device_placement import (
     Placement,
     PlacementPipeline,
     PlacementProblem,
-    plan_pipelines,
+    plan_pipeline_cuts,
+    plan_pipeline_estimates,
     plan_substitute,
     plan_substitute_node,
     plan_unit_region,
@@ -1721,16 +1722,35 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return _execute_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )[0].copy()
+        # A placement that keeps every unit on the CPU hands back the plan
+        # it optimized, so it is not optimized twice.
+        var optimized = Optional[LazyFrame]()
         if engine == "auto":
             var placed = _collect_placed(
-                self, _RegisteredProvider(), optimize, streaming, batch_size
+                self,
+                _RegisteredProvider(),
+                optimize,
+                streaming,
+                batch_size,
+                optimized,
             )
             if placed:
                 return placed.take()
         var crew = Crew.start()
         try:
             var result: DataFrame
-            if engine == "auto" and _automatic_handoff():
+            var handoff = engine == "auto" and _automatic_handoff()
+            if optimized:
+                var plan = optimized.take()
+                if handoff:
+                    plan = plan._with_handoff(HANDOFF_AUTO)
+                result = plan._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                    optimized=True,
+                )
+            elif handoff:
                 result = self._with_handoff(HANDOFF_AUTO)._collect(
                     optimize=optimize,
                     streaming=streaming,
@@ -1770,17 +1790,32 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
+            var optimized = Optional[LazyFrame]()
             var placed = _collect_placed(
-                self, accelerator, optimize, streaming, batch_size
+                self, accelerator, optimize, streaming, batch_size, optimized
             )
             if placed:
                 return placed.take()
-            return self.collect(
-                engine="cpu",
-                optimize=optimize,
-                streaming=streaming,
-                batch_size=batch_size,
-            )
+            if not optimized:
+                return self.collect(
+                    engine="cpu",
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
+            var crew = Crew.start()
+            try:
+                var result = optimized.value()._collect(
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                    optimized=True,
+                )
+                crew.release()
+                return result^
+            except e:
+                crew.release()
+                raise e^
         if engine != "accel":
             return self.collect(
                 engine=engine,
@@ -1973,7 +2008,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         optimize: Bool,
         streaming: Bool,
         batch_size: Int,
+        optimized: Bool = False,
     ) raises -> DataFrame:
+        """With `optimized`, this plan is already `_optimized()` and only
+        the passes after it run."""
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if getenv("DATAFRAME_EXECUTION_REPORT"):
@@ -2001,7 +2039,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     file=RawFileDescriptor(2),
                 )
             return profiled[0].copy()
-        var plan = self._optimized() if optimize else self.copy()
+        var plan = (
+            self._optimized() if optimize and not optimized else self.copy()
+        )
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
         if optimize:
@@ -2635,12 +2675,43 @@ struct _DevicePlacement(Movable):
 def _solve_devices[
     B: AcceleratorBackend
 ](
-    plan: LazyFrame, backend: B, var devices: List[DeviceInfo]
+    plan: LazyFrame,
+    backend: B,
+    var devices: List[DeviceInfo],
+    estimate_all: Bool = False,
 ) raises -> _DevicePlacement:
-    var units = plan_pipelines(plan._plan)
+    """Cut the plan into units, ask each device which it runs, and estimate
+    rows and bytes only for those units and the units below them, whose
+    output they read. A unit only the CPU runs costs the same wherever its
+    neighbours run, so its estimate (which may sample filters) cannot change
+    the placement; `estimate_all` estimates every unit, as `explain` does."""
+    # Each unit reads its input's schema and every unit above reads it
+    # again; remembered, each node's schema is derived once. Cutting and
+    # estimating change no node.
+    var context = plan._plan.copy()
+    _ = plan_remember_schemas(context)
+    var units = plan_pipeline_cuts(context)
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
     var cpu_costs = load_costs("cpu")
+    # A device is compared only against a measured CPU cost.
+    var supported = List[List[Bool]]()
+    var wanted = List[Bool](length=len(units), fill=estimate_all)
+    for p in range(len(units)):
+        var row = List[Bool](length=len(devices), fill=False)
+        if units[p].key in cpu_costs:
+            var region = _from_context(units[p].region.copy())
+            for d in range(len(devices)):
+                row[d] = backend.pipeline_supports(region, devices[d].ordinal)
+                wanted[p] = wanted[p] or row[d]
+        supported.append(row^)
+    # Children come before parents, so walking back marks every unit below
+    # a marked one.
+    for p in range(len(units) - 1, -1, -1):
+        if wanted[p]:
+            for c in units[p].children:
+                wanted[c] = True
+    plan_pipeline_estimates(context, units, wanted)
     for d in range(len(devices)):
         var model = backend.transfer_model(devices[d].ordinal)
         problem.transfers[d + 1] = model.copy()
@@ -2660,10 +2731,9 @@ def _solve_devices[
             ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var region = _from_context(unit.region.copy())
         for d in range(len(devices)):
-            # A device is compared only against a measured CPU cost.
             if problem.run_ns[p][_PLACE_CPU] < 0:
                 continue
-            if backend.pipeline_supports(region, devices[d].ordinal):
+            if supported[p][d]:
                 problem.run_ns[p][d + 1] = backend.pipeline_estimate(
                     region, devices[d].ordinal, unit.features
                 )
@@ -2680,7 +2750,7 @@ def _device_placement_lines[
     var found = backend.devices()
     if len(found) == 0:
         return String()
-    var solved = _solve_devices(plan, backend, found^)
+    var solved = _solve_devices(plan, backend, found^, estimate_all=True)
     ref devices = solved.devices
     ref units = solved.units
     ref problem = solved.problem
@@ -2830,9 +2900,12 @@ def _collect_placed[
     optimize: Bool,
     streaming: Bool,
     batch_size: Int,
+    mut optimized: Optional[LazyFrame],
 ) raises -> Optional[DataFrame]:
     """Collect with the units placement puts on a device run there; None
-    when the backend reports no devices or every unit stays on the CPU.
+    when the backend reports no devices or every unit stays on the CPU. In
+    the second case `optimized` holds the plan it optimized, for the CPU
+    collect to run without optimizing again.
 
     Units run children first. A device unit runs through `run_pipeline` on
     its inputs, and its result, which may stay in device memory, replaces
@@ -2854,6 +2927,9 @@ def _collect_placed[
     for d in chosen:
         any_device |= d != _PLACE_CPU
     if not any_device:
+        # The execution report profiles the plan from the start.
+        if optimize and not getenv("DATAFRAME_EXECUTION_REPORT"):
+            optimized = plan^
         return None
     ref units = solved.units
     var problem = solved.problem.copy()

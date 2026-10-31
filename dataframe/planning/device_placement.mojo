@@ -337,9 +337,81 @@ def _bounded_rows(
 def plan_pipelines(self: QueryContext) raises -> List[PlacementPipeline]:
     """The plan's placement units, children before parents; the last one
     produces the plan's result."""
+    var units = plan_pipeline_cuts(self)
+    plan_pipeline_estimates(self, units)
+    return units^
+
+
+def plan_pipeline_cuts(self: QueryContext) raises -> List[PlacementPipeline]:
+    """The placement units without their row and byte estimates (all -1).
+    Estimating samples filters, which costs more than cutting, so a planner
+    asks the backends first and estimates only when one can run a unit."""
     var units = List[PlacementPipeline]()
     _ = _unit(self, len(self._nodes) - 1, units)
     return units^
+
+
+def plan_pipeline_estimates(
+    self: QueryContext, mut units: List[PlacementPipeline]
+) raises:
+    """Fill in each unit's rows and bytes, children before parents, so a
+    unit over a child reads the child's estimated output."""
+    plan_pipeline_estimates(
+        self, units, List[Bool](length=len(units), fill=True)
+    )
+
+
+def plan_pipeline_estimates(
+    self: QueryContext, mut units: List[PlacementPipeline], wanted: List[Bool]
+) raises:
+    """Estimate only the units `wanted` marks; each must have its children
+    marked too, since a unit reads their estimated output. The others keep
+    -1, as cut."""
+    for p in range(len(units)):
+        if not wanted[p]:
+            continue
+        var top = units[p].top
+        var sink = units[p].sink
+        var cursor = units[p].input
+        var source = units[p].source
+        var children = units[p].children.copy()
+        var row_bytes = _row_bytes(units[p].region._frames[0])
+        var right = -1
+        if sink >= 0 and self._nodes[sink].right >= 0:
+            right = children[len(children) - 1]
+        var input_rows = -1
+        if cursor >= 0:
+            input_rows = units[
+                children[0]
+            ].features.output_rows if source < 0 else plan_estimated_rows(
+                self, cursor
+            )
+        var output_rows = _bounded_rows(self, top, sink, input_rows)
+        var groups = -1
+        if sink >= 0 and self._nodes[sink].kind == AGG:
+            groups = output_rows
+        var build_rows = -1
+        if sink >= 0 and self._nodes[sink].kind == JOIN:
+            build_rows = plan_estimated_rows(self, self._nodes[sink].right)
+        var input_bytes = -1
+        if input_rows >= 0:
+            input_bytes = input_rows * row_bytes
+        var output_bytes = -1
+        if output_rows >= 0:
+            output_bytes = output_rows * _row_bytes(self._execute(top, True))
+        # Input, build side and output held at once.
+        var working = -1
+        if input_bytes >= 0 and output_bytes >= 0:
+            working = input_bytes + output_bytes
+            if right >= 0:
+                var build = units[right].output_bytes
+                working = working + build if build >= 0 else -1
+        units[p].features = PipelineFeatures(
+            input_rows, input_bytes, output_rows, groups, build_rows
+        )
+        units[p].output_bytes = output_bytes
+        units[p].source_bytes = input_bytes if source >= 0 else 0
+        units[p].working_bytes = working
 
 
 def _input(self: QueryContext, index: Int) raises -> DataFrame:
@@ -448,33 +520,6 @@ def _unit(
     for column in input._columns:
         key += ":" + column.dtype().name()
 
-    var input_rows = -1
-    if cursor >= 0:
-        input_rows = units[
-            children[0]
-        ].features.output_rows if source < 0 else plan_estimated_rows(
-            self, cursor
-        )
-    var output_rows = _bounded_rows(self, top, sink, input_rows)
-    var groups = -1
-    if sink >= 0 and self._nodes[sink].kind == AGG:
-        groups = output_rows
-    var build_rows = -1
-    if sink >= 0 and self._nodes[sink].kind == JOIN:
-        build_rows = plan_estimated_rows(self, self._nodes[sink].right)
-    var input_bytes = -1
-    if input_rows >= 0:
-        input_bytes = input_rows * _row_bytes(input)
-    var output_bytes = -1
-    if output_rows >= 0:
-        output_bytes = output_rows * _row_bytes(self._execute(top, True))
-    # Input, build side and output held at once.
-    var working = -1
-    if input_bytes >= 0 and output_bytes >= 0:
-        working = input_bytes + output_bytes
-        if right >= 0:
-            var build = units[right].output_bytes
-            working = working + build if build >= 0 else -1
     units.append(
         PlacementPipeline(
             top,
@@ -485,12 +530,10 @@ def _unit(
             children^,
             region^,
             key^,
-            PipelineFeatures(
-                input_rows, input_bytes, output_rows, groups, build_rows
-            ),
-            output_bytes,
-            input_bytes if source >= 0 else 0,
-            working,
+            PipelineFeatures(-1, -1, -1, -1, -1),
+            -1,
+            -1,
+            -1,
         )
     )
     return len(units) - 1
