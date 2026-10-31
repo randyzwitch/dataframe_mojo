@@ -35,12 +35,14 @@ from dataframe.decimal import (
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.series import Series
 from dataframe.text.predicates import compare_with_literal
+from dataframe.text.comparisons import compare_chunked_strings
 from dataframe.expr import (
     ADD,
     SUB,
     MUL,
     GT,
     EQ,
+    NE,
     EQ_MISSING,
     NE_MISSING,
     LT,
@@ -2357,6 +2359,18 @@ def _bool_bitmap_result[
         elif op == OR:
             m = (av & bv) | x | y
             value = (x | y) & m
+        elif op == LT:
+            m = av & bv
+            value = (~x & y) & m
+        elif op == LE:
+            m = av & bv
+            value = (~x | y) & m
+        elif op == GT:
+            m = av & bv
+            value = (x & ~y) & m
+        elif op == GE:
+            m = av & bv
+            value = (x | ~y) & m
         else:
             m = av & bv
             value = (x ^ y) & m
@@ -2855,6 +2869,28 @@ def binary[
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
+        comptime if op == NE or op == LT or op == LE or op == GT or op == GE:
+            if (
+                left.dtype() == DataType.BOOL
+                and right.dtype() == DataType.BOOL
+                and left._data.isa[BoolColumn]()
+                and right._data.isa[BoolColumn]()
+            ):
+                # Reuse published caches independently, without creating or
+                # waiting for a cache on the other operand.
+                var a = left.copy()
+                var b = right.copy()
+                if (
+                    left.is_chunked()
+                    and left._chunked.value()[].cache[].state.load() == 2
+                ):
+                    a = left.rechunk()
+                if (
+                    right.is_chunked()
+                    and right._chunked.value()[].cache[].state.load() == 2
+                ):
+                    b = right.rechunk()
+                return _chunk_bool_binary[op](a, b)
         # These non-raising operations retain the contiguous kernels'
         # observation-mask behavior: their outputs do not apply that mask.
         comptime if is_logical(
@@ -2886,6 +2922,14 @@ def binary[
                         return _chunk_numeric_binary[op, width, D](
                             left, right, mask
                         )
+        comptime if is_comparison(op):
+            if (
+                left.dtype() == DataType.STRING
+                and right.dtype() == DataType.STRING
+                and left._data.isa[StringColumn]()
+                and right._data.isa[StringColumn]()
+            ):
+                return compare_chunked_strings[op](left, right)
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
     comptime if op == EQ_MISSING or op == NE_MISSING:
         return _missing_compare[op == EQ_MISSING](left, right)
