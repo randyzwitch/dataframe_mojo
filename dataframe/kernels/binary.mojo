@@ -1929,22 +1929,26 @@ def _chunk_arctan2[
     var values = List[Scalar[D]](length=n, fill=0)
     var a = _NumericInput[D](y)
     var b = _NumericInput[D](x)
+    var y_step = 0 if a.scalar else 1
+    var x_step = 0 if b.scalar else 1
     var output = 0
     while output < n:
         var count = min(a.available(n - output), b.available(n - output))
         for relative in range(count):
             var row = output + relative
-            valid[row] = a.valid[1](relative)[0] and b.valid[1](relative)[0]
+            var yi = a.row + relative * y_step
+            var xi = b.row + relative * x_step
+            valid[row] = a.column._valid(yi) and b.column._valid(xi)
             if valid[row]:
                 comptime if D == DType.float32:
                     values[row] = external_call["atan2f", Float32](
-                        a.values[1](relative)[0].cast[DType.float32](),
-                        b.values[1](relative)[0].cast[DType.float32](),
+                        a.column._get(yi).cast[DType.float32](),
+                        b.column._get(xi).cast[DType.float32](),
                     ).cast[D]()
                 else:
                     values[row] = external_call["atan2", Float64](
-                        a.values[1](relative)[0].cast[DType.float64](),
-                        b.values[1](relative)[0].cast[DType.float64](),
+                        a.column._get(yi).cast[DType.float64](),
+                        b.column._get(xi).cast[DType.float64](),
                     ).cast[D]()
         a.advance(count)
         b.advance(count)
