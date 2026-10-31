@@ -338,6 +338,13 @@ struct _ChunkPredicateJob[op: Int](Job):
             current = current.unsafe_offset(1)
             chunk_end += len(current[].column)
         var literal = self.literals.get(0)
+        var literal_head = UInt64(0)
+        comptime if Self.op == EQ or Self.op == NE:
+            literal_head = UInt64(len(literal))
+            for b in range(min(len(literal), 4)):
+                literal_head |= UInt64(
+                    literal.unsafe_ptr()[unsafe_offset=b]
+                ) << UInt64(32 + 8 * b)
         var row = self.first
         while row < self.last:
             var end = min(row + 8, self.last)
@@ -354,10 +361,27 @@ struct _ChunkPredicateJob[op: Int](Job):
                     var local = i - base
                     if not rows.column._valid(local):
                         continue
+                    comptime if Self.op == EQ or Self.op == NE:
+                        if rows.is_views() and rows.head(local) != literal_head:
+                            comptime if Self.op == NE:
+                                byte |= UInt8(1) << UInt8(i - row)
+                            continue
                     var value = rows.get(local)
                     var hit: Bool
                     comptime if Self.op == IS_IN:
                         hit = self.literals.contains(value)
+                    elif Self.op == EQ:
+                        hit = _same_bytes(value, literal)
+                    elif Self.op == NE:
+                        hit = not _same_bytes(value, literal)
+                    elif Self.op == LT:
+                        hit = _order_bytes(value, literal) < 0
+                    elif Self.op == LE:
+                        hit = _order_bytes(value, literal) <= 0
+                    elif Self.op == GT:
+                        hit = _order_bytes(value, literal) > 0
+                    elif Self.op == GE:
+                        hit = _order_bytes(value, literal) >= 0
                     elif Self.op == STARTS_WITH:
                         hit = len(value) >= len(literal) and _same_bytes(
                             Span[UInt8, ImmutAnyOrigin](
@@ -514,6 +538,28 @@ def is_in_literals(input: Series, values: List[String]) raises -> Series:
     else:
         run_jobs(jobs)
     return Series("", BoolColumn(values=packed^, bits=valid^, length=n))
+
+
+def compare_with_literal(
+    input: Series, op: Int, literal: StringSlice, literal_left: Bool
+) raises -> Series:
+    """Retain the contiguous literal kernel or consume owned chunk spans."""
+    if not input.is_chunked():
+        return compare_with_literal(
+            input._data[StringColumn], op, literal, literal_left
+        )
+    var actual = _flip(op) if literal_left else op
+    if actual == EQ:
+        return _literal_predicate[EQ](input, String(literal))
+    if actual == NE:
+        return _literal_predicate[NE](input, String(literal))
+    if actual == LT:
+        return _literal_predicate[LT](input, String(literal))
+    if actual == LE:
+        return _literal_predicate[LE](input, String(literal))
+    if actual == GT:
+        return _literal_predicate[GT](input, String(literal))
+    return _literal_predicate[GE](input, String(literal))
 
 
 def is_in_literals(column: StringColumn, values: List[String]) raises -> Series:
