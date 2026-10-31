@@ -459,6 +459,9 @@ The contiguous path, checked casts, masks, categorical dictionaries, temporal
 units and decimal rules keep their existing converters. Other consumers
 remain under measurement; this initial change does not complete #1003.
 
+[Metadata-only casts](scalar-cast-chunks.md) also retain source arrays for
+accepted identities and String-to-Binary retags, including whole expressions.
+
 ## Initial cast measurements
 
 The frozen paired comparison at implementation revision `b7c8d971` completed
