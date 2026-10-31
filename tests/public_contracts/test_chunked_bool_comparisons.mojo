@@ -115,7 +115,7 @@ def test_private_bool_tags_keep_numeric_storage_and_mask_dispatch() raises:
         "x", BoolColumn([True, False, False, False], [True, True, True, False])
     )
     assert_frame(
-        DataFrame([binary[LT](chunks, rhs).renamed("x")]), DataFrame([expected])
+        DataFrame([binary[LT](chunks, rhs).renamed("x")]), DataFrame([expected^])
     )
     var masked = binary[LT](chunks, rhs, List[Bool](length=4, fill=False))
     assert_frame(

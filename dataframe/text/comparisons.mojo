@@ -121,15 +121,15 @@ struct _StringComparisonJob[op: Int](Job):
                     var x = a[].get(ai)
                     var y = b[].get(bi)
                     var hit: Bool
-                    comptime if op == EQ:
+                    comptime if Self.op == EQ:
                         hit = _same_bytes(x, y)
-                    elif op == NE:
+                    elif Self.op == NE:
                         hit = not _same_bytes(x, y)
-                    elif op == LT:
+                    elif Self.op == LT:
                         hit = _order_bytes(x, y) < 0
-                    elif op == LE:
+                    elif Self.op == LE:
                         hit = _order_bytes(x, y) <= 0
-                    elif op == GT:
+                    elif Self.op == GT:
                         hit = _order_bytes(x, y) > 0
                     else:
                         hit = _order_bytes(x, y) >= 0
