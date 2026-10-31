@@ -2864,7 +2864,16 @@ def binary[
             op
         ) or op == EQ or op == FILL_NULL or op == EQ_MISSING or op == NE_MISSING:
             if left.dtype() == DataType.BOOL and right.dtype() == DataType.BOOL:
-                return _chunk_bool_binary[op](left, right)
+                comptime if op == EQ:
+                    # Private Storage constructors can carry a Bool tag over
+                    # other storage. Keep their existing physical dispatch.
+                    if (
+                        left._data.isa[BoolColumn]()
+                        and right._data.isa[BoolColumn]()
+                    ):
+                        return _chunk_bool_binary[op](left, right)
+                else:
+                    return _chunk_bool_binary[op](left, right)
         comptime if op == KEEP_NULLS:
             if right.dtype() == DataType.BOOL:
                 return _chunk_keep_bools(left, right)

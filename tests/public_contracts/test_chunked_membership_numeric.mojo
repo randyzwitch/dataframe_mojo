@@ -462,6 +462,39 @@ def test_bool_equality_whole_scalars_empty_lengths_and_masks() raises:
     with assert_raises(contains="Incompatible expression lengths"):
         _ = binary[EQ](x.slice(0, 2), empty)
 
+    # A private Bool dtype tag need not describe BoolColumn storage. Such
+    # inputs retain physical numeric equality and its observation-mask rule.
+    var a = Series("a", Column[Int64]([1, 2, 0, 99], [True, True, True, False]))
+    var b = Series("b", Column[Int64]([1, 1, 0, 99], [True, True, False, True]))
+    var tagged_a = Series("a", a._data.copy(), DataType.BOOL)
+    var tagged_b = Series("b", b._data.copy(), DataType.BOOL)
+    var chunked_a = _pieces(tagged_a)
+    var chunked_b = _pieces(tagged_b)
+    var private_eq = binary[EQ](chunked_a, chunked_b)
+    _same(private_eq, binary[EQ](tagged_a, tagged_b))
+    _same(
+        private_eq,
+        Series(
+            "a",
+            BoolColumn([True, False, False, False], [True, True, False, False]),
+        ),
+    )
+    var masked = binary[EQ](
+        chunked_a, chunked_b, List[Bool](length=4, fill=False)
+    )
+    _same(
+        masked, binary[EQ](tagged_a, tagged_b, List[Bool](length=4, fill=False))
+    )
+    _same(
+        masked,
+        Series(
+            "a",
+            BoolColumn(
+                [False, False, False, False], [False, False, False, False]
+            ),
+        ),
+    )
+
 
 def test_membership_public_empty_null_candidates_and_dtype_errors() raises:
     var source = _pieces(
