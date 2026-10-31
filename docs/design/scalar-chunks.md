@@ -672,3 +672,6 @@ Nested allocator bookkeeping is excluded to avoid double counting. Direct
 mmap and hidden allocator-internal calls are outside this diagnostic; the
 observed runtime/library hashes are retained. This does not finish the wider
 consumer inventory or external-suite/held-out validation.
+
+Literal string predicate chunk processing, retained cache/regex adapters and
+measured allocation costs are documented in [scalar-literal-predicates.md](scalar-literal-predicates.md).
