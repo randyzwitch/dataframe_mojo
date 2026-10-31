@@ -3304,6 +3304,7 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     return Series("", out^.finish())
 
 
+@no_inline
 def _chunk_integer_is_in[
     D: DType
 ](input: Series, text: String) raises -> Series:
