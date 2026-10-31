@@ -262,6 +262,8 @@ def test_literal_predicates_global_packed_bytes_are_disjoint_across_four_workers
         var source = _source(mode, n, 5)
         comptime for k in range(len(ops)):
             _check(source, ops[k], "ab", 5)
+    # Keep the scoped setting alive through every assertion and worker call.
+    _ = workers^
 
 
 def _owned_answers() raises -> List[Series]:
