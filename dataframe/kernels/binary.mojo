@@ -1885,8 +1885,22 @@ def math_unary[
 def arctan2_series(y: Series, x: Series, dtype: DataType) raises -> Series:
     """atan2(y, x) per row in `dtype` (Float32 or Float64); either side may
     be one row, broadcast. Null when either side is null."""
-    var ys = y.cast(dtype).rechunk()
-    var xs = x.cast(dtype).rechunk()
+    if dtype != DataType.FLOAT32 and dtype != DataType.FLOAT64:
+        # Preserve the existing conversion and failure path for private
+        # callers outside this function's documented floating result types.
+        var ys = y.cast(dtype).rechunk()
+        var xs = x.cast(dtype).rechunk()
+        return _arctan2[DType.float64](
+            ys._data[Column[Float64]], xs._data[Column[Float64]]
+        )
+    # Identity conversion needs no materialization. Other conversions stay
+    # strict, in y-before-x order, before any length check.
+    var ys = _arctan2_operand(y, dtype)
+    var xs = _arctan2_operand(x, dtype)
+    if ys.is_chunked() or xs.is_chunked():
+        if dtype == DataType.FLOAT32:
+            return _chunk_arctan2[DType.float32](ys, xs)
+        return _chunk_arctan2[DType.float64](ys, xs)
     if dtype == DataType.FLOAT32:
         return _arctan2[DType.float32](
             ys._data[Column[Float32]], xs._data[Column[Float32]]
@@ -1894,6 +1908,48 @@ def arctan2_series(y: Series, x: Series, dtype: DataType) raises -> Series:
     return _arctan2[DType.float64](
         ys._data[Column[Float64]], xs._data[Column[Float64]]
     )
+
+
+def _arctan2_operand(input: Series, dtype: DataType) raises -> Series:
+    var value = input.copy() if input.dtype() == dtype else input.cast(dtype)
+    if (
+        value.is_chunked()
+        and value._chunked.value()[].cache[].state.load() == 2
+    ):
+        # Reuse a published immutable cache; do not initiate or wait for one.
+        return value.rechunk()
+    return value^
+
+
+def _chunk_arctan2[
+    D: DType
+](y: Series, x: Series) raises -> Series where D.is_floating_point():
+    var n = _length(len(y), len(x))
+    var valid = List[Bool](length=n, fill=False)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var a = _NumericInput[D](y)
+    var b = _NumericInput[D](x)
+    var output = 0
+    while output < n:
+        var count = min(a.available(n - output), b.available(n - output))
+        for relative in range(count):
+            var row = output + relative
+            valid[row] = a.valid[1](relative)[0] and b.valid[1](relative)[0]
+            if valid[row]:
+                comptime if D == DType.float32:
+                    values[row] = external_call["atan2f", Float32](
+                        a.values[1](relative)[0].cast[DType.float32](),
+                        b.values[1](relative)[0].cast[DType.float32](),
+                    ).cast[D]()
+                else:
+                    values[row] = external_call["atan2", Float64](
+                        a.values[1](relative)[0].cast[DType.float64](),
+                        b.values[1](relative)[0].cast[DType.float64](),
+                    ).cast[D]()
+        a.advance(count)
+        b.advance(count)
+        output += count
+    return Series("", Column[Scalar[D]](values^, valid))
 
 
 def _arctan2[
