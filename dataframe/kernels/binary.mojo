@@ -2891,6 +2891,23 @@ def _comparison_storage[boolean: Bool](input: Series) -> Bool:
         return input._data.isa[StringColumn]()
 
 
+@no_inline
+def _chunk_bool_comparison[
+    op: Int
+](left: Series, right: Series) raises -> Series:
+    """Keep chunk-only owned setup outside the contiguous dispatch frame."""
+    var a = left.copy()
+    var b = right.copy()
+    if left.is_chunked() and left._chunked.value()[].cache[].state.load() == 2:
+        a = left.rechunk()
+    if (
+        right.is_chunked()
+        and right._chunked.value()[].cache[].state.load() == 2
+    ):
+        b = right.rechunk()
+    return _chunk_bool_binary[op](a, b)
+
+
 def binary[
     op: Int, width: Int = 4
 ](
@@ -2904,21 +2921,7 @@ def binary[
                 and _comparison_storage[True](left)
                 and _comparison_storage[True](right)
             ):
-                # Reuse published caches independently, without creating or
-                # waiting for a cache on the other operand.
-                var a = left.copy()
-                var b = right.copy()
-                if (
-                    left.is_chunked()
-                    and left._chunked.value()[].cache[].state.load() == 2
-                ):
-                    a = left.rechunk()
-                if (
-                    right.is_chunked()
-                    and right._chunked.value()[].cache[].state.load() == 2
-                ):
-                    b = right.rechunk()
-                return _chunk_bool_binary[op](a, b)
+                return _chunk_bool_comparison[op](left, right)
         # These non-raising operations retain the contiguous kernels'
         # observation-mask behavior: their outputs do not apply that mask.
         comptime if is_logical(
