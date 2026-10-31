@@ -1,8 +1,9 @@
 # Scalar kernel chunk consumption
 
 The numeric-cast change shipped in #1072, metadata consumers in #1082,
-and numeric unary kernels in #1084. The current multi-input comparison uses
-merged main `e4af628a`, including those changes and #1085. Earlier metadata
+numeric unary kernels in #1084, and numeric multi-input kernels in #1087.
+The current validity/fill comparison uses merged main `a54c04b4`. The
+historical multi-input comparison uses `e4af628a`, including #1085. Earlier metadata
 measurements retain baseline `6d3f987aae999e9e10072f926cc6d9817510fbb8`;
 historical cast measurements retain baseline
 `2d0dce12a41a07c265025a890a10ae121483dc1b`. Earlier gains are not counted
@@ -15,9 +16,9 @@ the latter are candidates for aligned chunk-window evaluation.
 | Consumer | Input-copy status | Constraints to preserve |
 | --- | --- | --- |
 | `kernels/cast.cast_series` | Unmasked infallible numeric casts already consume chunks; remaining checked/masked/logical paths merge | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
-| `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084; decimal and predicate adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
-| `kernels/binary.binary` and `choose` | Ordinary numeric operations consume physical chunks in this candidate; decimal and other adapters still merge | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
-| `kernels/horizontal` | Float folds and numeric extrema consume chunks in this candidate; nullable integer sum still merges through fill-null | Different boundaries, row null rules, mixed widths and promotions |
+| `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084; validity predicates are the current subset; decimal adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
+| `kernels/binary.binary` and `choose` | Ordinary numeric operations consume physical chunks in #1087; Boolean/fill/missing adapters are the current subset; decimal and other adapters still merge | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
+| `kernels/horizontal` | Float folds and numeric extrema consume chunks in #1087; nullable integer sum uses the current fill-null subset | Different boundaries, row null rules, mixed widths and promotions |
 | `kernels/temporal.dt_op` and `cast_temporal` | Metadata retags covered by #1082; calendar/conversion paths still merge | Logical temporal units/timezones, calendar behavior, masks and conversion errors |
 | `kernels/list.nested_op` | List length and struct selection covered by #1082; other list/string operations still merge | Child offsets, sliced children, empty/null rows, struct field validity |
 | `execution` scalar/text paths | Several preparation and result rechunks | Separate actual required contiguous adapters from avoidable input/result copies |
@@ -449,6 +450,147 @@ are included. The full verdicts, raw results, manifest and admission are
 retained under `heldout/` in the M1 evidence directory and `m1-heldout/` in
 the local directory. Validation is complete for this subset; remaining adapters listed above
 are outside it.
+
+## Validity, Boolean and fill consumers after #1087
+
+This subset uses baseline `a54c04b4` and candidate engine/test revision
+`c30afb58`. It reads owned parent validity windows for null tests and
+`KEEP_NULLS`, packed Boolean windows for NOT/Kleene logic/Boolean fill and
+missing comparison, and numeric windows for float predicates, fill and
+missing comparison. Physical chunks may have different boundaries, empty
+pieces and nonzero bitmap offsets. Only an entire one-row operand broadcasts.
+Parent null tests do not inspect or merge string payloads or nested children.
+
+Full packed-bit windows use the native SIMD byte width. They stay within a
+physical span and write only at global output-byte boundaries; short spans
+and boundaries use masked partial-byte writes. This follows development
+measurements of the initial byte loop, not held-out query timings. The two
+large contracts scale with SIMD width to exercise full vectors, unaligned
+source offsets, different boundaries and scalar truth tables on each host.
+
+Numeric paths apply only to plain matching numeric dtypes. Existing
+logical/decimal conversion paths and public schema validation remain in
+place. These operators historically ignore their observation-mask argument;
+the new paths preserve that behavior. Numeric fill and keep operations retain
+selected physical payloads under null rows, while packed Boolean outputs
+clear null-result value bits. Missing comparison has no null results, treats
+two nulls or two valid NaNs as equal, and keeps full integer precision.
+Length compatibility is checked before empty results are returned.
+
+The frozen external probe contains 49 operation/dtype variants. Baseline and
+candidate pass all 672 supported functional cells with complete ordered
+Parquet outputs independently checked for values, nulls and exact Arrow
+schema. Fourteen nested-left whole-expression `KEEP_NULLS` cells retain the
+baseline binder rejection. The expanded fixed allocation matrix passes 874
+observations across 437 supported pairs, retaining eight unsupported worker
+receipts and zero tracking errors. Each call has its own complete result.
+Instrumented elapsed observations are excluded. Fixture storage and previously
+owned warm caches are outside the allocation scope; the source-cache presence
+bitmask is diagnostic metadata, not a byte count or proof of copying.
+
+For cold direct operations on 100K nullable rows sliced at offset 13 across
+64 chunks, the final paired allocation matrix records:
+
+| Operation | Baseline requested bytes | Candidate requested bytes | Baseline peak newly owned bytes | Candidate peak newly owned bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Int64 null test | 884,534 | 25,400 | 838,156 | 25,400 |
+| String null test | 15,488,823 | 25,400 | 15,424,187 | 25,400 |
+| List parent null test | 27,113,268 | 25,400 | 26,925,736 | 25,400 |
+| Struct parent null test | 16,635,529 | 25,400 | 16,286,235 | 25,400 |
+| Boolean AND | 159,314 | 25,400 | 100,352 | 25,400 |
+| Int64 fill-null | 2,631,581 | 812,980 | 2,538,268 | 812,980 |
+| Float64 missing equality | 1,794,177 | 12,900 | 1,663,188 | 12,900 |
+| Nullable Int64 horizontal sum | 4,386,701 | 2,468,100 | 4,064,228 | 2,438,716 |
+
+These are scoped allocation observations, not a general query speedup claim.
+All 99 focused contracts pass on Linux and M1 CPU, including the 15 new
+cases. Both runs retain the same two expected-failure declarations with no
+skips, and all 632 source fingerprints match the frozen candidate. Baseline
+and candidate pass the actual installed native Metal-provider integration
+probe: 21 literal expressions with complete values/nulls/dtypes and batch order
+at batch size 3. This checks provider integration for CPU scalar operations.
+
+The fixed M1 timing matrix admits all 2,622 complete independently checked
+results across 437 supported pairs, retaining eight unsupported worker
+receipts. The calibrated actual-process guard detects no compiler or known
+worker overlap. Instrumented Linux allocation times are excluded. Representative
+median durations are below; the complete matrix retains every case and sample.
+
+| Operation | Direct 100K nullable rows / 64 cold chunks, baseline / candidate, ms | Whole expression 1M nullable rows / 64 cold chunks, baseline / candidate, ms |
+| --- | --- | --- |
+| Int64 null test | 0.069 / 0.023 | 0.899 / 0.166 |
+| String null test | 0.594 / 0.021 | 3.121 / 0.140 |
+| List parent null test | 2.852 / 0.022 | 12.389 / 0.522 |
+| Boolean AND | 0.092 / 0.035 | 0.834 / 0.542 |
+| Int64 fill-null | 0.412 / 0.167 | 1.466 / 0.834 |
+| Float64 fill-NaN | 0.609 / 0.177 | 2.017 / 1.052 |
+| Int64 missing equality | 0.202 / 0.152 | 0.978 / 0.580 |
+| Nullable Int64 horizontal sum | 0.937 / 0.517 | 2.911 / 2.054 |
+| Float32 is-finite | 0.306 / 0.089 | 1.046 / 1.388 |
+
+Warm fragmented input retains an explicit tradeoff. With 1K rows in one-row
+chunks (1024 requested, 1000 retained after slicing), the baseline already
+owns its merged input before the observed call: Float32-left `KEEP_NULLS`
+takes 2 us versus 57 us, and a String null test 2 us versus 48 us. The
+candidate walks physical descriptors without creating that merged cache.
+Explicitly rechunked input retains the contiguous dispatch.
+
+An initial contiguous 100K-row Int64 null-test observation was 14 / 35 us.
+A fixed six-cell supplement used three alternating process rounds with ten
+calls per revision, checking all 360 full answers and preserving the original
+matrix unchanged. Its per-round median ranges were 13.5–14 / 13–13 us for
+that null test, 208–208 / 207.5–208.5 us for the addition control, and
+37–38 / 37–37.5 us for the cast control. The original slower whole-expression
+Float32 is-finite cell above also did not reproduce in that supplement:
+round medians were 0.993–1.018 / 0.548–0.557 ms. All original observations,
+all supplemental samples, their ranges and source/binary identities remain
+retained. These short timing samples do not establish blanket non-regression.
+
+A separate direct-kernel supplement closes numeric-output `KEEP_NULLS`
+coverage: eight left/right dtype combinations across seven fixed shapes,
+112 independently checked allocation results and 336 M1 timing results.
+It includes numeric, String, List and Struct parents, different operand
+boundaries, scalar RHS, dense/null inputs, empty input and warm one-row chunks.
+The original fixture/fresh helpers are byte-identical; its NumPy/Arrow oracle
+checks complete numeric values, nulls, schema, NaNs and signed zero. All
+allocation tracking-error counts are zero, with no detected timing overlap.
+For cold nullable 100K-row/64-chunk Int64 inputs/output, requested bytes are
+2,731,581 / 812,980 and medians 0.577 / 0.130 ms. String-left/Int64-output
+records 17,335,870 / 812,980 bytes and 1.241 / 0.132 ms; List-left/Int64-output
+records 28,860,315 / 812,980 bytes and 4.566 / 0.127 ms. Warm one-row chunks
+retain the same cached-baseline tradeoff: String-left/Float64-output takes
+7 / 65 us. This supplement measures the direct numeric-output kernel; it does
+not qualify rejected nested whole expressions. Every original rejected cell
+remains in the main receipts.
+
+The unchanged complete quick-tier held-out ClickBench run passes all 43
+queries: all 86 baseline/candidate cells independently match complete DuckDB
+values and schemas, and all 774 target snapshots load and verify their hashes.
+Only aggregate timing is inspected: candidate/baseline elapsed geometric mean
+1.0003x, effectively unchanged. This is validation at the quick tier, not a
+full-tier performance headline. The full report retains Polars' 35 wrong-answer
+and eight successful cells.
+
+The qualified baseline suite binary from the initial build-only phase is
+reused after verifying its original build command, complete source hashes,
+compiler/SDK, lockfile, native library, input and benchmark identities.
+The candidate suite binary is freshly built against `c30afb58`. The complete
+43-query workload, all variants, four threads, three rounds/repetitions,
+tracing, fresh references and independent evaluator remain unchanged.
+No held-out query timings selected the vectorization change.
+
+Final-candidate evidence is outside the tracked tree under
+`build/1003-validity-validation-a54c04b4/vector-iteration/` on Linux and
+`/Users/randyzwitch/benchdata/1003-validity/a54c04b4/vector-iteration/` on M1.
+The package includes `frozen-sources.json`, `allocation-admission.json`,
+`focused-contract-admission.json`, `native-m1-admission.json`,
+`m1-timing-admission.json`, `contiguous-controls-receipt.json` and
+`m1-heldout-admission.json` and `keep-numeric/admission.json`, plus frozen
+producers/oracles/controllers.
+The M1 raw snapshots and full receipts remain at their original paths;
+`heldout/baseline-reuse.json` records the baseline qualification. Earlier
+`e8e08e81`/`916a0e4f` observations are preserved in the parent directory.
+The remaining #1003 consumers stay open.
 
 ## Initial numeric cast path
 

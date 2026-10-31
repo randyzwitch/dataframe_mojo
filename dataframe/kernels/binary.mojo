@@ -18,6 +18,11 @@ from dataframe.storage.column import (
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.kernels.cast import _decimal_to_float
 from dataframe.kernels.numeric_input import _NumericInput
+from dataframe.kernels.bitmap_input import (
+    _ValidityInput,
+    _BoolInput,
+    _write_bitmap_byte,
+)
 from dataframe.decimal import (
     common_decimal,
     decimal_add_type,
@@ -663,6 +668,24 @@ def _fill_null_bools(left: BoolColumn, right: BoolColumn) raises -> BoolColumn:
 
 def _validity_bytes(series: Series, n: Int) -> List[UInt8]:
     """A series' validity as an n-row bitmap, read from its column."""
+    if series.is_chunked():
+        var result = List[UInt8](length=(n + 7) // 8, fill=0)
+        var input = _ValidityInput(series)
+        comptime W = simd_width_of[DType.uint8]()
+        var row = 0
+        while row < n:
+            var count = input.available(n - row)
+            if row % 8 == 0 and count >= 8 * W:
+                result.unsafe_ptr().unsafe_store(
+                    row // 8, input.valid_bytes[W]()
+                )
+                count = 8 * W
+            else:
+                count = min(count, 8 - row % 8)
+                _write_bitmap_byte(result, row, input.valid(count), count)
+            input.advance(count)
+            row += count
+        return result^
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -2281,6 +2304,302 @@ def _missing_compare[equal: Bool](left: Series, right: Series) raises -> Series:
     return Series("", BoolColumn(values=values^, bits=List[UInt8](), length=n))
 
 
+def _chunk_not(input: Series) -> Series:
+    var n = len(input)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    var source = _BoolInput(input)
+    comptime W = simd_width_of[DType.uint8]()
+    var row = 0
+    while row < n:
+        var count = source.available(n - row)
+        if row % 8 == 0 and count >= 8 * W:
+            var m = source.valid_bytes[W]()
+            values.unsafe_ptr().unsafe_store(
+                row // 8, ~source.values_bytes[W]() & m
+            )
+            valid.unsafe_ptr().unsafe_store(row // 8, m)
+            count = 8 * W
+        else:
+            count = min(count, 8 - row % 8)
+            var m = source.valid(count)
+            _write_bitmap_byte(values, row, ~source.values(count) & m, count)
+            _write_bitmap_byte(valid, row, m, count)
+        source.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@always_inline
+def _bool_bitmap_result[
+    op: Int, W: Int
+](
+    av: SIMD[DType.uint8, W],
+    bv: SIMD[DType.uint8, W],
+    var x: SIMD[DType.uint8, W],
+    var y: SIMD[DType.uint8, W],
+) -> Tuple[SIMD[DType.uint8, W], SIMD[DType.uint8, W]]:
+    var m = SIMD[DType.uint8, W](0)
+    var value: SIMD[DType.uint8, W]
+    comptime if op == EQ_MISSING or op == NE_MISSING:
+        value = (~(x ^ y) & av & bv) | (~av & ~bv)
+        comptime if op == NE_MISSING:
+            value = ~value
+    elif op == FILL_NULL:
+        m = av | bv
+        value = ((x & av) | (y & ~av)) & m
+    else:
+        x &= av
+        y &= bv
+        comptime if op == AND:
+            m = (av & bv) | (av & ~x) | (bv & ~y)
+            value = x & y & m
+        elif op == OR:
+            m = (av & bv) | x | y
+            value = (x | y) & m
+        else:
+            m = av & bv
+            value = (x ^ y) & m
+    return (value, m)
+
+
+def _chunk_bool_binary[op: Int](left: Series, right: Series) raises -> Series:
+    var n = _length(len(left), len(right))
+    comptime missing = op == EQ_MISSING or op == NE_MISSING
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=0 if missing else (n + 7) // 8, fill=0)
+    var a = _BoolInput(left)
+    var b = _BoolInput(right)
+    comptime W = simd_width_of[DType.uint8]()
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        if row % 8 == 0 and count >= 8 * W:
+            var packed = _bool_bitmap_result[op, W](
+                a.valid_bytes[W](),
+                b.valid_bytes[W](),
+                a.values_bytes[W](),
+                b.values_bytes[W](),
+            )
+            values.unsafe_ptr().unsafe_store(row // 8, packed[0])
+            comptime if not missing:
+                valid.unsafe_ptr().unsafe_store(row // 8, packed[1])
+            count = 8 * W
+        else:
+            count = min(count, 8 - row % 8)
+            var packed = _bool_bitmap_result[op, 1](
+                a.valid(count), b.valid(count), a.values(count), b.values(count)
+            )
+            _write_bitmap_byte(values, row, packed[0], count)
+            comptime if not missing:
+                _write_bitmap_byte(valid, row, packed[1], count)
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+def _chunk_keep_bools(left: Series, right: Series) raises -> Series:
+    var n = _length(len(left), len(right))
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    var a = _ValidityInput(left)
+    var b = _BoolInput(right)
+    comptime W = simd_width_of[DType.uint8]()
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        if row % 8 == 0 and count >= 8 * W:
+            var m = a.valid_bytes[W]() & b.valid_bytes[W]()
+            values.unsafe_ptr().unsafe_store(row // 8, b.values_bytes[W]() & m)
+            valid.unsafe_ptr().unsafe_store(row // 8, m)
+            count = 8 * W
+        else:
+            count = min(count, 8 - row % 8)
+            var m = a.valid(count) & b.valid(count)
+            _write_bitmap_byte(values, row, b.values(count) & m, count)
+            _write_bitmap_byte(valid, row, m, count)
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@always_inline
+def _predicate_byte[W: Int](flags: SIMD[DType.bool, W]) -> UInt8:
+    comptime if W == 8:
+        return pack_bits[DType.uint8](flags)
+    else:
+        comptime assert W == 1
+        return UInt8(flags[0])
+
+
+@always_inline
+def _chunk_float_predicate_block[
+    op: Int, D: DType, W: Int
+](
+    input: _NumericInput[D],
+    relative: Int,
+    row: Int,
+    mut values: List[UInt8],
+    mut valid: List[UInt8],
+):
+    var x = input.values[W](relative)
+    var m = input.valid[W](relative)
+    var predicate: SIMD[DType.bool, W]
+    comptime if op == IS_NAN:
+        predicate = isnan(x)
+    elif op == IS_NOT_NAN:
+        predicate = ~isnan(x)
+    elif op == IS_FINITE:
+        predicate = ~isnan(x) & ~isinf(x)
+    else:
+        predicate = isinf(x)
+    _write_bitmap_byte(values, row, _predicate_byte[W](predicate & m), W)
+    _write_bitmap_byte(valid, row, _predicate_byte[W](m), W)
+
+
+def _chunk_float_predicate[op: Int, D: DType](input: Series) -> Series:
+    var n = len(input)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    var source = _NumericInput[D](input)
+    var row = 0
+    while row < n:
+        var count = source.available(n - row)
+        var relative = 0
+        while relative + 8 <= count:
+            _chunk_float_predicate_block[op, D, 8](
+                source, relative, row + relative, values, valid
+            )
+            relative += 8
+        while relative < count:
+            _chunk_float_predicate_block[op, D, 1](
+                source, relative, row + relative, values, valid
+            )
+            relative += 1
+        source.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@always_inline
+def _chunk_fill_block[
+    op: Int, D: DType, W: Int
+](
+    a: _NumericInput[D],
+    b: _NumericInput[D],
+    relative: Int,
+    row: Int,
+    mut values: List[Scalar[D]],
+    mut predicates: List[UInt8],
+    mut valid: List[UInt8],
+):
+    var av = a.valid[W](relative)
+    var bv = b.valid[W](relative)
+    var x = a.values[W](relative)
+    var y = b.values[W](relative)
+    comptime if op == EQ_MISSING or op == NE_MISSING:
+        var equal = x.eq(y)
+        comptime if D.is_floating_point():
+            equal |= isnan(x) & isnan(y)
+        var predicate = (equal & av & bv) | (~av & ~bv)
+        comptime if op == NE_MISSING:
+            predicate = ~predicate
+        _write_bitmap_byte(predicates, row, _predicate_byte[W](predicate), W)
+    else:
+        var use_left: SIMD[DType.bool, W]
+        comptime if op == FILL_NULL:
+            use_left = av
+        else:
+            comptime assert op == FILL_NAN and D.is_floating_point()
+            use_left = ~(av & isnan(x))
+        # Existing fill kernels retain the selected physical payload even
+        # when that row is null. Do not replace it with arithmetic's zero.
+        values.unsafe_ptr().unsafe_store(row, use_left.select(x, y))
+        var m = use_left.select(av, bv)
+        _write_bitmap_byte(valid, row, _predicate_byte[W](m), W)
+
+
+def _chunk_fill_numeric[
+    op: Int, D: DType
+](left: Series, right: Series) raises -> Series:
+    var n = _length(len(left), len(right))
+    comptime predicate = op == EQ_MISSING or op == NE_MISSING
+    var values = List[Scalar[D]](unsafe_uninit_length=0 if predicate else n)
+    var predicates = List[UInt8](
+        length=(n + 7) // 8 if predicate else 0, fill=0
+    )
+    var valid = List[UInt8](length=0 if predicate else (n + 7) // 8, fill=0)
+    var a = _NumericInput[D](left)
+    var b = _NumericInput[D](right)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        var relative = 0
+        while relative + 8 <= count:
+            _chunk_fill_block[op, D, 8](
+                a, b, relative, row + relative, values, predicates, valid
+            )
+            relative += 8
+        while relative < count:
+            _chunk_fill_block[op, D, 1](
+                a, b, relative, row + relative, values, predicates, valid
+            )
+            relative += 1
+        a.advance(count)
+        b.advance(count)
+        row += count
+    comptime if predicate:
+        return Series("", BoolColumn(values=predicates^, bits=valid^, length=n))
+    else:
+        return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
+@always_inline
+def _chunk_keep_numeric_block[
+    D: DType, W: Int
+](
+    left: _ValidityInput,
+    right: _NumericInput[D],
+    relative: Int,
+    row: Int,
+    mut values: List[Scalar[D]],
+    mut valid: List[UInt8],
+):
+    values.unsafe_ptr().unsafe_store(row, right.values[W](relative))
+    var m = left.valid(W, relative) & _predicate_byte[W](
+        right.valid[W](relative)
+    )
+    _write_bitmap_byte(valid, row, m, W)
+
+
+def _chunk_keep_numeric[D: DType](left: Series, right: Series) raises -> Series:
+    var n = _length(len(left), len(right))
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    var a = _ValidityInput(left)
+    var b = _NumericInput[D](right)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        var relative = 0
+        while relative + 8 <= count:
+            _chunk_keep_numeric_block[D, 8](
+                a, b, relative, row + relative, values, valid
+            )
+            relative += 8
+        while relative < count:
+            _chunk_keep_numeric_block[D, 1](
+                a, b, relative, row + relative, values, valid
+            )
+            relative += 1
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", Column[Scalar[D]](values=values^, bits=valid^))
+
+
 def _numeric_operand_bits[D: DType](input: Series, n: Int) -> List[UInt8]:
     if input.is_chunked() and len(input) == 1:
         var scalar = _NumericInput[D](input)
@@ -2536,6 +2855,27 @@ def binary[
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
+        # These non-raising operations retain the contiguous kernels'
+        # observation-mask behavior: their outputs do not apply that mask.
+        comptime if is_logical(
+            op
+        ) or op == FILL_NULL or op == EQ_MISSING or op == NE_MISSING:
+            if left.dtype() == DataType.BOOL and right.dtype() == DataType.BOOL:
+                return _chunk_bool_binary[op](left, right)
+        comptime if op == KEEP_NULLS:
+            if right.dtype() == DataType.BOOL:
+                return _chunk_keep_bools(left, right)
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                if right.dtype() == DataType.of(D):
+                    return _chunk_keep_numeric[D](left, right)
+        comptime if op == FILL_NULL or op == FILL_NAN or op == EQ_MISSING or op == NE_MISSING:
+            if left.dtype() == right.dtype():
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    comptime if op != FILL_NAN or D.is_floating_point():
+                        if left.dtype() == DataType.of(D):
+                            return _chunk_fill_numeric[op, D](left, right)
         comptime if is_comparison(
             op
         ) or op == ADD or op == SUB or op == MUL or op == DIV or op == FLOORDIV or op == MOD or op == POW or op == CLIP_LOW or op == CLIP_HIGH:
@@ -2674,10 +3014,16 @@ def unary[
     input: Series, integer: Int64, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     comptime if op == IS_NULL or op == IS_NOT_NULL:
-        if input.is_chunked():
-            return _null_test[op == IS_NOT_NULL](input.rechunk())
         return _null_test[op == IS_NOT_NULL](input)
     if input.is_chunked():
+        comptime if op == NOT:
+            if input.dtype() == DataType.BOOL:
+                return _chunk_not(input)
+        elif op >= IS_NAN and op <= IS_INFINITE:
+            if input.dtype() == DataType.FLOAT32:
+                return _chunk_float_predicate[op, DType.float32](input)
+            if input.dtype() == DataType.FLOAT64:
+                return _chunk_float_predicate[op, DType.float64](input)
         comptime if op != NOT and not (op >= IS_NAN and op <= IS_INFINITE):
             if input.dtype() == DataType.FLOAT32:
                 return _chunk_float[False, op, width, DType.float32](
