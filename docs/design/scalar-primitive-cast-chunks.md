@@ -18,9 +18,10 @@ The production branch starts from main `e25cdd0f`, independently of #1096.
 The incremental comparison applies #1096 to both sides: actual BASE
 `484a34bf0a9d88efb36f9c48a09c383e165adda3` and HEAD
 `0809807ee39fbbc8c46107925c5b2874ea896a71`. Its normalized primitive patch and
-new test blob match production implementation `02072314`. Complete cast-file
-or runtime equivalence across these branches is not assumed while #1096
-remains outside the production base. Earlier integer-cast gains are controls.
+new test blob match production implementation `02072314`. Before publication,
+the branch incorporates merged #1096 from main `78525c62`; all 298 runtime
+files then match the actually validated incremental HEAD byte for byte.
+Earlier integer-cast gains remain controls.
 
 ## Conversion behavior
 
