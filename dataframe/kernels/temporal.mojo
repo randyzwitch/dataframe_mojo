@@ -54,7 +54,9 @@ from dataframe.expr import (
     DT_CONVERT_TZ,
 )
 from dataframe.series import Series
-from dataframe.kernels.binary import fit_mask
+from dataframe.kernels.binary import fit_mask, _joined_numeric_bits, _apply_mask
+from dataframe.kernels.numeric_input import _NumericInput
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.temporal import (
     NANOS_PER_DAY,
     PreparedFormat,
@@ -101,10 +103,10 @@ def temporal_binary(
     mask: List[Bool] = List[Bool](),
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
-        return temporal_binary(
+        return _temporal_chunk_adapter(
             op,
-            left.rechunk(),
-            right.rechunk(),
+            left,
+            right,
             left_type,
             right_type,
             result_type,
@@ -189,6 +191,146 @@ def _temporal_binary[
             if date_difference:
                 raw = checked_mul(raw, 86400000)
             out.unsafe_offset(i)[] = raw
+    return Series("", Column[Int64](values=values^, bits=bits^)).with_dtype(
+        result_type
+    )
+
+
+@no_inline
+def _temporal_host_input(input: Series) -> Bool:
+    """Keep device host-access preparation on its existing adapter path."""
+    if input.is_chunked():
+        for storage in input._chunked.value()[].arrays:
+            ref column = storage[Column[Int64]]
+            if not column._data.on_host() or not column._bits.on_host():
+                return False
+        return True
+    ref column = input._data[Column[Int64]]
+    return column._data.on_host() and column._bits.on_host()
+
+
+@no_inline
+def _temporal_chunk_adapter(
+    op: Int,
+    left: Series,
+    right: Series,
+    left_type: DataType,
+    right_type: DataType,
+    result_type: DataType,
+    mask: List[Bool],
+) raises -> Series:
+    var a = left.copy()
+    var b = right.copy()
+    # Reuse actual immutable caches without creating or waiting for one.
+    if left.is_chunked() and left._chunked.value()[].cache[].state.load() == 2:
+        a = left.rechunk()
+    if (
+        right.is_chunked()
+        and right._chunked.value()[].cache[].state.load() == 2
+    ):
+        b = right.rechunk()
+    if not a.is_chunked() and not b.is_chunked():
+        return temporal_binary(
+            op, a, b, left_type, right_type, result_type, mask
+        )
+    # Reject private heterogeneous storage through the original merge before
+    # length/mask shortcuts or checked arithmetic can change its error order.
+    # Cold nested logical tags also select a distinct legacy merge adapter.
+    if not (
+        not (a.is_chunked() and a.dtype().is_nested())
+        and not (b.is_chunked() and b.dtype().is_nested())
+        and _has_physical_storage[Column[Int64]](a)
+        and _has_physical_storage[Column[Int64]](b)
+        and _temporal_host_input(a)
+        and _temporal_host_input(b)
+    ):
+        return temporal_binary(
+            op,
+            a.rechunk(),
+            b.rechunk(),
+            left_type,
+            right_type,
+            result_type,
+            mask,
+        )
+    if op == MUL:
+        return _chunk_temporal_binary[MUL](
+            a, b, left_type, right_type, result_type, mask
+        )
+    if op == FLOORDIV:
+        return _chunk_temporal_binary[FLOORDIV](
+            a, b, left_type, right_type, result_type, mask
+        )
+    if op == SUB:
+        return _chunk_temporal_binary[SUB](
+            a, b, left_type, right_type, result_type, mask
+        )
+    return _chunk_temporal_binary[ADD](
+        a, b, left_type, right_type, result_type, mask
+    )
+
+
+@no_inline
+def _chunk_temporal_binary[
+    op: Int
+](
+    left: Series,
+    right: Series,
+    left_type: DataType,
+    right_type: DataType,
+    result_type: DataType,
+    mask: List[Bool],
+) raises -> Series:
+    if len(left) != len(right) and len(left) != 1 and len(right) != 1:
+        raise Error("Incompatible expression lengths")
+    var n = 0 if len(left) == 0 or len(right) == 0 else max(
+        len(left), len(right)
+    )
+    var bits = _joined_numeric_bits[DType.int64](left, right, n)
+    _apply_mask(bits, n, mask)
+    comptime if op == FLOORDIV:
+        if len(bits) == 0:
+            bits = List[UInt8](length=(n + 7) // 8, fill=255)
+    var values = List[Int64](length=n, fill=0)
+    var out = values.unsafe_ptr()
+    var scale_left = left_type.is_date() and right_type.is_duration()
+    var date_difference = left_type.is_date() and right_type.is_date()
+    var scale = ticks_per_day(result_type) if scale_left else Int64(1)
+    var a = _NumericInput[DType.int64](left)
+    var b = _NumericInput[DType.int64](right)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        var source_a = a.column._ptr()
+        var source_b = b.column._ptr()
+        for local in range(count):
+            var i = row + local
+            var bit = UInt8(1) << UInt8(i % 8)
+            if len(bits) > 0 and bits[i // 8] & bit == 0:
+                continue
+            var x = source_a.unsafe_offset(0 if a.scalar else a.row + local)[]
+            var y = source_b.unsafe_offset(0 if b.scalar else b.row + local)[]
+            comptime if op == MUL:
+                out.unsafe_offset(i)[] = checked_mul(x, y)
+            elif op == FLOORDIV:
+                if y == 0:
+                    bits[i // 8] &= ~bit
+                else:
+                    out.unsafe_offset(i)[] = checked_floor_div(x, y)
+            else:
+                if scale_left:
+                    x = checked_mul(x, scale)
+                var raw: Int64
+                comptime if op == SUB:
+                    raw = checked_sub(x, y)
+                else:
+                    raw = checked_add(x, y)
+                if date_difference:
+                    raw = checked_mul(raw, 86400000)
+                out.unsafe_offset(i)[] = raw
+        a.advance(count)
+        b.advance(count)
+        row += count
     return Series("", Column[Int64](values=values^, bits=bits^)).with_dtype(
         result_type
     )
