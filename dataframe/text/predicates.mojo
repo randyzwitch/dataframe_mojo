@@ -327,48 +327,57 @@ struct _ChunkPredicateJob[op: Int](Job):
         var output = Pointer[List[UInt8], MutAnyOrigin](
             unsafe_from_address=self.output
         )[].unsafe_ptr()
-        ref chunks = self.chunks[]
-        var chunk = 0
+        # The shared list owns these descriptors until all jobs join. Keep
+        # one cursor and end offset rather than indexing the list per row.
+        var current = self.chunks[].unsafe_ptr()
         var base = 0
-        while base + len(chunks[chunk].column) <= self.first:
-            base += len(chunks[chunk].column)
-            chunk += 1
+        var chunk_end = len(current[].column)
+        while chunk_end <= self.first:
+            base = chunk_end
+            current = current.unsafe_offset(1)
+            chunk_end += len(current[].column)
         var literal = self.literals.get(0)
         var row = self.first
         while row < self.last:
             var end = min(row + 8, self.last)
             var byte = UInt8(0)
-            for i in range(row, end):
-                while i >= base + len(chunks[chunk].column):
-                    base += len(chunks[chunk].column)
-                    chunk += 1
-                ref rows = chunks[chunk]
-                var local = i - base
-                if not rows.column._valid(local):
-                    continue
-                var value = rows.get(local)
-                var hit: Bool
-                comptime if Self.op == STARTS_WITH:
-                    hit = len(value) >= len(literal) and _same_bytes(
-                        Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=value.unsafe_ptr(), length=len(literal)
-                        ),
-                        literal,
-                    )
-                elif Self.op == ENDS_WITH:
-                    hit = len(value) >= len(literal) and _same_bytes(
-                        Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=value.unsafe_ptr().unsafe_offset(
-                                len(value) - len(literal)
+            var at = row
+            while at < end:
+                while at >= chunk_end:
+                    base = chunk_end
+                    current = current.unsafe_offset(1)
+                    chunk_end += len(current[].column)
+                ref rows = current[]
+                var span_end = min(end, chunk_end)
+                for i in range(at, span_end):
+                    var local = i - base
+                    if not rows.column._valid(local):
+                        continue
+                    var value = rows.get(local)
+                    var hit: Bool
+                    comptime if Self.op == STARTS_WITH:
+                        hit = len(value) >= len(literal) and _same_bytes(
+                            Span[UInt8, ImmutAnyOrigin](
+                                unsafe_ptr=value.unsafe_ptr(),
+                                length=len(literal),
                             ),
-                            length=len(literal),
-                        ),
-                        literal,
-                    )
-                else:
-                    hit = _find_bytes(value, literal, 0) >= 0
-                if hit:
-                    byte |= UInt8(1) << UInt8(i - row)
+                            literal,
+                        )
+                    elif Self.op == ENDS_WITH:
+                        hit = len(value) >= len(literal) and _same_bytes(
+                            Span[UInt8, ImmutAnyOrigin](
+                                unsafe_ptr=value.unsafe_ptr().unsafe_offset(
+                                    len(value) - len(literal)
+                                ),
+                                length=len(literal),
+                            ),
+                            literal,
+                        )
+                    else:
+                        hit = _find_bytes(value, literal, 0) >= 0
+                    if hit:
+                        byte |= UInt8(1) << UInt8(i - row)
+                at = span_end
             output.unsafe_offset(row // 8)[] = byte
             row = end
 
