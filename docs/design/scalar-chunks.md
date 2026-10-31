@@ -2,7 +2,7 @@
 
 The numeric-cast change shipped in #1072, metadata consumers in #1082,
 numeric unary kernels in #1084, and numeric multi-input kernels in #1087.
-The current validity/fill comparison uses merged main `a54c04b4`. The
+The historical validity/fill comparison uses merged main `a54c04b4`. The
 historical multi-input comparison uses `e4af628a`, including #1085. Earlier metadata
 measurements retain baseline `6d3f987aae999e9e10072f926cc6d9817510fbb8`;
 historical cast measurements retain baseline
@@ -16,9 +16,10 @@ the latter are candidates for aligned chunk-window evaluation.
 | Consumer | Input-copy status | Constraints to preserve |
 | --- | --- | --- |
 | `kernels/cast.cast_series` | Unmasked infallible numeric casts already consume chunks; remaining checked/masked/logical paths merge | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
-| `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084; validity predicates are the current subset; decimal adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
-| `kernels/binary.binary` and `choose` | Ordinary numeric operations consume physical chunks in #1087; Boolean/fill/missing adapters are the current subset; decimal and other adapters still merge | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
-| `kernels/horizontal` | Float folds and numeric extrema consume chunks in #1087; nullable integer sum uses the current fill-null subset | Different boundaries, row null rules, mixed widths and promotions |
+| `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084 and validity predicates by #1089; decimal adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
+| `kernels/binary.binary` and `choose` | Ordinary numeric/Boolean operations, comparisons and fills covered by #1087/#1089/#1093/#1094; decimal and Boolean/String conditional adapters remain | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
+| `kernels/horizontal` | Float folds and numeric extrema covered by #1087; nullable integer sum by #1089; other adapters remain | Different boundaries, row null rules, mixed widths and promotions |
+| `kernels/temporal.temporal_binary` | ADD/SUB/MUL/FLOORDIV consume owned host windows in this subset; published caches and unsupported/device-preparation adapters remain | Checked arithmetic, global masks, scalar broadcasting, units/timezones and error order |
 | `kernels/temporal.dt_op` and `cast_temporal` | Metadata retags covered by #1082; calendar/conversion paths still merge | Logical temporal units/timezones, calendar behavior, masks and conversion errors |
 | `kernels/list.nested_op` | List length and struct selection covered by #1082; other list/string operations still merge | Child offsets, sliced children, empty/null rows, struct field validity |
 | `execution` scalar/text paths | Several preparation and result rechunks | Separate actual required contiguous adapters from avoidable input/result copies |
@@ -26,6 +27,9 @@ the latter are candidates for aligned chunk-window evaluation.
 Plain integer and String set membership, shared Boolean equality, retained
 adapters and measured tradeoffs are documented in
 [scalar-membership-chunks.md](scalar-membership-chunks.md).
+
+Temporal binary arithmetic, retained adapters and complete validation results
+are documented in [scalar-temporal-binary-chunks.md](scalar-temporal-binary-chunks.md).
 
 ## Measurement plan
 
