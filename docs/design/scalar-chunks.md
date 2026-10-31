@@ -675,3 +675,7 @@ consumer inventory or external-suite/held-out validation.
 
 Literal string predicate chunk processing, retained cache/regex adapters and
 measured allocation costs are documented in [scalar-literal-predicates.md](scalar-literal-predicates.md).
+
+The remaining two-input math adapter is documented in
+[scalar-arctan2-chunks.md](scalar-arctan2-chunks.md), including identity-cast
+handling, retained strict conversions and cold/published-cache controls.
