@@ -12,7 +12,7 @@ probes a small open-addressing table of their hashes.
 """
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.boolean import BoolColumn
-from dataframe.storage.column import _copy_validity
+from dataframe.storage.column import _append_validity, _copy_validity
 from dataframe.expr import EQ, GE, GT, LE, LT, NE
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes
@@ -298,6 +298,123 @@ def _predicate[
     return Series("", BoolColumn(values=values^, bits=valid^, length=n))
 
 
+struct _ChunkPredicateJob[op: Int](Job):
+    """Read owned physical spans; each job writes disjoint global bytes."""
+
+    var chunks: ArcPointer[List[_Bytes]]
+    var literals: _Literals
+    var output: Int
+    var first: Int
+    var last: Int
+
+    def __init__(
+        out self,
+        chunks: ArcPointer[List[_Bytes]],
+        literals: _Literals,
+        output: Int,
+        first: Int,
+        last: Int,
+    ):
+        self.chunks = chunks
+        self.literals = literals.copy()
+        self.output = output
+        self.first = first
+        self.last = last
+
+    def run(mut self) raises:
+        if self.first == self.last:
+            return
+        var output = Pointer[List[UInt8], MutAnyOrigin](
+            unsafe_from_address=self.output
+        )[].unsafe_ptr()
+        ref chunks = self.chunks[]
+        var chunk = 0
+        var base = 0
+        while base + len(chunks[chunk].column) <= self.first:
+            base += len(chunks[chunk].column)
+            chunk += 1
+        var literal = self.literals.get(0)
+        var row = self.first
+        while row < self.last:
+            var end = min(row + 8, self.last)
+            var byte = UInt8(0)
+            for i in range(row, end):
+                while i >= base + len(chunks[chunk].column):
+                    base += len(chunks[chunk].column)
+                    chunk += 1
+                ref rows = chunks[chunk]
+                var local = i - base
+                if not rows.column._valid(local):
+                    continue
+                var value = rows.get(local)
+                var hit: Bool
+                comptime if Self.op == STARTS_WITH:
+                    hit = len(value) >= len(literal) and _same_bytes(
+                        Span[UInt8, ImmutAnyOrigin](
+                            unsafe_ptr=value.unsafe_ptr(), length=len(literal)
+                        ),
+                        literal,
+                    )
+                elif Self.op == ENDS_WITH:
+                    hit = len(value) >= len(literal) and _same_bytes(
+                        Span[UInt8, ImmutAnyOrigin](
+                            unsafe_ptr=value.unsafe_ptr().unsafe_offset(
+                                len(value) - len(literal)
+                            ),
+                            length=len(literal),
+                        ),
+                        literal,
+                    )
+                else:
+                    hit = _find_bytes(value, literal, 0) >= 0
+                if hit:
+                    byte |= UInt8(1) << UInt8(i - row)
+            output.unsafe_offset(row // 8)[] = byte
+            row = end
+
+
+def _literal_predicate[
+    op: Int
+](input: Series, literal: String) raises -> Series:
+    var literals = _Literals([literal])
+    if not input.is_chunked():
+        return _predicate[op](input._data[StringColumn], literals)
+    ref storage = input._chunked.value()[]
+    # A completed immutable cache already owns contiguous input. Reusing it
+    # avoids per-chunk setup, without initiating or waiting for a merge.
+    if storage.cache[].state.load() == 2:
+        var merged = input.rechunk()
+        return _predicate[op](merged._data[StringColumn], literals)
+    var n = len(input)
+    var values = List[UInt8](unsafe_uninit_length=(n + 7) // 8)
+    var valid = List[UInt8](capacity=(n + 7) // 8)
+    var chunks = List[_Bytes](capacity=len(storage.arrays))
+    var start = 0
+    for array in storage.arrays:
+        ref column = array[StringColumn]
+        chunks.append(_Bytes(column))
+        _append_validity(
+            valid, start, column._bits[], column._offset, len(column)
+        )
+        start += len(column)
+    var shared = ArcPointer(chunks^)
+    var workers = worker_count(n)
+    var jobs = List[_ChunkPredicateJob[op]](capacity=workers)
+    for w in range(workers):
+        var first = (n * w // workers) // 8 * 8
+        var last = n if w == workers - 1 else (n * (w + 1) // workers) // 8 * 8
+        jobs.append(
+            _ChunkPredicateJob[op](
+                shared, literals, Int(Pointer(to=values)), first, last
+            )
+        )
+    if workers == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
 def _flip(op: Int) -> Int:
     """The operator with its operands swapped: lit < col is col > lit."""
     if op == LT:
@@ -368,12 +485,24 @@ def decode_values(text: String) raises -> List[String]:
     return values^
 
 
+def string_starts_with(input: Series, prefix: String) raises -> Series:
+    return _literal_predicate[STARTS_WITH](input, prefix)
+
+
 def string_starts_with(column: StringColumn, prefix: String) raises -> Series:
     return _predicate[STARTS_WITH](column, _Literals([prefix]))
 
 
+def string_ends_with(input: Series, suffix: String) raises -> Series:
+    return _literal_predicate[ENDS_WITH](input, suffix)
+
+
 def string_ends_with(column: StringColumn, suffix: String) raises -> Series:
     return _predicate[ENDS_WITH](column, _Literals([suffix]))
+
+
+def string_contains(input: Series, literal: String) raises -> Series:
+    return _literal_predicate[CONTAINS](input, literal)
 
 
 def string_contains(column: StringColumn, literal: String) raises -> Series:

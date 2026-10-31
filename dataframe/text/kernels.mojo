@@ -75,6 +75,12 @@ def string_op(
     if node.op == STR_LEN_CHARS:
         return string_lengths[True](input)
     if input.is_chunked():
+        if node.op == STR_STARTS_WITH:
+            return string_starts_with(input, node.text)
+        if node.op == STR_ENDS_WITH:
+            return string_ends_with(input, node.text)
+        if node.op == STR_CONTAINS and node.integer == 0:
+            return string_contains(input, node.text)
         return string_op(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
     if node.op == STR_STRIP:
