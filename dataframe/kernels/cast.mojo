@@ -26,6 +26,7 @@ from dataframe.series import Series
 from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
+from dataframe.kernels.physical_input import _has_physical_storage
 
 
 def _dtype(series: Series) -> DataType:
@@ -681,6 +682,90 @@ def _cast_chunk_exact(
     return None
 
 
+@no_inline
+def _cast_checked_chunk_values[
+    S: DType, T: DType
+](
+    input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
+) raises -> Series:
+    """Read observed integer windows once into an owned numeric result."""
+    var n = len(input)
+    var values = List[Scalar[T]](length=n, fill=0)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var to = values.unsafe_ptr()
+    var validity = bits.unsafe_ptr()
+    var masked = len(mask) == n
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        ref column = storage[Column[Scalar[S]]]
+        var source = column._ptr()
+        for row in range(len(column)):
+            var i = base + row
+            if not column._valid(row) or (masked and not mask[i]):
+                continue
+            var value = source[unsafe_offset=row]
+            comptime if T.is_integral():
+                var wide = value.cast[DType.int128]()
+                if (
+                    wide < Scalar[T].MIN.cast[DType.int128]()
+                    or wide > Scalar[T].MAX.cast[DType.int128]()
+                ):
+                    if strict:
+                        raise Error(
+                            "cast from "
+                            + input.dtype().name()
+                            + " to "
+                            + target.name()
+                            + " failed at row "
+                            + String(offset + i)
+                            + " for value '"
+                            + String(value)
+                            + "': out of "
+                            + String(T)
+                            + " range"
+                        )
+                    continue
+                to[unsafe_offset=i] = value.cast[T]()
+            else:
+                # Every nonempty mask uses the existing Float64 intermediate,
+                # even when its length differs and observation ignores it.
+                to[unsafe_offset=i] = (
+                    value.cast[T]() if len(mask)
+                    == 0 else value.cast[DType.float64]().cast[T]()
+                )
+            validity[unsafe_offset=i // 8] |= UInt8(1) << UInt8(i & 7)
+        base += len(column)
+    return Series(input.name(), Column[Scalar[T]](values=values^, bits=bits^))
+
+
+@no_inline
+def _cast_checked_chunks(
+    input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
+) raises -> Optional[Series]:
+    """Admit only cold, host-readable plain integer windows."""
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return None
+    comptime for j in range(len(NUMERIC_DTYPES)):
+        comptime S = NUMERIC_DTYPES[j]
+        comptime if S.is_integral():
+            if input.dtype() == DataType.of(S):
+                if not _has_physical_storage[Column[Scalar[S]]](input):
+                    return None
+                for storage in chunks.arrays:
+                    ref column = storage[Column[Scalar[S]]]
+                    if not column._data.on_host() or not column._bits.on_host():
+                        return None
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime T = NUMERIC_DTYPES[k]
+                    if target == DataType.of(T):
+                        return _cast_checked_chunk_values[S, T](
+                            input, target, strict, offset, mask
+                        )
+                return None
+    return None
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -716,6 +801,9 @@ def cast_series(
             var exact = _cast_chunk_exact(input, target)
             if exact:
                 return exact.take()
+        var checked = _cast_checked_chunks(input, target, strict, offset, mask)
+        if checked:
+            return checked.take()
         return cast_series(input.rechunk(), target, strict, offset, mask)
     if source.is_decimal() and target == DataType.FLOAT64:
         # Under a mask too: the conversion cannot fail on an inactive row,
