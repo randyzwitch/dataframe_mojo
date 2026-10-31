@@ -397,7 +397,75 @@ def test_bool_equality_and_dynamic_membership_keep_distinct_null_rules() raises:
         _bool_pair(offset)
 
 
+def _singleton_bools(right: Bool) raises -> Series:
+    var values: List[Bool] = [False, False, False]
+    var valid: List[Bool] = [True, True, True]
+    for row in range(1000):
+        var phase = row % 4
+        values.append(phase != 2 if right else phase != 1)
+        valid.append(phase != 1 if right else phase != 2)
+    var flat = Series("y" if right else "x", BoolColumn(values, valid))
+    var parts = List[Series]()
+    for row in range(1000):
+        parts.append(flat.slice(row + 3, 1))
+    return Series._from_chunks(parts)
+
+
+def _eq_raw(actual: Series, expected: Series) raises:
+    assert_equal(actual.name(), "")
+    _same(actual, expected)
+    var values = actual.bool()
+    var wanted = expected.bool()
+    for row in range(len(actual)):
+        assert_equal(values._get(row), wanted._get(row))
+
+
+def _published_bool_eq() raises:
+    var x = _singleton_bools(False)
+    var y = _singleton_bools(True)
+    assert_equal(x.n_chunks(), 1000)
+    assert_equal(y.n_chunks(), 1000)
+    var one = Series("a", BoolColumn([True]))
+    var scalar_values = List[Bool]()
+    var scalar_valid = List[Bool]()
+    var pair_values = List[Bool]()
+    var pair_valid = List[Bool]()
+    for row in range(1000):
+        var phase = row % 4
+        scalar_values.append(phase == 0 or phase == 3)
+        scalar_valid.append(phase != 2)
+        pair_values.append(phase == 0 or phase == 3)
+        pair_valid.append(phase == 0 or phase == 3)
+    var scalar_expected = Series("a", BoolColumn(scalar_values, scalar_valid))
+    var pair_expected = Series("a", BoolColumn(pair_values, pair_valid))
+    _eq_raw(binary[EQ](x, one), scalar_expected)
+    _eq_raw(binary[EQ](x, y), pair_expected)
+    _cold(x)
+    _cold(y)
+    var cached_x = x.rechunk()
+    _ = cached_x^
+    var masks = List[List[Bool]]()
+    masks.append([])
+    masks.append(List[Bool](length=1000, fill=False))
+    masks.append([False, True])
+    for mask in masks:
+        _eq_raw(binary[EQ](x, one, mask), scalar_expected)
+        _eq_raw(binary[EQ](one, x, mask), scalar_expected)
+        _eq_raw(binary[EQ](x, y, mask), pair_expected)
+        _eq_raw(binary[EQ](y, x, mask), pair_expected)
+        assert_equal(x._chunked.value()[].cache[].state.load(), Int64(2))
+        _cold(y)
+    var cached_y = y.rechunk()
+    _ = cached_y^
+    for mask in masks:
+        _eq_raw(binary[EQ](x, y, mask), pair_expected)
+        _eq_raw(binary[EQ](y, x, mask), pair_expected)
+        assert_equal(x._chunked.value()[].cache[].state.load(), Int64(2))
+        assert_equal(y._chunked.value()[].cache[].state.load(), Int64(2))
+
+
 def test_bool_equality_whole_scalars_empty_lengths_and_masks() raises:
+    _published_bool_eq()
     var xf = Series(
         "x", BoolColumn([True, False, True, False], [True, True, False, False])
     )

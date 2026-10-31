@@ -2871,7 +2871,23 @@ def binary[
                         left._data.isa[BoolColumn]()
                         and right._data.isa[BoolColumn]()
                     ):
-                        return _chunk_bool_binary[op](left, right)
+                        # A published cache is already contiguous. Reuse each
+                        # ready operand without creating or waiting for one.
+                        var a = left.copy()
+                        var b = right.copy()
+                        if (
+                            left.is_chunked()
+                            and left._chunked.value()[].cache[].state.load()
+                            == 2
+                        ):
+                            a = left.rechunk()
+                        if (
+                            right.is_chunked()
+                            and right._chunked.value()[].cache[].state.load()
+                            == 2
+                        ):
+                            b = right.rechunk()
+                        return _chunk_bool_binary[EQ](a, b)
                 else:
                     return _chunk_bool_binary[op](left, right)
         comptime if op == KEEP_NULLS:
