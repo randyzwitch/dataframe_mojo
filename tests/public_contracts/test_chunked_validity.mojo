@@ -626,8 +626,8 @@ def test_null_predicates_read_parent_validity_across_storage_and_logical_tags() 
     _null_windows(numeric.cast(DataType.decimal(30, 2, 128)), seed)
     var nulls = Series(
         "x",
-        Column[Int64](
-            List[Int64](length=60, fill=0), List[Bool](length=60, fill=False)
+        Column[Int8](
+            List[Int8](length=60, fill=0), List[Bool](length=60, fill=False)
         ),
     ).with_dtype(DataType.NULL)
     _null_windows(nulls, [False])
@@ -721,8 +721,8 @@ def test_keep_nulls_generic_left_uses_validity_for_boolean_output() raises:
     _cold(right)
     var null_flat = Series(
         "x",
-        Column[Int64](
-            List[Int64](length=8, fill=0), List[Bool](length=8, fill=False)
+        Column[Int8](
+            List[Int8](length=8, fill=0), List[Bool](length=8, fill=False)
         ),
     ).with_dtype(DataType.NULL)
     var nulls = _pieces(null_flat, [3, 5])
