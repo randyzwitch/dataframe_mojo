@@ -35,12 +35,14 @@ from dataframe.decimal import (
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.series import Series
 from dataframe.text.predicates import compare_with_literal
+from dataframe.text.comparisons import compare_chunked_strings
 from dataframe.expr import (
     ADD,
     SUB,
     MUL,
     GT,
     EQ,
+    NE,
     EQ_MISSING,
     NE_MISSING,
     LT,
@@ -2417,6 +2419,18 @@ def _bool_bitmap_result[
         elif op == OR:
             m = (av & bv) | x | y
             value = (x | y) & m
+        elif op == LT:
+            m = av & bv
+            value = (~x & y) & m
+        elif op == LE:
+            m = av & bv
+            value = (~x | y) & m
+        elif op == GT:
+            m = av & bv
+            value = (x & ~y) & m
+        elif op == GE:
+            m = av & bv
+            value = (x | ~y) & m
         else:
             m = av & bv
             value = (x ^ y) & m
@@ -2909,12 +2923,65 @@ def _chunk_numeric_binary[
         return Series("", Column[Scalar[D]](values=values^, bits=valid^))
 
 
+def _comparison_storage[boolean: Bool](input: Series) -> Bool:
+    """Check physical windows before taking comparison-only shortcuts.
+
+    Private constructors can combine unlike storage under one dtype tag.
+    Published caches have already merged those windows; inspect the actual
+    cached storage without scanning chunks or materializing a new cache.
+    """
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if chunks.cache[].state.load() == 2:
+            comptime if boolean:
+                return chunks.cache[].merged.value().isa[BoolColumn]()
+            else:
+                return chunks.cache[].merged.value().isa[StringColumn]()
+        for array in chunks.arrays:
+            comptime if boolean:
+                if not array.isa[BoolColumn]():
+                    return False
+            else:
+                if not array.isa[StringColumn]():
+                    return False
+        return True
+    comptime if boolean:
+        return input._data.isa[BoolColumn]()
+    else:
+        return input._data.isa[StringColumn]()
+
+
+@no_inline
+def _chunk_bool_comparison[
+    op: Int
+](left: Series, right: Series) raises -> Series:
+    """Keep chunk-only owned setup outside the contiguous dispatch frame."""
+    var a = left.copy()
+    var b = right.copy()
+    if left.is_chunked() and left._chunked.value()[].cache[].state.load() == 2:
+        a = left.rechunk()
+    if (
+        right.is_chunked()
+        and right._chunked.value()[].cache[].state.load() == 2
+    ):
+        b = right.rechunk()
+    return _chunk_bool_binary[op](a, b)
+
+
 def binary[
     op: Int, width: Int = 4
 ](
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
+        comptime if op == NE or op == LT or op == LE or op == GT or op == GE:
+            if (
+                left.dtype() == DataType.BOOL
+                and right.dtype() == DataType.BOOL
+                and _comparison_storage[True](left)
+                and _comparison_storage[True](right)
+            ):
+                return _chunk_bool_comparison[op](left, right)
         # These non-raising operations retain the contiguous kernels'
         # observation-mask behavior: their outputs do not apply that mask.
         comptime if is_logical(
@@ -2946,6 +3013,14 @@ def binary[
                         return _chunk_numeric_binary[op, width, D](
                             left, right, mask
                         )
+        comptime if is_comparison(op):
+            if (
+                left.dtype() == DataType.STRING
+                and right.dtype() == DataType.STRING
+                and _comparison_storage[False](left)
+                and _comparison_storage[False](right)
+            ):
+                return compare_chunked_strings[op](left, right)
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
     comptime if op == EQ_MISSING or op == NE_MISSING:
         return _missing_compare[op == EQ_MISSING](left, right)
