@@ -18,6 +18,7 @@ from dataframe.storage.column import (
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.kernels.cast import _decimal_to_float
 from dataframe.kernels.numeric_input import _NumericInput
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.kernels.bitmap_input import (
     _ValidityInput,
     _BoolInput,
@@ -2867,10 +2868,9 @@ def binary[
                 comptime if op == EQ:
                     # Private Storage constructors can carry a Bool tag over
                     # other storage. Keep their existing physical dispatch.
-                    if (
-                        left._data.isa[BoolColumn]()
-                        and right._data.isa[BoolColumn]()
-                    ):
+                    if _has_physical_storage[BoolColumn](
+                        left
+                    ) and _has_physical_storage[BoolColumn](right):
                         # A published cache is already contiguous. Reuse each
                         # ready operand without creating or waiting for one.
                         var a = left.copy()
@@ -3364,10 +3364,9 @@ def integer_is_in(input: Series, text: String) raises -> Series:
         comptime for d in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[d]
             comptime if D.is_integral():
-                if (
-                    input.dtype() == DataType.of(D)
-                    and input._data.isa[Column[Scalar[D]]]()
-                ):
+                if input.dtype() == DataType.of(D) and _has_physical_storage[
+                    Column[Scalar[D]]
+                ](input):
                     if input._chunked.value()[].cache[].state.load() == 2:
                         return integer_is_in(input.rechunk(), text)
                     return _chunk_integer_is_in[D](input, text)

@@ -17,6 +17,7 @@ from dataframe.expr import EQ, GE, GT, LE, LT, NE
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes
 from dataframe.series import Series
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.text.bytes import (
     _Bytes,
     _find_bytes,
@@ -463,6 +464,9 @@ def is_in_literals(input: Series, values: List[String]) raises -> Series:
     """One prepared lookup over owned physical strings, without merging."""
     if not input.is_chunked():
         return is_in_literals(input._data[StringColumn], values)
+    if not _has_physical_storage[StringColumn](input):
+        var merged = input.rechunk()
+        return is_in_literals(merged._data[StringColumn], values)
     ref storage = input._chunked.value()[]
     if storage.cache[].state.load() == 2:
         var merged = input.rechunk()

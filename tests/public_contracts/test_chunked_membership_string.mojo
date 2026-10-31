@@ -93,6 +93,8 @@ def _wanted(kind: Int) -> List[String]:
         return List[String]()
     if kind == 3:
         return List[String](length=9, fill="abc")
+    if kind == 5:
+        return ["abc"]
     var values: List[String] = [
         "",
         "abc",
@@ -131,7 +133,7 @@ def _expected(kind: Int, first: Int, n: Int) raises -> Series:
         hits = List[Bool](length=16, fill=False)
     elif kind == 2:
         hits[10] = True
-    elif kind == 3:
+    elif kind == 3 or kind == 5:
         hits = [
             False,
             True,
@@ -303,3 +305,25 @@ def test_string_membership_parallel_global_bytes_and_existing_literal_dispatch_a
         )
         assert_equal(source._chunked.value()[].cache[].state.load(), Int64(0))
     _ = workers^
+
+
+def test_string_membership_keeps_binary_storage_and_discards_empty_wrong_storage() raises:
+    # String -> Binary is a supported metadata retag with identical row bytes.
+    var bytes = _source(2, 41, 13).cast(DataType.BINARY)
+    var empty_bool = Series("s", BoolColumn(List[Bool]()))
+    # Private logical tags can differ from storage, but empty arrays are
+    # canonically discarded and must not disqualify the active String bytes.
+    var parts = List[Series]()
+    parts.append(Series("s", empty_bool._data.copy(), DataType.BINARY))
+    for chunk in bytes.chunks():
+        parts.append(chunk.copy())
+    var source = Series._from_chunks(parts)
+    assert_true(source.dtype() == DataType.BINARY)
+    assert_true(source.is_chunked())
+    for kind in [0, 5, 2]:
+        _check(source, kind, 13)
+    var merged = source.rechunk()
+    assert_false(merged.is_chunked())
+    for kind in [0, 5, 2]:
+        _check(source, kind, 13, False)
+        assert_equal(source._chunked.value()[].cache[].state.load(), Int64(2))

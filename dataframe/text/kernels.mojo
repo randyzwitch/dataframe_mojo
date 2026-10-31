@@ -32,6 +32,7 @@ from dataframe.text.regex_adapter import (
     regex_replace,
 )
 from dataframe.series import Series
+from dataframe.kernels.physical_input import _has_physical_storage
 from dataframe.text.lengths import string_lengths
 from dataframe.text.predicates import (
     decode_values,
@@ -76,7 +77,7 @@ def string_op(
         return string_lengths[True](input)
     if input.is_chunked():
         # Keep unsupported storage on the old error path before decoding.
-        if node.op == STR_IS_IN and input._data.isa[StringColumn]():
+        if node.op == STR_IS_IN and _has_physical_storage[StringColumn](input):
             return is_in_literals(input, decode_values(node.text))
         if node.op == STR_STARTS_WITH:
             return string_starts_with(input, node.text)
