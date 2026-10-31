@@ -158,6 +158,7 @@ from dataframe.kernels.binary import (
     binary,
     unary,
     choose,
+    _choice_chunk_input,
     fit_mask,
     math_unary,
     arctan2_series,
@@ -984,6 +985,24 @@ def _masked_branch[
             length,
             False,
             then_mask,
+        )
+    # Boolean/String null-otherwise branches use the same admitted window
+    # choice as explicit otherwise branches, before their legacy merge.
+    if (
+        then.is_chunked()
+        and then.dtype() == bound.dtypes[index]
+        and (len(flags) == 1 or len(flags) == size)
+        and _choice_chunk_input(then, bound.dtypes[index], size)
+    ):
+        if len(selected) == 0:
+            selected = List[Bool](unsafe_uninit_length=size)
+            var then_mask = List[Bool](unsafe_uninit_length=size)
+            var other_mask = List[Bool](unsafe_uninit_length=size)
+            _selection_masks(
+                flags, List[Bool](), selected, then_mask, other_mask
+            )
+        return choose(
+            selected, then, Series.full_null("", bound.dtypes[index], 1)
         )
     # A batch that spans a source's chunks (a Parquet column's row
     # groups) merges its branch once: one copy, where choosing every row

@@ -34,7 +34,7 @@ from dataframe.decimal import (
     pow10,
 )
 from dataframe.storage.string import StringColumn, StringBuilder
-from dataframe.series import Series
+from dataframe.series import Series, Storage
 from dataframe.text.predicates import compare_with_literal
 from dataframe.text.comparisons import compare_chunked_strings
 from dataframe.expr import (
@@ -3377,6 +3377,259 @@ def _choose_chunked_numeric[
     return Series("", Column[Scalar[D]](values=values^, bits=bits^))
 
 
+@no_inline
+def _choice_bool_host(column: BoolColumn) -> Bool:
+    if not column._data.on_host() or not column._bits.on_host():
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    # Compute ceil((offset + count) / 8) without overflowing the sum.
+    var required = offset // 8 + count // 8 + (offset % 8 + count % 8 + 7) // 8
+    return required <= len(column._data[]) and (
+        len(column._bits[]) == 0 or required <= len(column._bits[])
+    )
+
+
+@no_inline
+def _choice_string_host(column: StringColumn, cold_chunk: Bool) -> Bool:
+    # Cold merges prepare all codes before observation. A flat or published
+    # column's codes are not read by the existing row-choice kernel.
+    if cold_chunk and column._codes:
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    if column._is_view_storage():
+        var storage = column._view_storage_unchecked()
+        if column._bits.ptr() != storage._bits.ptr():
+            return False
+        if not storage._views.on_host() or not storage._bits.on_host():
+            return False
+        for buffer in storage._buffers[]:
+            if not buffer.on_host():
+                return False
+        var rows = len(storage)
+        var descriptors = len(storage._views[])
+        if offset > rows or count > rows - offset:
+            return False
+        if offset > descriptors or count > descriptors - offset:
+            return False
+        var end = offset + count
+        if len(storage._bits[]) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(storage._bits[])
+        ):
+            return False
+        for row in range(offset, end):
+            var view = storage._view_unchecked(row)
+            if not view.is_inline():
+                var index = Int(view.buffer_index)
+                if index >= len(storage._buffers[]):
+                    return False
+                var available = len(storage._buffers[][index])
+                var length = Int(view.length)
+                if length > available or Int(view.offset) > available - length:
+                    return False
+    else:
+        if (
+            not column._bytes.on_host()
+            or not column._offsets.on_host()
+            or not column._bits.on_host()
+        ):
+            return False
+        var entries = len(column._offsets[])
+        if entries == 0 or offset > entries - 1:
+            return False
+        if count > entries - 1 - offset:
+            return False
+        var end = offset + count
+        if len(column._bits[]) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(column._bits[])
+        ):
+            return False
+        var available = Int64(len(column._bytes[]))
+        var previous = column._offsets[][offset]
+        if previous < 0 or previous > available:
+            return False
+        for row in range(offset + 1, end + 1):
+            var next = column._offsets[][row]
+            if next < previous or next > available:
+                return False
+            previous = next
+    return True
+
+
+@no_inline
+def _choice_storage_host(
+    input: Storage, boolean: Bool, cold_chunk: Bool
+) -> Bool:
+    if boolean:
+        return input.isa[BoolColumn]() and _choice_bool_host(input[BoolColumn])
+    return input.isa[StringColumn]() and _choice_string_host(
+        input[StringColumn], cold_chunk
+    )
+
+
+def _choice_storage_length(input: Storage, boolean: Bool) -> Int:
+    # Called only after the physical/host guard admitted this exact array.
+    return len(input[BoolColumn]) if boolean else len(input[StringColumn])
+
+
+@no_inline
+def _choice_chunk_input(input: Series, dtype: DataType, size: Int) -> Bool:
+    """Unsupported shapes/storage keep the selected-row legacy adapter."""
+    if input.dtype() != dtype:
+        return False
+    if dtype != DataType.BOOL and dtype != DataType.STRING:
+        return False
+    if len(input) != 1 and len(input) < size:
+        return False
+    var boolean = dtype == DataType.BOOL
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if chunks.cache[].state.load() == 2:
+            ref merged = chunks.cache[].merged.value()
+            return _choice_storage_host(merged, boolean, False) and (
+                _choice_storage_length(merged, boolean) == len(input)
+            )
+        if len(chunks.arrays) == 0:
+            return False
+        var total = 0
+        for array in chunks.arrays:
+            if not _choice_storage_host(array, boolean, True):
+                return False
+            var count = _choice_storage_length(array, boolean)
+            if count > len(input) - total:
+                return False
+            total += count
+        return total == len(input)
+    return _choice_storage_host(input._data, boolean, False)
+
+
+def _choice_ready(input: Series) raises -> Series:
+    if (
+        input.is_chunked()
+        and input._chunked.value()[].cache[].state.load() == 2
+    ):
+        return input.rechunk()
+    return input.copy()
+
+
+struct _StringChoiceInput(Movable):
+    """Own a forward window; StringBuilder retains its existing row copier."""
+
+    var owner: Series
+    var column: StringColumn
+    var chunk: Int
+    var row: Int
+    var scalar: Bool
+
+    def __init__(out self, input: Series):
+        self.owner = input.copy()
+        self.chunk = 0
+        self.row = 0
+        self.scalar = len(input) == 1
+        self.column = (
+            input._chunked.value()[]
+            .arrays[0][StringColumn]
+            .copy() if input.is_chunked() else input._data[StringColumn]
+            .copy()
+        )
+        self._skip_empty()
+
+    def _skip_empty(mut self):
+        if not self.owner.is_chunked():
+            return
+        ref chunks = self.owner._chunked.value()[]
+        while self.row == len(self.column) and self.chunk + 1 < len(
+            chunks.arrays
+        ):
+            self.chunk += 1
+            self.column = chunks.arrays[self.chunk][StringColumn].copy()
+            self.row = 0
+
+    def available(self, remaining: Int) -> Int:
+        return remaining if self.scalar else min(
+            remaining, len(self.column) - self.row
+        )
+
+    def advance(mut self, count: Int):
+        if not self.scalar:
+            assert count >= 0 and count <= len(self.column) - self.row
+            self.row += count
+            self._skip_empty()
+
+
+@no_inline
+def _choose_chunked_bools(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var n = len(selected)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    if n == 0:
+        return Series("", BoolColumn(values=values^, bits=valid^, length=0))
+    var a = _BoolInput(then)
+    var b = _BoolInput(other)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        count = min(count, 8 - row % 8)
+        var take = UInt8(0)
+        for lane in range(count):
+            take |= UInt8(selected[row + lane]) << UInt8(lane)
+        # Preserve selected hidden values; validity must not clear them.
+        var data = (take & a.values(count)) | (~take & b.values(count))
+        var bits = (take & a.valid(count)) | (~take & b.valid(count))
+        _write_bitmap_byte(values, row, data, count)
+        _write_bitmap_byte(valid, row, bits, count)
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@no_inline
+def _choose_chunked_strings(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var n = len(selected)
+    var output = StringBuilder(n)
+    if n == 0:
+        return Series("", output^.finish())
+    var a = _StringChoiceInput(then)
+    var b = _StringChoiceInput(other)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        for relative in range(count):
+            if selected[row + relative]:
+                output._append_row(
+                    a.column, 0 if a.scalar else a.row + relative
+                )
+            else:
+                output._append_row(
+                    b.column, 0 if b.scalar else b.row + relative
+                )
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", output^.finish())
+
+
+@no_inline
+def _choose_chunked_bits_or_text(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var a = _choice_ready(then)
+    var b = _choice_ready(other)
+    if then.dtype() == DataType.BOOL:
+        return _choose_chunked_bools(selected, a, b)
+    return _choose_chunked_strings(selected, a, b)
+
+
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
     if then.is_chunked() or other.is_chunked():
@@ -3385,6 +3638,10 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
                 comptime D = NUMERIC_DTYPES[k]
                 if then.dtype() == DataType.of(D):
                     return _choose_chunked_numeric[D](selected, then, other)
+        if _choice_chunk_input(then, then.dtype(), len(selected)) and (
+            _choice_chunk_input(other, then.dtype(), len(selected))
+        ):
+            return _choose_chunked_bits_or_text(selected, then, other)
         return choose(selected, then.rechunk(), other.rechunk())
     if then.dtype().is_decimal() and other.dtype().is_decimal():
         # Decimals are stored as Int32, Int64 or Int128 by declared width.
