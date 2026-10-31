@@ -52,3 +52,39 @@ def export_fixture(
         directory,
         query,
     )
+
+
+def arrow_type(label):
+    """The Arrow type for a logical type label used in these contracts."""
+    import re
+    import pyarrow as pa
+
+    match = re.fullmatch(r"decimal(?:128)?\((\d+), (\d+)\)", label)
+    if match:
+        return pa.decimal128(int(match.group(1)), int(match.group(2)))
+    if label == "integer_sum":
+        return pa.decimal128(38, 0)
+    named = {
+        "string": pa.string(),
+        "binary": pa.binary(),
+        "bool": pa.bool_(),
+        "float": pa.float32(),
+        "double": pa.float64(),
+    }
+    return named.get(label) or pa.type_for_alias(label)
+
+
+def rows_answer(rows, names=("a",), types=("int64",), original_schema=None):
+    """A columnar suite answer built from Python rows."""
+    import pyarrow as pa
+    import suite_answers
+
+    names, types = list(names), list(types)
+    columns = [
+        pa.array([row[k] for row in rows], type=arrow_type(t))
+        for k, t in enumerate(types)
+    ]
+    table = pa.Table.from_arrays(columns, names=names)
+    if not columns:
+        table = pa.table({"_": pa.nulls(len(rows))}).select([])
+    return suite_answers.Answer(names, types, table, original_schema or {})

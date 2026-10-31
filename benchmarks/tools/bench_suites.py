@@ -703,7 +703,7 @@ def load_reference(suite, variant, engine, paths, args):
             ):
                 return None
             for record in run.get("answers", []) + run.get("oracles", []):
-                suite_answers.load_answer(record)
+                suite_answers.verify_answer(record)
     except (OSError, ValueError, TypeError, KeyError, ImportError):
         return None
     return cached
@@ -878,14 +878,18 @@ def evaluate(result):
 
     A summary-only historical run remains renderable, but cannot contribute
     a verified timing. Failures in any round remain failures.
+
+    Answers are compared as columns, one at a time. Cells are visited query
+    by query so each oracle is prepared once for every engine, and an answer
+    whose hash-pinned bytes were already compared with the same oracle reuses
+    that verdict (DuckDB's own answers are checked for every engine, and
+    repetitions often write identical files).
     """
     grouped = {}
     for run in result["runs"]:
         key = (run["suite"], run["variant"], run["query"], run["engine"])
         grouped.setdefault(key, []).append(run)
     def answers(run):
-        # Load one repetition at a time. Retaining every round of every query
-        # can multiply full-tier answer memory by the entire suite size.
         if run.get("answer_error"):
             raise ValueError(run["answer_error"])
         records = run.get("answers", [])
@@ -897,74 +901,113 @@ def evaluate(result):
         expected_count = max(1, requested_reps if requested_reps is not None else len(run.get("times", [])))
         if len(records) != expected_count or sorted(a["repetition"] for a in records) != list(range(expected_count)):
             raise ValueError("missing or duplicate complete answer repetitions")
-        for record in records:
-            yield suite_answers.load_answer(record)
+        yield from records
 
-    cells = {}
-    for (suite, variant, query, engine), runs in grouped.items():
-        oracle = answer = None  # Release the preceding query's full results.
-        key = (suite, variant, query, engine)
-        cell = cells[key] = {"status": "ok", "reason": ""}
-        bad = next((r for r in runs if r["status"] != "ok"), None)
-        if bad is not None:
-            cell.update(status=bad["status"], reason=bad.get("reason", ""))
-            continue
-        expected_rounds = result.get("provenance", {}).get("rounds")
-        if expected_rounds is not None and (
-            len(runs) != expected_rounds
-            or {r.get("round", 0) for r in runs} != set(range(expected_rounds))
-        ):
-            cell.update(
-                status="unverified",
-                reason="missing or duplicate measurement rounds",
+    def compare(record, suite, query, oracle_key, check):
+        schema = suite_answers.verify_answer(record)
+        key = (
+            oracle_key,
+            record["path_sha256"],
+            json.dumps([schema["columns"], schema["rows"]], sort_keys=True),
+        )
+        if key not in verdicts:
+            answer = suite_schema.normalize(
+                suite_answers.load_answer(record), suite, query
             )
-            continue
-        reference_runs = grouped.get((suite, variant, query, "duckdb"), [])
-        if not reference_runs or any(
-            r["status"] != "ok" for r in reference_runs
-        ):
-            cell.update(
-                status="unverified",
-                reason="missing successful independent DuckDB reference",
-            )
-            continue
-        try:
-            records = reference_runs[0].get("oracles", [])
-            if len(records) != 1 or reference_runs[0].get("oracle_error"):
+            verdicts[key] = check.compare(answer)
+        return verdicts[key]
+
+    cells = dict.fromkeys(grouped)
+    verdicts = {}
+    prepared = (None, None)  # (oracle key, OracleCheck): one oracle at a time
+    try:
+        for key in sorted(grouped, key=lambda k: k[:3]):
+            suite, variant, query, engine = key
+            runs = grouped[key]
+            cell = cells[key] = {"status": "ok", "reason": ""}
+            bad = next((r for r in runs if r["status"] != "ok"), None)
+            if bad is not None:
+                cell.update(status=bad["status"], reason=bad.get("reason", ""))
+                continue
+            expected_rounds = result.get("provenance", {}).get("rounds")
+            if expected_rounds is not None and (
+                len(runs) != expected_rounds
+                or {r.get("round", 0) for r in runs} != set(range(expected_rounds))
+            ):
                 cell.update(
                     status="unverified",
-                    reason=reference_runs[0].get(
-                        "oracle_error", "missing independent full relation"
-                    ),
+                    reason="missing or duplicate measurement rounds",
                 )
                 continue
-            if records[0].get("query") != query:
-                raise ValueError("oracle query identity differs from run")
-            oracle = suite_schema.normalize(
-                suite_answers.load_answer(records[0]), suite, query
-            )
-            tolerant = suite_answers.tolerant_columns(suite, query, oracle)
-            checked_runs = runs if engine == "duckdb" else runs + reference_runs
-            for answer in (answer for run in checked_runs for answer in answers(run)):
-                answer = suite_schema.normalize(answer, suite, query)
-                comparison = suite_answers.compare_selection(
-                    answer, oracle, tolerant_columns=tolerant
+            reference_runs = grouped.get((suite, variant, query, "duckdb"), [])
+            if not reference_runs or any(
+                r["status"] != "ok" for r in reference_runs
+            ):
+                cell.update(
+                    status="unverified",
+                    reason="missing successful independent DuckDB reference",
                 )
-                if comparison["status"] != "equal":
+                continue
+            try:
+                records = reference_runs[0].get("oracles", [])
+                if len(records) != 1 or reference_runs[0].get("oracle_error"):
                     cell.update(
-                        status="wrong answer" if comparison["status"]
-                        == "different" else "unverified",
-                        reason=comparison["reason"],
+                        status="unverified",
+                        reason=reference_runs[0].get(
+                            "oracle_error", "missing independent full relation"
+                        ),
                     )
-                    break
-        except (OSError, ValueError, TypeError, KeyError, ImportError) as error:
-            cell.update(status="unverified", reason=str(error))
-        if cell["status"] == "ok":
-            cell.update(
-                ms=_median_ms(runs),
-                rounds=[min(r["times"]) / 1e6 for r in runs if r.get("times")],
-                summary=runs[0].get("summary", {}),
-            )
+                    continue
+                if records[0].get("query") != query:
+                    raise ValueError("oracle query identity differs from run")
+                oracle_key = (
+                    suite,
+                    query,
+                    records[0].get("path_sha256"),
+                    records[0].get("schema_path_sha256"),
+                )
+                if prepared[0] == oracle_key:
+                    suite_answers.verify_answer(records[0])
+                else:
+                    if prepared[1] is not None:
+                        prepared[1].close()
+                    prepared = (None, None)  # Release the preceding oracle.
+                    oracle = suite_schema.normalize(
+                        suite_answers.load_answer(records[0]), suite, query
+                    )
+                    tolerant = suite_answers.tolerant_columns(
+                        suite, query, oracle
+                    )
+                    prepared = (
+                        oracle_key,
+                        suite_answers.OracleCheck(oracle, tolerant),
+                    )
+                    oracle = None
+                    verdicts.clear()
+                check = prepared[1]
+                checked_runs = runs if engine == "duckdb" else runs + reference_runs
+                for record in (r for run in checked_runs for r in answers(run)):
+                    comparison = compare(
+                        record, suite, query, (oracle_key, tuple(check.tolerant)), check
+                    )
+                    if comparison["status"] != "equal":
+                        cell.update(
+                            status="wrong answer" if comparison["status"]
+                            == "different" else "unverified",
+                            reason=comparison["reason"],
+                        )
+                        break
+            except (OSError, ValueError, TypeError, KeyError, ImportError) as error:
+                cell.update(status="unverified", reason=str(error))
+            if cell["status"] == "ok":
+                cell.update(
+                    ms=_median_ms(runs),
+                    rounds=[min(r["times"]) / 1e6 for r in runs if r.get("times")],
+                    summary=runs[0].get("summary", {}),
+                )
+    finally:
+        if prepared[1] is not None:
+            prepared[1].close()
     return cells
 
 
