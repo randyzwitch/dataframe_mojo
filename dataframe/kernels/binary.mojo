@@ -671,10 +671,18 @@ def _validity_bytes(series: Series, n: Int) -> List[UInt8]:
     if series.is_chunked():
         var result = List[UInt8](length=(n + 7) // 8, fill=0)
         var input = _ValidityInput(series)
+        comptime W = simd_width_of[DType.uint8]()
         var row = 0
         while row < n:
-            var count = min(8, input.available(n - row))
-            _write_bitmap_byte(result, row, input.valid(count), count)
+            var count = input.available(n - row)
+            if row % 8 == 0 and count >= 8 * W:
+                result.unsafe_ptr().unsafe_store(
+                    row // 8, input.valid_bytes[W]()
+                )
+                count = 8 * W
+            else:
+                count = min(count, 8 - row % 8)
+                _write_bitmap_byte(result, row, input.valid(count), count)
             input.advance(count)
             row += count
         return result^
@@ -2301,15 +2309,58 @@ def _chunk_not(input: Series) -> Series:
     var values = List[UInt8](length=(n + 7) // 8, fill=0)
     var valid = List[UInt8](length=(n + 7) // 8, fill=0)
     var source = _BoolInput(input)
+    comptime W = simd_width_of[DType.uint8]()
     var row = 0
     while row < n:
-        var count = min(8, source.available(n - row))
-        var m = source.valid(count)
-        _write_bitmap_byte(values, row, ~source.values(count) & m, count)
-        _write_bitmap_byte(valid, row, m, count)
+        var count = source.available(n - row)
+        if row % 8 == 0 and count >= 8 * W:
+            var m = source.valid_bytes[W]()
+            values.unsafe_ptr().unsafe_store(
+                row // 8, ~source.values_bytes[W]() & m
+            )
+            valid.unsafe_ptr().unsafe_store(row // 8, m)
+            count = 8 * W
+        else:
+            count = min(count, 8 - row % 8)
+            var m = source.valid(count)
+            _write_bitmap_byte(values, row, ~source.values(count) & m, count)
+            _write_bitmap_byte(valid, row, m, count)
         source.advance(count)
         row += count
     return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@always_inline
+def _bool_bitmap_result[
+    op: Int, W: Int
+](
+    av: SIMD[DType.uint8, W],
+    bv: SIMD[DType.uint8, W],
+    var x: SIMD[DType.uint8, W],
+    var y: SIMD[DType.uint8, W],
+) -> Tuple[SIMD[DType.uint8, W], SIMD[DType.uint8, W]]:
+    var m = SIMD[DType.uint8, W](0)
+    var value: SIMD[DType.uint8, W]
+    comptime if op == EQ_MISSING or op == NE_MISSING:
+        value = (~(x ^ y) & av & bv) | (~av & ~bv)
+        comptime if op == NE_MISSING:
+            value = ~value
+    elif op == FILL_NULL:
+        m = av | bv
+        value = ((x & av) | (y & ~av)) & m
+    else:
+        x &= av
+        y &= bv
+        comptime if op == AND:
+            m = (av & bv) | (av & ~x) | (bv & ~y)
+            value = x & y & m
+        elif op == OR:
+            m = (av & bv) | x | y
+            value = (x | y) & m
+        else:
+            m = av & bv
+            value = (x ^ y) & m
+    return (value, m)
 
 
 def _chunk_bool_binary[op: Int](left: Series, right: Series) raises -> Series:
@@ -2319,37 +2370,29 @@ def _chunk_bool_binary[op: Int](left: Series, right: Series) raises -> Series:
     var valid = List[UInt8](length=0 if missing else (n + 7) // 8, fill=0)
     var a = _BoolInput(left)
     var b = _BoolInput(right)
+    comptime W = simd_width_of[DType.uint8]()
     var row = 0
     while row < n:
-        var count = min(8, min(a.available(n - row), b.available(n - row)))
-        var av = a.valid(count)
-        var bv = b.valid(count)
-        var x = a.values(count)
-        var y = b.values(count)
-        var m = UInt8(0)
-        var value: UInt8
-        comptime if missing:
-            value = (~(x ^ y) & av & bv) | (~av & ~bv)
-            comptime if op == NE_MISSING:
-                value = ~value
-        elif op == FILL_NULL:
-            m = av | bv
-            value = ((x & av) | (y & ~av)) & m
+        var count = min(a.available(n - row), b.available(n - row))
+        if row % 8 == 0 and count >= 8 * W:
+            var packed = _bool_bitmap_result[op, W](
+                a.valid_bytes[W](),
+                b.valid_bytes[W](),
+                a.values_bytes[W](),
+                b.values_bytes[W](),
+            )
+            values.unsafe_ptr().unsafe_store(row // 8, packed[0])
+            comptime if not missing:
+                valid.unsafe_ptr().unsafe_store(row // 8, packed[1])
+            count = 8 * W
         else:
-            x &= av
-            y &= bv
-            comptime if op == AND:
-                m = (av & bv) | (av & ~x) | (bv & ~y)
-                value = x & y & m
-            elif op == OR:
-                m = (av & bv) | x | y
-                value = (x | y) & m
-            else:
-                m = av & bv
-                value = (x ^ y) & m
-        _write_bitmap_byte(values, row, value, count)
-        comptime if not missing:
-            _write_bitmap_byte(valid, row, m, count)
+            count = min(count, 8 - row % 8)
+            var packed = _bool_bitmap_result[op, 1](
+                a.valid(count), b.valid(count), a.values(count), b.values(count)
+            )
+            _write_bitmap_byte(values, row, packed[0], count)
+            comptime if not missing:
+                _write_bitmap_byte(valid, row, packed[1], count)
         a.advance(count)
         b.advance(count)
         row += count
@@ -2362,12 +2405,20 @@ def _chunk_keep_bools(left: Series, right: Series) raises -> Series:
     var valid = List[UInt8](length=(n + 7) // 8, fill=0)
     var a = _ValidityInput(left)
     var b = _BoolInput(right)
+    comptime W = simd_width_of[DType.uint8]()
     var row = 0
     while row < n:
-        var count = min(8, min(a.available(n - row), b.available(n - row)))
-        var m = a.valid(count) & b.valid(count)
-        _write_bitmap_byte(values, row, b.values(count) & m, count)
-        _write_bitmap_byte(valid, row, m, count)
+        var count = min(a.available(n - row), b.available(n - row))
+        if row % 8 == 0 and count >= 8 * W:
+            var m = a.valid_bytes[W]() & b.valid_bytes[W]()
+            values.unsafe_ptr().unsafe_store(row // 8, b.values_bytes[W]() & m)
+            valid.unsafe_ptr().unsafe_store(row // 8, m)
+            count = 8 * W
+        else:
+            count = min(count, 8 - row % 8)
+            var m = a.valid(count) & b.valid(count)
+            _write_bitmap_byte(values, row, b.values(count) & m, count)
+            _write_bitmap_byte(valid, row, m, count)
         a.advance(count)
         b.advance(count)
         row += count

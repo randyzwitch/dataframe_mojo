@@ -1,6 +1,7 @@
 """Validity operations keep literal null rules across physical boundaries."""
 # contract-group: expr.chunk_windows
 from std.math import isnan
+from std.sys.info import simd_width_of
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -1081,3 +1082,188 @@ def test_missing_comparisons_preserve_full_integer_precision() raises:
     )
     _cold(a)
     _cold(b)
+
+
+def _large_bool_source(right: Bool, n: Int) raises -> Series:
+    var values = List[Bool]()
+    var valid = List[Bool]()
+    if right:
+        values = [True, False, True, True, False, True, True, False, True]
+        valid = [True, True, False, True, True, False, True, True, False]
+    else:
+        values = [True, True, True, False, False, False, True, True, True]
+        valid = [True, True, True, True, True, True, False, False, False]
+    return Series(
+        "x",
+        BoolColumn(_repeat_bools(values, 0, n), _repeat_bools(valid, 0, n)),
+    )
+
+
+def _large_scalar_expected(
+    op: Int, state: Int, scalar_left: Bool, offset: Int, n: Int
+) raises -> Series:
+    # The existing literal nine-pair oracle is indexed by T/F/null states,
+    # independently of the packed implementation or scalar input payloads.
+    var truth = _boolean_expected(op, 0, 9).bool()
+    var values = List[Bool]()
+    var valid = List[Bool]()
+    for row in range(n):
+        var row_state = ((offset + row) % 9) // 3
+        var index = (
+            state * 3 + row_state if scalar_left else row_state * 3 + state
+        )
+        values.append(truth._get(index))
+        valid.append(truth._valid(index))
+    return Series("x", BoolColumn(values^, valid))
+
+
+def test_large_packed_boolean_windows_and_scalar_truth_tables() raises:
+    comptime W = simd_width_of[DType.uint8]()
+    comptime n = 32 * W + 9
+    for offset in range(8):
+        var flat_a = _large_bool_source(False, n + 16).slice(offset, n)
+        var flat_b = _large_bool_source(True, n + 16).slice(offset, n)
+        var a = _pieces(flat_a, [3, 16 * W + 1, 0, 16 * W + 5])
+        var b = _pieces(flat_b, [2, 12 * W + 1, 0, 20 * W + 6])
+        comptime ops = (
+            AND,
+            OR,
+            XOR,
+            FILL_NULL,
+            EQ_MISSING,
+            NE_MISSING,
+            KEEP_NULLS,
+        )
+        comptime for k in range(len(ops)):
+            comptime op = ops[k]
+            _bool_result(binary[op](a, b), _boolean_expected(op, offset, n))
+            _same(binary[op](a, b), binary[op](flat_a, flat_b))
+            for state in range(3):
+                var scalar = Series("x", BoolColumn([state != 1], [state != 2]))
+                _bool_result(
+                    binary[op](scalar, a),
+                    _large_scalar_expected(op, state, True, offset, n),
+                )
+                _bool_result(
+                    binary[op](a, scalar),
+                    _large_scalar_expected(op, state, False, offset, n),
+                )
+                _same(binary[op](scalar, a), binary[op](scalar, flat_a))
+                _same(binary[op](a, scalar), binary[op](flat_a, scalar))
+        comptime predicates = (NOT, IS_NULL, IS_NOT_NULL)
+        comptime for k in range(len(predicates)):
+            comptime op = predicates[k]
+            _bool_result(unary[op](a, 0), _boolean_expected(op, offset, n))
+            _same(unary[op](a, 0), unary[op](flat_a, 0))
+        _cold(a)
+        _cold(b)
+
+
+def test_large_generic_parent_validity_and_boolean_keep_windows() raises:
+    comptime W = simd_width_of[DType.uint8]()
+    comptime n = 32 * W + 9
+    var seed: List[Bool] = [
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
+    var valid = _repeat_bools(seed, 0, n + 16)
+    var number = Series(
+        "x", Column[Int64](List[Int64](length=n + 16, fill=99), valid)
+    )
+    var text = Series(
+        "x", StringColumn(List[String](length=n + 16, fill="payload"), valid)
+    )
+    var parents = List[Series]()
+    parents.append(number^)
+    parents.append(text^)
+    for offset in range(8):
+        var flat_b = _large_bool_source(True, n + 16).slice(offset, n)
+        var b = _pieces(flat_b, [2, 12 * W + 1, 0, 20 * W + 6])
+        for parent in parents:
+            var flat = parent.slice(offset, n)
+            var a = _pieces(flat, [3, 16 * W + 1, 0, 16 * W + 5])
+            _bool_result(
+                unary[IS_NULL](a, 0), _boolean_expected(IS_NULL, offset, n)
+            )
+            _bool_result(
+                unary[IS_NOT_NULL](a, 0),
+                _boolean_expected(IS_NOT_NULL, offset, n),
+            )
+            _same(unary[IS_NULL](a, 0), unary[IS_NULL](flat, 0))
+            _same(unary[IS_NOT_NULL](a, 0), unary[IS_NOT_NULL](flat, 0))
+            _bool_result(
+                binary[KEEP_NULLS](a, b),
+                _boolean_expected(KEEP_NULLS, offset, n),
+            )
+            _same(binary[KEEP_NULLS](a, b), binary[KEEP_NULLS](flat, flat_b))
+            for state in range(3):
+                var scalar = Series("x", BoolColumn([state != 1], [state != 2]))
+                _bool_result(
+                    binary[KEEP_NULLS](a, scalar),
+                    _large_scalar_expected(KEEP_NULLS, state, False, offset, n),
+                )
+                _same(
+                    binary[KEEP_NULLS](a, scalar),
+                    binary[KEEP_NULLS](flat, scalar),
+                )
+            _cold(a)
+        var scalar_number = Series("x", Column[Int64]([123]))
+        var scalar_null = Series("x", Column[Int64]([456], [False]))
+        var right_values: List[Bool] = [
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+        ]
+        var right_valid: List[Bool] = [
+            True,
+            True,
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+            False,
+        ]
+        _bool_result(
+            binary[KEEP_NULLS](scalar_number, b),
+            Series(
+                "x",
+                BoolColumn(
+                    _repeat_bools(right_values, offset, n),
+                    _repeat_bools(right_valid, offset, n),
+                ),
+            ),
+        )
+        _bool_result(
+            binary[KEEP_NULLS](scalar_null, b),
+            Series(
+                "x",
+                BoolColumn(
+                    List[Bool](length=n, fill=False),
+                    List[Bool](length=n, fill=False),
+                ),
+            ),
+        )
+        _same(
+            binary[KEEP_NULLS](scalar_number, b),
+            binary[KEEP_NULLS](scalar_number, flat_b),
+        )
+        _same(
+            binary[KEEP_NULLS](scalar_null, b),
+            binary[KEEP_NULLS](scalar_null, flat_b),
+        )
+        _cold(b)

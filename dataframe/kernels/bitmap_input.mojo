@@ -29,6 +29,34 @@ def _bitmap_byte(
 
 
 @always_inline
+def _bitmap_bytes[
+    W: Int
+](bits: Span[UInt8, _], offset: Int, scalar: Bool, empty: UInt8) -> SIMD[
+    DType.uint8, W
+]:
+    """Read W packed bytes for 8*W rows within one physical window."""
+    comptime assert W > 0
+    assert offset >= 0
+    if len(bits) == 0:
+        return SIMD[DType.uint8, W](empty)
+    var byte = offset // 8
+    var shift = UInt8(offset % 8)
+    assert byte < len(bits)
+    if scalar:
+        var present = (bits[byte] >> shift) & 1 != 0
+        return SIMD[DType.uint8, W](UInt8(255) if present else UInt8(0))
+    assert W <= len(bits) - byte
+    var low = bits.unsafe_ptr().unsafe_load[width=W](byte)
+    if shift == 0:
+        return low
+    # Nonzero bit alignment needs one extra physical byte. Both overlapping
+    # W-byte loads stay inside the bitmap; no padded allocation is assumed.
+    assert W < len(bits) - byte
+    var high = bits.unsafe_ptr().unsafe_load[width=W](byte + 1)
+    return (low >> shift) | (high << (UInt8(8) - shift))
+
+
+@always_inline
 def _write_bitmap_byte(
     mut output: List[UInt8], row: Int, value: UInt8, count: Int
 ):
@@ -122,6 +150,17 @@ struct _ValidityInput(Movable):
             255,
         )
 
+    @always_inline
+    def valid_bytes[W: Int](self, relative: Int = 0) -> SIMD[DType.uint8, W]:
+        assert relative >= 0
+        assert self.scalar or 8 * W <= self.length - self.row - relative
+        return _bitmap_bytes[W](
+            self.bits[].span(),
+            self.offset + self.row + (0 if self.scalar else relative),
+            self.scalar,
+            255,
+        )
+
 
 struct _BoolInput(Movable):
     """Packed Boolean payload and validity at the same physical window."""
@@ -183,6 +222,26 @@ struct _BoolInput(Movable):
             self.column._bits[].span(),
             self.column._offset + self.row,
             count,
+            self.scalar,
+            255,
+        )
+
+    @always_inline
+    def values_bytes[W: Int](self) -> SIMD[DType.uint8, W]:
+        assert self.scalar or 8 * W <= len(self.column) - self.row
+        return _bitmap_bytes[W](
+            self.column._data[].span(),
+            self.column._offset + self.row,
+            self.scalar,
+            0,
+        )
+
+    @always_inline
+    def valid_bytes[W: Int](self) -> SIMD[DType.uint8, W]:
+        assert self.scalar or 8 * W <= len(self.column) - self.row
+        return _bitmap_bytes[W](
+            self.column._bits[].span(),
+            self.column._offset + self.row,
             self.scalar,
             255,
         )
