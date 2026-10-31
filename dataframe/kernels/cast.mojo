@@ -685,12 +685,6 @@ def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
     """Convert every valid, observed row; others become null."""
-    if input.is_chunked():
-        if len(mask) == 0:
-            var exact = _cast_chunk_exact(input, target)
-            if exact:
-                return exact.take()
-        return cast_series(input.rechunk(), target, strict, offset, mask)
     if input.dtype().is_nested() or target.is_nested():
         raise Error(
             "cannot cast "
@@ -704,6 +698,25 @@ def cast_series(
         if source == target:
             return input.copy()
         raise Error("Geometry casts require explicit WKB import/export")
+    # Accepted identities and byte retags need only the Series metadata.
+    # Keep their array windows and owners, including with an inactive mask.
+    if source.is_categorical() and target.is_categorical():
+        if not target.has_dictionary() or source == target:
+            return input.copy()
+        # A different dictionary still validates and recodes all source labels.
+        # Keep its existing contiguous adapter, without comparing twice.
+        var whole = input.rechunk() if input.is_chunked() else input.copy()
+        return recode(whole, target)
+    if source == target:
+        return input.copy()
+    if source == DataType.STRING and target == DataType.BINARY:
+        return input.with_dtype(DataType.BINARY)
+    if input.is_chunked():
+        if len(mask) == 0:
+            var exact = _cast_chunk_exact(input, target)
+            if exact:
+                return exact.take()
+        return cast_series(input.rechunk(), target, strict, offset, mask)
     if source.is_decimal() and target == DataType.FLOAT64:
         # Under a mask too: the conversion cannot fail on an inactive row,
         # and its result there goes unread, so every row converts through
@@ -714,10 +727,6 @@ def cast_series(
     if source.is_categorical() or target.is_categorical():
         # Categoricals convert through their values (#106): decode, cast
         # the strings, and encode when the target is categorical.
-        if source.is_categorical() and target.is_categorical():
-            if not target.has_dictionary() or source == target:
-                return input.copy()
-            return recode(input, target)
         if source.is_categorical():
             return cast_series(decode(input), target, strict, offset, mask)
         var strings = (
@@ -729,8 +738,6 @@ def cast_series(
         if target.has_dictionary():
             return recode(strings, target)
         return encode(strings)
-    if source == target:
-        return input.copy()
     if source.is_binary() or target.is_binary():
         return _cast_binary(input, source, target, strict, offset, mask)
     if source.is_temporal() or target.is_temporal():

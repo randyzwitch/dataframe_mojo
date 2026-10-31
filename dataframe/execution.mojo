@@ -2748,6 +2748,37 @@ def _whole(
         if len(column) == height and column.dtype() == bound.dtypes[index]:
             return column.copy()
         return None
+    if (
+        node.op == CAST
+        and node.left >= 0
+        and len(node.dtypes) > 0
+        and node.dtypes[0]
+    ):
+        var source = bound.dtypes[node.left]
+        var target = node.dtypes[0].value()
+        # Metadata-only casts of an existing whole column/state need no
+        # batch assembly. In particular, appending each returned view chunk
+        # would repeatedly copy descriptors. Categorical expressions still
+        # decode/encode through their separate value representation.
+        if (
+            not source.is_nested()
+            and not target.is_nested()
+            and not source.is_categorical()
+            and not target.is_categorical()
+            and (
+                source == target
+                or (source == DataType.STRING and target == DataType.BINARY)
+            )
+        ):
+            var whole = _whole(
+                bound, columns, states, node.left, height, grouped
+            )
+            if whole:
+                var input = whole.take()
+                if len(input) == height and input.dtype() == source:
+                    return cast_series(
+                        input, target, node.integer == 1, 0, List[Bool]()
+                    )
     if (is_window(node.op) or node.op == OVER or is_replace(node.op)) and len(
         states[index]
     ) == height:
