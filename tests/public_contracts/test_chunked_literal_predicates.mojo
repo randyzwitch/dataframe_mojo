@@ -295,7 +295,7 @@ def test_literal_predicate_dispatch_keeps_compiled_regex_and_fallback_semantics(
     var source = _source(2, 41, 3)
     var compiled = compile_pattern("^never$", False)
     var literal = string_op(
-        _node(STR_CONTAINS, text="a.*[", integer=0), source, compiled
+        _node(STR_CONTAINS, text="a.*[", integer=0), source, compiled^
     )
     assert_frame(
         DataFrame([literal.renamed("result")]),
@@ -374,6 +374,6 @@ def test_literal_predicates_empty_allnull_and_public_binary_boundaries() raises:
     var binary = Series.binary("b", [[UInt8(97), 98]], [True])
     for selected in [binary.copy(), binary.slice(0, 0)]:
         with assert_raises(contains="string expression"):
-            _ = DataFrame([selected]).select_exprs(
+            _ = DataFrame([selected.copy()]).select_exprs(
                 [col("b").str().starts_with("ab")]
             )
