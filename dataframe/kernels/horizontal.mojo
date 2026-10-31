@@ -13,6 +13,7 @@ from std.memory import pack_bits
 from std.sys import size_of
 from dataframe.storage.boolean import BoolColumn
 from dataframe.kernels.cast import cast_series
+from dataframe.kernels.numeric_input import _NumericInput
 from dataframe.storage.column import Column
 from dataframe.decimal import (
     common_decimal,
@@ -267,6 +268,9 @@ def _extreme[
     var valid = List[UInt8](length=(n + 7) // 8, fill=0)
     var main = n - n % W
     for k in range(len(inputs)):
+        if inputs[k].is_chunked():
+            _chunk_extreme[D, is_max, False](inputs[k], n, values, valid)
+            continue
         var input = _Input[D](inputs[k])
         for start in range(0, main, W):
             _extreme_block[D, W, is_max](input, start, values, valid)
@@ -282,12 +286,31 @@ def _extreme_dense[
     var values = List[Scalar[D]](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var main = n - n % W
-    var first = _Input[D](inputs[0])
-    for start in range(0, main, W):
-        out.unsafe_offset(start).unsafe_store(first.values[W](start))
-    for start in range(main, n):
-        values[start] = first.values[1](start)[0]
+    if inputs[0].is_chunked():
+        var cursor = _NumericInput[D](inputs[0])
+        var output = 0
+        while output < n:
+            var count = cursor.available(n - output)
+            var relative = 0
+            while relative + W <= count:
+                out.unsafe_store(output + relative, cursor.values[W](relative))
+                relative += W
+            while relative < count:
+                values[output + relative] = cursor.values[1](relative)[0]
+                relative += 1
+            cursor.advance(count)
+            output += count
+    else:
+        var first = _Input[D](inputs[0])
+        for start in range(0, main, W):
+            out.unsafe_offset(start).unsafe_store(first.values[W](start))
+        for start in range(main, n):
+            values[start] = first.values[1](start)[0]
+    var no_validity = List[UInt8]()
     for k in range(1, len(inputs)):
+        if inputs[k].is_chunked():
+            _chunk_extreme[D, is_max, True](inputs[k], n, values, no_validity)
+            continue
         var input = _Input[D](inputs[k])
         for start in range(0, main, W):
             var x = out.unsafe_offset(start).unsafe_load[width=W]()
@@ -300,6 +323,105 @@ def _extreme_dense[
             var y = input.values[1](start)
             values[start] = _takes_right[D, 1, is_max](x, y).select(y, x)[0]
     return Series("", Column[Scalar[D]](values^))
+
+
+@always_inline
+def _chunk_extreme_block[
+    D: DType, W: Int, is_max: Bool, dense: Bool
+](
+    input: _NumericInput[D],
+    relative: Int,
+    output: Int,
+    mut values: List[Scalar[D]],
+    mut valid: List[UInt8],
+):
+    var x = values.unsafe_ptr().unsafe_load[width=W](output)
+    var y = input.values[W](relative)
+    var take = _takes_right[D, W, is_max](x, y)
+    comptime if not dense:
+        var x_valid = _packed_mask[W](Span(valid), output)
+        var y_valid = input.valid[W](relative)
+        take = y_valid & (~x_valid | take)
+        _store_flags[W](valid, output, x_valid | y_valid)
+    values.unsafe_ptr().unsafe_store(output, take.select(y, x))
+
+
+def _chunk_extreme[
+    D: DType, is_max: Bool, dense: Bool
+](source: Series, n: Int, mut values: List[Scalar[D]], mut valid: List[UInt8]):
+    comptime W = 1 if size_of[Scalar[D]]() > 8 else 8
+    var input = _NumericInput[D](source)
+    var output = 0
+    while output < n:
+        var count = input.available(n - output)
+        var relative = 0
+        comptime if not dense and W == 8:
+            # Packed stores replace one byte: peel until global alignment,
+            # rather than restarting them at an arbitrary chunk boundary.
+            while relative < count and (output + relative) % 8 != 0:
+                _chunk_extreme_block[D, 1, is_max, dense](
+                    input, relative, output + relative, values, valid
+                )
+                relative += 1
+        while relative + W <= count:
+            _chunk_extreme_block[D, W, is_max, dense](
+                input, relative, output + relative, values, valid
+            )
+            relative += W
+        while relative < count:
+            _chunk_extreme_block[D, 1, is_max, dense](
+                input, relative, output + relative, values, valid
+            )
+            relative += 1
+        input.advance(count)
+        output += count
+
+
+@always_inline
+def _chunk_fold_block[
+    D: DType, W: Int
+](
+    input: _NumericInput[D],
+    relative: Int,
+    output: Int,
+    mut sums: List[Scalar[D]],
+    mut counts: List[Scalar[D]],
+):
+    var valid = input.valid[W](relative)
+    var y = valid.select(input.values[W](relative), SIMD[D, W](0))
+    var s = sums.unsafe_ptr().unsafe_offset(output)
+    var c = counts.unsafe_ptr().unsafe_offset(output)
+    s.unsafe_store(s.unsafe_load[width=W]() + y)
+    c.unsafe_store(
+        c.unsafe_load[width=W]() + valid.select(SIMD[D, W](1), SIMD[D, W](0))
+    )
+
+
+def _chunk_float_fold[
+    D: DType
+](
+    source: Series,
+    n: Int,
+    mut sums: List[Scalar[D]],
+    mut counts: List[Scalar[D]],
+):
+    var input = _NumericInput[D](source)
+    var output = 0
+    while output < n:
+        var count = input.available(n - output)
+        var relative = 0
+        while relative + 8 <= count:
+            _chunk_fold_block[D, 8](
+                input, relative, output + relative, sums, counts
+            )
+            relative += 8
+        while relative < count:
+            _chunk_fold_block[D, 1](
+                input, relative, output + relative, sums, counts
+            )
+            relative += 1
+        input.advance(count)
+        output += count
 
 
 def _extreme_rows[is_max: Bool](inputs: List[Series], n: Int) raises -> Series:
@@ -338,6 +460,9 @@ def _float_fold[
     var counts = List[Scalar[D]](length=n, fill=0)
     var main = n - n % W
     for k in range(len(inputs)):
+        if inputs[k].is_chunked():
+            _chunk_float_fold[D](inputs[k], n, sums, counts)
+            continue
         var input = _Input[D](inputs[k])
         var s = sums.unsafe_ptr()
         var c = counts.unsafe_ptr()

@@ -18,12 +18,14 @@ def main() raises:
     var output = String("build/contract-tests")
     var compiler = String("mojo")
     var provider = String("metal")
+    var shard_index = 0
+    var shard_count = 1
     var i = 1
     while i < len(arguments):
         var option = String(arguments[i])
         if option == "--help" or option == "-h":
             print(
-                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--provider cpu|metal] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
+                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--provider cpu|metal] [--packaging areas|combined] [--shard-count N --shard-index I] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures). Shards partition each area's sorted modules; indices start at zero."
             )
             return
         i += 1
@@ -58,6 +60,10 @@ def main() raises:
             compiler = value^
         elif option == "--provider":
             provider = value^
+        elif option == "--shard-index":
+            shard_index = Int(value)
+        elif option == "--shard-count":
+            shard_count = Int(value)
         else:
             raise Error("Unknown argument: " + option)
         i += 1
@@ -82,6 +88,8 @@ def main() raises:
             compiler,
             capabilities,
             provider,
+            shard_index,
+            shard_count,
         ),
         production_policy(),
     )

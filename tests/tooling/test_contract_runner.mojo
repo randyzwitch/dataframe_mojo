@@ -27,6 +27,7 @@ from tests.tooling.contract_runner import (
     generate_driver,
     generate_fatal_driver,
     shell_quote,
+    shard_cases,
 )
 
 
@@ -161,6 +162,32 @@ def test_process_arguments_are_literal_and_wait_statuses_retain_failures() raise
     assert_equal(capture(["sh", "-c", "kill -ILL $$"])[0], 132)
 
 
+def test_module_shards_cover_each_entry_once_and_validate_indices() raises:
+    var entries: List[String] = [
+        "a.mojo::test_first",
+        "a.mojo::test_second",
+        "b.mojo::test_first",
+        "b.mojo::test_second",
+        "c.mojo::test_only",
+    ]
+    assert_equal(shard_cases(entries, 0, 1), entries)
+    assert_equal(
+        shard_cases(entries, 0, 2), [entries[0], entries[1], entries[4]]
+    )
+    assert_equal(shard_cases(entries, 1, 2), [entries[2], entries[3]])
+    for count in range(1, 5):
+        var occurrences = List[Int](length=len(entries), fill=0)
+        for index in range(count):
+            for entry in shard_cases(entries, index, count):
+                for row in range(len(entries)):
+                    if entry == entries[row]:
+                        occurrences[row] += 1
+        assert_equal(occurrences, List[Int](length=len(entries), fill=1))
+    for invalid in [(-1, 2), (2, 2), (0, 0), (0, -1)]:
+        with assert_raises(contains="Shard count must be positive"):
+            _ = shard_cases(entries, invalid[0], invalid[1])
+
+
 def _compiler(root: String, scenario: String) raises -> String:
     var path = root + "/fixture-compiler"
     var script = String(
@@ -247,6 +274,58 @@ def test_compile_and_execution_failures_do_not_hide_later_areas() raises:
         assert_equal(len(failures), 0 if scenario == "none" else 1)
         if failures:
             assert_equal(failures[0].string(), "public:" + scenario)
+
+
+def test_sharded_runs_preserve_ordinary_fatal_and_capability_outcomes() raises:
+    var root = _root()
+    var policy = _policy(True)
+    write_text(
+        root + "/tests/public_contracts/test_crash.mojo",
+        "def test_fatal() raises:\n    pass\n",
+    )
+    write_text(
+        root + "/tests/public_contracts/test_optional.mojo",
+        "def test_optional() raises:\n    pass\n",
+    )
+    policy.capabilities.append("metal")
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_optional.mojo::test_optional",
+            "metal",
+        )
+    )
+    var ordinary = 0
+    var fatal = 0
+    var skipped = 0
+    var expected = 0
+    for index in range(2):
+        var path = execute_suite(
+            RunnerOptions(
+                root,
+                ["public"],
+                List[String](),
+                "areas",
+                root + "/output",
+                _compiler(root, "process"),
+                shard_index=index,
+                shard_count=2,
+            ),
+            policy,
+        )
+        var metadata = JsonValue(read_text(path))
+        assert_equal(metadata.get("shard_index").text, String(index))
+        assert_equal(metadata.get("shard_count").text, "2")
+        var cases = metadata.get("cases")
+        if index == 1:
+            ordinary += len(cases.get("public").items())
+        fatal += len(metadata.get("process_cases").items())
+        skipped += len(metadata.get("skipped_capability_cases").items())
+        expected += Int(metadata.get("expected_failures").text)
+        assert_equal(len(metadata.get("failed").items()), 0)
+    assert_equal(ordinary, 1)
+    assert_equal(fatal, 1)
+    assert_equal(skipped, 1)
+    assert_equal(expected, 1)
 
 
 def test_explicit_combined_packaging_keeps_selection_and_reports_shared_process_failures() raises:
@@ -668,6 +747,10 @@ def main() raises:
     ]()
     suite.test[
         test_process_arguments_are_literal_and_wait_statuses_retain_failures
+    ]()
+    suite.test[test_module_shards_cover_each_entry_once_and_validate_indices]()
+    suite.test[
+        test_sharded_runs_preserve_ordinary_fatal_and_capability_outcomes
     ]()
     suite.test[test_compile_and_execution_failures_do_not_hide_later_areas]()
     suite.test[

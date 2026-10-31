@@ -14,9 +14,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Contract areas use the runner's own names (`tests/runner.mojo --help`).
-# Each area is one compiled program and compile time dominates (6-13 minutes
-# per program on a 64-core machine against 90 seconds of test execution in
-# total), so the areas run as parallel jobs rather than one serial job.
+# Compile time dominates, so areas run as parallel jobs. The larger public
+# area is partitioned by module on Linux to bound each compiler's memory use.
 
 jobs:
   checks:
@@ -97,7 +96,7 @@ jobs:
           name: ci-timings-native-linux
 
   unit-linux:
-    name: unit-linux (${{ matrix.area }})
+    name: unit-linux (${{ matrix.area }}${{ matrix.shard > 0 && format('-{0}', matrix.shard) || '' }})
     needs: native-linux
     permissions:
       contents: read
@@ -106,6 +105,14 @@ jobs:
       fail-fast: false
       matrix:
         area: [public, storage, kernels, planner, execution, interchange]
+        shard: [0]
+        include:
+          - area: public
+            shard: 1
+          - area: public
+            shard: 2
+          - area: public
+            shard: 3
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -121,9 +128,12 @@ jobs:
       - name: Run contract area
         env:
           AREA: ${{ matrix.area }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.area == 'public' && 4 || 1 }}
+          COMPILER: ${{ matrix.area == 'public' && 'scripts/ci_mojo_public.sh' || 'mojo' }}
         run: >-
           python3 scripts/ci_time.py --label "contract-$AREA" --budget-seconds 1500 --
-          pixi run test-cpu --areas "$AREA" --output build/contract-tests
+          pixi run test-cpu --areas "$AREA" --shard-count "$SHARDS" --shard-index "$SHARD" --compiler "$COMPILER" --output build/contract-tests
       - name: Install independent format consumers
         if: matrix.area == 'interchange'
         run: |
@@ -135,7 +145,7 @@ jobs:
       - uses: ./.github/actions/ci-timings
         if: always()
         with:
-          name: ci-timings-unit-linux-${{ matrix.area }}
+          name: ci-timings-unit-linux-${{ matrix.area }}${{ matrix.shard > 0 && format('-{0}', matrix.shard) || '' }}
 
   unit-macos:
     name: unit-macos (${{ matrix.area }})

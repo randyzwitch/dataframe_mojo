@@ -1,11 +1,12 @@
 # Scalar kernel chunk consumption
 
-The initial numeric-cast change shipped in #1072 and metadata consumers in
-#1082. The next numeric unary comparison uses merged main `015e2f70`,
-including those changes and #1080/#1081. Earlier metadata measurements
-retain baseline `6d3f987aae999e9e10072f926cc6d9817510fbb8`; historical cast
-measurements retain baseline `2d0dce12a41a07c265025a890a10ae121483dc1b`.
-Earlier gains are not counted again in the current work.
+The numeric-cast change shipped in #1072, metadata consumers in #1082,
+and numeric unary kernels in #1084. The current multi-input comparison uses
+merged main `e4af628a`, including those changes and #1085. Earlier metadata
+measurements retain baseline `6d3f987aae999e9e10072f926cc6d9817510fbb8`;
+historical cast measurements retain baseline
+`2d0dce12a41a07c265025a890a10ae121483dc1b`. Earlier gains are not counted
+again in the current work.
 
 The initial inventory distinguishes explicit APIs requesting an owned
 contiguous column from internal scalar consumers. The former are retained;
@@ -14,9 +15,9 @@ the latter are candidates for aligned chunk-window evaluation.
 | Consumer | Input-copy status | Constraints to preserve |
 | --- | --- | --- |
 | `kernels/cast.cast_series` | Unmasked infallible numeric casts already consume chunks; remaining checked/masked/logical paths merge | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
-| `kernels/binary.math_unary` and `unary` | This candidate consumes numeric chunks; decimal and predicate adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
-| `kernels/binary.binary` and `choose` | Rechunk each operand | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
-| `kernels/horizontal` | Rechunks each input | Different boundaries, row null rules, mixed widths and promotions |
+| `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084; decimal and predicate adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
+| `kernels/binary.binary` and `choose` | Ordinary numeric operations consume physical chunks in this candidate; decimal and other adapters still merge | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
+| `kernels/horizontal` | Float folds and numeric extrema consume chunks in this candidate; nullable integer sum still merges through fill-null | Different boundaries, row null rules, mixed widths and promotions |
 | `kernels/temporal.dt_op` and `cast_temporal` | Metadata retags covered by #1082; calendar/conversion paths still merge | Logical temporal units/timezones, calendar behavior, masks and conversion errors |
 | `kernels/list.nested_op` | List length and struct selection covered by #1082; other list/string operations still merge | Child offsets, sliced children, empty/null rows, struct field validity |
 | `execution` scalar/text paths | Several preparation and result rechunks | Separate actual required contiguous adapters from avoidable input/result copies |
@@ -339,6 +340,115 @@ revisions. The baseline suite binary is reused from its verified fresh
 `226d5ff3`. Admission/provenance/verdicts are under `m1-heldout/` in the local
 evidence directory and `heldout/` in the M1 directory. This completes this
 numeric unary subset; the remaining #1003 consumers stay open.
+
+## Numeric multi-input candidate
+
+The prepared follow-up uses merged main `e4af628a` and frozen implementation
+`78ba0eb8`. It reads ordinary numeric binary arithmetic/comparisons and
+conditional choices through physical input cursors. Differing partition
+boundaries are intersected without merging either operand; whole one-row
+operands broadcast, while physical one-row chunks remain ordinary rows.
+Float horizontal sum/mean and numeric extrema traverse each input's windows
+into one output, preserving input order. Contiguous paths remain intact.
+
+Validity and observation masks use global row positions. Checked narrow
+integer SIMD retains widened overflow detection and only examines observed,
+valid lanes for errors. Comparison and extrema bit stores align to global
+output bytes. Choice propagates the selected branch's validity. Logical and
+decimal fallbacks retain their existing dispatch. Nullable integer horizontal
+sum still goes through the fill-null adapter and retains its input merge;
+dense integer sums benefit from the ordinary numeric binary route.
+
+All 92 selected horizontal, arithmetic and chunk-window contracts pass on
+Linux and the live M1, with two unchanged expected-failure declarations.
+Engine and test source hashes match the frozen revision on both hosts.
+Tests include all numeric widths, every bitmap offset, different partitions,
+scalar broadcasts, masked overflow, zero divisors, dense SIMD, mixed
+bitless/nullable chunks, float NaNs/infinities/signed zero and source-owner
+lifetimes. The baseline measurement probe separately passes 600 complete
+independent value/null/schema cases before the paired comparison.
+
+The fixed Linux allocation matrix passes all 738 observed calls across
+369 cases. Each call exports a complete ordered result, independently
+checked against NumPy and exact Arrow schemas; all retained answer hashes
+verify. The calibrated runtime/libc observer reports zero tracking errors.
+Contiguous and unchanged direct controls have identical counters across 138
+cases. Instrumented elapsed measurements are excluded.
+
+For 100K nullable rows starting at row 13 in 64 cold chunks, with two
+operands using different boundaries:
+
+| Direct operation | Requested bytes, main / candidate | Peak newly owned bytes, main / candidate |
+| --- | --- | --- |
+| Int64 addition | 2,531,581 / 866,014 | 2,438,492 / 816,864 |
+| Float64 comparison | 1,756,501 / 78,434 | 1,650,912 / 40,960 |
+| Int8 conditional choice | 410,063 / 127,316 | 338,492 / 114,336 |
+| Float32 horizontal sum | 1,707,233 / 800,928 | 1,640,711 / 800,448 |
+| Float32 horizontal mean | 1,719,733 / 813,428 | 1,640,711 / 812,948 |
+| Int64 horizontal minimum | 2,546,365 / 827,764 | 2,453,211 / 813,204 |
+
+Requested/live/peak newly owned counters include output and temporaries but
+exclude existing fixtures, warm merged caches and allocator reservations.
+They are separate from RSS and source-cache bytes. Fresh chunk metadata is
+prepared outside each observation. Generated evidence stays untracked at
+`/home/randyzwitch/GitHub/dataframe_mojo/build/1003-multi-input-validation-78ba0eb8/`:
+`paired-alloc/receipt.json`, `allocation-admission.json`,
+`allocation-summary.json`, `provenance.json` and CPU admissions.
+
+Native integration passes on both baseline and candidate on the live M1
+through `collect(engine="accel", batch_size=3)`, checking complete literal
+values, nulls, dtypes and batch order. This exercises provider integration
+for CPU scalar operations; it does not claim new GPU execution. All 754
+engine and test files in the candidate archive match the frozen committed
+contents. The fixed M1 CPU timing matrix completes all 2,214 observed calls (369
+cases, three calls per revision), with complete independent ordered answers,
+exact schemas and retained answer/binary hashes verified. The calibrated
+Darwin activity guard detects no compiler or known suite-worker overlap.
+No zero-duration samples occur; the timer records microsecond steps.
+Linux allocation counters and M1 elapsed measurements remain separate.
+
+Representative median durations on the M1 are:
+
+| Operation | Direct 100K nullable rows / 64 cold chunks, main / candidate, ms | Whole expression 1M nullable rows / 64 cold chunks, main / candidate, ms |
+| --- | --- | --- |
+| Int64 addition | 0.342 / 0.294 | 1.359 / 1.259 |
+| Float64 comparison | 0.163 / 0.099 | 0.861 / 0.722 |
+| Int64 conditional choice | 0.433 / 0.286 | 1.689 / 1.211 |
+| Float32 horizontal sum | 0.268 / 0.153 | 1.099 / 0.690 |
+| Float64 horizontal mean | 0.386 / 0.261 | 1.445 / 1.011 |
+| Int64 horizontal minimum | 0.441 / 0.279 | 1.586 / 1.058 |
+
+Warm fragmented input retains a clear tradeoff: with 1K rows in one-row
+chunks (requested 1024, canonicalized to 1000), Int32 multiplication takes
+161 us versus the baseline's cached-input 5 us; Int64 choice takes 143 us
+versus 6 us. The baseline's merged input already exists before the observed
+call. Explicitly rechunked inputs retain the contiguous dispatch. In the
+short three-call contiguous 100K-row controls, Int64 addition takes
+0.203 / 0.203 ms, Float64 comparison 0.024 / 0.024 ms and Int64 minimum
+0.051 / 0.058 ms. These samples do not establish blanket non-regression
+or general engine speedup. No cases or slower samples are dropped.
+Complete observations remain at
+`/Users/randyzwitch/benchdata/1003-multi/78ba0eb8/paired-time/receipt.json`,
+with `timing-admission.json` and `timing-summary.json`; copies of admissions
+and medians are in the local evidence directory.
+
+The final guarded quick-tier held-out ClickBench comparison completes all
+43 queries, with all 86 candidate/baseline cells independently matching
+complete DuckDB values and schemas. All 774 retained target snapshots load
+and verify their content/schema hashes. Only the aggregate elapsed
+comparison is inspected: candidate/baseline geometric mean 1.004x,
+effectively unchanged. This is a quick-tier validation, not a full-tier
+performance headline. The complete Polars report retains 35 wrong-answer
+verdicts and eight successful cells.
+
+Both CPU suite binaries are freshly built against `e4af628a` and `78ba0eb8`.
+The unchanged suite, evaluator and hashed 1M-row input use all queries and
+variants, four threads, three rounds/repetitions, tracing and fresh
+independent references. No benchmark, query, generator or evaluator changes
+are included. The full verdicts, raw results, manifest and admission are
+retained under `heldout/` in the M1 evidence directory and `m1-heldout/` in
+the local directory. Validation is complete for this subset; remaining adapters listed above
+are outside it.
 
 ## Initial numeric cast path
 

@@ -194,6 +194,25 @@ def case_module(entry: String) raises -> String:
     return String(entry[byte=0:split])
 
 
+def shard_cases(
+    cases: List[String], index: Int, count: Int
+) raises -> List[String]:
+    """Partition sorted discovery by module, keeping its tests together."""
+    if count < 1 or index < 0 or index >= count:
+        raise Error("Shard count must be positive and index in [0, count)")
+    var selected = List[String]()
+    var previous = String()
+    var module_index = -1
+    for entry in cases:
+        var module = case_module(entry)
+        if module != previous:
+            module_index += 1
+            previous = module.copy()
+        if module_index % count == index:
+            selected.append(entry.copy())
+    return selected^
+
+
 def validate_policy(policy: SuitePolicy, root: String) raises -> List[String]:
     var discovered = List[String]()
     var modules = List[String]()
@@ -432,6 +451,8 @@ struct RunnerOptions(Copyable, Movable):
     # name is a directory under providers/ put ahead of the root on the import
     # path ("cpu" compiles no GPU code).
     var provider: String
+    var shard_index: Int
+    var shard_count: Int
 
     def __init__(
         out self,
@@ -443,6 +464,8 @@ struct RunnerOptions(Copyable, Movable):
         compiler: String,
         capabilities: List[String] = List[String](),
         provider: String = "metal",
+        shard_index: Int = 0,
+        shard_count: Int = 1,
     ):
         self.root = root.copy()
         self.areas = areas.copy()
@@ -452,6 +475,8 @@ struct RunnerOptions(Copyable, Movable):
         self.compiler = compiler.copy()
         self.capabilities = capabilities.copy()
         self.provider = provider.copy()
+        self.shard_index = shard_index
+        self.shard_count = shard_count
 
 
 def include_flags(options: RunnerOptions) -> List[String]:
@@ -537,7 +562,11 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
             raise Error("Select each area only once")
         seen_areas.append(area.copy())
         var ordinary = List[String]()
-        for entry in cases_for(options.root, area):
+        for entry in shard_cases(
+            cases_for(options.root, area),
+            options.shard_index,
+            options.shard_count,
+        ):
             if options.contracts and case_module(entry) not in selected:
                 continue
             var missing = List[String]()
@@ -691,6 +720,10 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
         + ("true" if status[1] else "false")
         + ',"packaging":'
         + json_quote(options.packaging)
+        + ',"shard_index":'
+        + String(options.shard_index)
+        + ',"shard_count":'
+        + String(options.shard_count)
         + ',"contracts":'
         + json_strings(options.contracts)
         + ',"provider":'
