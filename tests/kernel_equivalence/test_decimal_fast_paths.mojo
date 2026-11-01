@@ -3,7 +3,9 @@ width, and a decimal product of 64-bit operands is computed in 64 bits;
 both give exactly what the row-by-row arithmetic gives: the same values
 and nulls, a strict cast past the precision raising with the row and
 value, a lenient one giving null, and exact products whether or not the
-overflow check runs."""
+overflow check runs. Decimal sums and products over nulls read the
+operands' combined validity 64 rows at a time: the same values and nulls
+as row by row, and a null row's payload is never computed."""
 # contract-group: types.cast
 from std.testing import assert_equal, assert_true, assert_raises
 
@@ -32,6 +34,7 @@ def test_integer_to_decimal_casts_match_the_scaled_values() raises:
     var targets: List[DataType] = [
         DataType.decimal(9, 2, 32),
         DataType.decimal(18, 4, 64),
+        DataType.decimal(19, 0, 128),
         DataType.decimal(38, 10, 128),
     ]
     for t in types:
@@ -142,3 +145,99 @@ def test_decimal_products_agree_in_64_and_128_bits() raises:
     )
     for row in range(1, ROWS):
         assert_equal(both.get(row).string(), exact.get(row).string())
+
+
+def nullable_cents(
+    name: String, values: List[Int64], valid: List[Bool], dtype: DataType
+) raises -> Series:
+    """Hundredths stored as they are under a two-place decimal type, null
+    where `valid` is False, whatever the payload there."""
+    return Series(name, Column[Int64](values.copy(), valid)).with_dtype(dtype)
+
+
+def test_nullable_decimal_arithmetic_matches_row_by_row() raises:
+    """Blocks of 64 rows all valid, all null and mixed, on either side, at
+    64 and 128 bits: each row is the exact sum or product, or null where
+    either side is."""
+    var prices = List[Int64]()
+    var rates = List[Int64]()
+    var price_valid = List[Bool]()
+    var rate_valid = List[Bool]()
+    for row in range(ROWS):
+        prices.append(Int64((row * 104_729) % 10_000_000) - 5_000_000)
+        rates.append(Int64(row % 101) - 50)
+        var block = row // 64
+        # Whole valid blocks, whole null blocks and mixed ones.
+        price_valid.append(
+            block % 3 != 1 and not (block % 3 == 2 and row % 5 == 0)
+        )
+        rate_valid.append(row % 7 != 3)
+    var narrow = DataType.decimal(9, 2, 64)
+    var wide = DataType.decimal(20, 2, 128)
+    for t in range(2):
+        var dtype = narrow if t == 0 else wide
+        var frame = DataFrame(
+            [
+                nullable_cents("p", prices, price_valid, narrow).cast(dtype),
+                nullable_cents("r", rates, rate_valid, narrow).cast(dtype),
+            ]
+        )
+        var out = frame.select_exprs(
+            [
+                (col("p") * col("r")).alias("x"),
+                (col("p") + col("r")).alias("s"),
+                (col("p") - col("r")).alias("d"),
+            ]
+        )
+        var x = out.column("x").cast(DataType.STRING)
+        var sums = out.column("s").cast(DataType.STRING)
+        var differences = out.column("d").cast(DataType.STRING)
+        for row in range(ROWS):
+            var null = not price_valid[row] or not rate_valid[row]
+            assert_equal(x.get(row).is_null(), null)
+            assert_equal(sums.get(row).is_null(), null)
+            assert_equal(differences.get(row).is_null(), null)
+            if null:
+                continue
+            var p = Int128(prices[row])
+            var r = Int128(rates[row])
+            assert_equal(x.get(row).string(), places(p * r, 4))
+            assert_equal(sums.get(row).string(), places(p + r, 2))
+            assert_equal(differences.get(row).string(), places(p - r, 2))
+
+
+def test_a_null_rows_payload_is_never_computed() raises:
+    """A payload past the precision under a null raises nothing; the same
+    payload on a valid row still raises."""
+    var dtype = DataType.decimal(18, 2, 64)
+    var values: List[Int64] = [Int64(100), Int64.MAX, Int64(300)]
+    var hidden: List[Bool] = [True, False, True]
+    var frame = DataFrame(
+        [
+            nullable_cents("p", values, hidden, dtype),
+            nullable_cents(
+                "r",
+                [Int64(200), Int64(200), Int64(200)],
+                [True, True, True],
+                dtype,
+            ),
+        ]
+    )
+    var product = frame.select_exprs([(col("p") * col("r")).alias("x")]).column(
+        "x"
+    )
+    assert_true(product.get(1).is_null())
+    assert_equal(product.cast(DataType.STRING).get(2).string(), "6.0000")
+    var shown = DataFrame(
+        [
+            nullable_cents("p", values, [True, True, True], dtype),
+            nullable_cents(
+                "r",
+                [Int64(200), Int64(200), Int64(200)],
+                [True, True, True],
+                dtype,
+            ),
+        ]
+    )
+    with assert_raises():
+        _ = shown.select_exprs([(col("p") * col("r")).alias("x")])

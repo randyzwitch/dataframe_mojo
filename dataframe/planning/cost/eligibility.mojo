@@ -28,6 +28,7 @@ from dataframe.kernels.join_hash import (
 )
 from dataframe.join_type import (
     JOIN_ANTI,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -57,7 +58,7 @@ def _pipeline_steps(
     operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
 ) -> Bool:
     """Whether every operation is a step a pipeline runs: a row-local
-    step, or an inner, left, semi, anti or (uncoalesced) right join whose
+    step, or an inner, left, semi, anti, full or (uncoalesced) right join whose
     build index was prepared (its morsels probe the shared index on their
     own worker)."""
     for node in operations:
@@ -74,6 +75,10 @@ def _pipeline_steps(
                 # out as a final morsel with the probe columns null.
                 if node.coalesce:
                     return False
+            elif node.how == JOIN_FULL:
+                # Probed as a left join; its unmatched build rows come
+                # out as a final morsel, as a right join's do.
+                pass
             elif node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
                 return False
             if (

@@ -8,11 +8,13 @@ infinities, and out-of-range values.
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
 from std.bit import count_trailing_zeros
+from std.memory import ArcPointer
 from dataframe.storage.boolean import BoolColumn, _bits64
 from dataframe.storage.column import Column, _append_validity, _copy_validity
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.text.parse import parse_bool, parse_float64, parse_integer
+from dataframe.text.bytes import _Bytes
 from dataframe.decimal import (
     check_limit,
     check_precision,
@@ -194,6 +196,33 @@ def _scaled_integers[
     var out = values.unsafe_ptr()
     var source = column._ptr()
     var nulls = column.null_count() > 0
+    # Every value of the source type fits the target (BIGINT to
+    # DECIMAL(19,0), INTEGER to DECIMAL(10,0) or wider): no row can
+    # overflow, so the scaling is one unchecked pass over every slot,
+    # which vectorizes, and the source's validity is copied as it is.
+    # DuckDB's binder makes the same choice from the types alone.
+    var bound = Scalar[D].MAX.cast[DType.int128]() + 1
+    if bound <= (limit - 1) // factor:
+        var scaled = Scalar[W](factor.cast[W]())
+        for i in range(n):
+            out[unsafe_offset=i] = source[unsafe_offset=i].cast[W]() * scaled
+        if not nulls:
+            return Series(input.name(), Column[Scalar[W]](values^)).with_dtype(
+                target
+            )
+        var valid = _copy_validity(column._bits[], column._offset, n)
+        # Null slots hold 0, as on the checked path.
+        for k in range(len(valid)):
+            var byte = valid[k]
+            if byte == 255:
+                continue
+            for b in range(8):
+                var row = 8 * k + b
+                if row < n and not (byte >> UInt8(b)) & 1:
+                    out[unsafe_offset=row] = 0
+        return Series(
+            input.name(), Column[Scalar[W]](values=values^, bits=valid^)
+        ).with_dtype(target)
     var overflowed = List[Int]()
     for i in range(n):
         if nulls and not column._valid(i):
@@ -249,6 +278,356 @@ def _integer_at(input: Series, i: Int) raises -> Int128:
                     input._data[Column[Scalar[D]]]._get(i).cast[DType.int128]()
                 )
     raise Error("expected an integer column, found " + input.dtype().name())
+
+
+@no_inline
+def _string_cast_host(input: Series) -> Bool:
+    """Admit readable unencoded windows; malformed metadata keeps the adapter."""
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return False
+    for array in chunks.arrays:
+        if not array.isa[StringColumn]():
+            return False
+        ref column = array[StringColumn]
+        if column._codes:
+            return False
+        var offset = column._offset
+        var count = len(column)
+        if offset < 0 or count < 0:
+            return False
+        if column._is_view_storage():
+            var storage = column._view_storage_unchecked()
+            if column._bits.ptr() != storage._bits.ptr():
+                return False
+            if not storage._views.on_host() or not storage._bits.on_host():
+                return False
+            for buffer in storage._buffers[]:
+                if not buffer.on_host():
+                    return False
+            var rows = len(storage)
+            var descriptors = len(storage._views[])
+            if offset > rows or count > rows - offset:
+                return False
+            if offset > descriptors or count > descriptors - offset:
+                return False
+            var end = offset + count
+            if len(storage._bits[]) != 0 and (
+                end // 8 + Int(end % 8 != 0) > len(storage._bits[])
+            ):
+                return False
+            for row in range(offset, end):
+                var view = storage._view_unchecked(row)
+                if not view.is_inline():
+                    var index = Int(view.buffer_index)
+                    if index >= len(storage._buffers[]):
+                        return False
+                    var available = len(storage._buffers[][index])
+                    var length = Int(view.length)
+                    if (
+                        length > available
+                        or Int(view.offset) > available - length
+                    ):
+                        return False
+        else:
+            if (
+                not column._bytes.on_host()
+                or not column._offsets.on_host()
+                or not column._bits.on_host()
+            ):
+                return False
+            var entries = len(column._offsets[])
+            if entries == 0 or offset > entries - 1:
+                return False
+            if count > entries - 1 - offset:
+                return False
+            var end = offset + count
+            if len(column._bits[]) != 0 and (
+                end // 8 + Int(end % 8 != 0) > len(column._bits[])
+            ):
+                return False
+            var available = Int64(len(column._bytes[]))
+            var previous = column._offsets[][offset]
+            if previous < 0 or previous > available:
+                return False
+            for row in range(offset + 1, end + 1):
+                var next = column._offsets[][row]
+                if next < previous or next > available:
+                    return False
+                previous = next
+    return True
+
+
+@no_inline
+def _string_format_host[S: DType](input: Series) -> Bool:
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return False
+    for array in chunks.arrays:
+        comptime if S == DType.bool:
+            if not array.isa[BoolColumn]():
+                return False
+            ref column = array[BoolColumn]
+            if not column._data.on_host() or not column._bits.on_host():
+                return False
+        else:
+            if not array.isa[Column[Scalar[S]]]():
+                return False
+            ref column = array[Column[Scalar[S]]]
+            if not column._data.on_host() or not column._bits.on_host():
+                return False
+    return True
+
+
+@no_inline
+def _string_cast_spans(input: Series) -> ArcPointer[List[_Bytes]]:
+    var spans = List[_Bytes](capacity=len(input._chunked.value()[].arrays))
+    for array in input._chunked.value()[].arrays:
+        spans.append(_Bytes(array[StringColumn]))
+    return ArcPointer(spans^)
+
+
+@no_inline
+def _chunk_format_strings[
+    S: DType
+](input: Series, mask: List[Bool]) raises -> Series:
+    var output = StringBuilder(len(input))
+    var masked = len(mask) == len(input)
+    var base = 0
+    for array in input._chunked.value()[].arrays:
+        var count = 0
+        comptime if S == DType.bool:
+            ref column = array[BoolColumn]
+            count = len(column)
+            for row in range(len(column)):
+                if column._valid(row) and (not masked or mask[base + row]):
+                    output.append("true" if column._get(row) else "false")
+                else:
+                    output.append_null()
+        else:
+            ref column = array[Column[Scalar[S]]]
+            count = len(column)
+            var values = column._ptr()
+            for row in range(len(column)):
+                if column._valid(row) and (not masked or mask[base + row]):
+                    output.append(String(values[unsafe_offset=row]))
+                else:
+                    output.append_null()
+        base += count
+    return Series(input.name(), output^.finish())
+
+
+struct _ChunkParseJob[D: DType](Job):
+    """Own source spans while writing one unchanged global worker range."""
+
+    var spans: ArcPointer[List[_Bytes]]
+    var values: Int
+    var valid: Int
+    var mask: Int
+    var first: Int
+    var last: Int
+    var failed_row: Int
+    var message: String
+
+    def __init__(
+        out self,
+        spans: ArcPointer[List[_Bytes]],
+        values: Int,
+        valid: Int,
+        mask: Int,
+        first: Int,
+        last: Int,
+    ):
+        self.spans = spans
+        self.values = values
+        self.valid = valid
+        self.mask = mask
+        self.first = first
+        self.last = last
+        self.failed_row = -1
+        self.message = String()
+
+    def run(mut self) raises:
+        if self.first == self.last:
+            return
+        var out = Pointer[List[Scalar[Self.D]], MutAnyOrigin](
+            unsafe_from_address=self.values
+        )[].unsafe_ptr()
+        var valid = Pointer[List[Bool], MutAnyOrigin](
+            unsafe_from_address=self.valid
+        )[].unsafe_ptr()
+        ref mask = Pointer[List[Bool], MutAnyOrigin](
+            unsafe_from_address=self.mask
+        )[]
+        var masked = len(mask) > 0
+        var span = self.spans[].unsafe_ptr()
+        var base = 0
+        var end = len(span[].column)
+        while end <= self.first:
+            base = end
+            span = span.unsafe_offset(1)
+            end += len(span[].column)
+        for row in range(self.first, self.last):
+            while row >= end:
+                base = end
+                span = span.unsafe_offset(1)
+                end += len(span[].column)
+            var local = row - base
+            if not span[].column._valid(local) or (masked and not mask[row]):
+                valid.unsafe_offset(row)[] = False
+                continue
+            var text = StringSlice[ImmutAnyOrigin](
+                unsafe_from_utf8=span[].get(local)
+            )
+            try:
+                comptime if Self.D.is_floating_point():
+                    out.unsafe_offset(row)[] = parse_float64(text).cast[
+                        Self.D
+                    ]()
+                elif Self.D == DType.uint64:
+                    out.unsafe_offset(row)[] = rebind[Scalar[Self.D]](
+                        parse_integer[DType.uint64](text)
+                    )
+                else:
+                    out.unsafe_offset(row)[] = _to_integer[Self.D](
+                        parse_integer[DType.int64](text).cast[DType.int128]()
+                    )
+                valid.unsafe_offset(row)[] = True
+            except error:
+                valid.unsafe_offset(row)[] = False
+                if self.failed_row < 0:
+                    self.failed_row = row
+                    self.message = String(error)
+
+
+@no_inline
+def _chunk_string_error(
+    target: DataType, row: Int, text: StringSlice, cause: String
+) raises:
+    raise Error(
+        "cast from string to "
+        + target.name()
+        + " failed at row "
+        + String(row)
+        + " for value '"
+        + String(text)
+        + "': "
+        + cause
+    )
+
+
+@no_inline
+def _chunk_parse_strings[
+    D: DType
+](
+    input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
+) raises -> Series:
+    var n = len(input)
+    var spans = _string_cast_spans(input)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    var observed = mask.copy() if len(mask) == n else List[Bool]()
+    # Preserve the contiguous parser's worker policy and disjoint byte writes.
+    var workers = configured_workers() if n >= (1 << 16) else 1
+    var jobs = List[_ChunkParseJob[D]](capacity=workers)
+    for worker in range(workers):
+        jobs.append(
+            _ChunkParseJob[D](
+                spans,
+                Int(Pointer(to=values)),
+                Int(Pointer(to=valid)),
+                Int(Pointer(to=observed)),
+                n * worker // workers,
+                n * (worker + 1) // workers,
+            )
+        )
+    run_jobs(jobs)
+    _ = observed^
+    if strict:
+        for worker in range(len(jobs)):
+            if jobs[worker].failed_row >= 0:
+                var row = jobs[worker].failed_row
+                var base = 0
+                for span in spans[]:
+                    if row < base + len(span.column):
+                        var text = StringSlice[ImmutAnyOrigin](
+                            unsafe_from_utf8=span.get(row - base)
+                        )
+                        _chunk_string_error(
+                            target, offset + row, text, jobs[worker].message
+                        )
+                    base += len(span.column)
+    return Series(input.name(), Column[Scalar[D]](values^, valid))
+
+
+@no_inline
+def _chunk_parse_bools(
+    input: Series, strict: Bool, offset: Int, mask: List[Bool]
+) raises -> Series:
+    var n = len(input)
+    var spans = _string_cast_spans(input)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var out = values.unsafe_ptr()
+    var validity = bits.unsafe_ptr()
+    var masked = len(mask) == n
+    var base = 0
+    for span in spans[]:
+        for local in range(len(span.column)):
+            var row = base + local
+            if not span.column._valid(local) or (masked and not mask[row]):
+                continue
+            var text = StringSlice[ImmutAnyOrigin](
+                unsafe_from_utf8=span.get(local)
+            )
+            try:
+                var value = parse_bool(text)
+                var flag = UInt8(1) << UInt8(row & 7)
+                if value:
+                    out[unsafe_offset=row // 8] |= flag
+                validity[unsafe_offset=row // 8] |= flag
+            except error:
+                if strict:
+                    _chunk_string_error(
+                        DataType.BOOL, offset + row, text, String(error)
+                    )
+        base += len(span.column)
+    return Series(
+        input.name(), BoolColumn(values=values^, bits=bits^, length=n)
+    )
+
+
+@no_inline
+def _cast_string_chunks(
+    input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
+) raises -> Optional[Series]:
+    var source = input.dtype()
+    if source == DataType.STRING:
+        if target == DataType.BOOL:
+            if _string_cast_host(input):
+                return _chunk_parse_bools(input, strict, offset, mask)
+            return None
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if target == DataType.of(D):
+                if _string_cast_host(input):
+                    return _chunk_parse_strings[D](
+                        input, target, strict, offset, mask
+                    )
+                return None
+        return None
+    if target == DataType.STRING:
+        if source == DataType.BOOL:
+            if _string_format_host[DType.bool](input):
+                return _chunk_format_strings[DType.bool](input, mask)
+            return None
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if source == DataType.of(D):
+                if _string_format_host[D](input):
+                    return _chunk_format_strings[D](input, mask)
+                return None
+    return None
 
 
 def _cast_binary(
@@ -1124,6 +1503,12 @@ def cast_series(
         return input.copy()
     if source == DataType.STRING and target == DataType.BINARY:
         return input.with_dtype(DataType.BINARY)
+    if input.is_chunked():
+        var text_result = _cast_string_chunks(
+            input, target, strict, offset, mask
+        )
+        if text_result:
+            return text_result.take()
     if input.is_chunked():
         var decimal_float = _cast_decimal_float_chunks(input, target)
         if decimal_float:
