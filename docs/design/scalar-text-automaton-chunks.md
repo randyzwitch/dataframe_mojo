@@ -124,7 +124,9 @@ intervals. The complete 40-case table and all samples remain in the evidence.
 
 Unchanged quick43 heldout validation passes all 43 queries for both revisions
 against fresh independent DuckDB references. All 86 target cells and 774
-retained target snapshots verify. The aggregate HEAD/BASE elapsed ratio is
+retained target snapshots verify. The Polars comparison retains 35 wrong-answer
+and eight correct cells; these do not substitute for the independent DuckDB
+answers and are not suppressed. The aggregate HEAD/BASE elapsed ratio is
 0.9904502479 for this quick-tier protocol. Only aggregate elapsed results are
 inspected; this is no per-query or larger-scale performance claim and does
 not feed further tuning. Compiler/resource observations and functional or
