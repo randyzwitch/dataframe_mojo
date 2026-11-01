@@ -485,6 +485,10 @@ def table_frame(
         swap(columns, result.keys[p])
         var states = List[Reducer]()
         swap(states, result.states[p])
+        # Moved, not copied: a near-unique group-by's first rows are
+        # megabytes, copied here on one thread.
+        var firsts = List[Int]()
+        swap(firsts, result.firsts[p])
         parts.append(
             _StreamReduction(
                 keys=DataFrame(columns^, height=size),
@@ -493,7 +497,7 @@ def table_frame(
                 dtypes=template.dtypes,
                 outputs=template.outputs,
                 grouped=True,
-                firsts=result.firsts[p].copy(),
+                firsts=firsts^,
                 rows=0,
             )
         )
