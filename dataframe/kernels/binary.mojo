@@ -255,8 +255,8 @@ def _packed_mask[
 
 
 def _binary_validity[
-    T: Copyable & Deinitable
-](left: Column[T], right: Column[T], n: Int) -> List[UInt8]:
+    T: Copyable & Deinitable, U: Copyable & Deinitable
+](left: Column[T], right: Column[U], n: Int) -> List[UInt8]:
     """AND operand windows without expanding validity or packing it again."""
     if len(left._bits[]) == 0:
         if len(right._bits[]) == 0:
@@ -853,6 +853,38 @@ def _decimal_output(
     return Series("", Column[Int32](narrow^, valid)).with_dtype(dtype)
 
 
+def _decimal_output_bits(
+    var values: List[Int128], var bits: List[UInt8], dtype: DataType
+) raises -> Series:
+    """`_decimal_output` with validity as a bitmap aligned to row 0 (empty
+    when every row is valid)."""
+    var width = dtype.decimal_width()
+    if width == 128:
+        if len(bits) == 0:
+            return Series("", Column[Int128](values^)).with_dtype(dtype)
+        return Series(
+            "", Column[Int128](values=values^, bits=bits^)
+        ).with_dtype(dtype)
+    var n = len(values)
+    if width == 64:
+        var narrow = List[Int64](unsafe_uninit_length=n)
+        for i in range(n):
+            narrow[i] = Int64(values[i])
+        if len(bits) == 0:
+            return Series("", Column[Int64](narrow^)).with_dtype(dtype)
+        return Series("", Column[Int64](values=narrow^, bits=bits^)).with_dtype(
+            dtype
+        )
+    var narrow = List[Int32](unsafe_uninit_length=n)
+    for i in range(n):
+        narrow[i] = Int32(values[i])
+    if len(bits) == 0:
+        return Series("", Column[Int32](narrow^)).with_dtype(dtype)
+    return Series("", Column[Int32](values=narrow^, bits=bits^)).with_dtype(
+        dtype
+    )
+
+
 def _decimal_quotient(left: Series, right: Series) raises -> Series:
     """Compute a decimal quotient after converting both sides to Float64;
     return null where the divisor is zero or either side is null."""
@@ -959,43 +991,148 @@ def _decimal_dense[
     rescale: Int128,
     limit: Int128,
     dtype: DataType,
+    valid: List[UInt8],
 ) raises -> List[Int128]:
-    """Decimal ADD, SUB or MUL with no nulls on either side: values through
-    pointers, no validity to build. `divisor` is the multiplication's
+    """Decimal ADD, SUB or MUL through pointers at the operands' storage
+    widths. `valid` is the operands' combined validity bitmap (empty when
+    every row is valid); it is read 64 rows at a time, as DuckDB's flat
+    binary executor reads its validity entries: a block of valid rows is
+    computed without testing a row, a block of nulls is skipped, and only
+    a mixed block tests each row. Null rows hold 0 and are never computed,
+    so their payloads cannot raise. `divisor` is the multiplication's
     rescaling power of ten when it is one the compiler can specialize (0
     otherwise, which divides by `rescale` at run time)."""
     comptime if op == MUL and divisor > 0:
         var narrow = _decimal_mul_narrow[divisor](a, b, n)
         if narrow:
             var values = narrow.take()
-            for i in range(len(values)):
-                values[i] = check_limit(values[i], limit, dtype)
+            var at = values.unsafe_ptr()
+            for base in range(0, n, 64):
+                var end = min(base + 64, n)
+                var state = _block_state(valid, base, end)
+                if state == _BLOCK_ALL:
+                    for i in range(base, end):
+                        _ = check_limit(at[unsafe_offset=i], limit, dtype)
+                elif state == _BLOCK_NONE:
+                    for i in range(base, end):
+                        at[unsafe_offset=i] = 0
+                else:
+                    for i in range(base, end):
+                        if _bit(Span(valid), i):
+                            _ = check_limit(at[unsafe_offset=i], limit, dtype)
+                        else:
+                            at[unsafe_offset=i] = 0
             return values^
     var values = List[Int128](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
-    var xs = a._ptr()
-    var ys = b._ptr()
     var left_one = len(a) == 1
     var right_one = len(b) == 1
-    for i in range(n):
-        # decimal64 inputs are read at their width and widened per value.
-        var x = Int128(xs[unsafe_offset=0 if left_one else i])
-        var y = Int128(ys[unsafe_offset=0 if right_one else i])
-        var value: Int128
-        comptime if op == MUL:
-            value = _decimal_mul(x, y)
-            comptime if divisor > 1:
-                value = _round_div[divisor](value)
-            elif divisor == 0:
-                value = divide_half_even(value, rescale)
+    for base in range(0, n, 64):
+        var end = min(base + 64, n)
+        var state = _block_state(valid, base, end)
+        if state == _BLOCK_ALL:
+            for i in range(base, end):
+                out[unsafe_offset=i] = _decimal_value[op, divisor](
+                    a,
+                    b,
+                    0 if left_one else i,
+                    0 if right_one else i,
+                    left_factor,
+                    right_factor,
+                    rescale,
+                    limit,
+                    dtype,
+                )
+        elif state == _BLOCK_NONE:
+            for i in range(base, end):
+                out[unsafe_offset=i] = 0
         else:
-            if left_factor != 1:
-                x = _decimal_mul(x, left_factor)
-            if right_factor != 1:
-                y = _decimal_mul(y, right_factor)
-            value = x + y if op == ADD else x - y
-        out[unsafe_offset=i] = check_limit(value, limit, dtype)
+            for i in range(base, end):
+                if _bit(Span(valid), i):
+                    out[unsafe_offset=i] = _decimal_value[op, divisor](
+                        a,
+                        b,
+                        0 if left_one else i,
+                        0 if right_one else i,
+                        left_factor,
+                        right_factor,
+                        rescale,
+                        limit,
+                        dtype,
+                    )
+                else:
+                    out[unsafe_offset=i] = 0
     return values^
+
+
+@always_inline
+def _decimal_value[
+    op: Int, divisor: Int, A: DType, B: DType
+](
+    a: Column[Scalar[A]],
+    b: Column[Scalar[B]],
+    ai: Int,
+    bi: Int,
+    left_factor: Int128,
+    right_factor: Int128,
+    rescale: Int128,
+    limit: Int128,
+    dtype: DataType,
+) raises -> Int128:
+    """One row of `_decimal_dense`: decimal64 inputs are read at their
+    width and widened per value."""
+    var x = Int128(a._ptr()[unsafe_offset=ai])
+    var y = Int128(b._ptr()[unsafe_offset=bi])
+    var value: Int128
+    comptime if op == MUL:
+        value = _decimal_mul(x, y)
+        comptime if divisor > 1:
+            value = _round_div[divisor](value)
+        elif divisor == 0:
+            value = divide_half_even(value, rescale)
+    else:
+        if left_factor != 1:
+            x = _decimal_mul(x, left_factor)
+        if right_factor != 1:
+            y = _decimal_mul(y, right_factor)
+        value = x + y if op == ADD else x - y
+    return check_limit(value, limit, dtype)
+
+
+comptime _BLOCK_ALL = 0
+comptime _BLOCK_NONE = 1
+comptime _BLOCK_MIXED = 2
+
+
+@always_inline
+def _block_state(valid: List[UInt8], start: Int, end: Int) -> Int:
+    """Whether rows [start, end) of a bitmap aligned to row 0 are all
+    valid, all null or mixed; an empty bitmap is all valid. `start` is a
+    multiple of 64, so the block is whole bytes but for a final partial
+    one."""
+    if len(valid) == 0:
+        return _BLOCK_ALL
+    var first = start >> 3
+    var full = (end - start) >> 3
+    var any = UInt8(0)
+    var every = UInt8(255)
+    var bytes = valid.unsafe_ptr()
+    for k in range(full):
+        var byte = bytes[unsafe_offset=first + k]
+        any |= byte
+        every &= byte
+    var rest = (end - start) & 7
+    if rest > 0:
+        var keep = (UInt8(1) << UInt8(rest)) - 1
+        var byte = bytes[unsafe_offset=first + full] & keep
+        any |= byte
+        if byte != keep:
+            every = 0
+    if every == 255:
+        return _BLOCK_ALL
+    if any == 0:
+        return _BLOCK_NONE
+    return _BLOCK_MIXED
 
 
 def _dense_decimal[
@@ -1007,9 +1144,11 @@ def _dense_decimal[
     right_dtype: DataType,
     result_dtype: DataType,
 ) raises -> Series:
-    """Decimal ADD, SUB or MUL of columns without nulls, at their storage
-    widths (Int64 or Int128); the result is decimal128."""
+    """Decimal ADD, SUB or MUL of columns at their storage widths (Int64 or
+    Int128), null where either side is; the result is stored at its
+    type's width."""
     var n = _length(len(a), len(b))
+    var valid = _binary_validity(a, b, n)
     var common = max(left_dtype.scale(), right_dtype.scale())
     var lf = pow10(common - left_dtype.scale())
     var rf = pow10(common - right_dtype.scale())
@@ -1020,33 +1159,33 @@ def _dense_decimal[
     comptime if op == MUL:
         if shift <= 0:
             dense = _decimal_dense[op, 1, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 1:
             dense = _decimal_dense[op, 10, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 2:
             dense = _decimal_dense[op, 100, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 3:
             dense = _decimal_dense[op, 1000, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 4:
             dense = _decimal_dense[op, 10000, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         else:
             dense = _decimal_dense[op, 0, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
     else:
         dense = _decimal_dense[op, 1, A, B](
-            a, b, n, lf, rf, scale, lim, result_dtype
+            a, b, n, lf, rf, scale, lim, result_dtype, valid
         )
-    return _decimal_output(dense^, List[Bool](), result_dtype)
+    return _decimal_output_bits(dense^, valid^, result_dtype)
 
 
 def _decimal_side64(series: Series) -> Optional[Column[Int64]]:
@@ -1196,9 +1335,10 @@ def _decimal_binary[
     var narrow = (
         left._data.isa[Column[Int64]]() or right._data.isa[Column[Int64]]()
     )
-    var no_nulls = left.null_count() == 0 and right.null_count() == 0
     comptime if op == ADD or op == SUB or op == MUL:
-        if len(mask) == 0 and no_nulls:
+        # Nulls on either side are read through the combined validity
+        # (`_decimal_dense`), not the per-row path below.
+        if len(mask) == 0:
             var ld = left.dtype()
             var rd = right.dtype()
             if left._data.isa[Column[Int64]]():
