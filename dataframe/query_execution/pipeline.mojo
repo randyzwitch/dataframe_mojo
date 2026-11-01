@@ -84,6 +84,7 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -311,6 +312,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (step.how == JOIN_RIGHT and not step.coalesce)
+            or step.how == JOIN_FULL
         ):
             first = step.left
         else:
@@ -337,6 +339,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (node.how == JOIN_RIGHT and not node.coalesce)
+            or node.how == JOIN_FULL
         ):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
