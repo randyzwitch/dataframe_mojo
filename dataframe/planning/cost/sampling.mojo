@@ -317,17 +317,25 @@ def _key_group_bound(
     return bound
 
 
-def _unique_key_column(build: DataFrame, names: List[String]) raises -> Bool:
+def _unique_key_column(
+    build: DataFrame,
+    names: List[String],
+    counts: List[Int] = List[Int](),
+) raises -> Bool:
     """Whether one of the build's columns `names` holds no null and no value
     twice, so no two rows of the build hold the same values for all of
-    them. A column whose sampled distinct count is under nine tenths of the
-    rows is not checked."""
+    them. A column whose distinct count (`counts`, where known, else
+    sampled) is under nine tenths of the rows is not checked."""
     var height = build.height()
-    for name in names:
+    for i in range(len(names)):
+        ref name = names[i]
         var column = build.column(name)
         if column.null_count() > 0:
             continue
-        if 10 * distinct_estimate(column) < 9 * height:
+        var distinct = counts[i] if i < len(counts) and counts[i] > 0 else (
+            distinct_estimate(column)
+        )
+        if 10 * distinct < 9 * height:
             continue
         if column.n_unique() == height:
             return True

@@ -4,7 +4,12 @@ from dataframe.aggregation.group_by import (
     range_states,
 )
 from dataframe.kernels.distinct_statistics import (
+    _identity,
     distinct_estimate,
+)
+from dataframe.planning.graph import (
+    plan_spine_rows,
+    plan_spine_source,
 )
 from dataframe.dtype import (
     DataType,
@@ -135,6 +140,36 @@ def plan_batch_states_win(
     return True
 
 
+def _build_distinct(
+    self: QueryContext, op: PlanNode, build: DataFrame, key: String
+) raises -> Int:
+    """A join build's column's distinct count. A build holding every row
+    of the table under the join's right input keeps the count with that
+    table's statistics, through renames, as DuckDB reads a column's count
+    from its base table: it is taken from the build's rows once, then read
+    back on every run. Any other build is estimated from its column each
+    time. The table's own rows are not read here: this runs on pipeline
+    workers, and the planner's statistics read tables on one thread."""
+    if op.right >= 0 and op.right < len(self._nodes):
+        if plan_spine_rows(self, op.right) == build.height():
+            var source = plan_spine_source(self, op.right, key)
+            if source:
+                var found = source.value()
+                ref table = self._frames[found[0]]
+                if table._statistics:
+                    var column = table.column(found[1])
+                    var identity = _identity(column)
+                    var rows = len(column)
+                    var box = table._statistics.value()
+                    var known = box[].known(found[1], identity, rows)
+                    if known > 0:
+                        return known
+                    var count = distinct_estimate(build.column(key))
+                    box[].record(found[1], identity, rows, count)
+                    return count
+    return distinct_estimate(build.column(key))
+
+
 def plan_row_number_shape(
     self: QueryContext,
     source: Int,
@@ -171,8 +206,8 @@ def plan_row_number_shape(
         if op.names[0] not in table.columns():
             continue
         var probe = table._distinct_count(op.names[0])
-        var build = distinct_estimate(
-            joins[op.join_build_slot()].column(op.right_keys[0])
+        var build = _build_distinct(
+            self, op, joins[op.join_build_slot()], op.right_keys[0]
         )
         if probe > 0 and build > 0:
             rows *= min(1.0, Float64(build) / Float64(probe))
@@ -189,9 +224,12 @@ def plan_row_number_shape(
         if key in table.columns():
             count = table._distinct_count(key)
         else:
-            for build in joins:
+            for op in operations:
+                if op.kind != JOIN:
+                    continue
+                ref build = joins[op.join_build_slot()]
                 if key in build.columns():
-                    count = distinct_estimate(build.column(key))
+                    count = _build_distinct(self, op, build, key)
                     break
         if count <= 0:
             return (-1.0, -1.0)
@@ -394,7 +432,17 @@ def select_aggregation_strategy(
                     operations,
                 )
                 var merge = _row_merge_reductions(expressions)
-                var unique = _unique_key_column(joins[best], carried)
+                # The carried columns' counts from their table's
+                # statistics where the build holds the whole table.
+                var counts = List[Int]()
+                for op in operations:
+                    if op.kind == JOIN and op.join_build_slot() == best:
+                        for name in carried:
+                            counts.append(
+                                _build_distinct(self, op, joins[best], name)
+                            )
+                        break
+                var unique = _unique_key_column(joins[best], carried, counts)
                 var rows = shape[0]
                 var groups = shape[1]
                 var width = Float64(len(carried))
