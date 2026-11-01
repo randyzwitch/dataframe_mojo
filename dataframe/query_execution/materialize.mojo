@@ -28,6 +28,7 @@ from dataframe.planning.graph import (
     plan_ends_in_breaker,
     plan_reorder,
     plan_spine_rows,
+    plan_subplan,
     plan_subplan_classes,
 )
 from dataframe.planning.inputs import (
@@ -126,8 +127,7 @@ def plan_share_subplans(
         trace_path("lazy.shared_subplan")
         var origin = plan_spine_rows(self, best)
         var aggregated = plan_aggregated(self, best)
-        var sub = self.copy()
-        plan_reorder(sub, best)
+        var sub = plan_subplan(self, best)
         var frame = sub._collect(
             optimize=True, streaming=streaming, batch_size=batch_size
         )
