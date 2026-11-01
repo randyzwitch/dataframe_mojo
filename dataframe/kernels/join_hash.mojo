@@ -1661,6 +1661,15 @@ struct _KeyPacking(Copyable, Movable):
     def packs(self) -> Bool:
         return len(self.shifts) > 0
 
+    def most(self) -> UInt64:
+        """A bound on the packed keys (they start at 0), so the routes that
+        need a narrow span skip their scans of keys that cannot have one;
+        0 when nothing is packed."""
+        var most = UInt64(0)
+        for k in range(len(self.shifts)):
+            most |= self.spans[k] << UInt64(self.shifts[k])
+        return most
+
 
 def _int_range(key: Series) -> Tuple[UInt64, UInt64]:
     """An integer key's least valid value as its word (`_int_word`) and the
@@ -1721,11 +1730,13 @@ def _pack_key(
     base: UInt64,
     span: UInt64,
     shift: Int,
+    first: Bool,
     packed: Pointer[UInt64, MutAnyOrigin],
     outside: Pointer[UInt8, MutAnyOrigin],
 ):
-    """Add one key's distances from `base` at bit `shift` to every row's
-    packed word, and mark the rows whose key is null or past `span`."""
+    """Put one key's distance from `base` at bit `shift` of every row's
+    packed word, and mark the rows whose key is null or past `span`; the
+    first key writes both, the others add to them."""
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
@@ -1734,19 +1745,20 @@ def _pack_key(
                 var values = column._ptr()
                 var n = len(column)
                 var at = UInt64(shift)
-                if len(column._bits[]) == 0:
-                    for i in range(n):
-                        var offset = _int_word[D](values[unsafe_offset=i]) - base
-                        packed[unsafe_offset=i] |= offset << at
-                        outside[unsafe_offset=i] |= UInt8(offset > span)
-                    return
+                var nulls = len(column._bits[]) > 0
                 var bits = column._bits[].unsafe_ptr()
+                var bit_offset = column._offset
                 for i in range(n):
                     var offset = _int_word[D](values[unsafe_offset=i]) - base
-                    packed[unsafe_offset=i] |= offset << at
-                    outside[unsafe_offset=i] |= UInt8(offset > span) | UInt8(
-                        not _validity_at(bits, column._offset + i)
-                    )
+                    var mark = UInt8(offset > span)
+                    if nulls:
+                        mark |= UInt8(not _validity_at(bits, bit_offset + i))
+                    if first:
+                        packed[unsafe_offset=i] = offset << at
+                        outside[unsafe_offset=i] = mark
+                    else:
+                        packed[unsafe_offset=i] |= offset << at
+                        outside[unsafe_offset=i] |= mark
                 return
 
 
@@ -1755,9 +1767,11 @@ def _pack_keys(keys: List[Series], packing: _KeyPacking) -> Series:
     `packing`: null where any key is null, or past its build range, so
     such a row matches no build row."""
     var n = len(keys[0])
-    var packed = List[UInt64](length=n, fill=0)
-    var outside = List[UInt8](length=n, fill=0)
-    var words = packed.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var values = huge_uninit[Int64](n)
+    var outside = huge_uninit[UInt8](n)
+    var words = values.unsafe_ptr().unsafe_bitcast[UInt64]().unsafe_origin_cast[
+        MutAnyOrigin
+    ]()
     var marks = outside.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
     for k in range(len(keys)):
         _pack_key(
@@ -1765,23 +1779,25 @@ def _pack_keys(keys: List[Series], packing: _KeyPacking) -> Series:
             packing.bases[k],
             packing.spans[k],
             packing.shifts[k],
+            k == 0,
             words,
             marks,
         )
-    var values = List[Int64](unsafe_uninit_length=n)
-    var out = values.unsafe_ptr()
     var unmatchable = 0
     for i in range(n):
-        out[unsafe_offset=i] = bitcast[DType.int64](words[unsafe_offset=i])
         unmatchable += Int(marks[unsafe_offset=i])
     if unmatchable == 0:
         return Series(keys[0].name(), Column[Int64](values^))
-    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    # The validity bitmap, a byte (eight rows) at a time.
+    var bits = List[UInt8](unsafe_uninit_length=(n + 7) // 8)
     var valid = bits.unsafe_ptr()
-    for i in range(n):
-        valid[unsafe_offset=i >> 3] |= (UInt8(1) ^ marks[unsafe_offset=i]) << UInt8(
-            i & 7
-        )
+    for byte in range(len(bits)):
+        var packed_byte = UInt8(0)
+        for j in range(min(8, n - 8 * byte)):
+            packed_byte |= (
+                UInt8(1) ^ marks[unsafe_offset=8 * byte + j]
+            ) << UInt8(j)
+        valid[unsafe_offset=byte] = packed_byte
     return Series(keys[0].name(), Column[Int64](values=values^, bits=bits^))
 
 
@@ -1868,6 +1884,7 @@ def prepare_hash_index(
         allow_progression
         and len(right) == 1
         and right[0].dtype().physical() == DataType.INT64
+        and packing.most() < UInt64(_PERFECT_SPAN)
     ):
         var perfect = _perfect_slots(right[0])
         if perfect:
@@ -1949,6 +1966,7 @@ def prepare_hash_index(
         len(right) == 1
         and right[0].dtype().physical() == DataType.INT64
         and len(right[0]) <= probe_rows
+        and packing.most() < UInt64(4 * _l2_cache_bytes())
     ):
         var bits = _key_bits(right[0])
         if bits:
