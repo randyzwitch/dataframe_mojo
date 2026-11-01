@@ -207,6 +207,61 @@ struct StringColumn(Copyable, Sized):
         """Copy Arc metadata; caller first checks `_is_view_storage()`."""
         return self._view_storage.value().copy()
 
+    def _flat_views(self) -> Self:
+        """This column with one view descriptor a row, for kernels that
+        read the descriptors through a pointer: a column that selects
+        another's descriptors (`_select_rows`) copies them out; any other
+        column is itself."""
+        if not self._is_view_storage():
+            return self.copy()
+        if not self._view_storage.value()._selects():
+            return self.copy()
+        var result = self.copy()
+        result._view_storage = self._view_storage.value()._flat()
+        return result^
+
+    def _select_rows(self, shared: ArcPointer[List[Int]]) -> Optional[Self]:
+        """This column's rows at `shared` (every one a row of it, none
+        missing) without copying a descriptor: the result reads this
+        column's view descriptors through the row list, as DuckDB's join
+        emits a build column as a dictionary vector over it, and carries
+        this column's dictionary codes the same way. Only the validity is
+        gathered, when there are nulls. None when this column does not
+        hold its own view descriptors (offsets, or a selection itself)."""
+        if not self._is_view_storage():
+            return None
+        ref storage = self._view_storage.value()
+        if storage._selects():
+            return None
+        ref rows = shared[]
+        var n = len(rows)
+        var bits = List[UInt8]()
+        if len(self._bits[]) > 0:
+            # A byte of output bits at a time, through pointers.
+            bits = List[UInt8](unsafe_uninit_length=(n + 7) // 8)
+            var out_bits = bits.unsafe_ptr()
+            var in_bits = self._bits[].unsafe_ptr()
+            var at = rows.unsafe_ptr()
+            var base = self._offset
+            var k = 0
+            while k < n:
+                var end = min(k + 8, n)
+                var byte = UInt8(0)
+                for j in range(k, end):
+                    var bit = base + at[unsafe_offset=j]
+                    byte |= (
+                        (in_bits[unsafe_offset=bit >> 3] >> UInt8(bit & 7)) & 1
+                    ) << UInt8(j - k)
+                out_bits[unsafe_offset=k >> 3] = byte
+                k = end
+        var result = Self(
+            StringViewStorage._selecting(
+                storage, shared, 0, self._offset, n, bits^
+            )
+        )
+        self._carry_codes(result, rows, 0, n, 0, Optional(shared))
+        return result^
+
     def _start(self, i: Int) -> Int:
         assert not self._is_view_storage()
         return Int(self._offsets[][self._offset + i])
@@ -297,6 +352,9 @@ struct StringColumn(Copyable, Sized):
                 return False
             var left = self._view_storage.value().copy()
             var right = other._view_storage.value().copy()
+            if left._selects() or right._selects():
+                # Shared descriptors read through different rows.
+                return False
             return (
                 left.views_arc().ptr() == right.views_arc().ptr()
                 and left.buffers_arc().ptr() == right.buffers_arc().ptr()
