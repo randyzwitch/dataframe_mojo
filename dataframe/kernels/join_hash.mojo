@@ -11,6 +11,7 @@ from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
+from std.sys.intrinsics import prefetch
 
 from dataframe.aggregation.reducer import float_key
 from dataframe.storage.boolean import BoolColumn
@@ -450,7 +451,8 @@ def _is_int_key(key: Series) -> Bool:
 
 
 def _key_words(key: Series) -> List[UInt64]:
-    """Every row's word (`_int_word`) of an integer key with no nulls."""
+    """Every row's word (`_int_word`) of an integer key; a null row's word
+    is undefined."""
     var words = huge_uninit[UInt64](len(key))
     var out = words.unsafe_ptr()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -463,17 +465,6 @@ def _key_words(key: Series) -> List[UInt64]:
                         values.unsafe_offset(i)[]
                     )
     return words^
-
-
-def _int_key_at(key: Series, row: Int) -> Tuple[Bool, UInt64]:
-    """Whether an integer key's row is valid, and its word."""
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        comptime if not D.is_floating_point():
-            if key._data.isa[Column[Scalar[D]]]():
-                ref values = key._data[Column[Scalar[D]]]
-                return (values._valid(row), _int_word[D](values._get(row)))
-    return (False, UInt64(0))
 
 
 @fieldwise_init
@@ -571,6 +562,30 @@ def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
     (`pmovmskb` on x86), where a weighted sum of the lanes took a dozen
     vector instructions twice a probe (PDS-H q5's 6M lineitem probes)."""
     return pack_bits[DType.uint16](lanes)
+
+
+# Probe rows hashed, and their slots fetched, together (Polars 2.0's
+# `BLOCK_SIZE`): the block's cache misses are in flight at once instead of
+# one row's at a time, and the block's hashes stay in L1.
+comptime _PREFETCH_BLOCK = 256
+# Slots, over all buckets, from which a probe prefetches (Polars 2.0's
+# `MIN_PREFETCH_BUCKETS`): a smaller table stays in cache.
+comptime _PREFETCH_SLOTS = 1 << 15
+
+
+@always_inline
+def _prefetch_probe(index: _HashBucket, hash: UInt64):
+    """Start loading the line a probe of `hash` reads first: its tags, or
+    its slot in a bucket without tags."""
+    var position = Int(hash & UInt64(len(index.slots) - 1))
+    if len(index.tags) > 0:
+        prefetch(index.tags.unsafe_ptr().unsafe_offset(position))
+    else:
+        prefetch(
+            index.slots.unsafe_ptr().unsafe_offset(position).unsafe_bitcast[
+                UInt8
+            ]()
+        )
 
 
 @always_inline
@@ -708,7 +723,7 @@ struct _HashBuildJob(Job):
     """Build one hash bucket from stable right-row positions."""
 
     var order: ArcPointer[List[Int]]
-    # The hashes, and for an integer key without nulls its words, in
+    # The hashes, and for an integer key its words, in
     # bucket order: read in sequence instead of at each row (#378).
     var ordered_hashes: ArcPointer[List[UInt64]]
     var ordered_words: ArcPointer[List[UInt64]]
@@ -735,7 +750,7 @@ struct _HashBuildJob(Job):
         self.ordered_words = ordered_words.copy()
         self.right_keys = right_keys.copy()
         self.typed_int = typed_int
-        self.skip_nulls = skip_nulls and not typed_int
+        self.skip_nulls = skip_nulls
         self.first = first
         self.last = last
         self.result = _HashBucket(
@@ -788,11 +803,6 @@ struct _HashBuildJob(Job):
             var key = hash
             if have_words:
                 key = words.unsafe_offset(position)[]
-            elif self.typed_int:
-                var word = _int_key_at(self.right_keys[0], row)
-                if not word[0]:
-                    continue
-                key = word[1]
             var slot = Int(hash & UInt64(size - 1))
             var table = slots.unsafe_ptr()
             while table.unsafe_offset(slot)[].row >= 0:
@@ -891,6 +901,8 @@ struct _HashProbeJob(MatchJob):
     var filter_base: Int64
     # One batch's probe hashes (`_candidates`), for keys hashed on read.
     var batch_hashes: List[UInt64]
+    # Whether the table is large enough to prefetch (`_PREFETCH_SLOTS`).
+    var prefetching: Bool
 
     def __init__(
         out self,
@@ -930,6 +942,10 @@ struct _HashProbeJob(MatchJob):
         self.filter = filter.copy()
         self.filter_base = filter_base
         self.batch_hashes = List[UInt64]()
+        var slots = 0
+        for bucket in buckets[]:
+            slots += len(bucket.slots)
+        self.prefetching = slots >= _PREFETCH_SLOTS
 
     def take_matches(
         mut self, mut left: List[Int], mut right: List[Int]
@@ -1044,53 +1060,77 @@ struct _HashProbeJob(MatchJob):
                     if self.left_keys[0]._data.isa[Column[Scalar[D]]]():
                         ref left = self.left_keys[0]._data[Column[Scalar[D]]]
                         var left_all_valid = len(left._bits[]) == 0
-                        # Keys and buckets through pointers: no reference-count
-                        # or bounds check per row (#378).
+                        # Keys, validity and buckets through pointers: no
+                        # reference-count or bounds check per row (#378).
                         var keys = left._ptr()
+                        var valid = left._bits[].unsafe_ptr()
                         var buckets = self.buckets[].unsafe_ptr()
                         var bits = Int(self.filter[].unsafe_ptr())
                         var words = len(self.filter[])
-                        for i in range(self.start, self.end):
-                            if not (left_all_valid or left._valid(i)):
-                                if self.include_unmatched:
-                                    self.left_rows.append(i)
-                                    self.right_rows.append(-1)
-                                continue
-                            comptime if D == DType.int64:
-                                if words > 0 and _key_bit_clear(
-                                    bits,
-                                    words,
-                                    self.filter_base,
-                                    rebind[Int64](keys.unsafe_offset(i)[]),
+                        var bit_offset = left._offset
+                        for block in range(
+                            self.start, self.end, _PREFETCH_BLOCK
+                        ):
+                            var block_end = min(
+                                self.end, block + _PREFETCH_BLOCK
+                            )
+                            # The block's slots, fetched before any is
+                            # probed (a null row's line too, harmlessly).
+                            if self.prefetching:
+                                for i in range(block, block_end):
+                                    var hash = _mix(
+                                        _int_word[D](keys.unsafe_offset(i)[])
+                                    )
+                                    _prefetch_probe(
+                                        buckets.unsafe_offset(
+                                            Int(hash >> 56) >> self.fold
+                                        )[],
+                                        hash,
+                                    )
+                            for i in range(block, block_end):
+                                if not (
+                                    left_all_valid
+                                    or _validity_at(valid, bit_offset + i)
                                 ):
                                     if self.include_unmatched:
                                         self.left_rows.append(i)
                                         self.right_rows.append(-1)
                                     continue
-                            var key = _int_word[D](keys.unsafe_offset(i)[])
-                            var hash = _mix(key)
-                            var bucket = Int(hash >> 56) >> self.fold
-                            ref index = buckets.unsafe_offset(bucket)[]
-                            var hit = _tagged_probe(index, hash, key)
-                            if hit >= 0:
-                                ref slot = (
-                                    index.slots.unsafe_ptr().unsafe_offset(
-                                        hit
-                                    )[]
-                                )
-                                self.left_rows.append(i)
-                                self.right_rows.append(Int(slot.row))
-                                if slot.next_position >= 0:
-                                    _append_duplicate_rows(
-                                        index,
-                                        Int(slot.next_position),
-                                        i,
-                                        self.left_rows,
-                                        self.right_rows,
+                                comptime if D == DType.int64:
+                                    if words > 0 and _key_bit_clear(
+                                        bits,
+                                        words,
+                                        self.filter_base,
+                                        rebind[Int64](keys.unsafe_offset(i)[]),
+                                    ):
+                                        if self.include_unmatched:
+                                            self.left_rows.append(i)
+                                            self.right_rows.append(-1)
+                                        continue
+                                var key = _int_word[D](keys.unsafe_offset(i)[])
+                                var hash = _mix(key)
+                                var bucket = Int(hash >> 56) >> self.fold
+                                ref index = buckets.unsafe_offset(bucket)[]
+                                var hit = _tagged_probe(index, hash, key)
+                                if hit >= 0:
+                                    ref slot = (
+                                        index.slots.unsafe_ptr().unsafe_offset(
+                                            hit
+                                        )[]
                                     )
-                            elif self.include_unmatched:
-                                self.left_rows.append(i)
-                                self.right_rows.append(-1)
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(Int(slot.row))
+                                    if slot.next_position >= 0:
+                                        _append_duplicate_rows(
+                                            index,
+                                            Int(slot.next_position),
+                                            i,
+                                            self.left_rows,
+                                            self.right_rows,
+                                        )
+                                elif self.include_unmatched:
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(-1)
                         return
         if (
             len(self.left_keys) == 1
@@ -1254,12 +1294,23 @@ struct _HashProbeJob(MatchJob):
                 output_offset=start,
             )
         var buckets = self.buckets[].unsafe_ptr()
-        for i in range(start, stop):
-            var hash = hashes[unsafe_offset=i - start]
-            var bucket = Int(hash >> 56) >> self.fold
-            _hash_candidates(
-                buckets.unsafe_offset(bucket)[], hash, i, bucket, candidates
-            )
+        var block = start
+        while block < stop:
+            var block_end = min(stop, block + _PREFETCH_BLOCK)
+            if self.prefetching:
+                for i in range(block, block_end):
+                    var hash = hashes[unsafe_offset=i - start]
+                    _prefetch_probe(
+                        buckets.unsafe_offset(Int(hash >> 56) >> self.fold)[],
+                        hash,
+                    )
+            for i in range(block, block_end):
+                var hash = hashes[unsafe_offset=i - start]
+                var bucket = Int(hash >> 56) >> self.fold
+                _hash_candidates(
+                    buckets.unsafe_offset(bucket)[], hash, i, bucket, candidates
+                )
+            block = block_end
         candidates.match(self.left_keys, self.right_keys)
 
 
@@ -1659,8 +1710,10 @@ def prepare_hash_index(
     # size also keeps its tags (_TAG_BUCKET_BYTES), so probes take the
     # branch-free tag path.
     var typed_int = len(right) == 1 and _is_int_key(right[0])
+    # An integer key's words, null rows' included: those rows are skipped
+    # by their validity bit, so no row reads its key through the column.
     var words = List[UInt64]()
-    if typed_int and right[0].null_count() == 0:
+    if typed_int:
         words = _key_words(right[0])
     var right_parts = right_hashes.scatter(
         worker_count(len(right[0])),

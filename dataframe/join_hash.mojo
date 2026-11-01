@@ -12,7 +12,6 @@ from dataframe.kernels.join_hash import (
     _int_word,
     _is_int_key,
     _key_words,
-    _int_key_at,
     _HashSlot,
     _DuplicateEntry,
     _HashBucket,
