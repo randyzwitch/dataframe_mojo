@@ -38,6 +38,8 @@ from dataframe.expr import (
 )
 from dataframe.planning.properties import (
     _expr_signature,
+    _mix,
+    _mix_text,
 )
 from dataframe.series import (
     Series,
@@ -288,9 +290,61 @@ def _shared_text(expr: Expr, root: Int) -> Optional[String]:
     return _expr_signature(part)
 
 
+def _shared_candidates(expr: Expr) -> List[Optional[UInt64]]:
+    """For each node of `expr`, a hash of its subexpression when
+    `_shared_text` would name one, else None, computed bottom-up in one
+    walk, as Polars' common-subexpression pass gives each node an
+    identifier from its children's. Equal texts hash alike, so only
+    nodes whose hash repeats need a text to compare."""
+    var count = len(expr._nodes)
+    var hashes = List[UInt64](capacity=count)
+    var reads = List[Bool](capacity=count)
+    var local = List[Bool](capacity=count)
+    var out = List[Optional[UInt64]](capacity=count)
+    for i in range(count):
+        ref node = expr._nodes[i]
+        var op = node.op
+        var h = _mix(UInt64(0xCBF29CE484222325), UInt64(op))
+        h = _mix_text(h, node.text)
+        h = _mix_text(h, node.text2)
+        h = _mix(h, UInt64(node.integer))
+        h = _mix(h, UInt64(node.min_count))
+        h = _mix(h, UInt64(len(node.dtypes)))
+        var reading = op == COL
+        var row_local = not (
+            op == SELECTOR or op == OVER or is_reduction(op) or is_window(op)
+        )
+        var children = node_children(node)
+        h = _mix(h, UInt64(len(children)))
+        for child in children:
+            h = _mix(h, hashes[child])
+            reading = reading or reads[child]
+            row_local = row_local and local[child]
+        hashes.append(h)
+        reads.append(reading)
+        local.append(row_local)
+        if (
+            op == COL
+            or op == LIT_INT
+            or op == LIT_FLOAT
+            or op == LIT_BOOL
+            or op == LIT_STRING
+            or op == LIT_NULL
+            or op == SELECTOR
+            or op == HORIZONTAL_ARGS
+            or not reading
+            or not row_local
+        ):
+            out.append(None)
+        else:
+            out.append(h)
+    return out^
+
+
 def _emit_shared(
     expr: Expr,
     i: Int,
+    texts: List[Optional[String]],
     seen: Dict[String, Int],
     mut names: Dict[String, String],
     mut shared: List[Expr],
@@ -300,7 +354,7 @@ def _emit_shared(
     """Append node `i` of `expr` to `out` after its inputs, a subexpression
     `seen` more than once as a read of the hidden column computing it
     (added to `shared` the first time); its index in `out`."""
-    var text = _shared_text(expr, i)
+    ref text = texts[i]
     if text and seen.get(text.value(), 0) > 1:
         if text.value() not in names:
             var name = "__cse_" + String(len(shared))
@@ -314,7 +368,7 @@ def _emit_shared(
     var children = node_children(copy)
     for k in range(len(children)):
         children[k] = _emit_shared(
-            expr, children[k], seen, names, shared, taken, out
+            expr, children[k], texts, seen, names, shared, taken, out
         )
     _set_node_children(copy, children)
     out.append(copy^)

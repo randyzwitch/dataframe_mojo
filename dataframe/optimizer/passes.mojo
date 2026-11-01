@@ -34,6 +34,7 @@ from dataframe.join_type import (
 )
 from dataframe.optimizer.expressions import (
     _emit_shared,
+    _shared_candidates,
     _fold_casts,
     _fold_constants,
     _shared_text,
@@ -148,13 +149,38 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
         if self._nodes[i].left < 0:
             continue
         ref exprs = self._nodes[i].exprs
+        # Each eligible subexpression's hash, found in one walk per
+        # expression; only those whose hash repeats are written as text
+        # and counted by it, so a node with no repeat costs no text.
+        var candidates = List[List[Optional[UInt64]]](capacity=len(exprs))
+        var hashed = Dict[UInt64, Int]()
+        var repeats = False
+        for e in exprs:
+            var found = _shared_candidates(e)
+            for h in found:
+                if h:
+                    var n = hashed.get(h.value(), 0) + 1
+                    hashed[h.value()] = n
+                    repeats = repeats or n > 1
+            candidates.append(found^)
+        if not repeats:
+            continue
         # How often each eligible subexpression appears, by its text.
         var seen = Dict[String, Int]()
-        for e in exprs:
+        var texts = List[List[Optional[String]]](capacity=len(exprs))
+        for k in range(len(exprs)):
+            ref e = exprs[k]
+            var named = List[Optional[String]](capacity=len(e._nodes))
             for r in range(len(e._nodes)):
-                var text = _shared_text(e, r)
-                if text:
-                    seen[text.value()] = seen.get(text.value(), 0) + 1
+                ref h = candidates[k][r]
+                if h and hashed.get(h.value(), 0) > 1:
+                    var text = _shared_text(e, r)
+                    if text:
+                        seen[text.value()] = seen.get(text.value(), 0) + 1
+                    named.append(text^)
+                else:
+                    named.append(None)
+            texts.append(named^)
         var any = False
         for entry in seen.items():
             any = any or entry.value > 1
@@ -179,10 +205,11 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
         var shared = List[Expr]()
         var names = Dict[String, String]()
         var rewritten = List[Expr](capacity=len(exprs))
-        for e in exprs:
+        for k in range(len(exprs)):
+            ref e = exprs[k]
             var out = List[Node]()
             _ = _emit_shared(
-                e, len(e._nodes) - 1, seen, names, shared, taken, out
+                e, len(e._nodes) - 1, texts[k], seen, names, shared, taken, out
             )
             rewritten.append(Expr(out^, e._name))
         if len(shared) == 0:
