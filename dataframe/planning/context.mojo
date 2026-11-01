@@ -14,6 +14,9 @@ from dataframe.frame import (
 from dataframe.io.csv import (
     CsvSchema,
 )
+from dataframe.kernels.join_hash import (
+    PreparedHashIndex,
+)
 from dataframe.planning.model import (
     HANDOFF_OFF,
     PlanNode,
@@ -26,6 +29,25 @@ from std.collections import (
 from std.memory import (
     ArcPointer,
 )
+
+
+struct _ReadyIndex(Copyable, Movable):
+    """A prefetched build side's hash index: the keys it hashes and the
+    probe rows bound it was made for (`finish_build`)."""
+
+    var keys: List[String]
+    var probe_rows: Int
+    var index: PreparedHashIndex
+
+    def __init__(
+        out self,
+        keys: List[String],
+        probe_rows: Int,
+        var index: PreparedHashIndex,
+    ):
+        self.keys = keys.copy()
+        self.probe_rows = probe_rows
+        self.index = index^
 
 
 struct QueryContext(Copyable, Deinitable, Movable):
@@ -53,6 +75,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # (`_prefetch_breakers`), and `_execute` takes each result out once.
     # Shared by the copies a run makes; None outside `collect`.
     var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
+    # The hash indexes made with prefetched build sides, by node, beside
+    # the frames in `_prefetched`; the stream takes one with its frame.
+    var _prefetched_indexes: Optional[ArcPointer[Dict[Int, _ReadyIndex]]]
     # How `_execute` offers nodes to the accelerator provider, which may run
     # them on the columns the CPU computed below (`_handoff_region`):
     # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
@@ -88,6 +113,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
+        self._prefetched_indexes = None
         self._handoff = HANDOFF_OFF
         self._executor = executor
         self._collector = collector

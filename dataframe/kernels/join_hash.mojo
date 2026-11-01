@@ -1604,6 +1604,29 @@ def prepare_progression_index(
     )
 
 
+def _filters_probe(build_rows: Int, probe_rows: Int) -> Bool:
+    """Whether a build of `build_rows` rows sets a bit filter for probes
+    bounded by `probe_rows` (-1 when unknown): only when it has no more
+    rows than the probe (see `prepare_hash_index`)."""
+    return build_rows <= probe_rows
+
+
+def serves_probe(
+    index: PreparedHashIndex, made_for: Int, probe_rows: Int
+) -> Bool:
+    """Whether an index prepared for probes bounded by `made_for` is the
+    one `prepare_hash_index` would make for `probe_rows`: the bound only
+    decides a hash table's bit filter over one integer key."""
+    if (
+        index.progression
+        or len(index.right) != 1
+        or index.right[0].dtype().physical() != DataType.INT64
+    ):
+        return True
+    var rows = len(index.right[0])
+    return _filters_probe(rows, made_for) == _filters_probe(rows, probe_rows)
+
+
 def prepare_hash_index(
     right_keys: List[Series],
     allow_progression: Bool = True,
@@ -1719,7 +1742,7 @@ def prepare_hash_index(
     if (
         len(right) == 1
         and right[0].dtype().physical() == DataType.INT64
-        and len(right[0]) <= probe_rows
+        and _filters_probe(len(right[0]), probe_rows)
     ):
         var bits = _key_bits(right[0])
         if bits:

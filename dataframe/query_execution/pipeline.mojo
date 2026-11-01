@@ -77,8 +77,8 @@ from dataframe.io.parquet import (
 from dataframe.kernels.join_hash import (
     PreparedHashIndex,
     prefer_left_build,
-    prepare_hash_index,
     prepare_progression_index,
+    serves_probe,
 )
 from dataframe.join_type import (
     JOIN_ANTI,
@@ -100,6 +100,10 @@ from dataframe.pipeline import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    _ReadyIndex,
+)
+from dataframe.planning.inputs import (
+    finish_build,
 )
 from dataframe.planning.graph import (
     plan_columns_of,
@@ -432,6 +436,12 @@ def plan_stream_execute(
                 )
             )
             var built = self._execute(node.right, False, True, batch_size)
+            # The index a prefetch made with this build, if any.
+            var ready = Optional[_ReadyIndex]()
+            if self._prefetched_indexes:
+                var held = self._prefetched_indexes.value()
+                if node.right in held[]:
+                    ready = held[].pop(node.right)
             if (
                 node.how == JOIN_INNER
                 and not node.sides_fixed
@@ -588,28 +598,27 @@ def plan_stream_execute(
                 return _stream_after_materialization(
                     plan, index, batch_size, sink
                 )
-            # The build frame in one chunk per column, once: a probe
-            # gathers the build's payload through `take_parallel`,
-            # which rechunks a chunked column every time it is
-            # called, once per morsel or batch (PDS-H q2's 159K-row
-            # build with five string columns: 3.8 ms a probe).
-            for column in built._columns:
-                if column.is_chunked():
-                    built = built.rechunk()
-                    break
-            joins.append(built^)
+            # The build finished: one chunk per column, and its keys'
+            # hash index, unless a prefetch made the same one already.
+            var keys = List[String]()
             if not prepared and node.how != JOIN_CROSS and len(node.names):
-                ref build = joins[len(joins) - 1]
-                var sources = List[Series]()
-                var supported = build.height() <= Int(Int32.MAX)
-                for name in node.right_keys:
-                    var key = build[name]
-                    supported = supported and not key.dtype().is_nested()
-                    sources.append(key.copy())
-                if supported:
-                    prepared = prepare_hash_index(sources, probe_rows=bound)
-                    if prepared:
-                        algorithm = "hash_index"
+                keys = node.right_keys.copy()
+            if (
+                len(keys) > 0
+                and ready
+                and ready.value().keys == keys
+                and serves_probe(
+                    ready.value().index, ready.value().probe_rows, bound
+                )
+            ):
+                prepared = ready.value().index.copy()
+                algorithm = "hash_index"
+                keys = List[String]()
+            var finished = finish_build(built, keys, bound)
+            if finished:
+                prepared = finished^
+                algorithm = "hash_index"
+            joins.append(built^)
             plan_record(
                 self,
                 cursor,
