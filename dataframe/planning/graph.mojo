@@ -32,6 +32,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.planning.context import (
+    FrameSlots,
     QueryContext,
 )
 from dataframe.planning.model import (
@@ -1196,7 +1197,7 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             origins[slots[entry.key]] = entry.value
-    self._frames = frames^
+    self._frames = FrameSlots(frames^)
     self._schemas = schemas^
     self._origin_rows = origins^
 
