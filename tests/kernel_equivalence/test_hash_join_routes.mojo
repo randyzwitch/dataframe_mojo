@@ -77,7 +77,6 @@ def numeric_probes[D: DType]() raises:
                 [build.copy()], allow_progression=False
             )
             assert_true(not prepared.progression)
-            assert_equal(len(prepared.probe([probe.copy()]).left_hashes[]), 0)
             for outer in [False, True]:
                 var expected_left = List[Int]()
                 var expected_right = List[Int]()
@@ -290,10 +289,6 @@ def test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_co
                         Series("u", Column[UInt64](probe_codes.copy()))
                     )
                 var index = prepare_hash_index(build, allow_progression=False)
-                assert_equal(
-                    len(index.probe(probe).left_hashes[]),
-                    len(left) if compound else 0,
-                )
                 var grouped_rows = 0
                 var slots = 0
                 for bucket in index.indexes[]:

@@ -1,7 +1,6 @@
 """Compatibility imports; implementation lives in dataframe.kernels.join_hash."""
 from dataframe.kernels.join_hash import (
     _key_equal,
-    _row_valid,
     _row_equal,
     _MATCH_BATCH,
     _Candidates,
@@ -22,7 +21,6 @@ from dataframe.kernels.join_hash import (
     _tag_of,
     _tagged_probe,
     _lane_bits,
-    _TagCursor,
     _int64_probe_slot,
     _string_probe_hash,
     _string_probe_slot,

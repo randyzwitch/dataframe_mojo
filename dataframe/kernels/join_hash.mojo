@@ -27,6 +27,7 @@ from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.partition import (
     Partitioner,
     _hash_bytes,
+    _hash_column,
     _mix,
     _short_hash,
 )
@@ -64,23 +65,30 @@ def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
     return a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
 
 
-def _row_valid(keys: List[Series], row: Int) -> Bool:
-    """Null in any join component makes the build row unmatchable."""
-    for key in keys:
-        var valid = True
-        comptime for k in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[k]
-            if key._data.isa[Column[Scalar[D]]]():
-                valid = key._data[Column[Scalar[D]]]._valid(row)
-        if key._data.isa[Column[Int128]]():
-            valid = key._data[Column[Int128]]._valid(row)
-        if key._data.isa[BoolColumn]():
-            valid = key._data[BoolColumn]._valid(row)
-        elif key._data.isa[StringColumn]():
-            valid = key._data[StringColumn]._valid(row)
-        if not valid:
-            return False
-    return True
+def _bitmap_of(key: Series) -> Tuple[Int, Int]:
+    """A key's validity bitmap address (0 when it has none, so every row is
+    valid) and the bit of its row 0."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if key._data.isa[Column[Scalar[D]]]():
+            ref column = key._data[Column[Scalar[D]]]
+            if len(column._bits[]) == 0:
+                return (0, 0)
+            return (Int(column._bits[].unsafe_ptr()), column._offset)
+    if key._data.isa[Column[Int128]]():
+        ref column = key._data[Column[Int128]]
+        if len(column._bits[]) == 0:
+            return (0, 0)
+        return (Int(column._bits[].unsafe_ptr()), column._offset)
+    if key._data.isa[BoolColumn]():
+        ref column = key._data[BoolColumn]
+        if len(column._bits[]) == 0:
+            return (0, 0)
+        return (Int(column._bits[].unsafe_ptr()), column._offset)
+    ref column = key._data[StringColumn]
+    if len(column._bits[]) == 0:
+        return (0, 0)
+    return (Int(column._bits[].unsafe_ptr()), column._offset)
 
 
 def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
@@ -565,85 +573,53 @@ def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
     return pack_bits[DType.uint16](lanes)
 
 
-struct _TagCursor:
-    """Walks the slots whose tag matches a hash, in probe order, stopping
-    at the first empty slot: `next()` yields each candidate position or
-    -1 when the search is over. Sixteen tags are read per load."""
-
-    # The tag table's address, as an Int: a struct field cannot hold an
-    # unsafe-origin pointer. The bucket outlives every probe of it.
-    var tags: Int
-    var mask: Int
-    var position: Int
-    var lane: Int
-    var hits: SIMD[DType.bool, 16]
-    var empties: SIMD[DType.bool, 16]
-    var wanted: SIMD[DType.uint8, 16]
-    var done: Bool
-    # Without tags (a bucket past _TAG_BUCKET_BYTES) every occupied slot
-    # in probe order is a candidate.
-    var slots: Int
-    var plain: Bool
-
-    def __init__(out self, index: _HashBucket, hash: UInt64):
-        self.tags = Int(index.tags.unsafe_ptr())
-        self.slots = Int(index.slots.unsafe_ptr())
-        self.plain = len(index.tags) == 0
-        self.mask = len(index.slots) - 1
-        self.position = Int(hash & UInt64(self.mask))
-        self.lane = 0
-        self.wanted = SIMD[DType.uint8, 16](_tag_of(hash))
-        self.hits = SIMD[DType.bool, 16](fill=False)
-        self.empties = SIMD[DType.bool, 16](fill=False)
-        self.done = False
-        if not self.plain:
-            self._load()
-
-    def _load(mut self):
-        """Load groups until one holds a candidate or an empty slot."""
-        while True:
-            var group = (
-                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.tags)
-                .unsafe_offset(self.position)
-                .unsafe_load[width=16]()
-            )
-            self.hits = group.eq(self.wanted)
-            self.empties = group.eq(SIMD[DType.uint8, 16](0))
-            self.lane = 0
-            if self.hits.reduce_or():
-                return
-            # No candidate but an empty slot: the search is over. No
-            # candidate and no empty slot: the next group.
-            if self.empties.reduce_or():
-                self.done = True
-                return
-            self.position = (self.position + _TAG_LANES) & self.mask
-
-    def next(mut self) -> Int:
-        if self.plain:
-            if self.done:
-                return -1
-            var slots = Pointer[_HashSlot, MutAnyOrigin](
-                unsafe_from_address=self.slots
-            )
-            if slots.unsafe_offset(self.position)[].row < 0:
-                self.done = True
-                return -1
-            var at = self.position
-            self.position = (self.position + 1) & self.mask
-            return at
-        while not self.done:
-            while self.lane < _TAG_LANES:
-                var lane = self.lane
-                self.lane += 1
-                if self.empties[lane]:
-                    self.done = True
-                    return -1
-                if self.hits[lane]:
-                    return (self.position + lane) & self.mask
-            self.position = (self.position + _TAG_LANES) & self.mask
-            self._load()
-        return -1
+@always_inline
+def _hash_candidates(
+    index: _HashBucket,
+    hash: UInt64,
+    row: Int,
+    bucket: Int,
+    mut candidates: _Candidates,
+):
+    """Add every slot whose stored hash equals `hash` to `candidates`, in
+    probe order: sixteen tags per load and their matching lanes walked by
+    set bits, as `_tagged_probe` does, so a probe row whose tag matches no
+    slot (most rows of a selective or outer join) reads one tag line and
+    compares nothing. DuckDB's probe (`ProbeForPointers`) likewise skips
+    entries whose salt differs and compares keys only where it matches."""
+    var mask = len(index.slots) - 1
+    var slots = index.slots.unsafe_ptr()
+    var position = Int(hash & UInt64(mask))
+    if len(index.tags) == 0:
+        # A bucket past _TAG_BUCKET_BYTES: the plain slot walk.
+        while slots.unsafe_offset(position)[].row >= 0:
+            ref slot = slots.unsafe_offset(position)[]
+            if slot.key == hash:
+                candidates.add(
+                    row, Int(slot.row), bucket, Int(slot.next_position)
+                )
+            position = (position + 1) & mask
+        return
+    var tags = index.tags.unsafe_ptr()
+    var wanted = SIMD[DType.uint8, 16](_tag_of(hash))
+    while True:
+        var group = tags.unsafe_offset(position).unsafe_load[width=16]()
+        var hits = _lane_bits(group.eq(wanted))
+        var empties = _lane_bits(group.eq(SIMD[DType.uint8, 16](0)))
+        if empties != 0:
+            hits &= (empties & (0 - empties)) - 1
+        while hits != 0:
+            var lane = Int(count_trailing_zeros(hits))
+            hits &= hits - 1
+            var at = (position + lane) & mask
+            ref slot = slots.unsafe_offset(at)[]
+            if slot.key == hash:
+                candidates.add(
+                    row, Int(slot.row), bucket, Int(slot.next_position)
+                )
+        if empties != 0:
+            return
+        position = (position + _TAG_LANES) & mask
 
 
 @always_inline
@@ -786,9 +762,27 @@ struct _HashBuildJob(Job):
         var ordered_hashes = self.ordered_hashes[].unsafe_ptr()
         var words = self.ordered_words[].unsafe_ptr()
         var have_words = len(self.ordered_words[]) > 0
+        # The bitmaps of the keys that have one, through addresses taken
+        # once: a row with a null key component never enters the index,
+        # tested with one bit read per bitmap instead of resolving every
+        # key's type for every row.
+        var bitmaps = List[Int]()
+        var bit_offsets = List[Int]()
+        if self.skip_nulls:
+            for key in self.right_keys:
+                var bitmap = _bitmap_of(key)
+                if bitmap[0] != 0:
+                    bitmaps.append(bitmap[0])
+                    bit_offsets.append(bitmap[1])
         for position in range(self.last - 1, self.first - 1, -1):
             var row = order.unsafe_offset(position)[]
-            if self.skip_nulls and not _row_valid(self.right_keys, row):
+            var valid = True
+            for b in range(len(bitmaps)):
+                valid = valid and _validity_at(
+                    Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bitmaps[b]),
+                    bit_offsets[b] + row,
+                )
+            if not valid:
                 continue
             var hash = ordered_hashes.unsafe_offset(position)[]
             var key = hash
@@ -880,7 +874,6 @@ struct _HashBuildJob(Job):
 struct _HashProbeJob(MatchJob):
     var left_keys: List[Series]
     var right_keys: List[Series]
-    var left_hashes: ArcPointer[List[UInt64]]
     var buckets: ArcPointer[List[_HashBucket]]
     var fold: Int
     var start: Int
@@ -896,12 +889,13 @@ struct _HashProbeJob(MatchJob):
     # The build keys' bits (`PreparedHashIndex.filter`), empty for none.
     var filter: ArcPointer[List[UInt64]]
     var filter_base: Int64
+    # One batch's probe hashes (`_candidates`), for keys hashed on read.
+    var batch_hashes: List[UInt64]
 
     def __init__(
         out self,
         left_keys: List[Series],
         right_keys: List[Series],
-        left_hashes: ArcPointer[List[UInt64]],
         buckets: ArcPointer[List[_HashBucket]],
         fold: Int,
         start: Int,
@@ -914,7 +908,6 @@ struct _HashProbeJob(MatchJob):
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
-        self.left_hashes = left_hashes.copy()
         self.buckets = buckets.copy()
         self.fold = fold
         self.start = start
@@ -936,6 +929,7 @@ struct _HashProbeJob(MatchJob):
         )
         self.filter = filter.copy()
         self.filter_base = filter_base
+        self.batch_hashes = List[UInt64]()
 
     def take_matches(
         mut self, mut left: List[Int], mut right: List[Int]
@@ -1013,6 +1007,7 @@ struct _HashProbeJob(MatchJob):
                     self.left_rows.append(i)
             return
         var candidates = _Candidates()
+        self.batch_hashes = List[UInt64](length=_MATCH_BATCH, fill=0)
         var row = self.start
         while row < self.end:
             var stop = min(self.end, row + _MATCH_BATCH)
@@ -1195,6 +1190,7 @@ struct _HashProbeJob(MatchJob):
         # 17.9 -> 8.4 ms, q40 22.8 -> 17.4) once Parquet columns lost their
         # all-valid bitmaps and reached it.
         var candidates = _Candidates()
+        self.batch_hashes = List[UInt64](length=_MATCH_BATCH, fill=0)
         var row = self.start
         while row < self.end:
             var stop = min(self.end, row + _MATCH_BATCH)
@@ -1238,33 +1234,41 @@ struct _HashProbeJob(MatchJob):
             self.right_rows,
         )
 
-    def _candidates(self, start: Int, stop: Int, mut candidates: _Candidates):
+    def _candidates(
+        mut self, start: Int, stop: Int, mut candidates: _Candidates
+    ) raises:
         """The build slots of probe rows [start, stop) whose stored hash
-        equals the row's, matched on the keys."""
+        equals the row's, matched on the keys. The rows' hashes are made
+        here, one batch at a time into a buffer that stays in cache, as
+        DuckDB hashes each probe vector (`JoinHashTable::Hash`) before
+        looking it up, rather than in a pass over the whole probe first."""
         candidates.clear()
+        var hashes = self.batch_hashes.unsafe_ptr()
+        for k in range(len(self.left_keys)):
+            _hash_column(
+                self.left_keys[k],
+                start,
+                stop,
+                Int(hashes),
+                k == 0,
+                output_offset=start,
+            )
+        var buckets = self.buckets[].unsafe_ptr()
         for i in range(start, stop):
-            var hash = self.left_hashes[][i]
+            var hash = hashes[unsafe_offset=i - start]
             var bucket = Int(hash >> 56) >> self.fold
-            ref index = self.buckets[][bucket]
-            var cursor = _TagCursor(index, hash)
-            var position = cursor.next()
-            while position >= 0:
-                ref slot = index.slots[position]
-                if hash == slot.key:
-                    candidates.add(
-                        i, Int(slot.row), bucket, Int(slot.next_position)
-                    )
-                position = cursor.next()
+            _hash_candidates(
+                buckets.unsafe_offset(bucket)[], hash, i, bucket, candidates
+            )
         candidates.match(self.left_keys, self.right_keys)
 
 
 @fieldwise_init
 struct _HashIndex(Movable):
-    """A built right-row index; single integer probes hash from their keys."""
+    """A built right-row index and the probe keys, hashed as they are read."""
 
     var left: List[Series]
     var right: List[Series]
-    var left_hashes: ArcPointer[List[UInt64]]
     var indexes: ArcPointer[List[_HashBucket]]
     var fold: Int
     var workers: Int
@@ -1320,24 +1324,13 @@ struct PreparedHashIndex(Copyable):
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
         var lanes = workers if workers > 0 else worker_count(len(left[0]))
-        if len(left) == 1 and (
-            _is_int_key(left[0]) or left[0]._data.isa[StringColumn]()
-        ):
-            # Hash integer and string probe keys as workers read them.
-            # No row-sized hash buffer or separate hashing/histogram pass.
-            return _HashIndex(
-                left^,
-                self.right.copy(),
-                ArcPointer(List[UInt64]()),
-                self.indexes.copy(),
-                self.fold,
-                lanes,
-            )
-        var hashes = Partitioner(left, lanes)
+        # Every key is hashed as the workers read it: integer and string
+        # single keys row by row, compound keys a batch at a time
+        # (`_HashProbeJob._candidates`). No row-sized hash buffer, and no
+        # histogram pass, which only a partitioning build needs.
         return _HashIndex(
             left^,
             self.right.copy(),
-            ArcPointer(hashes^.into_hashes()),
             self.indexes.copy(),
             self.fold,
             lanes,
@@ -1787,7 +1780,6 @@ def prepared_hash_semi_anti_rows(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[worker],
@@ -1919,7 +1911,6 @@ def prepared_hash_join_gather(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[block],
@@ -2095,7 +2086,6 @@ def prepared_hash_join_rows(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[worker],
