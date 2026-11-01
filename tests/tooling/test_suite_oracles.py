@@ -6,8 +6,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks/suites"))
 sys.path.insert(0, str(ROOT / "benchmarks/tools"))
+sys.path.insert(0, str(ROOT / "tests/tooling"))
 from oracle_sql import full_relation
-from suite_answers import Answer, compare_selection
+from suite_answers import compare_selection
+from suite_answer_fixture import rows_answer
+
+
+def Answer(names, types, rows, original_schema):
+    return rows_answer(rows, names, types, original_schema)
 
 
 class SQLTests(unittest.TestCase):
@@ -119,7 +125,7 @@ class SelectionTests(unittest.TestCase):
             ],
             "equal",
         )
-        actual.rows = [("a", 1.0 + 1e-10, 999)]
+        actual = Answer(names, types, [("a", 1.0 + 1e-10, 999)], {})
         self.assertEqual(
             compare_selection(actual, oracle, tolerant_columns=["sumsales"])[
                 "status"
@@ -163,7 +169,9 @@ class SelectionTests(unittest.TestCase):
             ["key", "value"], ["int64", "int64"], [(2, 8), (4, 1)], {}
         )
         self.assertEqual(compare_selection(good, full)["status"], "equal")
-        good.rows = [(1, 9), (2, 8)]
+        good = Answer(
+            ["key", "value"], ["int64", "int64"], [(1, 9), (2, 8)], {}
+        )
         self.assertEqual(compare_selection(good, full)["status"], "different")
 
     def test_hidden_q24_key_still_checks_selection_and_multiplicity(self):
@@ -191,7 +199,9 @@ class SelectionTests(unittest.TestCase):
             ["key", "value"], ["int64", "int64"], [(1, 5), (2, 4)], {}
         )
         self.assertEqual(compare_selection(good, full)["status"], "equal")
-        good.rows.reverse()
+        good = Answer(
+            ["key", "value"], ["int64", "int64"], [(2, 4), (1, 5)], {}
+        )
         self.assertEqual(compare_selection(good, full)["status"], "different")
 
     def test_empty_and_short_relations_obey_limit(self):

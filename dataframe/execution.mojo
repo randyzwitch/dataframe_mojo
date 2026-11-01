@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from dataframe.kernels.validity import _valid_lanes
+from dataframe.kernels.bitmap_input import _BoolInput, _write_bitmap_byte
 from dataframe.storage.buffer import _Buffer, _BufferData
 from dataframe.kernels.binary import validity
 from .dtype import DataType, NUMERIC_DTYPES
@@ -158,6 +159,7 @@ from dataframe.kernels.binary import (
     binary,
     unary,
     choose,
+    _choice_chunk_input,
     fit_mask,
     math_unary,
     arctan2_series,
@@ -820,6 +822,279 @@ def _implode[
     return Series("", ListColumn(offsets^, input.take(order).renamed("item")))
 
 
+@no_inline
+def _conditional_bool_host(column: BoolColumn) -> Bool:
+    if not column._data.on_host() or not column._bits.on_host():
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    var required = offset // 8 + count // 8 + (offset % 8 + count % 8 + 7) // 8
+    return required <= len(column._data[]) and (
+        len(column._bits[]) == 0 or required <= len(column._bits[])
+    )
+
+
+@no_inline
+def _conditional_original_host(
+    input: Series, required: Int, broadcast_or_prefix: Bool
+) -> Bool:
+    # Never consult the cache. This also validates the exact boundaries
+    # Series.slice would use, before _BoolInput traverses original arrays.
+    if input.dtype() != DataType.BOOL or required < 0:
+        return False
+    var total = 0
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if len(chunks.arrays) == 0 or len(chunks.arrays) != len(chunks.ends):
+            return False
+        for i in range(len(chunks.arrays)):
+            ref array = chunks.arrays[i]
+            if not array.isa[BoolColumn]():
+                return False
+            ref column = array[BoolColumn]
+            if not _conditional_bool_host(column):
+                return False
+            var count = len(column)
+            if count > Int.MAX - total:
+                return False
+            total += count
+            if chunks.ends[i] != total:
+                return False
+    else:
+        if not input._data.isa[BoolColumn]():
+            return False
+        ref column = input._data[BoolColumn]
+        if not _conditional_bool_host(column):
+            return False
+        total = len(column)
+    return (total == 1 or total >= required) if broadcast_or_prefix else (
+        total == required
+    )
+
+
+@fieldwise_init
+struct _ConditionalFlags(Copyable, Sized):
+    # Flat columns own their two bitmap buffers directly. Only streamed
+    # inputs retain a Series owner for every original physical array.
+    var column: BoolColumn
+    var actual_length: Int
+    var owner: Optional[Series]
+    var stream_mode: Bool
+
+    def __len__(self) -> Int:
+        return self.actual_length
+
+
+def _conditional_flat_flags(input: Series) raises -> _ConditionalFlags:
+    # Preserve extraction before branch evaluation, including zero rows.
+    # Capture the adapted column length: a ready cache can differ from the
+    # original arrays, and NORMAL preparation must use that actual cache.
+    var column = input._data[BoolColumn].copy()
+    var actual_length = len(column)
+    return _ConditionalFlags(column^, actual_length, None, False)
+
+
+def _conditional_stream_flags(input: Series) -> _ConditionalFlags:
+    # Admission has checked all arrays. Read the original first array,
+    # never a separate representative variant or a published merge.
+    var column = (
+        input._chunked.value()[]
+        .arrays[0][BoolColumn]
+        .copy() if input.is_chunked() else input._data[BoolColumn]
+        .copy()
+    )
+    return _ConditionalFlags(column^, len(input), Optional(input.copy()), True)
+
+
+@no_inline
+def _prepare_conditional_flags(
+    input: Series, required: Int
+) raises -> _ConditionalFlags:
+    if input.is_chunked():
+        if input._chunked.value()[].cache[].state.load() == 2:
+            return _conditional_flat_flags(input.rechunk())
+        if _conditional_original_host(input, required, True):
+            return _conditional_stream_flags(input)
+    var legacy = input.rechunk() if input.is_chunked() else input.copy()
+    return _conditional_flat_flags(legacy)
+
+
+@no_inline
+def _original_conditional_flags(
+    input: Series, height: Int
+) -> Optional[_ConditionalFlags]:
+    # For _whole lookup only: ignore even a published cache and stream flat
+    # originals too. A decline must run the original _rows evaluation.
+    if not _conditional_original_host(input, height, False):
+        return None
+    return Optional(_conditional_stream_flags(input))
+
+
+@no_inline
+def _evaluated_whole_conditional_flags(
+    input: Series, height: Int
+) raises -> Optional[_ConditionalFlags]:
+    # After ORIGINAL _rows has run: retain old merge-before-length/type-check
+    # fallback. Do not send a non-Bool result to the normal typed extractor.
+    if input.is_chunked():
+        if input._chunked.value()[].cache[].state.load() != 2:
+            if _conditional_original_host(input, height, False):
+                return Optional(_conditional_stream_flags(input))
+    var legacy = input.rechunk() if input.is_chunked() else input.copy()
+    if len(legacy) != height or not legacy._data.isa[BoolColumn]():
+        return None
+    return Optional(_conditional_flat_flags(legacy))
+
+
+def _selection_masks(
+    flags: _ConditionalFlags,
+    active: List[Bool],
+    mut selected: List[Bool],
+    mut then_mask: List[Bool],
+    mut other_mask: List[Bool],
+):
+    if not flags.stream_mode:
+        _selection_masks(flags.column, active, selected, then_mask, other_mask)
+        return
+    var source = _BoolInput(flags.owner.value())
+    var size = len(selected)
+    var out_selected = selected.unsafe_ptr()
+    var out_then = then_mask.unsafe_ptr()
+    var out_other = other_mask.unsafe_ptr()
+    var observed = active.unsafe_ptr()
+    var any_active = len(active) == 0
+    if source.scalar:
+        var take = source.column._valid(0) and source.column._get(0)
+        for row in range(size):
+            var seen = any_active or observed[unsafe_offset=row]
+            out_selected[unsafe_offset=row] = take
+            out_then[unsafe_offset=row] = seen and take
+            out_other[unsafe_offset=row] = seen and not take
+        return
+    var row = 0
+    while row < size:
+        var span = source.available(size - row)
+        var data = source.column._data[].unsafe_ptr()
+        var valid = source.column._bits[].unsafe_ptr()
+        var nulls = len(source.column._bits[]) > 0
+        var bit = source.column._offset + source.row
+        var relative = 0
+        while relative < span:
+            var at = bit + relative
+            var byte = data[unsafe_offset=at >> 3]
+            if nulls:
+                byte &= valid[unsafe_offset=at >> 3]
+            var word = Int(byte) >> (at & 7)
+            var count = min(8 - (at & 7), span - relative)
+            for lane in range(count):
+                var out_row = row + relative + lane
+                var take = (word >> lane) & 1 == 1
+                var seen = any_active or observed[unsafe_offset=out_row]
+                out_selected[unsafe_offset=out_row] = take
+                out_then[unsafe_offset=out_row] = seen and take
+                out_other[unsafe_offset=out_row] = seen and not take
+            relative += count
+        source.advance(span)
+        row += span
+
+
+@always_inline
+def _conditional_truth_byte(
+    data: Pointer[UInt8, _],
+    data_bytes: Int,
+    valid: Pointer[UInt8, _],
+    valid_bytes: Int,
+    bit: Int,
+    scalar: Bool,
+    scalar_truth: UInt8,
+) -> UInt8:
+    if scalar:
+        return scalar_truth
+    var truth = _byte_from(data, data_bytes, bit)
+    if valid_bytes > 0:
+        truth &= _byte_from(valid, valid_bytes, bit)
+    return truth
+
+
+def _and_validity(
+    flags: _ConditionalFlags, bits: _BufferData[UInt8], base: Int, size: Int
+) -> List[UInt8]:
+    if not flags.stream_mode:
+        return _and_validity(flags.column, bits, base, size)
+    # Keep eager own-buffer host access before any zero-row shortcut.
+    var own = bits.unsafe_ptr()
+    var own_bytes = len(bits)
+    var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
+    var packed = out.unsafe_ptr()
+    var source = _BoolInput(flags.owner.value())
+    var scalar_truth = UInt8(0)
+    if source.scalar and size > 0:
+        if source.column._valid(0) and source.column._get(0):
+            scalar_truth = 255
+    var row = 0
+    while row < size:
+        var span = source.available(size - row)
+        var data = source.column._data[].unsafe_ptr()
+        var data_bytes = len(source.column._data[])
+        var valid = source.column._bits[].unsafe_ptr()
+        var valid_bytes = len(source.column._bits[])
+        var bit = source.column._offset + source.row
+        var relative = 0
+        # A prior physical window may have written the prefix of this
+        # destination byte. Complete only our nonoverlapping head bits.
+        var head = min((8 - (base + row) % 8) % 8, span)
+        if head > 0:
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= _byte_from(own, own_bytes, base + row)
+            _write_bitmap_byte(out, base + row, truth, head)
+            relative = head
+        # Complete destination bytes are fresh, not shared with a prior
+        # window. Direct stores avoid a loop-carried masked OR.
+        while relative + 8 <= span:
+            var out_bit = base + row + relative
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit + relative,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= own[unsafe_offset=out_bit >> 3]
+            packed[unsafe_offset=out_bit >> 3] = truth
+            relative += 8
+        if relative < span:
+            var out_bit = base + row + relative
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit + relative,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= _byte_from(own, own_bytes, out_bit)
+            _write_bitmap_byte(out, out_bit, truth, span - relative)
+        source.advance(span)
+        row += span
+    return out^
+
+
 def _selection_masks(
     flags: BoolColumn,
     active: List[Bool],
@@ -952,11 +1227,8 @@ def _masked_branch[
         False,
         List[Bool](),
     )
-    var contiguous_predicate = (
-        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
-    )
-    ref flags = contiguous_predicate._data[BoolColumn]
     var size = length if bound.shapes[index] == ROWS else 1
+    var flags = _prepare_conditional_flags(predicate, size)
     var then: Series
     var selected = List[Bool]()
     if _cannot_raise(bound, node.right):
@@ -984,6 +1256,24 @@ def _masked_branch[
             length,
             False,
             then_mask,
+        )
+    # Boolean/String null-otherwise branches use the same admitted window
+    # choice as explicit otherwise branches, before their legacy merge.
+    if (
+        then.is_chunked()
+        and then.dtype() == bound.dtypes[index]
+        and (len(flags) == 1 or len(flags) == size)
+        and _choice_chunk_input(then, bound.dtypes[index], size)
+    ):
+        if len(selected) == 0:
+            selected = List[Bool](unsafe_uninit_length=size)
+            var then_mask = List[Bool](unsafe_uninit_length=size)
+            var other_mask = List[Bool](unsafe_uninit_length=size)
+            _selection_masks(
+                flags, List[Bool](), selected, then_mask, other_mask
+            )
+        return choose(
+            selected, then, Series.full_null("", bound.dtypes[index], 1)
         )
     # A batch that spans a source's chunks (a Parquet column's row
     # groups) merges its branch once: one copy, where choosing every row
@@ -1113,10 +1403,7 @@ def _conditional[
     var predicate = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
-    var contiguous_predicate = (
-        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
-    )
-    ref flags = contiguous_predicate._data[BoolColumn]
+    var flags = _prepare_conditional_flags(predicate, size)
     var selected = List[Bool](unsafe_uninit_length=size)
     var then_mask = List[Bool](unsafe_uninit_length=size)
     var other_mask = List[Bool](unsafe_uninit_length=size)
@@ -2899,10 +3186,26 @@ def _partition_ids(keys: List[Series], height: Int) raises -> RowKeys:
     return encode_partitioned(keys, workers, nulls_equal=True)
 
 
-def _has_over(bound: BoundExpr) -> Bool:
+def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
+    """Whether a nested over() in `bound` can see rows outside one
+    partition of `keys`: a global one, or one partitioned without every
+    key. A nested over() partitioned by all of them (perhaps more) splits
+    each partition further, so a run of whole partitions holds its rows,
+    as DuckDB evaluates a window whose partition keys extend another's
+    within the other's sorted partitions."""
+    var outer = split_names(keys)
     for node in bound.expr._nodes:
-        if node.op == OVER:
+        if node.op != OVER:
+            continue
+        if (node.integer & OVER_GLOBAL) != 0:
             return True
+        var inner = split_names(node.text2)
+        for key in outer:
+            var found = False
+            for name in inner:
+                found = found or name == key
+            if not found:
+                return True
     return False
 
 
@@ -3000,6 +3303,17 @@ def _over_contiguous[
     for source in probe.sources:
         if source >= 0:
             used[source] = True
+    # A nested over() finds its partition and order columns by name.
+    for nested in probe.expr._nodes:
+        if nested.op != OVER:
+            continue
+        var names = split_names(nested.text2)
+        if nested.min_count > 0:
+            names.extend(split_names(nested.text))
+        for name in names:
+            for c in range(len(columns)):
+                if columns[c].name() == name:
+                    used[c] = True
     var reads = List[Series]()
     for c in range(len(columns)):
         if used[c]:
@@ -3176,9 +3490,9 @@ def _over[
         return result.take(inverse if inner.shape() == ROWS else ids)
     # Whole partitions laid out contiguously and evaluated many at once,
     # when the rows fill more than one block per thread. A nested over()
-    # partitions differently, so it keeps the row-order route.
+    # that partitions across these partitions keeps the row-order route.
     var lanes = min(configured_workers(), height // _WINDOW_BLOCK)
-    if lanes > 1 and not _has_over(inner):
+    if lanes > 1 and not _crosses_partitions(inner, node.text2):
         var owned = WindowLayouts()
         var cache = Pointer[WindowLayouts, MutAnyOrigin](
             unsafe_from_address=layouts if layouts
@@ -3845,22 +4159,28 @@ def _whole_masked_branch[
             numeric = True
     if not numeric:
         return None
-    var predicate = _rows[width](
-        bound,
-        columns,
-        prepared_columns,
-        states,
-        node.left,
-        height,
-        batch_size,
-        False,
-        workers,
+    var prepared_flags = Optional[_ConditionalFlags]()
+    var original = _whole(
+        bound, prepared_columns, states, node.left, height, False
     )
-    if predicate.is_chunked():
-        predicate = predicate.rechunk()
-    if len(predicate) != height or not predicate._data.isa[BoolColumn]():
+    if original:
+        prepared_flags = _original_conditional_flags(original.take(), height)
+    if not prepared_flags:
+        var predicate = _rows[width](
+            bound,
+            columns,
+            prepared_columns,
+            states,
+            node.left,
+            height,
+            batch_size,
+            False,
+            workers,
+        )
+        prepared_flags = _evaluated_whole_conditional_flags(predicate, height)
+    if not prepared_flags:
         return None
-    ref flags = predicate._data[BoolColumn]
+    var flags = prepared_flags.take()
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():
