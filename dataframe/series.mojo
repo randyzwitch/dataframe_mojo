@@ -627,6 +627,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if self.is_chunked() or other.is_chunked():
             if not (self.is_chunked() and other.is_chunked()):
                 return False
+            # Copies of one series hold one list of arrays: the same
+            # list shares every buffer, without a view built per chunk
+            # (the planner compares every scanned frame with the others
+            # each time it classes a plan's subtrees; TPC-DS q4 scans
+            # store sales, with 23 columns of 25 row groups, six times).
+            if Int(self._chunked.value().ptr()) == Int(
+                other._chunked.value().ptr()
+            ):
+                return True
             var mine = self.chunks()
             var theirs = other.chunks()
             if len(mine) != len(theirs):
