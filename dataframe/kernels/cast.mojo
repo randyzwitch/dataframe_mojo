@@ -8,9 +8,15 @@ infinities, and out-of-range values.
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
 from std.bit import count_trailing_zeros
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from dataframe.storage.boolean import BoolColumn, _bits64
-from dataframe.storage.column import Column, _append_validity, _copy_validity
+from dataframe.storage.column import (
+    Column,
+    _append_validity,
+    _copy_validity,
+    _append_validity_bit,
+    SCALAR_DTYPES,
+)
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.text.parse import parse_bool, parse_float64, parse_integer
@@ -24,7 +30,7 @@ from dataframe.decimal import (
     pow10,
     precision_limit,
 )
-from dataframe.series import Series
+from dataframe.series import Series, Storage
 from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
@@ -1356,6 +1362,558 @@ def _cast_checked_chunks(
     return None
 
 
+def _decimal_cast_canonical(dtype: DataType) raises -> Bool:
+    if not dtype.is_decimal():
+        return False
+    var width = dtype.decimal_width()
+    var precision = dtype.precision()
+    var scale = dtype.scale()
+    var most = 38 if width == 128 else 18 if width == 64 else 9
+    if precision < 1 or precision > most or scale < 0 or scale > precision:
+        return False
+    return dtype == DataType.decimal(precision, scale, width)
+
+
+def _decimal_cast_plain_numeric(dtype: DataType) -> Bool:
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        if dtype == DataType.of(NUMERIC_DTYPES[k]):
+            return True
+    return False
+
+
+@no_inline
+def _decimal_cast_string_host(column: StringColumn) -> Bool:
+    # Merging coded Strings also validates/combines dictionary state before
+    # observing masks. Leave those preparation effects to the old adapter.
+    if column._codes:
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count <= 0:
+        return False
+    if column._is_view_storage():
+        var storage = column._view_storage_unchecked()
+        if column._bits.ptr() != storage._bits.ptr():
+            return False
+        if not storage._views.on_host() or not storage._bits.on_host():
+            return False
+        for buffer in storage._buffers[]:
+            if not buffer.on_host():
+                return False
+        var rows = len(storage)
+        var descriptors = len(storage._views[])
+        if offset > rows or count > rows - offset:
+            return False
+        if offset > descriptors or count > descriptors - offset:
+            return False
+        var end = offset + count
+        if len(storage._bits[]) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(storage._bits[])
+        ):
+            return False
+        for row in range(offset, end):
+            var view = storage._view_unchecked(row)
+            if not view.is_inline():
+                var index = Int(view.buffer_index)
+                if index >= len(storage._buffers[]):
+                    return False
+                var available = len(storage._buffers[][index])
+                var length = Int(view.length)
+                if length > available or Int(view.offset) > available - length:
+                    return False
+        return True
+    if (
+        not column._bytes.on_host()
+        or not column._offsets.on_host()
+        or not column._bits.on_host()
+    ):
+        return False
+    var entries = len(column._offsets[])
+    if entries == 0 or offset > entries - 1 or count > entries - 1 - offset:
+        return False
+    var end = offset + count
+    if len(column._bits[]) != 0 and (
+        end // 8 + Int(end % 8 != 0) > len(column._bits[])
+    ):
+        return False
+    var available = Int64(len(column._bytes[]))
+    var previous = column._offsets[][offset]
+    if previous < 0 or previous > available:
+        return False
+    for row in range(offset + 1, end + 1):
+        var next = column._offsets[][row]
+        if next < previous or next > available:
+            return False
+        previous = next
+    return True
+
+
+@no_inline
+def _decimal_cast_storage_count(storage: Storage, source: DataType) -> Int:
+    if source == DataType.STRING:
+        if not storage.isa[StringColumn]():
+            return -1
+        ref column = storage[StringColumn]
+        return len(column) if _decimal_cast_string_host(column) else -1
+    if source == DataType.BOOL:
+        if not storage.isa[BoolColumn]():
+            return -1
+        ref column = storage[BoolColumn]
+        if not column._data.on_host() or not column._bits.on_host():
+            return -1
+        var count = len(column)
+        if count <= 0 or column._offset < 0 or count > Int.MAX - column._offset:
+            return -1
+        var end = column._offset + count
+        var bytes = end // 8 + Int(end % 8 != 0)
+        if bytes > len(column._data) or (
+            len(column._bits) != 0 and bytes > len(column._bits)
+        ):
+            return -1
+        return count
+    comptime for k in range(len(SCALAR_DTYPES)):
+        comptime D = SCALAR_DTYPES[k]
+        if source.storage() and source.storage().value() == D:
+            if not storage.isa[Column[Scalar[D]]]():
+                return -1
+            ref column = storage[Column[Scalar[D]]]
+            if not column._data.on_host() or not column._bits.on_host():
+                return -1
+            var count = len(column)
+            if (
+                count <= 0
+                or column._offset < 0
+                or column._offset > len(column._data)
+            ):
+                return -1
+            if count > len(column._data) - column._offset:
+                return -1
+            var end = column._offset + count
+            if len(column._bits) != 0 and (
+                end // 8 + Int(end % 8 != 0) > len(column._bits)
+            ):
+                return -1
+            return count
+    return -1
+
+
+@no_inline
+def _decimal_cast_chunks_host(input: Series, source: DataType) -> Bool:
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return False
+    if len(chunks.arrays) == 0 or len(chunks.arrays) != len(chunks.ends):
+        return False
+    var representative = False
+    if source == DataType.STRING:
+        representative = input._data.isa[StringColumn]()
+    elif source == DataType.BOOL:
+        representative = input._data.isa[BoolColumn]()
+    else:
+        var physical = source.storage()
+        comptime for k in range(len(SCALAR_DTYPES)):
+            comptime D = SCALAR_DTYPES[k]
+            if physical and physical.value() == D:
+                representative = input._data.isa[Column[Scalar[D]]]()
+    if not representative:
+        return False
+    var total = 0
+    for k in range(len(chunks.arrays)):
+        var count = _decimal_cast_storage_count(chunks.arrays[k], source)
+        if count <= 0 or count > Int.MAX - total:
+            return False
+        total += count
+        if chunks.ends[k] != total:
+            return False
+    return True
+
+
+# Decimal conversions share one runtime source window and specialize only
+# the final physical destination, rather than every source/destination pair.
+comptime _DecimalIntegerReader = def(Int, Int) thin -> Int128
+comptime _DecimalTextReader = def(Int, Int) thin -> String
+
+
+def _decimal_read_integer[D: DType](address: Int, row: Int) -> Int128:
+    return Pointer[Scalar[D], ImmutAnyOrigin](unsafe_from_address=address)[
+        unsafe_offset=row
+    ].cast[DType.int128]()
+
+
+def _decimal_read_text[D: DType](address: Int, row: Int) -> String:
+    return String(
+        Pointer[Scalar[D], ImmutAnyOrigin](unsafe_from_address=address)[
+            unsafe_offset=row
+        ]
+    )
+
+
+def _decimal_read_bool(address: Int, row: Int) -> Int128:
+    var bytes = Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=address)
+    return Int128((bytes[unsafe_offset=row // 8] >> UInt8(row % 8)) & 1)
+
+
+def _decimal_bool_text(address: Int, row: Int) -> String:
+    return "true" if _decimal_read_bool(address, row) != 0 else "false"
+
+
+def _decimal_unused_integer(address: Int, row: Int) -> Int128:
+    return 0
+
+
+def _decimal_unused_text(address: Int, row: Int) -> String:
+    return String()
+
+
+struct _DecimalCastWindow(Movable):
+    """A physical owner and prepared readers; no per-row Series/owner rebuild."""
+
+    var storage: Storage
+    var source: DataType
+    var address: Int
+    var bits: Int
+    var offset: Int
+    var row_offset: Int
+    var length: Int
+    var integer_reader: _DecimalIntegerReader
+    var text_reader: _DecimalTextReader
+
+    def __init__(out self, storage: Storage, source: DataType):
+        self.storage = storage.copy()
+        self.source = source.copy()
+        self.address = 0
+        self.bits = 0
+        self.offset = 0
+        self.row_offset = 0
+        self.length = 0
+        self.integer_reader = _decimal_unused_integer
+        self.text_reader = _decimal_unused_text
+        if source == DataType.STRING:
+            ref column = self.storage[StringColumn]
+            self.offset = column._offset
+            self.length = len(column)
+            if len(column._bits) != 0:
+                self.bits = Int(column._bits[].unsafe_ptr())
+            return
+        if source == DataType.BOOL:
+            ref column = self.storage[BoolColumn]
+            self.offset = column._offset
+            self.row_offset = column._offset
+            self.length = len(column)
+            self.address = Int(column._data[].unsafe_ptr())
+            if len(column._bits) != 0:
+                self.bits = Int(column._bits[].unsafe_ptr())
+            self.integer_reader = _decimal_read_bool
+            self.text_reader = _decimal_bool_text
+            return
+        comptime for k in range(len(SCALAR_DTYPES)):
+            comptime D = SCALAR_DTYPES[k]
+            if self.storage.isa[Column[Scalar[D]]]():
+                ref column = self.storage[Column[Scalar[D]]]
+                self.offset = column._offset
+                self.length = len(column)
+                self.address = Int(column._ptr())
+                if len(column._bits) != 0:
+                    self.bits = Int(column._bits[].unsafe_ptr())
+                comptime if D.is_integral():
+                    self.integer_reader = _decimal_read_integer[D]
+                self.text_reader = _decimal_read_text[D]
+                return
+
+    @always_inline
+    def valid(self, row: Int) -> Bool:
+        if self.bits == 0:
+            return True
+        var bit = self.offset + row
+        var bytes = Pointer[UInt8, ImmutAnyOrigin](
+            unsafe_from_address=self.bits
+        )
+        return (bytes[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1 != 0
+
+    @always_inline
+    def integer(self, row: Int) -> Int128:
+        return self.integer_reader(self.address, self.row_offset + row)
+
+    def text(self, row: Int) -> String:
+        if self.source.is_decimal():
+            return format_decimal(self.integer(row), self.source.scale())
+        if self.source == DataType.STRING:
+            return String(self.storage[StringColumn]._get(row))
+        return self.text_reader(self.address, self.row_offset + row)
+
+
+struct _DecimalCastPlan(Copyable):
+    var source: DataType
+    var target: DataType
+    var factor: Int128
+    var limit: Int128
+    var grow: Bool
+
+    def __init__(out self, source: DataType, target: DataType):
+        self.source = source.copy()
+        self.target = target.copy()
+        self.factor = 1
+        self.limit = 1
+        self.grow = True
+        if target.is_decimal():
+            self.limit = precision_limit(target.precision())
+            if source.is_decimal():
+                self.grow = source.scale() <= target.scale()
+                self.factor = pow10(
+                    target.scale()
+                    - source.scale() if self.grow else source.scale()
+                    - target.scale()
+                )
+            else:
+                self.factor = pow10(target.scale())
+        elif source.is_decimal():
+            self.factor = pow10(source.scale())
+
+    @no_inline
+    def integer(self, window: _DecimalCastWindow, row: Int) raises -> Int128:
+        if not self.target.is_decimal():
+            return divide_half_even(window.integer(row), self.factor)
+        if self.source == DataType.STRING:
+            return parse_decimal(
+                window.storage[StringColumn]._get(row), self.target
+            )
+        if self.source.is_decimal():
+            var raw = window.integer(row)
+            if self.grow:
+                raw *= self.factor
+            else:
+                raw = divide_half_even(raw, self.factor)
+            return check_limit(raw, self.limit, self.target)
+        if self.source.is_integer() or self.source == DataType.BOOL:
+            return check_limit(
+                window.integer(row) * self.factor, self.limit, self.target
+            )
+        # Preserve original-width scalar formatting and the exact parser,
+        # including exponent/excess-digit errors and Int128 accumulation wrap.
+        var rendered = window.text(row)
+        var value = parse_decimal(StringSlice(rendered), self.target)
+        _ = rendered^
+        return value
+
+    def float32(self, window: _DecimalCastWindow, row: Int) -> Float32:
+        return (Float64(window.integer(row)) / Float64(self.factor)).cast[
+            DType.float32
+        ]()
+
+
+@no_inline
+def _decimal_cast_failure(
+    plan: _DecimalCastPlan,
+    window: _DecimalCastWindow,
+    row: Int,
+    global_row: Int,
+    offset: Int,
+    message: String,
+) raises:
+    raise Error(
+        "cast from "
+        + plan.source.name()
+        + " to "
+        + plan.target.name()
+        + " failed at row "
+        + String(offset + global_row)
+        + " for value '"
+        + window.text(row)
+        + "': "
+        + message
+    )
+
+
+@always_inline
+def _decimal_cast_validity(
+    mut bits: List[UInt8], row: Int, valid: Bool, n: Int, lazy: Bool
+):
+    if lazy:
+        _append_validity_bit(bits, row, valid, n)
+    elif valid:
+        bits[row // 8] |= UInt8(1) << UInt8(row % 8)
+
+
+@no_inline
+def _decimal_cast_numeric[
+    D: DType
+](
+    input: Series,
+    plan: _DecimalCastPlan,
+    strict: Bool,
+    offset: Int,
+    mask: List[Bool],
+) raises -> Series:
+    var n = len(input)
+    var values = List[Scalar[D]](length=n, fill=0)
+    # The existing unmasked integer-to-decimal route represents an all-valid
+    # output with no bitmap. Generic routes always produce packed validity.
+    var lazy = (
+        plan.target.is_decimal() and plan.source.is_integer() and len(mask) == 0
+    )
+    var bits = List[UInt8]()
+    if not lazy:
+        bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var out = values.unsafe_ptr()
+    var masked = len(mask) == n
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        var window = _DecimalCastWindow(storage, plan.source)
+        for row in range(window.length):
+            var global_row = base + row
+            if not window.valid(row) or (masked and not mask[global_row]):
+                _decimal_cast_validity(bits, global_row, False, n, lazy)
+                continue
+            var valid = False
+            try:
+                comptime if D.is_floating_point():
+                    out[unsafe_offset=global_row] = plan.float32(
+                        window, row
+                    ).cast[D]()
+                else:
+                    var value = plan.integer(window, row)
+                    if plan.target.is_decimal():
+                        out[unsafe_offset=global_row] = value.cast[D]()
+                    else:
+                        out[unsafe_offset=global_row] = _to_integer[D](value)
+                valid = True
+            except e:
+                if strict:
+                    _decimal_cast_failure(
+                        plan, window, row, global_row, offset, String(e)
+                    )
+            _decimal_cast_validity(bits, global_row, valid, n, lazy)
+        base += window.length
+    var result = Series(
+        input.name(), Column[Scalar[D]](values=values^, bits=bits^)
+    )
+    if plan.target.is_decimal():
+        return result.with_dtype(plan.target)
+    return result^
+
+
+@no_inline
+def _decimal_cast_bool(
+    input: Series,
+    plan: _DecimalCastPlan,
+    strict: Bool,
+    offset: Int,
+    mask: List[Bool],
+) raises -> Series:
+    var n = len(input)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var masked = len(mask) == n
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        var window = _DecimalCastWindow(storage, plan.source)
+        for row in range(window.length):
+            var global_row = base + row
+            if not window.valid(row) or (masked and not mask[global_row]):
+                continue
+            try:
+                if plan.integer(window, row) != 0:
+                    values[global_row // 8] |= UInt8(1) << UInt8(global_row % 8)
+                _decimal_cast_validity(bits, global_row, True, n, False)
+            except e:
+                if strict:
+                    _decimal_cast_failure(
+                        plan, window, row, global_row, offset, String(e)
+                    )
+        base += window.length
+    return Series(
+        input.name(), BoolColumn(values=values^, bits=bits^, length=n)
+    )
+
+
+@no_inline
+def _decimal_cast_string(
+    input: Series,
+    plan: _DecimalCastPlan,
+    mask: List[Bool],
+) raises -> Series:
+    var n = len(input)
+    var out = StringBuilder(n)
+    var masked = len(mask) == n
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        var window = _DecimalCastWindow(storage, plan.source)
+        for row in range(window.length):
+            if window.valid(row) and (not masked or mask[base + row]):
+                out.append(window.text(row))
+            else:
+                out.append_null()
+        base += window.length
+    return Series(input.name(), out^.finish())
+
+
+@no_inline
+def _cast_decimal_chunks(
+    input: Series,
+    target: DataType,
+    strict: Bool,
+    offset: Int,
+    mask: List[Bool],
+) raises -> Optional[Series]:
+    var source = input.dtype()
+    # Identity and specialized Float64 semantics remain at their existing
+    # earlier dispatch/adapter. No source or target outside this family scans.
+    if source == target or (
+        not source.is_decimal() and not target.is_decimal()
+    ):
+        return None
+    if source.is_decimal() and target == DataType.FLOAT64:
+        return None
+    if input._chunked.value()[].cache[].state.load() == 2:
+        return None
+    if source.is_decimal():
+        if not _decimal_cast_canonical(source):
+            return None
+    elif (
+        source != DataType.BOOL
+        and source != DataType.STRING
+        and not _decimal_cast_plain_numeric(source)
+    ):
+        return None
+    if target.is_decimal():
+        if not _decimal_cast_canonical(target):
+            return None
+    elif (
+        target != DataType.BOOL
+        and target != DataType.STRING
+        and target != DataType.FLOAT32
+    ):
+        if not _decimal_cast_plain_numeric(target) or not target.is_integer():
+            return None
+    if not _decimal_cast_chunks_host(input, source):
+        return None
+    var plan = _DecimalCastPlan(source, target)
+    if target == DataType.STRING:
+        return _decimal_cast_string(input, plan, mask)
+    if target == DataType.BOOL:
+        return _decimal_cast_bool(input, plan, strict, offset, mask)
+    if target.is_decimal():
+        if target.decimal_width() == 32:
+            return _decimal_cast_numeric[DType.int32](
+                input, plan, strict, offset, mask
+            )
+        if target.decimal_width() == 64:
+            return _decimal_cast_numeric[DType.int64](
+                input, plan, strict, offset, mask
+            )
+        return _decimal_cast_numeric[DType.int128](
+            input, plan, strict, offset, mask
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if target == DataType.of(D):
+            comptime if D != DType.float64:
+                return _decimal_cast_numeric[D](
+                    input, plan, strict, offset, mask
+                )
+    return None
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -1393,6 +1951,9 @@ def cast_series(
         if text_result:
             return text_result.take()
     if input.is_chunked():
+        var decimal = _cast_decimal_chunks(input, target, strict, offset, mask)
+        if decimal:
+            return decimal.take()
         var primitive = _cast_primitive_chunks(
             input, target, strict, offset, mask
         )
