@@ -14,7 +14,7 @@ from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
 from std.ffi import _get_global, external_call
-from std.memory import ArcPointer, Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 from std.time import perf_counter_ns
 
@@ -75,6 +75,7 @@ from dataframe.aggregation.keys import (
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from dataframe.kernels.join_hash import (
     PreparedHashIndex,
+    prepared_direct_rows_at,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
@@ -1068,6 +1069,17 @@ struct Morsel(Movable):
             for k in range(kept):
                 var r = at[unsafe_offset=k]
                 put[unsafe_offset=r >> 6] |= UInt64(1) << UInt64(r & 63)
+        elif self.by_rows:
+            # The selected rows' frame indices are known: the kept ones are
+            # read at the positions, and the mask set from them, without a
+            # pass over the old mask.
+            var old_rows = self.rows.unsafe_ptr()
+            frame_rows = List[Int](unsafe_uninit_length=kept)
+            var to = frame_rows.unsafe_ptr()
+            for k in range(kept):
+                var r = old_rows[unsafe_offset=at[unsafe_offset=k]]
+                to[unsafe_offset=k] = r
+                put[unsafe_offset=r >> 6] |= UInt64(1) << UInt64(r & 63)
         else:
             # The old mask's set bits, in order: position j of the selected
             # rows is the j-th set bit.
@@ -1108,6 +1120,7 @@ struct Morsel(Movable):
                         frame_rows.append(64 * w + b)
                         next += 1
                     j += 1
+        if self.selected:
             var compact_at = List[Int]()
             var compact_columns = List[Series]()
             for i in range(self.frame.width()):
@@ -1119,13 +1132,16 @@ struct Morsel(Movable):
                     rows
                 )
         var bytes = List[UInt8](unsafe_uninit_length=8 * words)
-        var source = out.unsafe_ptr().unsafe_bitcast[UInt8]()
-        for k in range(8 * words):
-            bytes.unsafe_ptr()[unsafe_offset=k] = source[unsafe_offset=k]
+        unsafe_memcpy(
+            dest=bytes.unsafe_ptr(),
+            src=out.unsafe_ptr().unsafe_bitcast[UInt8](),
+            count=8 * words,
+        )
         _ = out^
         var mask = BoolColumn(List[Bool]())
         mask._data = _Buffer(bytes^)
-        mask._bits = _Buffer(List[UInt8](length=(height + 7) // 8, fill=255))
+        # Every entry valid: no validity bitmap, as `_rows_mask` builds.
+        mask._bits = _Buffer(List[UInt8]())
         mask._length = height
         mask._offset = 0
         if not self.selected:
@@ -1167,8 +1183,25 @@ struct Morsel(Movable):
             var rt = right._columns[right._index(step.right_keys[i])].dtype()
             if lt != rt or lt.is_categorical() or lt.is_nested():
                 return False
-        var keys = self._compact_frame(step.names)
+        # A selection's key rows probe a direct index where they are, as
+        # DuckDB probes a join's dictionary vector through its selection:
+        # the key is not gathered first (TPC-DS q23's customer join after
+        # its date join copied the customer keys of every kept row).
+        var through = Optional[Tuple[List[Int], List[Int], Bool]]()
+        if self.selected and self.by_rows and len(step.names) == 1:
+            var at = self._index(step.names[0])
+            if not self.compact[at]:
+                through = prepared_direct_rows_at(
+                    self.frame._columns[at],
+                    self.rows,
+                    indexes[][step.join].value(),
+                    step.how != JOIN_ANTI,
+                )
         if step.how != JOIN_INNER:
+            if through:
+                self._narrow_rows(through.value()[0])
+                return True
+            var keys = self._compact_frame(step.names)
             self._narrow_rows(
                 prepared_hash_semi_anti_rows(
                     keys._columns,
@@ -1178,18 +1211,25 @@ struct Morsel(Movable):
                 )
             )
             return True
-        var pairs = prepared_hash_join_rows(
-            keys._columns,
-            indexes[][step.join].value(),
-            False,
-            omit_identity=True,
-            workers=0,
-        )
+        var pairs: Tuple[List[Int], List[Int], Bool]
+        if through:
+            pairs = through.take()
+        else:
+            var keys = self._compact_frame(step.names)
+            pairs = prepared_hash_join_rows(
+                keys._columns,
+                indexes[][step.join].value(),
+                False,
+                omit_identity=True,
+                workers=0,
+            )
         # A probe row matching twice (a build key repeated) repeats rows:
         # no selection can hold them, so every column is gathered at them
         # from the pairs already probed.
         var repeated = False
-        if not pairs[2]:
+        # A progression or perfect hash holds each build key once: no probe
+        # row can match twice.
+        if not pairs[2] and not indexes[][step.join].value().progression:
             var at = pairs[0].unsafe_ptr()
             for k in range(1, len(pairs[0])):
                 if at[unsafe_offset=k] <= at[unsafe_offset=k - 1]:
@@ -1234,6 +1274,10 @@ struct Morsel(Movable):
             trace_path("pipeline.join_selection")
             if not pairs[2]:
                 self._narrow_rows(pairs[0])
+        if len(right_output) == 0:
+            # The build side adds no column (a join kept for its keys only):
+            # its matched rows are never read.
+            return True
         var sources = List[Series](capacity=len(right_output))
         for k in range(len(right_output)):
             sources.append(right._columns[right_output[k]].copy())
