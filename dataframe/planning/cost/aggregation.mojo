@@ -20,6 +20,7 @@ from dataframe.kernels.hashing import (
 )
 from dataframe.parallel import configured_workers
 from dataframe.join_type import (
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_RIGHT,
 )
@@ -456,11 +457,13 @@ def select_aggregation_strategy(
                         choice.row_merge = merge.take()
                         choice.row_names = carried^
 
-    # Right joins require their unmatched build rows to be emitted by a
-    # morsel pipeline. A row-only in-memory fallback may prefer eager work.
+    # Right and full joins require their unmatched build rows to be
+    # emitted by a morsel pipeline. A row-only in-memory fallback may prefer eager work.
     if not choice.uses_pipeline():
         for operation in operations:
-            if operation.kind == JOIN and operation.how == JOIN_RIGHT:
+            if operation.kind == JOIN and (
+                operation.how == JOIN_RIGHT or operation.how == JOIN_FULL
+            ):
                 choice.choose(EAGER_FRAME, "right_join_requires_pipeline")
                 return choice^
     if (
