@@ -31,6 +31,10 @@ adapters and measured tradeoffs are documented in
 Temporal binary arithmetic, retained adapters and complete validation results
 are documented in [scalar-temporal-binary-chunks.md](scalar-temporal-binary-chunks.md).
 
+Conditional predicate preparation, original-window versus cache semantics and
+numeric value-owner reuse are documented in
+[scalar-conditional-predicate-chunks.md](scalar-conditional-predicate-chunks.md).
+
 ## Measurement plan
 
 Compare identical values as contiguous input, nonzero slices and uneven
