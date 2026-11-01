@@ -27,6 +27,7 @@ from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
 from dataframe.kernels.physical_input import _has_physical_storage
+from dataframe.kernels.bitmap_input import _bitmap_byte, _write_bitmap_byte
 
 
 def _dtype(series: Series) -> DataType:
@@ -505,6 +506,30 @@ def _decimal_float_host[D: DType](input: Series) -> Bool:
     return True
 
 
+def _append_decimal_validity(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: Span[UInt8, _],
+    offset: Int,
+    count: Int,
+):
+    """Append an admitted decimal bitmap without a per-row unaligned loop."""
+    if count == 0 or len(incoming) == 0 or offset % 8 == 0:
+        _append_validity(bits, length, incoming, offset, count)
+        return
+    if len(bits) == 0:
+        bits.resize((length + 7) // 8, 255)
+    if length % 8 != 0:
+        bits[len(bits) - 1] &= (UInt8(1) << UInt8(length % 8)) - 1
+    bits.resize((length + count + 7) // 8, 0)
+    var i = 0
+    while i < count:
+        var take = min(8, count - i)
+        var value = _bitmap_byte(incoming, offset + i, take, False, 255)
+        _write_bitmap_byte(bits, length + i, value, take)
+        i += take
+
+
 @no_inline
 def _chunk_decimal_to_float[D: DType](input: Series) raises -> Series:
     """Convert every initialized payload, including rows hidden by nulls."""
@@ -524,7 +549,9 @@ def _chunk_decimal_to_float[D: DType](input: Series) raises -> Series:
             )
         if len(bits) == 0 and len(column._bits) != 0:
             bits.reserve((n + 7) // 8)
-        _append_validity(bits, base, column._bits[], column._offset, count)
+        _append_decimal_validity(
+            bits, base, column._bits[].span(), column._offset, count
+        )
         base += count
     return Series(input.name(), Column[Float64](values=values^, bits=bits^))
 
