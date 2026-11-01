@@ -47,6 +47,31 @@ def tolerant_columns(suite, query, oracle):
     ]
 
 
+def tolerant_ranks(suite, query, oracle, tolerant):
+    """Rank columns computed over a tolerant Float64 column.
+
+    A sum that is within tolerance of the oracle's can still sit one ulp
+    above or below a peer that is exactly equal in decimal arithmetic, so a
+    rank() over it may split or merge that tie. The policy names each such
+    rank with the value it orders by, its partition and direction; only
+    ranks whose value column is tolerant in this answer qualify, so a
+    decimal variant still compares its ranks exactly.
+    """
+    policy_path = Path(__file__).with_name("suite_numerical_policy.json")
+    policy = json.loads(policy_path.read_text())
+    specs = policy.get("float_rank_fields", {}).get(f"{suite}/{query}", {})
+    out = {}
+    for name, spec in specs.items():
+        if (
+            name in oracle.names
+            and spec["value"] in tolerant
+            and all(c in oracle.names for c in spec["partition"])
+            and type(spec["descending"]) is bool
+        ):
+            out[name] = spec
+    return out
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -227,9 +252,11 @@ class OracleCheck:
     reused for every later answer of the same query.
     """
 
-    def __init__(self, oracle, tolerant_columns=()):
+    def __init__(self, oracle, tolerant_columns=(), tolerant_ranks=None):
         self.oracle = oracle
         self.tolerant = list(tolerant_columns)
+        # Rank columns over a tolerant value (`tolerant_ranks`).
+        self.ranks = dict(tolerant_ranks or {})
         self._engine = None
         self._prepared = None
 
@@ -305,6 +332,18 @@ class OracleCheck:
         if self._engine is None:
             self._engine = _Engine()
         engine = self._engine
+        if self.ranks:
+            actual = Answer(
+                actual.names,
+                actual.types,
+                engine.settle_ranks(
+                    actual.table,
+                    oracle.table.select(list(range(width))),
+                    self.tolerant,
+                    self.ranks,
+                ),
+                actual.original_schema,
+            )
         if not order and limit is None and offset == 0:
             return engine.equal(
                 actual.table,
@@ -322,12 +361,15 @@ class OracleCheck:
         return result
 
 
-def compare_selection(actual, oracle, *, tolerant_columns=()):
+def compare_selection(
+    actual, oracle, *, tolerant_columns=(), tolerant_ranks=None
+):
     """Full relation membership and exact ordered ranks, including hidden keys.
 
-    One-off form of OracleCheck(oracle, tolerant_columns).compare(actual).
+    One-off form of
+    OracleCheck(oracle, tolerant_columns, tolerant_ranks).compare(actual).
     """
-    with OracleCheck(oracle, tolerant_columns) as check:
+    with OracleCheck(oracle, tolerant_columns, tolerant_ranks) as check:
         return check.compare(actual)
 
 
@@ -518,6 +560,85 @@ class _Engine:
             return self._buckets(schema, exact, tol, subset=False, grouped=False)
         finally:
             self._release("a", "p")
+
+    # Rank columns over a tolerant value: ties tolerance allows.
+    def settle_ranks(self, actual, oracle, tolerant, ranks):
+        """`actual` with each rank that differs from its oracle row's only
+        within a tie tolerance allows replaced by the oracle's rank.
+
+        An oracle row of value v allows ranks from 1 + its partition's
+        peers above v by more than tolerance, to the peers at or above v
+        counting those within tolerance (the row itself included). Its
+        actual rows are those equal in every exact column and within
+        tolerance in v. Any other rank, and a row without such an oracle
+        row, is left for the exact comparison to reject.
+        """
+        import pyarrow as pa
+
+        names = [f.name for f in oracle.schema]
+        tol = set(tolerant)
+        self._register("ra", actual)
+        self._register("ro", oracle)
+        try:
+            for name, spec in ranks.items():
+                r = f"c{names.index(name)}"
+                v = f"c{names.index(spec['value'])}"
+                same = " AND ".join(
+                    f"p.c{names.index(c)} IS NOT DISTINCT FROM"
+                    f" o.c{names.index(c)}"
+                    for c in spec["partition"]
+                ) or "TRUE"
+                exact = " AND ".join(
+                    f"a.c{k} IS NOT DISTINCT FROM o.c{k}"
+                    for k, n in enumerate(names)
+                    if n != name and n not in tol
+                ) or "TRUE"
+                sign = "" if spec["descending"] else "-"
+                rows = self._sql(
+                    f"""
+                    WITH bounds AS (
+                        SELECT o.i,
+                            1 + count(*) FILTER (WHERE {sign}(p.{v} - o.{v}) > 0
+                                AND NOT {_close_sql(f"p.{v}", f"o.{v}")})
+                                AS low,
+                            count(*) FILTER (WHERE {sign}(p.{v} - o.{v}) >= 0
+                                OR {_close_sql(f"p.{v}", f"o.{v}")}) AS high
+                        FROM ro o JOIN ro p ON {same} AND p.{v} IS NOT NULL
+                        WHERE o.{v} IS NOT NULL
+                        GROUP BY o.i
+                    ),
+                    pairs AS (
+                        SELECT a.i, a.{r} AS got, o.{r} AS want, b.low, b.high
+                        FROM ra a JOIN ro o ON {exact}
+                            AND a.{v} IS NOT NULL AND o.{v} IS NOT NULL
+                            AND {_close_sql(f"a.{v}", f"o.{v}")}
+                        JOIN bounds b ON b.i = o.i
+                    )
+                    SELECT i, min(want) FROM pairs
+                    GROUP BY i
+                    HAVING NOT bool_or(got = want)
+                        AND bool_or(got BETWEEN low AND high)
+                    """
+                )
+                if not rows:
+                    continue
+                # An actual row's oracle rows share its exact columns and a
+                # tolerance-equal value: in practice one rank; min() picks
+                # one if not.
+                k = names.index(name)
+                column = actual.column(k).to_pylist()
+                for i, want in rows:
+                    column[i] = want
+                actual = actual.set_column(
+                    k,
+                    actual.schema.field(k),
+                    pa.array(column, type=actual.schema.field(k).type),
+                )
+                self._unregister("ra")
+                self._register("ra", actual)
+        finally:
+            self._unregister("ra", "ro")
+        return actual
 
     # Selections: rank groups and their oracle pools, built once per oracle.
     def prepare_pool(self, oracle, width, order, offset, count):
