@@ -207,6 +207,7 @@ from dataframe.aggregation.state import (
 from dataframe.trace import (
     trace_path,
 )
+from std.bit import bit_width
 from std.collections import (
     Dict,
     Optional,
@@ -296,6 +297,45 @@ struct _DecodeKeyJob(Job):
             else:
                 rows.append(representatives[unsafe_offset=Int(codes._get(r))])
         self.result = self.values.take_or_null(rows).renamed(self.name)
+
+
+def _unpacked(
+    frame: DataFrame,
+    pack_names: List[List[String]],
+    pack_shifts: List[List[Int]],
+    pack_bits: List[List[Int]],
+    wanted: List[String],
+) raises -> DataFrame:
+    """`frame` with each packed key (named for its first field's key)
+    replaced by the codes of its fields named in `wanted`: a field of 0,
+    or a null packed value, is a null code."""
+    var result = frame.copy()
+    for g in range(len(pack_names)):
+        ref names = pack_names[g]
+        if names[0] not in result.columns():
+            continue
+        var packed = result.column(names[0]).rechunk()
+        ref words = packed._data[Column[Int64]]
+        var n = len(packed)
+        var fields = List[Series]()
+        for f in range(len(names)):
+            if names[f] not in wanted:
+                continue
+            var codes = List[Int64](length=n, fill=0)
+            var valid = List[Bool](length=n, fill=False)
+            var shift = Int64(pack_shifts[g][f])
+            var mask = (Int64(1) << Int64(pack_bits[g][f])) - 1
+            for r in range(n):
+                if words._valid(r):
+                    var field = (words._get(r) >> shift) & mask
+                    if field != 0:
+                        codes[r] = field - 1
+                        valid[r] = True
+            fields.append(Series(names[f], Column[Int64](codes^, valid)))
+        result = result.drop([names[0]])
+        for field in fields:
+            result = result.with_column(field.copy())
+    return result^
 
 
 def plan_stream_execute(
@@ -915,6 +955,100 @@ def plan_stream_execute(
         late_values.append(coding[k].values.copy())
         late_rows.append(coding[k].representatives.copy())
     _ = coding^
+    # Coded keys of one build whose codes fit one word together are
+    # packed into it, a field each (0 for a null value): the probe then
+    # gathers one Int64 per joined row and the sink hashes and compares
+    # one word, as DuckDB's perfect hash aggregate concatenates its group
+    # keys' bits. A grouping set keeps the fields of its own keys and
+    # masks the others to zero. The packed column takes the first key's
+    # name; the others leave the build and the steps.
+    var pack_names = List[List[String]]()
+    var pack_shifts = List[List[Int]]()
+    var pack_bits = List[List[Int]]()
+    if len(row_names) == 0 and sink == 0 and decision.uses_pipeline():
+        var builds_seen = List[Int]()
+        for k in range(len(late_names)):
+            var b = late_builds[k]
+            if b in builds_seen:
+                continue
+            builds_seen.append(b)
+            var members = List[Int]()
+            # In key order, so the packed key keeps the first one's place.
+            for name in keys:
+                if name in late_names:
+                    var at = late_names.index(name)
+                    if late_builds[at] == b:
+                        members.append(at)
+            if len(members) < 2:
+                continue
+            # A left join's missing build row would be a null packed key,
+            # apart from the packed key of a row whose values are all null
+            # though both read back as nulls: only an inner join packs.
+            var inner = True
+            for operation in operations:
+                if (
+                    operation.kind == JOIN
+                    and operation.join_build_slot() == b
+                    and operation.how != JOIN_INNER
+                ):
+                    inner = False
+            if not inner:
+                continue
+            var shifts = List[Int]()
+            var bits = List[Int]()
+            var total = 0
+            for at in members:
+                # Fields 1..n hold codes 0..n-1; 0 is a null value.
+                var width = Int(bit_width(UInt64(len(late_rows[at]))))
+                shifts.append(total)
+                bits.append(width)
+                total += width
+            if total > 63:
+                continue
+            var n = joins[b].height()
+            var packed = List[Int64](length=n, fill=0)
+            var out = packed.unsafe_ptr()
+            var names = List[String]()
+            for f in range(len(members)):
+                var name = late_names[members[f]]
+                names.append(name)
+                var coded = joins[b].column(name).rechunk()
+                ref codes = coded._data[Column[Int64]]
+                var shift = Int64(shifts[f])
+                for r in range(n):
+                    if codes._valid(r):
+                        out[unsafe_offset=r] |= (codes._get(r) + 1) << shift
+            var dropped = List[String]()
+            for f in range(1, len(names)):
+                dropped.append(names[f])
+            joins[b] = (
+                joins[b]
+                .drop(dropped)
+                .with_column(Series(names[0], Column[Int64](packed^)))
+            )
+            var kept_keys = List[String]()
+            for name in keys:
+                if name not in dropped:
+                    kept_keys.append(name)
+            keys = kept_keys^
+            for k2 in range(len(operations)):
+                if operations[k2].kind != SELECT:
+                    continue
+                var passed = List[Expr]()
+                for e in operations[k2].exprs:
+                    if not (
+                        len(e._nodes) == 1
+                        and e._nodes[0].op == COL
+                        and e._name == e._nodes[0].text
+                        and e._name in dropped
+                    ):
+                        passed.append(e.copy())
+                operations[k2].exprs = passed^
+            pack_names.append(names^)
+            pack_shifts.append(shifts^)
+            pack_bits.append(bits^)
+        if len(pack_names) > 0:
+            trace_path("pipeline.packed_build_keys")
     if top >= 0:
         operations.append(self._nodes[top_node].copy())
         operation_nodes.append(top_node)
@@ -1202,12 +1336,42 @@ def plan_stream_execute(
             step_nodes.append(operations[k].copy())
         var set_frames = List[DataFrame]()
         var set_indices = List[List[Int]]()
+        var set_masks = List[List[Int64]]()
         if grouping:
             for members in _set_members(terminal):
                 var indices = List[Int]()
+                var masks = List[Int64]()
                 for name in members:
-                    indices.append(keys.index(name))
+                    var at = keys.index(name) if name in keys else -1
+                    var mask = Int64(-1)
+                    for g in range(len(pack_names)):
+                        if name in pack_names[g]:
+                            at = keys.index(pack_names[g][0])
+                            var f = pack_names[g].index(name)
+                            mask = (
+                                (Int64(1) << Int64(pack_bits[g][f])) - 1
+                            ) << Int64(pack_shifts[g][f])
+                    if at in indices:
+                        masks[indices.index(at)] |= mask
+                    else:
+                        indices.append(at)
+                        masks.append(mask)
+                # A packed key whose every field the set keeps is grouped
+                # whole.
+                for j in range(len(indices)):
+                    for g in range(len(pack_names)):
+                        if keys[indices[j]] == pack_names[g][0]:
+                            var last = len(pack_bits[g]) - 1
+                            var all = (
+                                Int64(1)
+                                << Int64(
+                                    pack_shifts[g][last] + pack_bits[g][last]
+                                )
+                            ) - 1
+                            if masks[j] == all:
+                                masks[j] = -1
                 set_indices.append(indices^)
+                set_masks.append(masks^)
         var piped_result = run_pipeline(
             input,
             _steps_of(step_nodes),
@@ -1229,24 +1393,42 @@ def plan_stream_execute(
             top_nulls_last=top_nulls_last,
             bounded=bounded,
             table=decision.uses_aggregate_table(),
+            set_masks=set_masks,
         )
         if grouping:
             if len(set_frames) != len(set_indices):
                 return None
             # The empty frame through the steps types the keys a set
-            # leaves null.
+            # leaves null; a packed key's fields are codes.
             var dtypes = List[DataType]()
-            for name in keys:
-                dtypes.append(piped_result.column(name).dtype())
+            for name in terminal.names:
+                if name in keys:
+                    dtypes.append(piped_result.column(name).dtype())
+                else:
+                    dtypes.append(DataType.INT64)
             var parts = List[DataFrame](capacity=len(set_frames))
             var members = _set_members(terminal)
             for k in range(len(set_frames)):
-                parts.append(
-                    _set_rows(
-                        terminal, set_frames[k].copy(), members[k], dtypes
-                    )
+                var part = _unpacked(
+                    set_frames[k],
+                    pack_names,
+                    pack_shifts,
+                    pack_bits,
+                    members[k],
                 )
+                parts.append(_set_rows(terminal, part^, members[k], dtypes))
             piped_result = concat(parts)
+        elif len(pack_names) > 0:
+            # The packed keys back to their codes, in the keys' order.
+            var unpacked = _unpacked(
+                piped_result, pack_names, pack_shifts, pack_bits, original_keys
+            )
+            var columns = List[Series]()
+            for name in original_keys:
+                columns.append(unpacked.column(name))
+            for e in expressions:
+                columns.append(unpacked.column(e._name))
+            piped_result = DataFrame(columns^)
         if top > 0:
             piped_result = piped_result.slice(skip, limit)
         if len(row_names) > 0:
