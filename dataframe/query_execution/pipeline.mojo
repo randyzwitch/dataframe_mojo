@@ -567,14 +567,12 @@ def plan_stream_execute(
                         return _stream_after_materialization(
                             plan, index, batch_size, sink
                         )
-            if (
-                (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
-                and built.height() >= 524288
-                and plan_known_height(self, node.left) < 0
+            if (node.how == JOIN_SEMI or node.how == JOIN_ANTI) and (
+                built.height() >= 524288
             ):
                 # A semi or anti join whose built right side turned out
-                # large: run the left too, and decide from both real
-                # sizes, as DuckDB does. A left at most a quarter of the
+                # large: run the left too (a known table's rows are only
+                # read), and decide from both real sizes, as DuckDB does. A left at most a quarter of the
                 # right is joined eagerly, hashing the left (PDS-H q4:
                 # about 57K orders against 3.8M late lineitem rows);
                 # otherwise the stream continues from the left's rows.
