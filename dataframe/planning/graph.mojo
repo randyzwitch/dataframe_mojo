@@ -928,19 +928,64 @@ def plan_progression_key(
     return False
 
 
+@fieldwise_init
+struct GraphJoin(Copyable, Movable):
+    """A join of a join graph as written (`plan_collect_graph`): its plan
+    node, the relations under its left input (indices `left_from` up to
+    `right_from`) and under its right input (up to `end`), and the joins
+    under each input (indices `joins_from` up to `joins_mid`, then up to
+    the join's own index)."""
+
+    var node: Int
+    var left_from: Int
+    var right_from: Int
+    var end: Int
+    var joins_from: Int
+    var joins_mid: Int
+
+
+def plan_graph_join(node: PlanNode) -> Bool:
+    """Whether join `node` is an operator of a join graph: an inner join
+    with coalesced keys, or a semi, anti or left join on equal keys (a
+    left join's coalesced), as DuckDB's join order reorders
+    (`JoinIsReorderable`)."""
+    if node.kind != JOIN:
+        return False
+    if _chain_member(node):
+        return True
+    if len(node.names) == 0 or len(node.names) != len(node.right_keys):
+        return False
+    if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+        return True
+    return node.how == JOIN_LEFT and node.coalesce
+
+
 def plan_graph_step(self: QueryContext, index: Int) -> Bool:
-    """Whether node `index` is part of a join graph: an inner join with
-    coalesced keys, or a row-local filter or plain column selection
+    """Whether node `index` is part of a join graph: a graph join
+    (`plan_graph_join`), or a row-local filter or plain column selection
     over one (through others of its kind)."""
     var cursor = index
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == JOIN:
-            return _chain_member(node)
+            return plan_graph_join(node)
         if not _chain_member(node):
             return False
         cursor = node.left
     return False
+
+
+def plan_graph_input(self: QueryContext, parent: Int, child: Int) -> Bool:
+    """Whether node `child`, an input of `parent`, belongs to `parent`'s
+    join graph: anything under a graph step but the right input of a
+    semi, anti or left join, which is a relation of its own whose graph
+    is ordered apart (DuckDB's child optimizer for that side)."""
+    if not plan_graph_step(self, parent):
+        return False
+    ref node = self._nodes[parent]
+    return not (
+        node.kind == JOIN and node.how != JOIN_INNER and node.right == child
+    )
 
 
 def plan_collect_graph(
@@ -949,24 +994,45 @@ def plan_collect_graph(
     mut relations: List[Int],
     mut pairs: List[Tuple[String, String]],
     mut filters: List[Int],
+    mut joins: List[GraphJoin],
 ):
-    """The relations, key pairs and filters of the join graph under
-    node `index`: both inputs of each
-    inner join, through filters (kept to place again) and plain column
-    selections; anything else is a relation."""
+    """The relations, inner key pairs, filters and joins (in post-order)
+    of the join graph under node `index`: both inputs of each inner join
+    and the left input of each semi, anti or left join, through filters
+    (kept to place again) and plain column selections; the right input of
+    a semi, anti or left join, and anything else, is a relation."""
     ref node = self._nodes[index]
     if not plan_graph_step(self, index):
         relations.append(index)
         return
     if node.kind == JOIN:
-        plan_collect_graph(self, node.left, relations, pairs, filters)
-        plan_collect_graph(self, node.right, relations, pairs, filters)
-        for i in range(len(node.names)):
-            pairs.append((node.names[i], node.right_keys[i]))
+        var left_from = len(relations)
+        var joins_from = len(joins)
+        plan_collect_graph(self, node.left, relations, pairs, filters, joins)
+        var right_from = len(relations)
+        var joins_mid = len(joins)
+        if node.how == JOIN_INNER:
+            plan_collect_graph(
+                self, node.right, relations, pairs, filters, joins
+            )
+            for i in range(len(node.names)):
+                pairs.append((node.names[i], node.right_keys[i]))
+        else:
+            relations.append(node.right)
+        joins.append(
+            GraphJoin(
+                index,
+                left_from,
+                right_from,
+                len(relations),
+                joins_from,
+                joins_mid,
+            )
+        )
         return
     if node.kind == FILTER:
         filters.append(index)
-    plan_collect_graph(self, node.left, relations, pairs, filters)
+    plan_collect_graph(self, node.left, relations, pairs, filters, joins)
 
 
 def plan_indexed_relation(

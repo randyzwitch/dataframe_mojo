@@ -3,17 +3,31 @@ divides the relations' rows by each
 spanning edge's total domain, the fewest table rows among the relations
 its keys reach; the cheapest tree is found exactly below twelve relations
 and greedily from twelve; a disconnected graph is left alone; a filter
-comparing two relations' columns is an edge of the estimate. A plan's
+comparing two relations' columns is an edge of the estimate; semi, anti
+and left joins are operators whose conflict rules say where they go (a
+semi join before inner joins its keys do not read, an inner join on a
+left join's right columns above it). A plan's
 result is the same joins over separately collected inputs: a snowflake
 written large-table-last, a nested chain met from its far side (its keys
 swapped, the dropped ones read from their partners), a filter between
 joins, and a graph with no consumer above it, ordered like any other since
 a join promises no row order."""
 # contract-group: planner.relational
+from std.collections import Dict
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from dataframe.distinct_statistics import distinct_estimate
-from dataframe.join_order import FilterEdge, JoinEdge, JoinGraph, order_joins
+from dataframe.join_order import (
+    FilterEdge,
+    JoinEdge,
+    JoinGraph,
+    JoinOperator,
+    OPERATOR_INNER,
+    OPERATOR_LEFT,
+    OPERATOR_SEMI,
+    build_conflicts,
+    order_joins,
+)
 from tests.support.coverage_compare import (
     assert_frame,
     assert_frame_unordered,
@@ -455,3 +469,122 @@ def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
     assert_equal(
         computed._spine_distinct(len(computed._plan._nodes) - 1, "pk"), -1
     )
+
+
+def test_a_semi_join_runs_before_inner_joins_its_keys_do_not_read() raises:
+    # TPC-DS q35's shape: customers joined to addresses and demographics,
+    # then a semi join on the customer key. The semi join's conflict
+    # rules ask only for the customers (inner joins below it associate),
+    # so it can run first and the joins after it see a fifth of the rows.
+    var rows: List[Float64] = [100_000.0, 50_000.0, 1_920_000.0, 300_000.0]
+    var edges: List[JoinEdge] = [
+        JoinEdge(0, 1, ["c_addr"], ["ca_sk"]),
+        JoinEdge(0, 2, ["c_demo"], ["cd_sk"]),
+    ]
+    var ops: List[JoinOperator] = [
+        JoinOperator(OPERATOR_INNER, 0b0001, 0b0010, 0b0011, [], []),
+        JoinOperator(OPERATOR_INNER, 0b0011, 0b0100, 0b0101, [0], []),
+        JoinOperator(OPERATOR_SEMI, 0b0111, 0b1000, 0b1001, [0, 1], []),
+    ]
+    build_conflicts(ops)
+    assert_true(not ops[0].must_apply and not ops[1].must_apply)
+    assert_true(ops[2].must_apply)
+    assert_equal(ops[2].left_total, 0b0001)
+    assert_equal(ops[2].right_total, 0b1000)
+    var graph = JoinGraph(
+        rows, rows, edges, Dict[String, Float64](), List[FilterEdge](), ops
+    )
+    # A semi join keeps a fifth of its left input's rows.
+    assert_equal(graph.estimate(0b1001), 20_000.0)
+    assert_equal(graph.candidate(0b0001, 0b1000), 2)
+    # Its right relation joins nothing else.
+    assert_equal(graph.candidate(0b0010, 0b1000), -2)
+    var found = order_joins(
+        rows, rows, edges, Dict[String, Float64](), List[FilterEdge](), ops
+    )
+    var tree = found.take()
+    assert_equal(tree.mask[4], 0b1001)
+    assert_equal(tree.operator[4], 2)
+    assert_equal(tree.mask[6], 0b1111)
+
+
+def test_inner_joins_on_a_left_joins_right_columns_stay_above_it() raises:
+    # A left join B, then B's column joins C: C cannot join B before A
+    # does, since the left join would then keep A's unmatched rows that
+    # the inner join drops (CD-C's conflict rule, as DuckDB 2.0 builds).
+    var rows: List[Float64] = [1000.0, 100.0, 10.0]
+    var ops: List[JoinOperator] = [
+        JoinOperator(OPERATOR_LEFT, 0b001, 0b010, 0b011, [], []),
+        JoinOperator(OPERATOR_INNER, 0b011, 0b100, 0b110, [0], []),
+    ]
+    build_conflicts(ops)
+    assert_true(ops[1].must_apply)
+    assert_equal(ops[1].left_total, 0b011)
+    assert_equal(ops[1].right_total, 0b100)
+    var edges: List[JoinEdge] = [
+        JoinEdge(0, 1, ["a"], ["b"], 0),
+        JoinEdge(1, 2, ["b2"], ["c"], 1),
+    ]
+    var graph = JoinGraph(
+        rows, rows, edges, Dict[String, Float64](), List[FilterEdge](), ops
+    )
+    assert_equal(graph.candidate(0b010, 0b100), -2)
+    assert_equal(graph.candidate(0b001, 0b010), 0)
+    assert_equal(graph.candidate(0b011, 0b100), 1)
+    # A left join keeps at least its left input's rows.
+    assert_true(graph.estimate(0b011) >= 1000.0)
+    var found = order_joins(
+        rows, rows, edges, Dict[String, Float64](), List[FilterEdge](), ops
+    )
+    var tree = found.take()
+    assert_equal(tree.mask[3], 0b011)
+    assert_equal(tree.operator[4], 1)
+
+
+def test_semi_anti_and_left_joins_are_ordered_with_the_inner_joins() raises:
+    # Inner joins, then a semi, a left and an anti join, and a filter on
+    # the left join's right column, which must stay above that join.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var regions = t[3].filter(col("s_region") < lit(Int64(5)))
+    var later = (
+        t[3]
+        .select_exprs(
+            [col("s_id").alias("l_id"), col("s_region").alias("l_region")]
+        )
+        .filter(col("l_region") < lit(Int64(20)))
+    )
+    var excluded = (
+        t[1]
+        .filter(col("p_category") == lit(Int64(7)))
+        .select_exprs([col("p_id").alias("x_id")])
+    )
+    var query = (
+        t[0]
+        .join(t[1], left_on=["f_product"], right_on=["p_id"])
+        .join(t[2], left_on=["p_category"], right_on=["c_id"])
+        .join(regions, left_on=["f_store"], right_on=["s_id"], how="semi")
+        .join(later, left_on=["f_store"], right_on=["l_id"], how="left")
+        .join(excluded, left_on=["f_product"], right_on=["x_id"], how="anti")
+        .filter(col("l_region").is_null() | (col("c_group") == lit(Int64(1))))
+        .group_by(["c_group"])
+        .agg(
+            [
+                col("f_amount").sum().alias("total"),
+                col("f_amount").len().alias("rows"),
+                col("l_region").max().alias("region"),
+            ]
+        )
+        .sort(["c_group"])
+    )
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    assert_true(
+        "dataframe-path: lazy.cost_join_order\n" in observed.text(),
+        "the graph with semi, anti and left joins was not ordered",
+    )
+    _ = observed^
+    _ = trace^
+    var written = query.collect(optimize=False, engine="cpu")
+    assert_true(written.height() > 0)
+    assert_frame(rows, written)
