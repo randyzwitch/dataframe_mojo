@@ -28,11 +28,47 @@ from std.memory import (
 )
 
 
+struct FrameSlots(Copyable, Movable, Sized):
+    """A plan's in-memory tables, by slot, shared by every copy of the plan.
+
+    A table never changes once it holds a slot; plans only add slots. So a
+    copy of the plan shares the list, and the copy that adds a slot while
+    another shares it copies the list first. Building a plan copies it at
+    every step (`push`, a join's two sides), and execution copies it for
+    each job: a copy that copied every table's columns made TPC-DS q14's
+    57 tables (1,555 columns) cost 214 us of a 281 us plan copy. Polars'
+    plans and DuckDB's relations hold their tables by shared pointer.
+    """
+
+    var _shared: ArcPointer[List[DataFrame]]
+
+    def __init__(out self, var frames: List[DataFrame]):
+        self._shared = ArcPointer(frames^)
+
+    def __len__(self) -> Int:
+        return len(self._shared[])
+
+    def __getitem__(self, slot: Int) -> ref[MutAnyOrigin] DataFrame:
+        """The table in `slot`, to read: no plan changes a table in place."""
+        debug_assert(0 <= slot < len(self._shared[]), "frame slot out of range")
+        return Pointer[DataFrame, MutAnyOrigin](
+            unsafe_from_address=Int(
+                self._shared[].unsafe_ptr().unsafe_offset(slot)
+            )
+        )[]
+
+    def append(mut self, var frame: DataFrame):
+        """Add a slot, copying the list first if another plan shares it."""
+        if self._shared.count() > 1:
+            self._shared = ArcPointer(self._shared[].copy())
+        self._shared[].append(frame^)
+
+
 struct QueryContext(Copyable, Deinitable, Movable):
     """Plan storage and per-run state, with explicit runtime ports."""
 
     var _nodes: List[PlanNode]
-    var _frames: List[DataFrame]
+    var _frames: FrameSlots
     var _schemas: List[Optional[CsvSchema]]
     # Observed execution counters (#439), attached by `profile` and shared
     # by every copy of the plan made while it runs; None otherwise.
@@ -81,7 +117,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         handoff_execute: def(QueryContext) raises thin -> DataFrame,
     ):
         self._nodes = nodes^
-        self._frames = frames^
+        self._frames = FrameSlots(frames^)
         self._schemas = schemas^
         self._report = None
         self._origin_rows = Dict[Int, Int]()
