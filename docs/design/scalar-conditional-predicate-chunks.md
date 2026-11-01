@@ -183,10 +183,19 @@ and retains typed flat flags. It preserves all three sites and computed
 `_rows` fallback. All original A sources, binaries and distributions remain
 intact; none supplies B's fresh baseline observations.
 
-Heldout execution is pending. It uses the accepted baseline exporter and the
-separately built final candidate, with unchanged benchmark sources and queries.
-Functional timing fields and compiler resource diagnostics support no engine
-elapsed claim.
+Both revisions independently match fresh DuckDB answers for all 43 unchanged
+quick-tier ClickBench queries: 86 target verdicts and 774 verified target
+snapshots, with zero target errors. Aggregate HEAD/BASE elapsed geometric mean
+is 1.0070145973 (+0.70%); only the aggregate was inspected, and heldout timings
+did not choose the implementation. Existing Polars discrepancies (35 wrong,
+eight correct) remain retained without skips.
+
+The accepted BASE exporter is reused at its original admitted path and build
+identity; B uses a separately built exporter from `e005cc8b`. Benchmark drivers,
+queries and observer policy are unchanged. This frozen plan contains only the
+base variant: full external perturbation/development-suite coverage and
+helper-specific multi-query trace coverage are not claimed. Functional timing
+fields and compiler resource diagnostics support no engine elapsed claim.
 
 ## Evidence and remaining scope
 
