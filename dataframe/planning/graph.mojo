@@ -1013,7 +1013,14 @@ def plan_spine_distinct(
     if not source:
         return -1
     var found = source.value()
-    return self._frames[found[0]]._distinct_count(found[1])
+    var count = self._frames[found[0]]._distinct_count(found[1])
+    if count < 0 and found[0] in self._origin_tables:
+        ref names = self._origin_names[found[0]]
+        if found[1] in names:
+            return self._origin_tables[found[0]]._distinct_count(
+                names[found[1]]
+            )
+    return count
 
 
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
@@ -1125,9 +1132,19 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             origins[slots[entry.key]] = entry.value
+    var tables = Dict[Int, DataFrame]()
+    var names = Dict[Int, Dict[String, String]]()
+    for entry in self._origin_tables.items():
+        if slots[entry.key] >= 0:
+            tables[slots[entry.key]] = entry.value.copy()
+    for entry in self._origin_names.items():
+        if slots[entry.key] >= 0:
+            names[slots[entry.key]] = entry.value.copy()
     self._frames = frames^
     self._schemas = schemas^
     self._origin_rows = origins^
+    self._origin_tables = tables^
+    self._origin_names = names^
 
 
 def plan_available(

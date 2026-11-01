@@ -28,6 +28,7 @@ from dataframe.planning.graph import (
     plan_ends_in_breaker,
     plan_reorder,
     plan_spine_rows,
+    plan_spine_source,
     plan_subplan_classes,
 )
 from dataframe.planning.inputs import (
@@ -135,12 +136,42 @@ def plan_share_subplans(
         # columns for the join order, as DuckDB keeps a materialized
         # CTE's statistics (`AddMaterializedCTEStats`) and gives an
         # aggregate's columns distinct counts (`ExtractAggregationStats`).
+        # A result holding every row of its table reads its columns'
+        # distinct counts from that table: they are the same columns, as
+        # DuckDB carries a column's count through a projection into a
+        # materialized CTE's statistics. TPC-DS q76's three channels share
+        # one projection of date_dim, whose date keys then had no count,
+        # and the join order took the 1,990 dates the sales hold for the
+        # domain, putting the item join first on a date join estimated 37
+        # times too large. A filtered result reads none: DuckDB keeps the
+        # table's counts there too, but a filtered dimension's full key
+        # count is the date-containment estimate of #1083 (a month of
+        # dates joined to sales estimated 37 times too small, TPC-DS q60),
+        # whose low estimates the run-time swaps then undo.
+        var origin_slot = -1
+        var origin_names = Dict[String, String]()
+        if not aggregated and origin > 0 and frame.height() == origin:
+            var top = len(sub._nodes) - 1
+            for name in frame.columns():
+                var source = plan_spine_source(sub, top, name)
+                if not source:
+                    continue
+                var found = source.value()
+                if not sub._frames[found[0]]._statistics:
+                    continue
+                if origin_slot >= 0 and found[0] != origin_slot:
+                    continue
+                origin_slot = found[0]
+                origin_names[name] = found[1]
         if aggregated:
             self._frames.append(frame^._with_statistics())
         else:
             self._frames.append(frame^)
         self._schemas.append(Optional[CsvSchema]())
         var slot = len(self._frames) - 1
+        if origin_slot >= 0:
+            self._origin_tables[slot] = sub._frames[origin_slot].copy()
+            self._origin_names[slot] = origin_names^
         if origin > 0:
             self._origin_rows[slot] = origin
         for j in range(len(self._nodes)):
