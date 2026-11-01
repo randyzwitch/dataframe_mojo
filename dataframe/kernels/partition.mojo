@@ -132,10 +132,10 @@ def _hash_column(
         if series._data.isa[Column[Scalar[D]]]():
             ref column = series._data[Column[Scalar[D]]]
             comptime if not D.is_floating_point():
+                var values = column._ptr()
                 if len(column._bits[]) == 0:
                     # No validity bitmap: every row through the pointer,
                     # with no per-row validity test or bounds check.
-                    var values = column._ptr()
                     for i in range(start, end):
                         var value = values.unsafe_offset(i)[]
 
@@ -144,6 +144,27 @@ def _hash_column(
                         else:
                             write(i, bitcast[DType.uint64](Int64(value)))
                     return
+                # A bitmap: values and bits through pointers taken once,
+                # the null word chosen without a branch, as DuckDB's
+                # vector hash reads a flat vector and its validity mask.
+                # A null slot's value is undefined but readable.
+                var bits = column._bits[].unsafe_ptr()
+                var bit_offset = column._offset
+                for i in range(start, end):
+                    var value = values.unsafe_offset(i)[]
+                    var word: UInt64
+
+                    comptime if D.is_unsigned():
+                        word = UInt64(value)
+                    else:
+                        word = bitcast[DType.uint64](Int64(value))
+                    write(
+                        i,
+                        word if _validity_at(
+                            bits, bit_offset + i
+                        ) else _NULL_KEY,
+                    )
+                return
             for i in range(start, end):
                 if not column._valid(i):
                     write(i, _NULL_KEY)
