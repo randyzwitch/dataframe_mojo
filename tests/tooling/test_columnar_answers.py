@@ -24,7 +24,7 @@ except ImportError:
     duckdb = None
 
 if duckdb is not None:
-    import row_answer_reference as reference
+    import row_answer_reference as reference  # row_answer_reference.py
     import suite_answers
     from suite_answer_fixture import rows_answer
 
