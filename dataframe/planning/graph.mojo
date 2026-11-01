@@ -402,16 +402,15 @@ def plan_repeats_a_scan(self: QueryContext) -> Bool:
     frames holding the same buffers (plans joined carry their own copies
     of a frame they both scan, in separate slots). Without one no subtree
     can be written twice."""
-    var seen = List[Int]()
+    var canonical = plan_canonical_frames(self)
+    var seen = Dict[Int, Bool]()
     var files = List[String]()
     for node in self._nodes:
         if node.kind == SCAN_FRAME:
-            for f in seen:
-                if f == node.source_slot() or self._frames[
-                    f
-                ]._shares_buffers_with(self._frames[node.source_slot()]):
-                    return True
-            seen.append(node.source_slot())
+            var slot = canonical[node.source_slot()]
+            if slot in seen:
+                return True
+            seen[slot] = True
         elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC, SCAN_NDJSON]:
             if node.text in files:
                 return True
@@ -491,6 +490,90 @@ def plan_projection_visits(self: QueryContext) -> Tuple[List[Int], List[Int]]:
     return (order^, copy_of^)
 
 
+def plan_canonical_frames(self: QueryContext) -> List[Int]:
+    """For each frame slot, the first slot holding the same buffers.
+    Frames are compared only with earlier ones of the same shape
+    (width and height), as a hash join compares only rows of one
+    bucket: copies of one table meet once, other tables never."""
+    var canonical = List[Int](capacity=len(self._frames))
+    # The first slot of each distinct frame, by shape.
+    var heads = Dict[Int, List[Int]]()
+    for f in range(len(self._frames)):
+        ref frame = self._frames[f]
+        var shape = frame.height() * 4099 + frame.width()
+        var first = f
+        var known = heads.get(shape)
+        if known:
+            for g in known.value():
+                if self._frames[g]._shares_buffers_with(frame):
+                    first = g
+                    break
+        if first == f:
+            if known:
+                var slots = known.take()
+                slots.append(f)
+                heads[shape] = slots^
+            else:
+                heads[shape] = [f]
+        canonical.append(first)
+    return canonical^
+
+
+def _frame_scan_slots(self: QueryContext) -> List[Bool]:
+    """Which input slots only frame scans read (a file scan's slot also
+    holds its parsed schema)."""
+    var frame_only = List[Bool](length=len(self._frames), fill=True)
+    for i in range(len(self._schemas)):
+        if self._schemas[i]:
+            frame_only[i] = False
+    for node in self._nodes:
+        if _is_scan(node.kind) and node.kind != SCAN_FRAME:
+            frame_only[node.source_slot()] = False
+    return frame_only^
+
+
+def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
+    """Append `other`'s inputs to this plan's for a plan joining both,
+    and return each of its slots' new number. A frame this plan already
+    scans keeps its one slot, as Polars' arena holds one scan of a
+    frame both sides read: a CTE read twice is then one table, not one
+    copy per reader for every pass to tell apart again."""
+    var mine = _frame_scan_slots(self)
+    var theirs = _frame_scan_slots(other)
+    # The frame-only slots by shape (height and width), as
+    # `plan_canonical_frames` buckets them.
+    var heads = Dict[Int, List[Int]]()
+    for f in range(len(self._frames)):
+        if not mine[f]:
+            continue
+        ref frame = self._frames[f]
+        var shape = frame.height() * 4099 + frame.width()
+        var known = heads.get(shape)
+        if known:
+            var slots = known.take()
+            slots.append(f)
+            heads[shape] = slots^
+        else:
+            heads[shape] = [f]
+    var slot_of = List[Int](capacity=len(other._frames))
+    for f in range(len(other._frames)):
+        ref frame = other._frames[f]
+        var found = -1
+        if theirs[f]:
+            var known = heads.get(frame.height() * 4099 + frame.width())
+            if known:
+                for g in known.value():
+                    if self._frames[g]._shares_buffers_with(frame):
+                        found = g
+                        break
+        if found < 0:
+            found = len(self._frames)
+            self._frames.append(frame.copy())
+            self._schemas.append(other._schemas[f].copy())
+        slot_of.append(found)
+    return slot_of^
+
+
 def plan_subplan_classes(
     self: QueryContext,
 ) -> Tuple[List[Int], List[Int], List[Bool]]:
@@ -504,16 +587,7 @@ def plan_subplan_classes(
     # Two plans joined carry their own copies of a frame they both
     # scan, in separate slots: a scan names the first slot holding the
     # same buffers.
-    var canonical = List[Int](capacity=len(self._frames))
-    for f in range(len(self._frames)):
-        var first = f
-        for g in range(f):
-            if canonical[g] == g and self._frames[g]._shares_buffers_with(
-                self._frames[f]
-            ):
-                first = g
-                break
-        canonical.append(first)
+    var canonical = plan_canonical_frames(self)
     var classes = List[Int](capacity=len(self._nodes))
     var sizes = List[Int](capacity=len(self._nodes))
     var reducing = List[Bool](capacity=len(self._nodes))
