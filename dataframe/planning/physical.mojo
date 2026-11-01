@@ -44,6 +44,7 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_order import (
     FilterEdge,
     JoinEdge,
+    JoinTree,
     order_joins,
 )
 from dataframe.join_type import (
@@ -813,7 +814,16 @@ def plan_cost_order_joins(
         # narrows nothing can never be the largest input. A narrowing
         # relation larger than all of those is estimated instead; when
         # every relation narrows, the one of the largest table is.
+        #
+        # A relation joined to one of a smaller table may instead stream
+        # through that one's index inside a build for a third, and is
+        # then never held whole (PDS-H q3's orders through its
+        # customers, inside the build its lines probe): running it ahead
+        # would materialize every filtered row. Such a relation is
+        # estimated (`deferred`), and runs only once the estimated tree
+        # builds on it whole, the tree then chosen again with its count.
         var narrows = List[Bool](capacity=n)
+        var deferred = List[Bool](length=n, fill=False)
         var widest_plain = -1
         var largest = 0
         for r in range(n):
@@ -830,7 +840,20 @@ def plan_cost_order_joins(
                 (tables[r] >= 0 and tables[r] <= widest_plain)
                 or (widest_plain < 0 and r != largest)
             ):
-                estimates.append(-1)
+                var smaller_neighbor = False
+                for e in edges:
+                    var other = e.b if e.a == r else (e.a if e.b == r else -1)
+                    if (
+                        other >= 0
+                        and tables[other] >= 0
+                        and tables[other] < tables[r]
+                    ):
+                        smaller_neighbor = True
+                if smaller_neighbor:
+                    estimates.append(plan_relation_estimate(self, relations[r]))
+                    deferred[r] = estimates[r] >= 0
+                else:
+                    estimates.append(-1)
             else:
                 estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
@@ -867,39 +890,10 @@ def plan_cost_order_joins(
             var count = plan_spine_distinct(self, relations[pair[0]], pair[1])
             if count > 0:
                 distinct[key] = Float64(count)
-        # Relations that must run to be counted are independent
-        # pipelines: run them at once, as Polars and DuckDB run
-        # independent pipelines (`_prefetch_breakers`), not one after
-        # another on a crew their serial phases leave partly idle.
-        if len(runs) > 0:
-            var jobs = List[_SubplanJob](capacity=len(runs))
-            for r in runs:
-                jobs.append(
-                    _SubplanJob(
-                        self.copy(), relations[r], streaming, batch_size
-                    )
-                )
-            if len(jobs) == 1:
-                jobs[0].run()
-            else:
-                run_jobs(jobs)
-            for k in range(len(runs)):
-                var r = runs[k]
-                estimates[r] = jobs[k].result.height()
-                # An aggregate's result is a new table: it keeps
-                # distinct counts of its own columns, as DuckDB's
-                # estimator gives an aggregate relation's columns
-                # (`ExtractAggregationStats`).
-                if aggregated[r]:
-                    self._frames.append(
-                        jobs[k].result.copy()._with_statistics()
-                    )
-                else:
-                    self._frames.append(jobs[k].result.copy())
-                self._schemas.append(Optional[CsvSchema]())
-                self._nodes[relations[r]] = _frame_scan_node(
-                    slot=len(self._frames) - 1
-                )
+        # Relations that must run to be counted.
+        plan_run_relations(
+            self, relations, runs, aggregated, estimates, streaming, batch_size
+        )
         for r in range(n):
             var table = tables[r]
             var estimated = estimates[r]
@@ -921,16 +915,38 @@ def plan_cost_order_joins(
         if not chosen:
             continue
         var tree = chosen.take()
+        # Deferred relations the estimated tree builds on whole run now,
+        # and the tree is chosen again with their counts.
+        var swaps = plan_tree_swaps(self, tree, relations, columns, edges)
+        var later = List[Int]()
+        for e in range(n, len(tree.mask)):
+            var build = tree.left[e] if swaps[e] else tree.right[e]
+            if build < n and deferred[build]:
+                later.append(build)
+        if len(later) > 0:
+            plan_run_relations(
+                self,
+                relations,
+                later,
+                aggregated,
+                estimates,
+                streaming,
+                batch_size,
+            )
+            for r in later:
+                rows[r] = Float64(estimates[r])
+            chosen = order_joins(rows, domains, edges, distinct, compares)
+            if not chosen:
+                continue
+            tree = chosen.take()
+            swaps = plan_tree_swaps(self, tree, relations, columns, edges)
         # Build the chosen tree. `node_of` is each tree entry's plan
         # node; `renamed` maps each key a join dropped to the key it
         # matched; `joined` marks entries holding a join.
         var entries = len(tree.mask)
         var node_of = List[Int](length=entries, fill=-1)
-        var width = List[Int](length=entries, fill=0)
-        var joined = List[Bool](length=entries, fill=False)
         for r in range(n):
             node_of[r] = relations[r]
-            width[r] = len(columns[r])
         var renamed = Dict[String, String]()
         var placed = List[Bool](length=len(filters), fill=False)
         var added = List[PlanNode]()
@@ -938,27 +954,7 @@ def plan_cost_order_joins(
         for e in range(n, entries):
             var left = tree.left[e]
             var right = tree.right[e]
-            # DuckDB's build side: the side of fewer rows times
-            # columns builds, a relation 15% dearer against a join.
-            var left_cost = tree.rows[left] * Float64(width[left])
-            var right_cost = tree.rows[right] * Float64(width[right])
-            if not joined[right] and joined[left]:
-                right_cost *= 1.15
-            if not joined[left] and joined[right]:
-                left_cost *= 1.15
-            # A lone relation joined on one key whose values are a
-            # progression builds no hash table: the other side looks
-            # its rows up by position (`join.progression`), so it costs
-            # nothing to build on.
-            if plan_indexed_relation(
-                self, left, right, joined, node_of, edges, tree.mask
-            ):
-                left_cost = 0.0
-            if plan_indexed_relation(
-                self, right, left, joined, node_of, edges, tree.mask
-            ):
-                right_cost = 0.0
-            if right_cost > left_cost:
+            if swaps[e]:
                 var t = left
                 left = right
                 right = t
@@ -1017,8 +1013,6 @@ def plan_cost_order_joins(
                 current = base + len(added) - 1
                 placed[f] = True
             node_of[e] = current
-            width[e] = width[left] + width[right] - len(left_keys)
-            joined[e] = True
         var keep = List[Expr]()
         for name in output:
             var source = name
@@ -1043,6 +1037,99 @@ def plan_cost_order_joins(
         trace_path("lazy.cost_join_order")
         changed = True
     return changed
+
+
+def plan_tree_swaps(
+    self: QueryContext,
+    tree: JoinTree,
+    relations: List[Int],
+    columns: List[List[String]],
+    edges: List[JoinEdge],
+) raises -> List[Bool]:
+    """For each entry of `tree` that joins two others, whether its left
+    child builds rather than its right. DuckDB's build side: the side of
+    fewer rows times columns builds, a lone relation 15% dearer against
+    a join, and a lone relation joined on one key whose values are a
+    progression costs nothing, since it builds no hash table (the other
+    side looks its rows up by position, `join.progression`)."""
+    var n = len(relations)
+    var entries = len(tree.mask)
+    var swaps = List[Bool](length=entries, fill=False)
+    var width = List[Int](length=entries, fill=0)
+    var joined = List[Bool](length=entries, fill=False)
+    var node_of = List[Int](length=entries, fill=-1)
+    for r in range(n):
+        node_of[r] = relations[r]
+        width[r] = len(columns[r])
+    for e in range(n, entries):
+        var left = tree.left[e]
+        var right = tree.right[e]
+        var left_cost = tree.rows[left] * Float64(width[left])
+        var right_cost = tree.rows[right] * Float64(width[right])
+        if not joined[right] and joined[left]:
+            right_cost *= 1.15
+        if not joined[left] and joined[right]:
+            left_cost *= 1.15
+        if plan_indexed_relation(
+            self, left, right, joined, node_of, edges, tree.mask
+        ):
+            left_cost = 0.0
+        if plan_indexed_relation(
+            self, right, left, joined, node_of, edges, tree.mask
+        ):
+            right_cost = 0.0
+        swaps[e] = right_cost > left_cost
+        # The keys the join drops: one per key pair between its sides.
+        var keys = 0
+        for edge in edges:
+            var lmask = tree.mask[left]
+            var rmask = tree.mask[right]
+            if (lmask & (1 << edge.a) != 0 and rmask & (1 << edge.b) != 0) or (
+                lmask & (1 << edge.b) != 0 and rmask & (1 << edge.a) != 0
+            ):
+                keys += len(edge.a_keys)
+        width[e] = width[left] + width[right] - keys
+        joined[e] = True
+    return swaps^
+
+
+def plan_run_relations(
+    mut self: QueryContext,
+    relations: List[Int],
+    runs: List[Int],
+    aggregated: List[Bool],
+    mut estimates: List[Int],
+    streaming: Bool,
+    batch_size: Int,
+) raises:
+    """Run join-graph relations `runs` for their counts (`estimates`),
+    each replaced by its result so nothing runs twice. They are
+    independent pipelines: run at once, as Polars and DuckDB run
+    independent pipelines (`_prefetch_breakers`), not one after another
+    on a crew their serial phases leave partly idle."""
+    if len(runs) == 0:
+        return
+    var jobs = List[_SubplanJob](capacity=len(runs))
+    for r in runs:
+        jobs.append(
+            _SubplanJob(self.copy(), relations[r], streaming, batch_size)
+        )
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    for k in range(len(runs)):
+        var r = runs[k]
+        estimates[r] = jobs[k].result.height()
+        # An aggregate's result is a new table: it keeps distinct
+        # counts of its own columns, as DuckDB's estimator gives an
+        # aggregate relation's columns (`ExtractAggregationStats`).
+        if aggregated[r]:
+            self._frames.append(jobs[k].result.copy()._with_statistics())
+        else:
+            self._frames.append(jobs[k].result.copy())
+        self._schemas.append(Optional[CsvSchema]())
+        self._nodes[relations[r]] = _frame_scan_node(slot=len(self._frames) - 1)
 
 
 def plan_probe_largest_inputs(
