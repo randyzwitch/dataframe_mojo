@@ -15,7 +15,7 @@ the latter are candidates for aligned chunk-window evaluation.
 
 | Consumer | Input-copy status | Constraints to preserve |
 | --- | --- | --- |
-| `kernels/cast.cast_series` | Unmasked infallible numeric casts already consume chunks; remaining checked/masked/logical paths merge | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
+| `kernels/cast.cast_series` | Plain numeric/Boolean, String and eligible decimal scalar conversions consume cold host chunks; remaining logical/temporal/Binary adapters require audit | Global error-row offset, observed-row masks, strict/non-strict behavior, logical dtype |
 | `kernels/binary.math_unary` and `unary` | Numeric chunks covered by #1084 and validity predicates by #1089; decimal adapters still merge | NaN/infinity/signed zero, integer errors, null tests and masks |
 | `kernels/binary.binary` and `choose` | Ordinary numeric/Boolean operations, comparisons and fills covered by #1087/#1089/#1093/#1094; decimal and Boolean/String conditional adapters remain | Different chunk boundaries, scalar broadcasting, empty inputs, conditional observation and dtype promotion |
 | `kernels/horizontal` | Float folds and numeric extrema covered by #1087; nullable integer sum by #1089; other adapters remain | Different boundaries, row null rules, mixed widths and promotions |
@@ -30,6 +30,10 @@ adapters and measured tradeoffs are documented in
 
 Temporal binary arithmetic, retained adapters and complete validation results
 are documented in [scalar-temporal-binary-chunks.md](scalar-temporal-binary-chunks.md).
+
+Remaining decimal scalar conversions and rescaling, retained adapters and complete
+validation results are documented in
+[scalar-decimal-conversions-chunks.md](scalar-decimal-conversions-chunks.md).
 
 ## Measurement plan
 
