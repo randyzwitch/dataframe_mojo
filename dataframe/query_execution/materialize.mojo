@@ -28,6 +28,7 @@ from dataframe.planning.graph import (
     plan_ends_in_breaker,
     plan_reorder,
     plan_spine_rows,
+    plan_subplan,
     plan_subplan_classes,
 )
 from dataframe.planning.inputs import (
@@ -59,9 +60,10 @@ def plan_share_subplans(
     would compute the same frame twice: PDS-H q21 filters lineitem
     for late shipments both as a join input and under a grouped
     n_unique, TPC-DS q39 joins and groups inventory once per month
-    compared. The largest such subtree is collected on its own, with
-    every planner pass, and every node holding it becomes a scan of
-    the result. Runs after join key sets pass sideways: copies that
+    compared. The largest such subtree is collected on its own, and
+    every node holding it becomes a scan of the result. The plan
+    around it already optimized it, so only the passes after
+    optimization run on it again (join key sets, sharing, join order). Runs after join key sets pass sideways: copies that
     receive different key sets are left apart, since one shared
     result could not take either set (TPC-DS q59's weekly sales per
     store are joined with a different year's weeks on each side, and
@@ -126,8 +128,8 @@ def plan_share_subplans(
         trace_path("lazy.shared_subplan")
         var origin = plan_spine_rows(self, best)
         var aggregated = plan_aggregated(self, best)
-        var sub = self.copy()
-        plan_reorder(sub, best)
+        var sub = plan_subplan(self, best)
+        sub._optimized = True
         var frame = sub._collect(
             optimize=True, streaming=streaming, batch_size=batch_size
         )

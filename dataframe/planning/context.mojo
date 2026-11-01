@@ -94,6 +94,11 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
     # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
     var _handoff: Int
+    # Whether the logical optimizer passes already ran on these nodes:
+    # a shared subplan cut from an optimized plan is collected without
+    # optimizing it again, as Polars optimizes a cached subplan with the
+    # plan around it and DuckDB plans a materialized CTE once.
+    var _optimized: Bool
 
     var _executor: def(
         QueryContext, Int, Bool, Bool, Int
@@ -125,6 +130,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._schema_memo = None
         self._prefetched = None
         self._handoff = HANDOFF_OFF
+        self._optimized = False
         self._executor = executor
         self._collector = collector
         self._supports = supports

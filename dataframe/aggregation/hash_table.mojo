@@ -99,7 +99,7 @@ from dataframe.kernels.partition import (
     _hash_column,
     _mix,
 )
-from dataframe.series import Series
+from dataframe.series import Series, Storage
 from dataframe.kernels.hashing import RowKeys
 from dataframe.trace import trace_path
 from dataframe.text.bytes import _Bytes
@@ -2351,7 +2351,7 @@ struct AggregateSink(Movable):
 
     def sink(
         mut self,
-        keys: List[Series],
+        given: List[Series],
         inputs: List[Series],
         first: Int,
         keep: List[Bool] = List[Bool](),
@@ -2362,8 +2362,23 @@ struct AggregateSink(Movable):
         dropped rows, read in place rather than compacted away) update a
         discarded group row, so no group appears for them. `first` is the source
         row of its first."""
-        if len(keys) == 0:
+        if len(given) == 0:
             raise Error("aggregate table: no keys")
+        # A string key without codes whose views select another column's
+        # descriptors (a join's build side) is read a batch at a time
+        # through pointers: its descriptors are copied out once here, not
+        # once a batch. One with codes is read through them alone.
+        var keys = List[Series](capacity=len(given))
+        for c in range(len(given)):
+            if given[c]._data.isa[StringColumn]():
+                ref strings = given[c]._data[StringColumn]
+                if not strings._codes and strings._is_view_storage():
+                    if strings._view_storage.value()._selects():
+                        var flat = given[c].copy()
+                        flat._data = Storage(strings._flat_views())
+                        keys.append(flat^)
+                        continue
+            keys.append(given[c].copy())
         var length = len(keys[0])
         var width = len(self.addressed)
         var word_ptrs = List[Int](capacity=width)

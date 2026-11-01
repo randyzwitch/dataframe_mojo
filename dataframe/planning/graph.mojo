@@ -391,6 +391,11 @@ def plan_parents(self: QueryContext) -> List[Int]:
 
 
 def plan_columns_of(self: QueryContext, index: Int) raises -> List[String]:
+    # A remembered schema is read in place, not copied out first.
+    if self._schema_memo:
+        ref memo = self._schema_memo.value()[]
+        if index in memo:
+            return memo[index].columns()
     return self._execute(index, True).columns()
 
 
@@ -1281,6 +1286,53 @@ def plan_reorder(mut self: QueryContext, root: Int = -1):
                 except:
                     pass
         memo = moved^
+
+
+def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
+    """The plan rooted at `root` on its own: its nodes copied children
+    first and renumbered, with only the inputs they scan, as a whole
+    copy is left by `_reorder` and `_compact_scan_slots`, without
+    copying the rest of the plan first (Polars hands a cached subplan
+    its own root in the shared arena)."""
+    var order = plan_topological(self, root)
+    var position = List[Int](length=len(self._nodes), fill=-1)
+    for k in range(len(order)):
+        position[order[k]] = k
+    var slots = List[Int](length=len(self._frames), fill=-1)
+    var nodes = List[PlanNode](capacity=len(order))
+    var frames = List[DataFrame]()
+    var schemas = List[Optional[CsvSchema]]()
+    for k in range(len(order)):
+        var node = self._nodes[order[k]].copy()
+        if node.left >= 0:
+            node.left = position[node.left]
+        if node.right >= 0:
+            node.right = position[node.right]
+        if _is_scan(node.kind):
+            var old = node.source_slot()
+            if slots[old] < 0:
+                slots[old] = len(frames)
+                frames.append(self._frames[old].copy())
+                schemas.append(self._schemas[old].copy())
+            node.set_source_slot(slots[old])
+        nodes.append(node^)
+    var sub = QueryContext(
+        nodes^,
+        frames^,
+        schemas^,
+        self._executor,
+        self._collector,
+        self._supports,
+        self._estimate,
+        self._handoff_execute,
+    )
+    sub._report = self._report
+    sub._accelerator_settings = self._accelerator_settings.copy()
+    sub._handoff = self._handoff
+    for entry in self._origin_rows.items():
+        if slots[entry.key] >= 0:
+            sub._origin_rows[slots[entry.key]] = entry.value
+    return sub^
 
 
 def plan_topological(self: QueryContext, root: Int = -1) -> List[Int]:
