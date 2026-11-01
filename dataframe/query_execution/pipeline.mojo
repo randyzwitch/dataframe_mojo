@@ -12,6 +12,7 @@ from dataframe.planning.cost.aggregation import (
     select_aggregation_strategy,
     refine_string_sample,
 )
+from dataframe.kernels.distinct_statistics import distinct_estimate
 from dataframe.planning.cost.eligibility import (
     pipeline_eligibility,
     consider_inline_table,
@@ -83,6 +84,7 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -310,6 +312,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (step.how == JOIN_RIGHT and not step.coalesce)
+            or step.how == JOIN_FULL
         ):
             first = step.left
         else:
@@ -336,6 +339,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (node.how == JOIN_RIGHT and not node.coalesce)
+            or node.how == JOIN_FULL
         ):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
@@ -507,11 +511,22 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
+                # cannot be smaller is never sampled. A right side whose
+                # one key is a progression builds no hash table (the left
+                # looks its rows up by position), so it costs nothing to
+                # build on and is kept, as the planner's build side counts
+                # it (`plan_indexed_relation`) and the swaps above keep
+                # it: TPC-DS q35 hashed 100K customers to stream 1.9M
+                # demographics rows through them, where the customers
+                # look up their demographics by position.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
-                if most < 0 or most * columns < right_cost:
+                if (
+                    most < 0 or most * columns < right_cost
+                ) and not plan_progression_key(
+                    self, node.right, node.right_keys
+                ):
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # The join builds on the smaller left inside the
@@ -1678,21 +1693,26 @@ def plan_reduce_by_probe_keys(
         return None
     trace_path("stream.probe_key_reduction")
     var probed = self._execute(below, False, True, batch_size)
-    var keys = probed.select(key).unique(key)
+    # The probe's keys as they are, duplicates and all: the semi joins
+    # below hash them into their build index, which keeps each key once
+    # (DuckDB's join filters come from the built table, with no distinct
+    # pass of their own). An exact distinct of PDS-H q21's 76K probe rows
+    # ran on one thread for 3 ms.
+    var keys = probed.select(key)
     var plan = self.copy()
     plan._frames.append(probed^)
     plan._schemas.append(Optional[CsvSchema]())
     plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     plan._nodes[lowest].left = len(plan._nodes) - 1
     var key_frame = len(plan._frames)
-    # Each probe key's distinct values, and each source column's span,
-    # found once: PDS-H q21's two aggregates read one lineitem column.
+    # Each probe key's distinct values, estimated from a sample as the
+    # planner's statistics are (`distinct_estimate`, DuckDB's distinct
+    # statistics), and each source column's span, found once: PDS-H q21's
+    # two aggregates read one lineitem column.
     var distinct = List[Int]()
     for name in key:
-        distinct.append(
-            keys.height() if len(key)
-            == 1 else keys.select([name]).unique([name]).height()
-        )
+        var estimate = distinct_estimate(keys.column(name))
+        distinct.append(estimate if estimate >= 0 else keys.height())
     var spans = Dict[String, Int]()
     plan._frames.append(keys^)
     plan._schemas.append(Optional[CsvSchema]())

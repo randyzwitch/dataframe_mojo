@@ -220,3 +220,22 @@ def test_profiles_count_rows_and_single_join_builds_across_batches_without_retai
                 7,
             )
             assert_true(not query._plan._report)
+
+
+def test_plan_copies_share_tables_until_one_adds_a_slot() raises:
+    """A plan built on another shares its tables; a join that adds slots
+    to one copy leaves the other's slots and results as they were."""
+    var facts = _facts(64, 4, 8).lazy()
+    var narrowed = facts.filter(col("a") == 1)
+    assert_equal(len(narrowed._plan._frames), 1)
+    var joined = narrowed.join(
+        _dimension("a", "va", 4).lazy(), left_on=["a"], right_on=["a"]
+    )
+    assert_equal(len(joined._plan._frames), 2)
+    # The plan the join was built on keeps its one slot.
+    assert_equal(len(narrowed._plan._frames), 1)
+    assert_equal(narrowed.collect().height(), 16)
+    var result = joined.collect()
+    assert_equal(result.height(), 16)
+    assert_true("va" in result.columns())
+    assert_equal(narrowed._plan._frames[0].height(), 64)

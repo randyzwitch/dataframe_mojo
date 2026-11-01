@@ -1,7 +1,4 @@
 """Plan traversal, identity, schemas, and cardinality properties."""
-from dataframe.planning.node_builders import (
-    _frame_scan_node,
-)
 from dataframe.storage.boolean import (
     true_count,
 )
@@ -35,6 +32,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.planning.context import (
+    FrameSlots,
     QueryContext,
 )
 from dataframe.planning.model import (
@@ -393,6 +391,11 @@ def plan_parents(self: QueryContext) -> List[Int]:
 
 
 def plan_columns_of(self: QueryContext, index: Int) raises -> List[String]:
+    # A remembered schema is read in place, not copied out first.
+    if self._schema_memo:
+        ref memo = self._schema_memo.value()[]
+        if index in memo:
+            return memo[index].columns()
     return self._execute(index, True).columns()
 
 
@@ -401,16 +404,15 @@ def plan_repeats_a_scan(self: QueryContext) -> Bool:
     frames holding the same buffers (plans joined carry their own copies
     of a frame they both scan, in separate slots). Without one no subtree
     can be written twice."""
-    var seen = List[Int]()
+    var canonical = plan_canonical_frames(self)
+    var seen = Dict[Int, Bool]()
     var files = List[String]()
     for node in self._nodes:
         if node.kind == SCAN_FRAME:
-            for f in seen:
-                if f == node.source_slot() or self._frames[
-                    f
-                ]._shares_buffers_with(self._frames[node.source_slot()]):
-                    return True
-            seen.append(node.source_slot())
+            var slot = canonical[node.source_slot()]
+            if slot in seen:
+                return True
+            seen[slot] = True
         elif node.kind in [SCAN_CSV, SCAN_PARQUET, SCAN_IPC, SCAN_NDJSON]:
             if node.text in files:
                 return True
@@ -490,6 +492,90 @@ def plan_projection_visits(self: QueryContext) -> Tuple[List[Int], List[Int]]:
     return (order^, copy_of^)
 
 
+def plan_canonical_frames(self: QueryContext) -> List[Int]:
+    """For each frame slot, the first slot holding the same buffers.
+    Frames are compared only with earlier ones of the same shape
+    (width and height), as a hash join compares only rows of one
+    bucket: copies of one table meet once, other tables never."""
+    var canonical = List[Int](capacity=len(self._frames))
+    # The first slot of each distinct frame, by shape.
+    var heads = Dict[Int, List[Int]]()
+    for f in range(len(self._frames)):
+        ref frame = self._frames[f]
+        var shape = frame.height() * 4099 + frame.width()
+        var first = f
+        var known = heads.get(shape)
+        if known:
+            for g in known.value():
+                if self._frames[g]._shares_buffers_with(frame):
+                    first = g
+                    break
+        if first == f:
+            if known:
+                var slots = known.take()
+                slots.append(f)
+                heads[shape] = slots^
+            else:
+                heads[shape] = [f]
+        canonical.append(first)
+    return canonical^
+
+
+def _frame_scan_slots(self: QueryContext) -> List[Bool]:
+    """Which input slots only frame scans read (a file scan's slot also
+    holds its parsed schema)."""
+    var frame_only = List[Bool](length=len(self._frames), fill=True)
+    for i in range(len(self._schemas)):
+        if self._schemas[i]:
+            frame_only[i] = False
+    for node in self._nodes:
+        if _is_scan(node.kind) and node.kind != SCAN_FRAME:
+            frame_only[node.source_slot()] = False
+    return frame_only^
+
+
+def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
+    """Append `other`'s inputs to this plan's for a plan joining both,
+    and return each of its slots' new number. A frame this plan already
+    scans keeps its one slot, as Polars' arena holds one scan of a
+    frame both sides read: a CTE read twice is then one table, not one
+    copy per reader for every pass to tell apart again."""
+    var mine = _frame_scan_slots(self)
+    var theirs = _frame_scan_slots(other)
+    # The frame-only slots by shape (height and width), as
+    # `plan_canonical_frames` buckets them.
+    var heads = Dict[Int, List[Int]]()
+    for f in range(len(self._frames)):
+        if not mine[f]:
+            continue
+        ref frame = self._frames[f]
+        var shape = frame.height() * 4099 + frame.width()
+        var known = heads.get(shape)
+        if known:
+            var slots = known.take()
+            slots.append(f)
+            heads[shape] = slots^
+        else:
+            heads[shape] = [f]
+    var slot_of = List[Int](capacity=len(other._frames))
+    for f in range(len(other._frames)):
+        ref frame = other._frames[f]
+        var found = -1
+        if theirs[f]:
+            var known = heads.get(frame.height() * 4099 + frame.width())
+            if known:
+                for g in known.value():
+                    if self._frames[g]._shares_buffers_with(frame):
+                        found = g
+                        break
+        if found < 0:
+            found = len(self._frames)
+            self._frames.append(frame.copy())
+            self._schemas.append(other._schemas[f].copy())
+        slot_of.append(found)
+    return slot_of^
+
+
 def plan_subplan_classes(
     self: QueryContext,
 ) -> Tuple[List[Int], List[Int], List[Bool]]:
@@ -503,16 +589,7 @@ def plan_subplan_classes(
     # Two plans joined carry their own copies of a frame they both
     # scan, in separate slots: a scan names the first slot holding the
     # same buffers.
-    var canonical = List[Int](capacity=len(self._frames))
-    for f in range(len(self._frames)):
-        var first = f
-        for g in range(f):
-            if canonical[g] == g and self._frames[g]._shares_buffers_with(
-                self._frames[f]
-            ):
-                first = g
-                break
-        canonical.append(first)
+    var canonical = plan_canonical_frames(self)
     var classes = List[Int](capacity=len(self._nodes))
     var sizes = List[Int](capacity=len(self._nodes))
     var reducing = List[Bool](capacity=len(self._nodes))
@@ -1140,7 +1217,7 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for entry in self._origin_names.items():
         if slots[entry.key] >= 0:
             names[slots[entry.key]] = entry.value.copy()
-    self._frames = frames^
+    self._frames = FrameSlots(frames^)
     self._schemas = schemas^
     self._origin_rows = origins^
     self._origin_tables = tables^
@@ -1188,20 +1265,34 @@ def plan_reorder(mut self: QueryContext, root: Int = -1):
     schemas move with them, so renumbering changes no node's output.
     Unreachable nodes and their schemas are dropped."""
     var order = plan_topological(self, root)
-    var position = List[Int](length=len(self._nodes), fill=-1)
+    var count = len(self._nodes)
+    var position = List[Int](length=count, fill=-1)
     for k in range(len(order)):
         position[order[k]] = k
-    var nodes = List[PlanNode](capacity=len(order))
+    # Unreachable nodes go after the reachable ones and are dropped.
+    var placed = len(order)
+    for i in range(count):
+        if position[i] < 0:
+            position[i] = placed
+            placed += 1
+    # The nodes are permuted in place, cycle by cycle, so none is copied
+    # or rebuilt.
+    var target = position.copy()
+    for i in range(count):
+        while target[i] != i:
+            var j = target[i]
+            self._nodes.swap_elements(i, j)
+            # What stood at j now waits at i; slot j is filled.
+            target[i] = target[j]
+            target[j] = j
+    while len(self._nodes) > len(order):
+        _ = self._nodes.pop()
     for k in range(len(order)):
-        # Each node is reached once, so it is taken, not copied.
-        var node = _frame_scan_node()
-        swap(node, self._nodes[order[k]])
+        ref node = self._nodes[k]
         if node.left >= 0:
             node.left = position[node.left]
         if node.right >= 0:
             node.right = position[node.right]
-        nodes.append(node^)
-    self._nodes = nodes^
     if self._schema_memo:
         ref memo = self._schema_memo.value()[]
         var moved = Dict[Int, DataFrame]()
@@ -1212,6 +1303,59 @@ def plan_reorder(mut self: QueryContext, root: Int = -1):
                 except:
                     pass
         memo = moved^
+
+
+def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
+    """The plan rooted at `root` on its own: its nodes copied children
+    first and renumbered, with only the inputs they scan, as a whole
+    copy is left by `_reorder` and `_compact_scan_slots`, without
+    copying the rest of the plan first (Polars hands a cached subplan
+    its own root in the shared arena)."""
+    var order = plan_topological(self, root)
+    var position = List[Int](length=len(self._nodes), fill=-1)
+    for k in range(len(order)):
+        position[order[k]] = k
+    var slots = List[Int](length=len(self._frames), fill=-1)
+    var nodes = List[PlanNode](capacity=len(order))
+    var frames = List[DataFrame]()
+    var schemas = List[Optional[CsvSchema]]()
+    for k in range(len(order)):
+        var node = self._nodes[order[k]].copy()
+        if node.left >= 0:
+            node.left = position[node.left]
+        if node.right >= 0:
+            node.right = position[node.right]
+        if _is_scan(node.kind):
+            var old = node.source_slot()
+            if slots[old] < 0:
+                slots[old] = len(frames)
+                frames.append(self._frames[old].copy())
+                schemas.append(self._schemas[old].copy())
+            node.set_source_slot(slots[old])
+        nodes.append(node^)
+    var sub = QueryContext(
+        nodes^,
+        frames^,
+        schemas^,
+        self._executor,
+        self._collector,
+        self._supports,
+        self._estimate,
+        self._handoff_execute,
+    )
+    sub._report = self._report
+    sub._accelerator_settings = self._accelerator_settings.copy()
+    sub._handoff = self._handoff
+    for entry in self._origin_rows.items():
+        if slots[entry.key] >= 0:
+            sub._origin_rows[slots[entry.key]] = entry.value
+    for entry in self._origin_tables.items():
+        if slots[entry.key] >= 0:
+            sub._origin_tables[slots[entry.key]] = entry.value.copy()
+    for entry in self._origin_names.items():
+        if slots[entry.key] >= 0:
+            sub._origin_names[slots[entry.key]] = entry.value.copy()
+    return sub^
 
 
 def plan_topological(self: QueryContext, root: Int = -1) -> List[Int]:

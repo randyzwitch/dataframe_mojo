@@ -325,3 +325,80 @@ def test_ordered_group_bys_and_distinct_counts_swap_and_renamed_columns_keep_the
         assert_equal(num(suffixed.item(r, "total")), totals[key])
     _ = trace^
     _ = workers^
+
+
+def test_a_progression_right_side_is_kept_when_the_left_is_smaller() raises:
+    """A right side whose one key is a progression builds no hash table:
+    the left looks its rows up by position. The smaller-left check keeps
+    it as the build, as the planner's build side and the swaps by size
+    do: TPC-DS q35 hashed 100K customers to stream 1.9M demographics rows
+    through them, where the customers look up their demographics."""
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    comptime PEOPLE = 20_000
+    comptime PROFILES = 100_000
+    var ids = List[Int64]()
+    var profiles = List[Int64]()
+    for p in range(PEOPLE):
+        ids.append(Int64(p))
+        profiles.append(Int64((p * 7919) % PROFILES))
+    var people = DataFrame(
+        [
+            Series("person", Column[Int64](ids^)),
+            Series("profile", Column[Int64](profiles^)),
+        ]
+    )
+    var keys = List[Int64]()
+    var groups = List[Int64]()
+    var weights = List[Int64]()
+    var ages = List[Int64]()
+    var counts = List[Int64]()
+    for d in range(PROFILES):
+        keys.append(Int64(d))
+        groups.append(Int64(d % 7))
+        weights.append(Int64(d % 13))
+        ages.append(Int64(d % 90))
+        counts.append(Int64(d % 5))
+    var details = DataFrame(
+        [
+            Series("profile_id", Column[Int64](keys^)),
+            Series("grp", Column[Int64](groups^)),
+            Series("weight", Column[Int64](weights^)),
+            Series("age", Column[Int64](ages^)),
+            Series("count", Column[Int64](counts^)),
+        ]
+    )
+    var observed = StrategyTrace()
+    var actual = (
+        people.lazy()
+        .filter(col("person") % lit(Int64(20)) == lit(Int64(0)))
+        .join(details.lazy(), left_on=["profile"], right_on=["profile_id"])
+        .group_by("grp")
+        .agg(
+            [
+                col("weight").sum().alias("total"),
+                col("person").count().alias("rows"),
+            ]
+        )
+        .collect()
+    )
+    var paths = observed.text()
+    assert_true(not swapped(paths), "the join was swapped")
+    assert_true(
+        "dataframe-path: stream.smaller_left_build\n" not in paths,
+        "the join was built on the left",
+    )
+    _ = observed^
+    var totals = List[Int64](length=7, fill=0)
+    var rows = List[Int64](length=7, fill=0)
+    for p in range(0, PEOPLE, 20):
+        var d = (p * 7919) % PROFILES
+        totals[d % 7] += Int64(d % 13)
+        rows[d % 7] += 1
+    assert_equal(actual.height(), 7)
+    for r in range(actual.height()):
+        var g = Int(num(actual.item(r, "grp")))
+        assert_equal(num(actual.item(r, "total")), totals[g])
+        assert_equal(num(actual.item(r, "rows")), rows[g])
+    _ = trace^
+    _ = workers^

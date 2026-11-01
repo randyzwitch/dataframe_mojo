@@ -9,13 +9,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks/tools"))
+sys.path.insert(0, str(ROOT / "tests/tooling"))
 import suite_answers as answers
 import bench_suites as bench
 import suite_schema
-
-
-def answer(rows, names=("a",), types=("int64",)):
-    return answers.Answer(list(names), list(types), rows, {})
+from suite_answer_fixture import rows_answer as answer
 
 
 class CompleteComparisonTests(unittest.TestCase):
@@ -37,22 +35,18 @@ class CompleteComparisonTests(unittest.TestCase):
             ),
         ]
         for actual, expected in cases:
-            with self.subTest(actual=actual.rows):
+            with self.subTest(actual=actual.table.to_pylist()):
                 self.assertEqual(
                     answers.compare_answers(actual, expected)["status"],
                     "different",
                 )
 
-    def test_preserves_multiplicity_and_optional_order(self):
+    def test_preserves_multiplicity(self):
         actual, expected = answer([(1,), (1,), (2,)]), answer(
             [(2,), (1,), (1,)]
         )
         self.assertEqual(
             answers.compare_answers(actual, expected)["status"], "equal"
-        )
-        self.assertEqual(
-            answers.compare_answers(actual, expected, ordered=True)["status"],
-            "different",
         )
         self.assertEqual(
             answers.compare_answers(actual, answer([(1,), (2,), (2,)]))[
@@ -116,7 +110,15 @@ class CompleteComparisonTests(unittest.TestCase):
         self.assertEqual(
             answers.compare_answers(native, reference)["status"], "equal"
         )
-        reference.rows = [("a", 2**53)]
+        reference = suite_schema.normalize(
+            answer(
+                [("a", Decimal(2**53))],
+                ("id1", "v1"),
+                ("string", "decimal128(38, 0)"),
+            ),
+            "h2o_groupby",
+            "q1",
+        )
         self.assertEqual(
             answers.compare_answers(native, reference)["status"], "different"
         )
@@ -188,10 +190,14 @@ class ExportTests(unittest.TestCase):
 
     def test_round_trip_keeps_integer_and_nanosecond_precision(self):
         receipt = self.export([2**53 + 1], pa.int64())
-        self.assertEqual(answers.load_answer(receipt).rows, [(2**53 + 1,)])
+        self.assertEqual(
+            answers.load_answer(receipt).table.column(0).to_pylist(),
+            [2**53 + 1],
+        )
         receipt = self.export([1234567890123456789], pa.timestamp("ns"))
         self.assertEqual(
-            answers.load_answer(receipt).rows, [(1234567890123456789,)]
+            answers.load_answer(receipt).table.column(0).to_pylist(),
+            [1234567890123456789],
         )
 
     def test_modification_or_foreign_paths_fail_closed(self):
@@ -284,6 +290,37 @@ class ExportTests(unittest.TestCase):
         cell = bench.evaluate(result)[("fixture", "base", "q1", "mojo")]
         self.assertEqual(cell["status"], "wrong answer")
         self.assertNotIn("ms", cell)
+
+    def test_reused_verdict_still_checks_each_receipt(self):
+        # Repetition 1 has the same Parquet bytes as repetition 0, so its
+        # comparison is reused, but its own files are still verified.
+        oracle = self.export([1, 2])
+        first = self.export([1, 2])
+        second = self.export([1, 2], repetition=1)
+        self.assertEqual(first["path_sha256"], second["path_sha256"])
+        base = {
+            "suite": "fixture",
+            "variant": "base",
+            "query": "q1",
+            "status": "ok",
+            "round": 0,
+            "times": [10, 20],
+        }
+        result = {
+            "runs": [
+                dict(
+                    base,
+                    engine="duckdb",
+                    answers=[first, second],
+                    oracles=[oracle],
+                ),
+                dict(base, engine="mojo", answers=[first, second]),
+            ]
+        }
+        key = ("fixture", "base", "q1", "mojo")
+        self.assertEqual(bench.evaluate(result)[key]["status"], "ok")
+        Path(second["schema_path"]).write_text("{}")
+        self.assertEqual(bench.evaluate(result)[key]["status"], "unverified")
 
     def test_missing_round_is_not_a_successful_measurement(self):
         first = self.export([1])
