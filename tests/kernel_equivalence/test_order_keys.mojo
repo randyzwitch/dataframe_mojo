@@ -1044,6 +1044,21 @@ def test_row_top_k_matches_stable_full_order_prefix_for_keys_that_do_not_pack() 
                                 for row in range(min(k, n)):
                                     prefix.append(expected[row])
                                 assert_equal(actual, prefix)
+                # The float key first: once a range's heap is full, rows
+                # are passed over by that key alone, ties going on to the
+                # string.
+                if n >= 100:
+                    var swapped: List[Series] = [keys[1].copy(), keys[0].copy()]
+                    for descending in [False, True]:
+                        var order: List[Bool] = [descending, not descending]
+                        var nulls: List[Bool] = [not descending, descending]
+                        var expected = row_arg_sort(swapped, order, nulls)
+                        for k in [1, 64, 100, 3000]:
+                            var actual = row_top_rows(swapped, order, nulls, k)
+                            var prefix = List[Int]()
+                            for row in range(min(k, n)):
+                                prefix.append(expected[row])
+                            assert_equal(actual, prefix)
     with assert_raises():
         _ = row_top_rows(
             [Series("k", Column[Int64]([1]))], [False], [True], -1, threads=1
