@@ -138,3 +138,48 @@ def test_window_expressions_over_one_key_share_its_layout() raises:
         assert_equal(cell.is_null(), not seen[g])
         if seen[g]:
             assert_equal(cell.float64(), Float64(best[g]))
+
+
+def test_nested_over_on_other_keys_sees_its_whole_partition() raises:
+    """A nested over() runs inside the outer one's runs of whole
+    partitions only when it partitions by every outer key: by another key
+    (`h` cuts across `g`) it reads rows of other runs; by more keys
+    (`g`, `h`) each of its partitions lies within one of `g`'s."""
+    var source = frame()
+    var hs = List[Int64](capacity=ROWS)
+    for row in range(ROWS):
+        hs.append(Int64(row % 5))
+    var typed = DataFrame(
+        [
+            source.column("v").copy(),
+            source.column("g").copy(),
+            Series("h", Column[Int64](hs^)),
+        ]
+    )
+    var keys: List[List[String]] = [["h"], ["g", "h"]]
+    for k in range(len(keys)):
+        var filled = (
+            col("v").fill_null(col("v").max().over(keys[k])).cum_sum().over("g")
+        )
+        var result = typed.select_exprs([filled.alias("r")])
+        # The model: each partition's largest value, then running sums of
+        # the filled values within `g` in row order.
+        var parts = GROUPS * 5
+        var top = List[Int64](length=parts, fill=0)
+        var has = List[Bool](length=parts, fill=False)
+        for row in range(ROWS):
+            var p = row % 5 if k == 0 else Int(group_of(row)) * 5 + row % 5
+            if value_valid(row) and (not has[p] or value_of(row) > top[p]):
+                top[p] = value_of(row)
+                has[p] = True
+        var total = List[Int64](length=GROUPS, fill=0)
+        var numbers = result.column("r")
+        for row in range(ROWS):
+            var g = Int(group_of(row))
+            var p = row % 5 if k == 0 else g * 5 + row % 5
+            var cell = numbers.get(row)
+            if value_valid(row) or has[p]:
+                total[g] += value_of(row) if value_valid(row) else top[p]
+                assert_equal(cell.int64(), total[g])
+            else:
+                assert_true(cell.is_null())
