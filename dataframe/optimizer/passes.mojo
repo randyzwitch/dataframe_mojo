@@ -422,30 +422,34 @@ def plan_merge_filters(mut self: QueryContext):
     """Join a row-local filter directly over another into one filter
     on both predicates, lower first, so a scan below sees them all (CSV
     range filters, Parquet row-group pruning)."""
-    var changed = True
-    while changed:
-        changed = False
-        for i in range(len(self._nodes)):
+    # One walk, children before parents, as DuckDB's filter pullup and
+    # pushdown visit each operator once: a run of filters folds into its
+    # top, which absorbs the filter below it until another kind of node
+    # (or one it may not merge with) is reached. The plan is renumbered
+    # once at the end, dropping the absorbed filters.
+    var changed = False
+    for i in range(len(self._nodes)):
+        while True:
             ref node = self._nodes[i]
             if node.kind != FILTER or node.left < 0:
-                continue
+                break
             ref below = self._nodes[node.left]
             if below.kind != FILTER:
-                continue
+                break
             if not (_row_local(node.exprs) and _row_local(below.exprs)):
-                continue
+                break
             # A reader's pinned filters merge with each other, never
             # with the shared subplan's own.
             if _pinned(node) != _pinned(below):
-                continue
+                break
             var merged = below.exprs[0] & node.exprs[0]
             var child = below.left
             self._nodes[i].exprs = [merged^]
             self._nodes[i].left = child
             plan_forget_schema(self, i)
-            plan_reorder(self)
             changed = True
-            break
+    if changed:
+        plan_reorder(self)
 
 
 def plan_push_predicates(mut self: QueryContext) raises:
@@ -519,12 +523,10 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
             var child = self._nodes[i].left
             var side = plan_passes(self, i, child)
             if side >= 0:
-                # The filter moves as far as it goes before the scan
-                # restarts: a moved filter stays first in the order it
-                # was found in, and no move below a filter changes
-                # where an earlier one can go, so the moves are the
-                # ones a restart after each would make, without a
-                # scan of the plan per move.
+                # The filter moves as far as it goes, and the walk goes
+                # on with the filters after it: no move below a filter
+                # changes where an earlier one can go, and the filters
+                # a move unsticks are asked again on the next walk.
                 while side >= 0:
                     if i == root:
                         root = child
@@ -555,7 +557,7 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                     side = plan_passes(self, i, child)
                 changed = True
                 moved = True
-                break
+                continue
             # Over another row-local filter that is stuck where this one
             # could go further (a filter on an AND split into parts,
             # one on the keys of a group_by, one on its aggregates):
@@ -589,7 +591,7 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                 plan_swap_in_place(self, i, child, False)
                 changed = True
                 moved = True
-                break
+                continue
             if i < len(stuck):
                 stuck[i] = True
     if moved:

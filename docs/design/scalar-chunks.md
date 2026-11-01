@@ -35,6 +35,10 @@ Remaining decimal scalar conversions and rescaling, retained adapters and comple
 validation results are documented in
 [scalar-decimal-conversions-chunks.md](scalar-decimal-conversions-chunks.md).
 
+Conditional predicate preparation, original-window versus cache semantics and
+numeric value-owner reuse are documented in
+[scalar-conditional-predicate-chunks.md](scalar-conditional-predicate-chunks.md).
+
 ## Measurement plan
 
 Compare identical values as contiguous input, nonzero slices and uneven
@@ -698,3 +702,7 @@ measured allocation costs are documented in [scalar-literal-predicates.md](scala
 The remaining two-input math adapter is documented in
 [scalar-arctan2-chunks.md](scalar-arctan2-chunks.md), including identity-cast
 handling, retained strict conversions and cold/published-cache controls.
+
+Automaton text matching over cold String windows is documented in
+[scalar-text-automaton-chunks.md](scalar-text-automaton-chunks.md), including
+replacement output costs, retained adapters and measured timing tradeoffs.
