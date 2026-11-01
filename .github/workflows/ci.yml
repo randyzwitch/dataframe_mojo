@@ -115,6 +115,10 @@ jobs:
             shard: 3
           - area: kernels
             shard: 1
+          - area: kernels
+            shard: 2
+          - area: kernels
+            shard: 3
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -131,7 +135,7 @@ jobs:
         env:
           AREA: ${{ matrix.area }}
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.area == 'public' && 4 || matrix.area == 'kernels' && 2 || 1 }}
+          SHARDS: ${{ (matrix.area == 'public' || matrix.area == 'kernels') && 4 || 1 }}
           COMPILER: ${{ (matrix.area == 'public' || matrix.area == 'kernels') && 'scripts/ci_mojo_public.sh' || 'mojo' }}
         run: >-
           python3 scripts/ci_time.py --label "contract-$AREA" --budget-seconds 1500 --
