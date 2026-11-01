@@ -34,7 +34,7 @@ from dataframe.decimal import (
     pow10,
 )
 from dataframe.storage.string import StringColumn, StringBuilder
-from dataframe.series import Series, Storage
+from dataframe.series import Series, FixedElements, Storage
 from dataframe.text.predicates import compare_with_literal
 from dataframe.text.comparisons import compare_chunked_strings
 from dataframe.expr import (
@@ -2356,22 +2356,37 @@ def _logical[op: Int](left: BoolColumn, right: BoolColumn) raises -> Series:
     return Series("", BoolColumn(values, valid))
 
 
-def _fill_null[
-    T: Copyable & Deinitable
-](left: Column[T], right: Column[T]) raises -> Column[T]:
+def _fill_null_numeric[
+    D: DType
+](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Column[
+    Scalar[D]
+]:
+    """Fill nulls in a fixed-width column through pointers: left where it
+    is valid, else right (either broadcast when it holds one value), a
+    bitmap only when the result can hold a null."""
     var n = _length(len(left), len(right))
-    var values = List[T](capacity=n)
-    var valid = List[Bool](capacity=n)
+    var left_scalar = len(left) == 1
+    var right_scalar = len(right) == 1
+    var left_nulls = left.null_count() > 0
+    var right_nulls = right.null_count() > 0
+    if not left_nulls and not left_scalar:
+        return left.copy()
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var a = left._ptr()
+    var b = right._ptr()
+    var bits = List[UInt8](length=(n + 7) // 8 if right_nulls else 0, fill=0)
+    var packed = bits.unsafe_ptr()
     for i in range(n):
-        var a = 0 if len(left) == 1 else i
-        var b = 0 if len(right) == 1 else i
-        if left._valid(a):
-            values.append(left._get(a).copy())
-            valid.append(True)
-        else:
-            values.append(right._get(b).copy())
-            valid.append(right._valid(b))
-    return Column[T](values^, valid)
+        var x = 0 if left_scalar else i
+        var y = 0 if right_scalar else i
+        var keep = not left_nulls or left._valid(x)
+        out[unsafe_offset=i] = a[unsafe_offset=x] if keep else b[
+            unsafe_offset=y
+        ]
+        if right_nulls and (keep or right._valid(y)):
+            packed[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
+    return Column[Scalar[D]](values=values^, bits=bits^)
 
 
 def _fill_nan[
@@ -2399,18 +2414,20 @@ def validity(series: Series) -> List[Bool]:
             result.extend(Span(validity(part)))
         return result^
     var n = len(series)
-    var valid = List[Bool](capacity=n)
-    if series.dtype().is_decimal():
-        for i in range(n):
-            valid.append(series._decimal_valid(i))
-        return valid^
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if series._data.isa[Column[Scalar[D]]]():
-            ref column = series._data[Column[Scalar[D]]]
+    # Fixed-width storage, decimals' Int32/Int64/Int128 among it, is
+    # matched once, not per row; without nulls every flag is set at once.
+    comptime for k in range(len(FixedElements.Ts)):
+        comptime E: Copyable & Deinitable = FixedElements.Ts[k]
+        if series._data.isa[Column[E]]():
+            ref column = series._data[Column[E]]
+            if column.null_count() == 0:
+                return List[Bool](length=n, fill=True)
+            var flags = List[Bool](length=n, fill=False)
+            var out = flags.unsafe_ptr()
             for i in range(n):
-                valid.append(column._valid(i))
-            return valid^
+                out[unsafe_offset=i] = column._valid(i)
+            return flags^
+    var valid = List[Bool](capacity=n)
     if series._data.isa[BoolColumn]():
         for i in range(n):
             valid.append(series._data[BoolColumn]._valid(i))
@@ -3202,17 +3219,22 @@ def binary[
             if a._data.isa[Column[Int128]]():
                 return Series(
                     "",
-                    _fill_null(
+                    _fill_null_numeric(
                         a._data[Column[Int128]], b._data[Column[Int128]]
                     ),
                 ).with_dtype(a.dtype())
             if a._data.isa[Column[Int64]]():
                 return Series(
                     "",
-                    _fill_null(a._data[Column[Int64]], b._data[Column[Int64]]),
+                    _fill_null_numeric(
+                        a._data[Column[Int64]], b._data[Column[Int64]]
+                    ),
                 ).with_dtype(a.dtype())
             return Series(
-                "", _fill_null(a._data[Column[Int32]], b._data[Column[Int32]])
+                "",
+                _fill_null_numeric(
+                    a._data[Column[Int32]], b._data[Column[Int32]]
+                ),
             ).with_dtype(a.dtype())
     # decimal64 operands go to the decimal kernels at their width, which
     # widen what they do not cover; decimal32 operands are widened to 64
@@ -3239,7 +3261,7 @@ def binary[
             if left._data.isa[Column[Scalar[D]]]():
                 return Series(
                     "",
-                    _fill_null(
+                    _fill_null_numeric(
                         left._data[Column[Scalar[D]]],
                         right._data[Column[Scalar[D]]],
                     ),
@@ -3792,20 +3814,22 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
         if a._data.isa[Column[Int128]]():
             return Series(
                 "",
-                _choose(
+                _choose_numeric[DType.int128](
                     selected, a._data[Column[Int128]], b._data[Column[Int128]]
                 ),
             ).with_dtype(a.dtype())
         if a._data.isa[Column[Int64]]():
             return Series(
                 "",
-                _choose(
+                _choose_numeric[DType.int64](
                     selected, a._data[Column[Int64]], b._data[Column[Int64]]
                 ),
             ).with_dtype(a.dtype())
         return Series(
             "",
-            _choose(selected, a._data[Column[Int32]], b._data[Column[Int32]]),
+            _choose_numeric[DType.int32](
+                selected, a._data[Column[Int32]], b._data[Column[Int32]]
+            ),
         ).with_dtype(a.dtype())
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]

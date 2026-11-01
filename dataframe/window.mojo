@@ -54,7 +54,7 @@ from dataframe.text.parse import parse_float64
 from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt
-from .series import Series, sort_indices
+from .series import Series, FixedElements, sort_indices
 from dataframe.kernels.rank import rank_numeric
 from dataframe.kernels.packed_sort import packed_arg_sort
 from std.collections import Optional
@@ -492,8 +492,25 @@ def _running(
         for i in range(n):
             groups = max(groups, id_ptr[unsafe_offset=i] + 1)
     if op == CUM_COUNT:
-        var valid = validity(input)
-        var flags = valid.unsafe_ptr()
+        # Counts read the validity bitmap as stored; a column without
+        # nulls counts every row.
+        var bits = List[UInt8]()
+        var offset = 0
+        comptime for k in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[k]
+            if input._data.isa[Column[E]]():
+                ref column = input._data[Column[E]]
+                if column.null_count() > 0:
+                    bits = _copy_validity(column._bits[], column._offset, n)
+        if len(bits) == 0 and input.null_count() > 0:
+            # Booleans, strings and nested values.
+            var flags = validity(input)
+            bits = List[UInt8](length=(n + 7) // 8, fill=0)
+            for i in range(n):
+                if flags[i]:
+                    bits[i >> 3] |= UInt8(1) << UInt8(i & 7)
+        var masked = len(bits) > 0
+        var mask = bits.unsafe_ptr()
         var partition = ids.unsafe_ptr()
         var state = List[Int64](length=groups, fill=0)
         var out = List[Int64](length=n, fill=0)
@@ -502,7 +519,10 @@ def _running(
         for step in range(n):
             var i = n - 1 - step if reverse else step
             var g = partition[unsafe_offset=i] if partitioned else 0
-            if flags[unsafe_offset=i]:
+            if (
+                not masked
+                or ((mask[unsafe_offset=i >> 3] >> UInt8(i & 7)) & 1) != 0
+            ):
                 counts[unsafe_offset=g] += 1
             written[unsafe_offset=i] = counts[unsafe_offset=g]
         return Series("", Column[Int64](out^))
@@ -610,22 +630,68 @@ def _decimal_cum_sum(
     """A running sum of a decimal column within each partition, exact in
     128 bits at the input's scale, typed as SQL's SUM of it (decimal(38,
     scale) for a decimal32 or decimal64 input); nulls are skipped and stay
-    null. A running total past 38 digits raises."""
-    var wide = input._decimal128()
-    ref column = wide._data[Column[Int128]]
-    var n = len(column)
-    var valid = validity(input)
+    null. A running total past 38 digits raises. One pass over the rows
+    with each partition's total in a flat array, as `_running` does, read
+    from the stored width."""
+    var n = len(input)
+    var groups = 1
+    if len(ids) > 0:
+        var id_ptr = ids.unsafe_ptr()
+        for i in range(n):
+            groups = max(groups, id_ptr[unsafe_offset=i] + 1)
     var target = input.dtype().sum_type()
+    if input._data.isa[Column[Int32]]():
+        return _decimal_running_sum[DType.int32](
+            input._data[Column[Int32]], ids, groups, reverse, target
+        )
+    if input._data.isa[Column[Int64]]():
+        return _decimal_running_sum[DType.int64](
+            input._data[Column[Int64]], ids, groups, reverse, target
+        )
+    return _decimal_running_sum[DType.int128](
+        input._data[Column[Int128]], ids, groups, reverse, target
+    )
+
+
+def _decimal_running_sum[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    ids: List[Int],
+    groups: Int,
+    reverse: Bool,
+    target: DataType,
+) raises -> Series:
+    """`_decimal_cum_sum` over decimal storage of width D, widening each
+    value to 128 bits as it is read."""
+    var n = len(column)
     var limit = precision_limit(target.precision())
-    var values = List[Int128](length=n, fill=0)
-    for rows in partitions(n, ids):
-        var total = Int128(0)
-        for row in _ordered(rows, reverse):
-            if not valid[row]:
-                continue
-            total = check_limit(total + column._get(row), limit, target)
-            values[row] = total
-    return Series("", Column[Int128](values^, valid)).with_dtype(target)
+    var values = column.unsafe_values()
+    var partitioned = len(ids) > 0
+    var partition = ids.unsafe_ptr()
+    var nulls = column.null_count() > 0
+    var state = List[Int128](length=groups, fill=0)
+    var out = List[Int128](length=n, fill=0)
+    var running = state.unsafe_ptr()
+    var written = out.unsafe_ptr()
+    for step in range(n):
+        var i = n - 1 - step if reverse else step
+        if nulls and not column._valid(i):
+            continue
+        var g = partition[unsafe_offset=i] if partitioned else 0
+        var total = check_limit(
+            running[unsafe_offset=g] + Int128(values.unsafe_load(i)),
+            limit,
+            target,
+        )
+        running[unsafe_offset=g] = total
+        written[unsafe_offset=i] = total
+    var bits = _copy_validity(
+        column._bits[], column._offset, n
+    ) if nulls else List[UInt8]()
+    return Series("", Column[Int128](values=out^, bits=bits^)).with_dtype(
+        target
+    )
 
 
 def _as_float(input: Series) raises -> Series:
