@@ -19,7 +19,7 @@ from dataframe.text.byte_encoding import (
 )
 from std.memory import ArcPointer, Pointer
 from dataframe.storage.boolean import BoolColumn
-from dataframe.storage.column import Column, _copy_validity
+from dataframe.storage.column import Column, _append_validity, _copy_validity
 from dataframe.expr import (
     Node,
     STR_TITLECASE,
@@ -74,6 +74,10 @@ def text_function(
     if node.op == STR_NORMALIZE:
         return normalize_series(input, node.text)
     if input.is_chunked():
+        if node.op == STR_CONTAINS_ANY or node.op == STR_REPLACE_MANY:
+            var chunked = _chunk_automaton(node, input)
+            if chunked:
+                return chunked.take()
         return text_function(node, input.rechunk(), compiled)
     ref column = input._data[StringColumn]
     var op = node.op
@@ -931,4 +935,207 @@ def _titlecase(column: StringColumn) raises -> Series:
             _ = lowered^
             b += width
         _end_row(out)
+    return Series("", out^.finish())
+
+
+@no_inline
+def _automaton_chunks_host(input: Series) -> Bool:
+    """Admit readable unencoded windows; malformed metadata keeps the adapter."""
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return False
+    # Legacy _merge_storage dispatches logical nested types before examining
+    # physical strings. Keep that preparation/error path even for forged tags.
+    if input.dtype().is_nested():
+        return False
+    if len(chunks.arrays) == 0 or len(chunks.arrays) != len(chunks.ends):
+        return False
+    var total = 0
+    var piece = 0
+    for array in chunks.arrays:
+        if not array.isa[StringColumn]():
+            return False
+        ref column = array[StringColumn]
+        if column._codes:
+            return False
+        var offset = column._offset
+        var count = len(column)
+        # Physical empty arrays retain the legacy merge path. Public
+        # _from_chunks already discards empty construction pieces.
+        if offset < 0 or count <= 0 or count > Int.MAX - total:
+            return False
+        total += count
+        if chunks.ends[piece] != total:
+            return False
+        piece += 1
+        if column._is_view_storage():
+            var storage = column._view_storage_unchecked()
+            if column._bits.ptr() != storage._bits.ptr():
+                return False
+            if not storage._views.on_host() or not storage._bits.on_host():
+                return False
+            for buffer in storage._buffers[]:
+                if not buffer.on_host():
+                    return False
+            var rows = len(storage)
+            var descriptors = len(storage._views[])
+            if offset > rows or count > rows - offset:
+                return False
+            if offset > descriptors or count > descriptors - offset:
+                return False
+            var end = offset + count
+            if len(storage._bits[]) != 0 and (
+                end // 8 + Int(end % 8 != 0) > len(storage._bits[])
+            ):
+                return False
+            for row in range(offset, end):
+                var view = storage._view_unchecked(row)
+                if not view.is_inline():
+                    var index = Int(view.buffer_index)
+                    if index >= len(storage._buffers[]):
+                        return False
+                    var available = len(storage._buffers[][index])
+                    var length = Int(view.length)
+                    if (
+                        length > available
+                        or Int(view.offset) > available - length
+                    ):
+                        return False
+        else:
+            if (
+                not column._bytes.on_host()
+                or not column._offsets.on_host()
+                or not column._bits.on_host()
+            ):
+                return False
+            var entries = len(column._offsets[])
+            if entries == 0 or offset > entries - 1:
+                return False
+            if count > entries - 1 - offset:
+                return False
+            var end = offset + count
+            if len(column._bits[]) != 0 and (
+                end // 8 + Int(end % 8 != 0) > len(column._bits[])
+            ):
+                return False
+            var available = Int64(len(column._bytes[]))
+            var previous = column._offsets[][offset]
+            if previous < 0 or previous > available:
+                return False
+            for row in range(offset + 1, end + 1):
+                var next = column._offsets[][row]
+                if next < previous or next > available:
+                    return False
+                previous = next
+    return True
+
+
+@no_inline
+def _chunk_automaton(node: Node, input: Series) raises -> Optional[Series]:
+    """One matcher and output, reading owned cold host windows in row order.
+
+    Flat and published-cache inputs keep their existing adapter and kernel.
+    The full preflight precedes literal decoding and all row observations,
+    preserving legacy preparation errors for unsupported private storage.
+    """
+    if not _automaton_chunks_host(input):
+        return None
+    var automaton = _Automaton(
+        decode_values(node.text),
+        (node.integer & 1) != 0,
+        (node.integer & 2) != 0,
+    )
+    var replacements = List[String]()
+    if node.op == STR_REPLACE_MANY:
+        replacements = decode_values(node.text2)
+    var spans = List[_Bytes](capacity=len(input._chunked.value()[].arrays))
+    var bytes = 0
+    for array in input._chunked.value()[].arrays:
+        ref column = array[StringColumn]
+        spans.append(_Bytes(column))
+        if node.op == STR_REPLACE_MANY:
+            bytes += column._value_bytes()
+    if node.op == STR_CONTAINS_ANY:
+        return _contains_any_chunks(spans, automaton, len(input))
+    return _replace_many_chunks(
+        spans, automaton, replacements, len(input), bytes
+    )
+
+
+@no_inline
+def _contains_any_chunks(
+    spans: List[_Bytes], automaton: _Automaton, n: Int
+) raises -> Series:
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](capacity=(n + 7) // 8)
+    var base = 0
+    for rows in spans:
+        ref column = rows.column
+        var count = len(column)
+        var nulls = column.null_count() > 0
+        _append_validity(valid, base, column._bits[], column._offset, count)
+        for i in range(count):
+            if nulls and not column._valid(i):
+                continue
+            if automaton.find(rows.get(i), 0).start >= 0:
+                var row = base + i
+                values[row // 8] |= UInt8(1) << UInt8(row % 8)
+        base += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@no_inline
+def _replace_many_chunks(
+    spans: List[_Bytes],
+    automaton: _Automaton,
+    replacements: List[String],
+    n: Int,
+    bytes: Int,
+) raises -> Series:
+    var out = StringBuilder(n, bytes)
+    for rows in spans:
+        ref column = rows.column
+        var nulls = column.null_count() > 0
+        for i in range(len(column)):
+            if nulls and not column._valid(i):
+                out.append_null()
+                continue
+            var row = rows.get(i)
+            var size = len(row)
+            var data = row.unsafe_ptr()
+            var copied = 0
+            var at = 0
+            var last_end = -1
+            while at <= size:
+                var found = automaton.find(row, at)
+                if found.start < 0:
+                    break
+                var empty = found.end == found.start
+                if not (empty and found.start == last_end):
+                    out._bytes.extend(
+                        _Row(
+                            unsafe_ptr=data.unsafe_offset(copied),
+                            length=found.start - copied,
+                        )
+                    )
+                    var replacement = replacements[
+                        0 if len(replacements) == 1 else found.pattern
+                    ].as_bytes()
+                    out._bytes.extend(replacement)
+                    copied = found.end
+                    last_end = found.end
+                if not empty:
+                    at = found.end
+                elif found.start >= size:
+                    break
+                else:
+                    at = found.start + _codepoint_width(
+                        data[unsafe_offset=found.start]
+                    )
+            out._bytes.extend(
+                _Row(
+                    unsafe_ptr=data.unsafe_offset(copied), length=size - copied
+                )
+            )
+            _end_row(out)
     return Series("", out^.finish())
