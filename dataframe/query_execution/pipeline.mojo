@@ -729,7 +729,7 @@ def plan_stream_execute(
     if consider_inline_table(
         eligibility, len(keys), len(expressions), ordered, distinct
     ):
-        var empty = self._frames[self._nodes[cursor].source_slot()].clear()
+        var empty = self._frames.empty(self._nodes[cursor].source_slot())
         var empty_joins = ArcPointer(joins.copy())
         var empty_indexes = ArcPointer(indexes.copy())
         for operation in operations:

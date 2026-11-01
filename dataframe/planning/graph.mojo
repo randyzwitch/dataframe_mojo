@@ -570,7 +570,7 @@ def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
                         break
         if found < 0:
             found = len(self._frames)
-            self._frames.append(frame.copy())
+            self._frames.append_slot(other._frames, f)
             self._schemas.append(other._schemas[f].copy())
         slot_of.append(found)
     return slot_of^
@@ -1187,7 +1187,7 @@ def plan_measurable(self: QueryContext, index: Int) -> Bool:
 def plan_compact_scan_slots(mut self: QueryContext):
     """Release scan inputs/materializations no reachable node owns."""
     var slots = List[Int](length=len(self._frames), fill=-1)
-    var frames = List[DataFrame]()
+    var frames = FrameSlots(List[DataFrame]())
     var schemas = List[Optional[CsvSchema]]()
     for i in range(len(self._nodes)):
         if not _is_scan(self._nodes[i].kind):
@@ -1195,14 +1195,14 @@ def plan_compact_scan_slots(mut self: QueryContext):
         var old = self._nodes[i].source_slot()
         if slots[old] < 0:
             slots[old] = len(frames)
-            frames.append(self._frames[old].copy())
+            frames.append_slot(self._frames, old)
             schemas.append(self._schemas[old].copy())
         self._nodes[i].set_source_slot(slots[old])
     var origins = Dict[Int, Int]()
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             origins[slots[entry.key]] = entry.value
-    self._frames = FrameSlots(frames^)
+    self._frames = frames^
     self._schemas = schemas^
     self._origin_rows = origins^
 

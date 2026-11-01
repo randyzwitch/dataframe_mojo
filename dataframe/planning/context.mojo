@@ -28,6 +28,27 @@ from std.memory import (
 )
 
 
+struct _Tables(Copyable, Movable):
+    """The tables of `FrameSlots`, and each one's schema as a zero-row
+    frame (None if one could not be made)."""
+
+    var frames: List[DataFrame]
+    var empties: List[Optional[DataFrame]]
+
+    def __init__(out self, var frames: List[DataFrame]):
+        self.empties = List[Optional[DataFrame]](capacity=len(frames))
+        for frame in frames:
+            self.empties.append(_empty_of(frame))
+        self.frames = frames^
+
+
+def _empty_of(frame: DataFrame) -> Optional[DataFrame]:
+    try:
+        return frame.clear()
+    except:
+        return None
+
+
 struct FrameSlots(Copyable, Movable, Sized):
     """A plan's in-memory tables, by slot, shared by every copy of the plan.
 
@@ -38,30 +59,61 @@ struct FrameSlots(Copyable, Movable, Sized):
     each job: a copy that copied every table's columns made TPC-DS q14's
     57 tables (1,555 columns) cost 214 us of a 281 us plan copy. Polars'
     plans and DuckDB's relations hold their tables by shared pointer.
+
+    Each slot also keeps its table's schema as a zero-row frame, made once
+    when the slot is added, as Polars' `DataFrameScan` holds its frame's
+    schema: planner passes derive schemas by running the plan on no rows,
+    and a scan copying and clearing a wide table each time made TPC-DS q14
+    spend 2.9 ms a run in 269 such scans (11 us each).
     """
 
-    var _shared: ArcPointer[List[DataFrame]]
+    var _shared: ArcPointer[_Tables]
 
     def __init__(out self, var frames: List[DataFrame]):
-        self._shared = ArcPointer(frames^)
+        self._shared = ArcPointer(_Tables(frames^))
 
     def __len__(self) -> Int:
-        return len(self._shared[])
+        return len(self._shared[].frames)
 
     def __getitem__(self, slot: Int) -> ref[MutAnyOrigin] DataFrame:
         """The table in `slot`, to read: no plan changes a table in place."""
-        debug_assert(0 <= slot < len(self._shared[]), "frame slot out of range")
+        debug_assert(
+            0 <= slot < len(self._shared[].frames), "frame slot out of range"
+        )
         return Pointer[DataFrame, MutAnyOrigin](
             unsafe_from_address=Int(
-                self._shared[].unsafe_ptr().unsafe_offset(slot)
+                self._shared[].frames.unsafe_ptr().unsafe_offset(slot)
             )
         )[]
 
+    def empty(self, slot: Int) raises -> DataFrame:
+        """The table in `slot` with no rows: its names, types and metadata."""
+        debug_assert(
+            0 <= slot < len(self._shared[].empties), "frame slot out of range"
+        )
+        ref known = self._shared[].empties[slot]
+        if known:
+            return known.value().copy()
+        return self[slot].clear()
+
     def append(mut self, var frame: DataFrame):
         """Add a slot, copying the list first if another plan shares it."""
+        var empty = _empty_of(frame)
+        self._own()
+        self._shared[].frames.append(frame^)
+        self._shared[].empties.append(empty^)
+
+    def append_slot(mut self, other: FrameSlots, slot: Int):
+        """Add `other`'s table in `slot`, with the schema it already holds."""
+        var frame = other[slot].copy()
+        var empty = other._shared[].empties[slot].copy()
+        self._own()
+        self._shared[].frames.append(frame^)
+        self._shared[].empties.append(empty^)
+
+    def _own(mut self):
         if self._shared.count() > 1:
             self._shared = ArcPointer(self._shared[].copy())
-        self._shared[].append(frame^)
 
 
 struct QueryContext(Copyable, Deinitable, Movable):
