@@ -875,21 +875,36 @@ def _conditional_original_host(
 
 @fieldwise_init
 struct _ConditionalFlags(Copyable, Sized):
-    # stream_mode is independent of chunking: original flat whole windows
-    # require bounded tail reads too, unlike normal final flat predicates.
-    var owner: Series
+    # Flat columns own their two bitmap buffers directly. Only streamed
+    # inputs retain a Series owner for every original physical array.
+    var column: BoolColumn
+    var actual_length: Int
+    var owner: Optional[Series]
     var stream_mode: Bool
 
     def __len__(self) -> Int:
-        return len(self.owner)
+        return self.actual_length
 
 
 def _conditional_flat_flags(input: Series) raises -> _ConditionalFlags:
-    # Preserve the legacy physical extraction point before branch evaluation
-    # even when later helpers have no rows. Do not use for admitted chunks.
+    # Preserve extraction before branch evaluation, including zero rows.
+    # Capture the adapted column length: a ready cache can differ from the
+    # original arrays, and NORMAL preparation must use that actual cache.
     var column = input._data[BoolColumn].copy()
-    _ = column^
-    return _ConditionalFlags(input.copy(), False)
+    var actual_length = len(column)
+    return _ConditionalFlags(column^, actual_length, None, False)
+
+
+def _conditional_stream_flags(input: Series) -> _ConditionalFlags:
+    # Admission has checked all arrays. Read the original first array,
+    # never a separate representative variant or a published merge.
+    var column = (
+        input._chunked.value()[]
+        .arrays[0][BoolColumn]
+        .copy() if input.is_chunked() else input._data[BoolColumn]
+        .copy()
+    )
+    return _ConditionalFlags(column^, len(input), Optional(input.copy()), True)
 
 
 @no_inline
@@ -900,7 +915,7 @@ def _prepare_conditional_flags(
         if input._chunked.value()[].cache[].state.load() == 2:
             return _conditional_flat_flags(input.rechunk())
         if _conditional_original_host(input, required, True):
-            return _ConditionalFlags(input.copy(), True)
+            return _conditional_stream_flags(input)
     var legacy = input.rechunk() if input.is_chunked() else input.copy()
     return _conditional_flat_flags(legacy)
 
@@ -913,7 +928,7 @@ def _original_conditional_flags(
     # originals too. A decline must run the original _rows evaluation.
     if not _conditional_original_host(input, height, False):
         return None
-    return Optional(_ConditionalFlags(input.copy(), True))
+    return Optional(_conditional_stream_flags(input))
 
 
 @no_inline
@@ -925,7 +940,7 @@ def _evaluated_whole_conditional_flags(
     if input.is_chunked():
         if input._chunked.value()[].cache[].state.load() != 2:
             if _conditional_original_host(input, height, False):
-                return Optional(_ConditionalFlags(input.copy(), True))
+                return Optional(_conditional_stream_flags(input))
     var legacy = input.rechunk() if input.is_chunked() else input.copy()
     if len(legacy) != height or not legacy._data.isa[BoolColumn]():
         return None
@@ -940,51 +955,142 @@ def _selection_masks(
     mut other_mask: List[Bool],
 ):
     if not flags.stream_mode:
-        _selection_masks(
-            flags.owner._data[BoolColumn],
-            active,
-            selected,
-            then_mask,
-            other_mask,
-        )
+        _selection_masks(flags.column, active, selected, then_mask, other_mask)
         return
-    var source = _BoolInput(flags.owner)
+    var source = _BoolInput(flags.owner.value())
     var size = len(selected)
+    var out_selected = selected.unsafe_ptr()
+    var out_then = then_mask.unsafe_ptr()
+    var out_other = other_mask.unsafe_ptr()
+    var observed = active.unsafe_ptr()
     var any_active = len(active) == 0
+    if source.scalar:
+        var take = source.column._valid(0) and source.column._get(0)
+        for row in range(size):
+            var seen = any_active or observed[unsafe_offset=row]
+            out_selected[unsafe_offset=row] = take
+            out_then[unsafe_offset=row] = seen and take
+            out_other[unsafe_offset=row] = seen and not take
+        return
     var row = 0
     while row < size:
-        var count = min(source.available(size - row), 8)
-        var truth = source.values(count) & source.valid(count)
-        for lane in range(count):
-            var take = (truth >> UInt8(lane)) & 1 != 0
-            var seen = any_active or active[row + lane]
-            selected[row + lane] = take
-            then_mask[row + lane] = seen and take
-            other_mask[row + lane] = seen and not take
-        source.advance(count)
-        row += count
+        var span = source.available(size - row)
+        var data = source.column._data[].unsafe_ptr()
+        var valid = source.column._bits[].unsafe_ptr()
+        var nulls = len(source.column._bits[]) > 0
+        var bit = source.column._offset + source.row
+        var relative = 0
+        while relative < span:
+            var at = bit + relative
+            var byte = data[unsafe_offset=at >> 3]
+            if nulls:
+                byte &= valid[unsafe_offset=at >> 3]
+            var word = Int(byte) >> (at & 7)
+            var count = min(8 - (at & 7), span - relative)
+            for lane in range(count):
+                var out_row = row + relative + lane
+                var take = (word >> lane) & 1 == 1
+                var seen = any_active or observed[unsafe_offset=out_row]
+                out_selected[unsafe_offset=out_row] = take
+                out_then[unsafe_offset=out_row] = seen and take
+                out_other[unsafe_offset=out_row] = seen and not take
+            relative += count
+        source.advance(span)
+        row += span
+
+
+@always_inline
+def _conditional_truth_byte(
+    data: Pointer[UInt8, _],
+    data_bytes: Int,
+    valid: Pointer[UInt8, _],
+    valid_bytes: Int,
+    bit: Int,
+    scalar: Bool,
+    scalar_truth: UInt8,
+) -> UInt8:
+    if scalar:
+        return scalar_truth
+    var truth = _byte_from(data, data_bytes, bit)
+    if valid_bytes > 0:
+        truth &= _byte_from(valid, valid_bytes, bit)
+    return truth
 
 
 def _and_validity(
     flags: _ConditionalFlags, bits: _BufferData[UInt8], base: Int, size: Int
 ) -> List[UInt8]:
     if not flags.stream_mode:
-        return _and_validity(flags.owner._data[BoolColumn], bits, base, size)
-    # Retain eager host-access side effects even when size==0. Predicate
-    # storage was already admitted host-readable; own validity may differ.
+        return _and_validity(flags.column, bits, base, size)
+    # Keep eager own-buffer host access before any zero-row shortcut.
     var own = bits.unsafe_ptr()
     var own_bytes = len(bits)
     var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
-    var source = _BoolInput(flags.owner)
+    var packed = out.unsafe_ptr()
+    var source = _BoolInput(flags.owner.value())
+    var scalar_truth = UInt8(0)
+    if source.scalar and size > 0:
+        if source.column._valid(0) and source.column._get(0):
+            scalar_truth = 255
     var row = 0
     while row < size:
-        var count = min(source.available(size - row), 8 - (base + row) % 8)
-        var truth = source.values(count) & source.valid(count)
-        if own_bytes > 0:
-            truth &= _byte_from(own, own_bytes, base + row)
-        _write_bitmap_byte(out, base + row, truth, count)
-        source.advance(count)
-        row += count
+        var span = source.available(size - row)
+        var data = source.column._data[].unsafe_ptr()
+        var data_bytes = len(source.column._data[])
+        var valid = source.column._bits[].unsafe_ptr()
+        var valid_bytes = len(source.column._bits[])
+        var bit = source.column._offset + source.row
+        var relative = 0
+        # A prior physical window may have written the prefix of this
+        # destination byte. Complete only our nonoverlapping head bits.
+        var head = min((8 - (base + row) % 8) % 8, span)
+        if head > 0:
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= _byte_from(own, own_bytes, base + row)
+            _write_bitmap_byte(out, base + row, truth, head)
+            relative = head
+        # Complete destination bytes are fresh, not shared with a prior
+        # window. Direct stores avoid a loop-carried masked OR.
+        while relative + 8 <= span:
+            var out_bit = base + row + relative
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit + relative,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= own[unsafe_offset=out_bit >> 3]
+            packed[unsafe_offset=out_bit >> 3] = truth
+            relative += 8
+        if relative < span:
+            var out_bit = base + row + relative
+            var truth = _conditional_truth_byte(
+                data,
+                data_bytes,
+                valid,
+                valid_bytes,
+                bit + relative,
+                source.scalar,
+                scalar_truth,
+            )
+            if own_bytes > 0:
+                truth &= _byte_from(own, own_bytes, out_bit)
+            _write_bitmap_byte(out, out_bit, truth, span - relative)
+        source.advance(span)
+        row += span
     return out^
 
 
