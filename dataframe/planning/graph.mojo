@@ -1,7 +1,4 @@
 """Plan traversal, identity, schemas, and cardinality properties."""
-from dataframe.planning.node_builders import (
-    _frame_scan_node,
-)
 from dataframe.storage.boolean import (
     true_count,
 )
@@ -1245,20 +1242,34 @@ def plan_reorder(mut self: QueryContext, root: Int = -1):
     schemas move with them, so renumbering changes no node's output.
     Unreachable nodes and their schemas are dropped."""
     var order = plan_topological(self, root)
-    var position = List[Int](length=len(self._nodes), fill=-1)
+    var count = len(self._nodes)
+    var position = List[Int](length=count, fill=-1)
     for k in range(len(order)):
         position[order[k]] = k
-    var nodes = List[PlanNode](capacity=len(order))
+    # Unreachable nodes go after the reachable ones and are dropped.
+    var placed = len(order)
+    for i in range(count):
+        if position[i] < 0:
+            position[i] = placed
+            placed += 1
+    # The nodes are permuted in place, cycle by cycle, so none is copied
+    # or rebuilt.
+    var target = position.copy()
+    for i in range(count):
+        while target[i] != i:
+            var j = target[i]
+            self._nodes.swap_elements(i, j)
+            # What stood at j now waits at i; slot j is filled.
+            target[i] = target[j]
+            target[j] = j
+    while len(self._nodes) > len(order):
+        _ = self._nodes.pop()
     for k in range(len(order)):
-        # Each node is reached once, so it is taken, not copied.
-        var node = _frame_scan_node()
-        swap(node, self._nodes[order[k]])
+        ref node = self._nodes[k]
         if node.left >= 0:
             node.left = position[node.left]
         if node.right >= 0:
             node.right = position[node.right]
-        nodes.append(node^)
-    self._nodes = nodes^
     if self._schema_memo:
         ref memo = self._schema_memo.value()[]
         var moved = Dict[Int, DataFrame]()
