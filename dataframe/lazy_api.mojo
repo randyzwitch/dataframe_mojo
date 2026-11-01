@@ -807,8 +807,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var left_root = len(result._plan._nodes) - 1
         var shift = len(result._plan._nodes)
         var frame_shift = len(result._plan._frames)
-        for frame in other._plan._frames:
-            result._plan._frames.append(frame.copy())
+        for f in range(len(other._plan._frames)):
+            result._plan._frames.append(other._plan._frames[f].copy())
         for schema in other._plan._schemas:
             result._plan._schemas.append(schema.copy())
         for node in other._plan._nodes:
@@ -1535,8 +1535,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var left_root = len(result._plan._nodes) - 1
         var shift = len(result._plan._nodes)
         var frame_shift = len(result._plan._frames)
-        for frame in other._plan._frames:
-            result._plan._frames.append(frame.copy())
+        for f in range(len(other._plan._frames)):
+            result._plan._frames.append(other._plan._frames[f].copy())
         for schema in other._plan._schemas:
             result._plan._schemas.append(schema.copy())
         for node in other._plan._nodes:
