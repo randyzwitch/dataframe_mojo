@@ -100,7 +100,12 @@ from .series import Series
 from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
-from .selected_expressions import SelectedPlan, evaluate_selected, selected_plan
+from .selected_expressions import (
+    SelectedPlan,
+    evaluate_masked,
+    evaluate_selected,
+    selected_plan,
+)
 
 # Step kinds, the row-local plan nodes a pipeline runs between its source
 # and its sink. Numbered here so this module does not import the planner.
@@ -960,6 +965,48 @@ struct Morsel(Movable):
         self.compact = List[Bool](length=self.frame.width(), fill=True)
         self.selected = False
 
+    def _evaluate_selected(
+        self,
+        plan: SelectedPlan,
+        scatter: Bool,
+        name: String,
+        mut masked_rows: Optional[List[Int]],
+    ) -> Optional[Series]:
+        """`evaluate_selected` over this morsel's selection: its rows, or
+        the rows its mask keeps, listed once into `masked_rows`. A mask
+        whose values are placed at their rows (`scatter`) is computed at
+        every row instead (`evaluate_masked`), as `_with_columns_in_place`
+        computes it, and its rows are listed only when that returns
+        None."""
+        var n = self.frame.height()
+        if self.by_rows:
+            return evaluate_selected(
+                plan,
+                self.frame._columns,
+                self.compact,
+                self.rows,
+                n,
+                scatter,
+                name,
+            )
+        if scatter:
+            var whole = evaluate_masked(
+                plan, self.frame._columns, self.compact, self.mask, n, name
+            )
+            if whole:
+                return whole^
+        if not masked_rows:
+            masked_rows = _mask_rows(self.mask, self.count)
+        return evaluate_selected(
+            plan,
+            self.frame._columns,
+            self.compact,
+            masked_rows.value(),
+            n,
+            scatter,
+            name,
+        )
+
     def _select_selected(mut self, exprs: List[Expr]) raises -> Bool:
         """A projection of columns and of arithmetic and casts over them
         that keeps the selection: a column is picked as it is, as a bare
@@ -984,9 +1031,7 @@ struct Morsel(Movable):
             plans.append(plan^)
         var n = self.frame.height()
         var scatter = 2 * self.count >= n
-        var masked_rows = List[Int]()
-        if not self.by_rows:
-            masked_rows = _mask_rows(self.mask, self.count)
+        var masked_rows = Optional[List[Int]]()
         var columns = List[Series](capacity=len(exprs))
         var compact = List[Bool](capacity=len(exprs))
         for k in range(len(exprs)):
@@ -995,27 +1040,9 @@ struct Morsel(Movable):
                 columns.append(self.frame._columns[i].renamed(exprs[k]._name))
                 compact.append(self.compact[i])
                 continue
-            var result: Optional[Series]
-            if self.by_rows:
-                result = evaluate_selected(
-                    plans[k].value(),
-                    self.frame._columns,
-                    self.compact,
-                    self.rows,
-                    n,
-                    scatter,
-                    exprs[k]._name,
-                )
-            else:
-                result = evaluate_selected(
-                    plans[k].value(),
-                    self.frame._columns,
-                    self.compact,
-                    masked_rows,
-                    n,
-                    scatter,
-                    exprs[k]._name,
-                )
+            var result = self._evaluate_selected(
+                plans[k].value(), scatter, exprs[k]._name, masked_rows
+            )
             if not result:
                 return False
             columns.append(result.take())
@@ -1079,31 +1106,11 @@ struct Morsel(Movable):
         var n = self.frame.height()
         var scatter = 2 * self.count >= n
         var results = List[Series](capacity=len(exprs))
-        var masked_rows = List[Int]()
-        if not self.by_rows:
-            masked_rows = _mask_rows(self.mask, self.count)
+        var masked_rows = Optional[List[Int]]()
         for k in range(len(plans)):
-            var result: Optional[Series]
-            if self.by_rows:
-                result = evaluate_selected(
-                    plans[k],
-                    self.frame._columns,
-                    self.compact,
-                    self.rows,
-                    n,
-                    scatter,
-                    exprs[k]._name,
-                )
-            else:
-                result = evaluate_selected(
-                    plans[k],
-                    self.frame._columns,
-                    self.compact,
-                    masked_rows,
-                    n,
-                    scatter,
-                    exprs[k]._name,
-                )
+            var result = self._evaluate_selected(
+                plans[k], scatter, exprs[k]._name, masked_rows
+            )
             if not result:
                 return False
             results.append(result.take())
@@ -3327,35 +3334,14 @@ def _selected_table_rows(
     if not any_computed:
         return None
     var computed = List[Optional[Series]](capacity=len(plans))
-    var masked_rows = List[Int]()
-    if not morsel.by_rows:
-        masked_rows = _mask_rows(morsel.mask, morsel.count)
-    var n = morsel.frame.height()
+    var masked_rows = Optional[List[Int]]()
     for k in range(len(plans)):
         if not plans[k]:
             computed.append(None)
             continue
-        var result: Optional[Series]
-        if morsel.by_rows:
-            result = evaluate_selected(
-                plans[k].value(),
-                morsel.frame._columns,
-                morsel.compact,
-                morsel.rows,
-                n,
-                False,
-                "__input",
-            )
-        else:
-            result = evaluate_selected(
-                plans[k].value(),
-                morsel.frame._columns,
-                morsel.compact,
-                masked_rows,
-                n,
-                False,
-                "__input",
-            )
+        var result = morsel._evaluate_selected(
+            plans[k].value(), False, "__input", masked_rows
+        )
         if not result:
             return None
         computed.append(result^)
@@ -3437,35 +3423,15 @@ def _in_place_table_rows(
             computed.append(len(inputs))
             sources.append(subtree(expression, node.left))
             inputs.append(key_columns[0].copy())
-    var masked_rows = List[Int]()
-    if not morsel.by_rows and len(computed) > 0:
-        masked_rows = _mask_rows(morsel.mask, morsel.count)
+    var masked_rows = Optional[List[Int]]()
     for c in range(len(computed)):
         # Arithmetic and casts are computed for the kept rows alone, each
         # value at its row (`selected_expressions`).
         var plan = selected_plan(sources[c], morsel.frame._columns)
         if plan:
-            var placed: Optional[Series]
-            if morsel.by_rows:
-                placed = evaluate_selected(
-                    plan.value(),
-                    morsel.frame._columns,
-                    morsel.compact,
-                    morsel.rows,
-                    n,
-                    True,
-                    "__input",
-                )
-            else:
-                placed = evaluate_selected(
-                    plan.value(),
-                    morsel.frame._columns,
-                    morsel.compact,
-                    masked_rows,
-                    n,
-                    True,
-                    "__input",
-                )
+            var placed = morsel._evaluate_selected(
+                plan.value(), True, "__input", masked_rows
+            )
             if placed:
                 inputs[computed[c]] = placed.take()
                 continue
