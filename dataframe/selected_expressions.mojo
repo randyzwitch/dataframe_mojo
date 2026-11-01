@@ -35,16 +35,20 @@ from dataframe.kernels.binary import (
     checked_add,
 )
 from dataframe.series import Series
+from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 
 # Selected rows per vector, DuckDB's STANDARD_VECTOR_SIZE.
 comptime _VECTOR = 2048
 
 # How a node's values are held while computing: Int64 for integers,
-# Int128 for decimals (unscaled), Float64 for floats.
+# Int128 for decimals (unscaled), Float64 for floats, and Int64 for
+# decimals when every decimal of the plan has at most 18 digits
+# (`_narrow_decimals`).
 comptime _LANE_INT = 0
 comptime _LANE_DECIMAL = 1
 comptime _LANE_FLOAT = 2
+comptime _LANE_DECIMAL64 = 3
 
 comptime _NODE_UNUSED = 0
 comptime _NODE_COLUMN = 1
@@ -259,7 +263,36 @@ def selected_plan(
         needed[left] = True
         if right >= 0:
             needed[right] = True
+    _narrow_decimals(plan, columns)
     return plan^
+
+
+def _narrow_decimals(mut plan: SelectedPlan, columns: List[Series]):
+    """Every decimal node at 64 bits when each has at most 18 digits, as
+    `_decimal_dense64` computes them: such values multiply, align and add
+    exactly in 128-bit arithmetic, and a result checked against its
+    precision fits 64 bits again. Left at 128 bits when any decimal is
+    wider, a decimal column is stored at 128 bits, or a constant does not
+    fit."""
+    for i in range(len(plan.kinds)):
+        if plan.kinds[i] == _NODE_UNUSED or plan.lanes[i] != _LANE_DECIMAL:
+            continue
+        if plan.bound.dtypes[i].precision() > 18:
+            return
+        if plan.kinds[i] == _NODE_COLUMN and columns[
+            plan.bound.sources[i]
+        ]._data.isa[Column[Int128]]():
+            return
+        if plan.kinds[i] == _NODE_CONSTANT:
+            var value = plan.decimals[i]
+            if value > Int128(Int64.MAX) or value < -Int128(Int64.MAX):
+                return
+    for i in range(len(plan.kinds)):
+        if plan.kinds[i] == _NODE_UNUSED or plan.lanes[i] != _LANE_DECIMAL:
+            continue
+        plan.lanes[i] = _LANE_DECIMAL64
+        if plan.kinds[i] == _NODE_CONSTANT:
+            plan.ints[i] = Int64(plan.decimals[i])
 
 
 struct _Vectors(Movable):
@@ -285,7 +318,9 @@ struct _Vectors(Movable):
             var lane = plan.lanes[i]
             self.ints.append(
                 List[Int64](
-                    length=_VECTOR if used and lane == _LANE_INT else 0, fill=0
+                    length=_VECTOR if used
+                    and (lane == _LANE_INT or lane == _LANE_DECIMAL64) else 0,
+                    fill=0,
                 )
             )
             self.decimals.append(
@@ -305,7 +340,7 @@ struct _Vectors(Movable):
                 flag = UInt8(1) if plan.constant_valid[i] else UInt8(0)
                 self.whole[i] = plan.constant_valid[i]
                 # A null constant's value is 0, as the plan holds it.
-                if lane == _LANE_INT:
+                if lane == _LANE_INT or lane == _LANE_DECIMAL64:
                     for k in range(_VECTOR):
                         self.ints[i][k] = plan.ints[i]
                 elif lane == _LANE_DECIMAL:
@@ -479,6 +514,134 @@ def _decimal_product[
         raise Error("value exceeds decimal precision")
 
 
+def _decimal64_product[
+    divisor: Int
+](
+    mut vectors: _Vectors,
+    left: Int,
+    right: Int,
+    index: Int,
+    count: Int,
+    rescale: Int128,
+    limit: Int128,
+) raises:
+    """`_decimal_product` for 64-bit operands: their product is exact in
+    128 bits, and the rounded result is checked, so it fits 64 again."""
+    var a = vectors.ints[left].unsafe_ptr()
+    var b = vectors.ints[right].unsafe_ptr()
+    var o = vectors.ints[index].unsafe_ptr()
+    var overflow = False
+    # A null row's operands are 0, so its product is too.
+    for k in range(count):
+        var value = Int128(a[unsafe_offset=k]) * Int128(b[unsafe_offset=k])
+        comptime if divisor > 1:
+            value = _round_div[divisor](value)
+        elif divisor == 0:
+            value = divide_half_even(value, rescale)
+        overflow |= value <= -limit or value >= limit
+        o[unsafe_offset=k] = Int64(value)
+    if overflow:
+        raise Error("value exceeds decimal precision")
+
+
+def _decimal64_sum[
+    op: Int, whole: Bool
+](
+    mut vectors: _Vectors,
+    left: Int,
+    right: Int,
+    index: Int,
+    count: Int,
+    left_factor: Int128,
+    right_factor: Int128,
+    limit: Int128,
+) raises:
+    """A 64-bit decimal sum or difference, each side aligned in 128 bits
+    (exact: a factor is at most 10^18). A null row holds 0."""
+    var x = vectors.ints[left].unsafe_ptr()
+    var y = vectors.ints[right].unsafe_ptr()
+    var out = vectors.ints[index].unsafe_ptr()
+    var flags = vectors.valid[index].unsafe_ptr()
+    var overflow = False
+    for k in range(count):
+        var a = Int128(x[unsafe_offset=k]) * left_factor
+        var b = Int128(y[unsafe_offset=k]) * right_factor
+        var value: Int128
+        comptime if op == ADD:
+            value = a + b
+        else:
+            value = a - b
+        comptime if not whole:
+            value = value if flags[unsafe_offset=k] != 0 else 0
+        overflow |= value <= -limit or value >= limit
+        out[unsafe_offset=k] = Int64(value)
+    if overflow:
+        raise Error("value exceeds decimal precision")
+
+
+def _decimal64(
+    op: Int,
+    mut vectors: _Vectors,
+    left: Int,
+    right: Int,
+    index: Int,
+    count: Int,
+    left_type: DataType,
+    right_type: DataType,
+    dtype: DataType,
+) raises:
+    var limit = precision_limit(dtype.precision())
+    if op == MUL:
+        var shift = left_type.scale() + right_type.scale() - dtype.scale()
+        var rescale = pow10(max(shift, 0))
+        if shift <= 0:
+            _decimal64_product[1](
+                vectors, left, right, index, count, rescale, limit
+            )
+        elif shift == 1:
+            _decimal64_product[10](
+                vectors, left, right, index, count, rescale, limit
+            )
+        elif shift == 2:
+            _decimal64_product[100](
+                vectors, left, right, index, count, rescale, limit
+            )
+        elif shift == 3:
+            _decimal64_product[1000](
+                vectors, left, right, index, count, rescale, limit
+            )
+        elif shift == 4:
+            _decimal64_product[10000](
+                vectors, left, right, index, count, rescale, limit
+            )
+        else:
+            _decimal64_product[0](
+                vectors, left, right, index, count, rescale, limit
+            )
+        return
+    var common = max(left_type.scale(), right_type.scale())
+    var lf = pow10(common - left_type.scale())
+    var rf = pow10(common - right_type.scale())
+    var whole = vectors.whole[index]
+    if op == ADD:
+        if whole:
+            _decimal64_sum[ADD, True](
+                vectors, left, right, index, count, lf, rf, limit
+            )
+        else:
+            _decimal64_sum[ADD, False](
+                vectors, left, right, index, count, lf, rf, limit
+            )
+    elif whole:
+        _decimal64_sum[SUB, True](
+            vectors, left, right, index, count, lf, rf, limit
+        )
+    else:
+        _decimal64_sum[SUB, False](
+            vectors, left, right, index, count, lf, rf, limit
+        )
+
+
 def _float_op[
     op: Int, whole: Bool
 ](mut vectors: _Vectors, left: Int, right: Int, index: Int, count: Int):
@@ -574,6 +737,27 @@ def _compute(
             if overflow:
                 raise Error("value exceeds decimal precision")
             return
+        if lane == _LANE_DECIMAL64:
+            # From an integer or a 64-bit decimal, rescaled in 128 bits.
+            var out = vectors.ints[index].unsafe_ptr()
+            var x = vectors.ints[left].unsafe_ptr()
+            var limit = precision_limit(dtype.precision())
+            var shift = dtype.scale() - (
+                source.scale() if source_lane == _LANE_DECIMAL64 else 0
+            )
+            var factor = pow10(abs(shift))
+            var overflow = False
+            for k in range(count):
+                var value = Int128(x[unsafe_offset=k])
+                if shift > 0:
+                    value *= factor
+                elif shift < 0:
+                    value = divide_half_even(value, factor)
+                overflow |= value <= -limit or value >= limit
+                out[unsafe_offset=k] = Int64(value)
+            if overflow:
+                raise Error("value exceeds decimal precision")
+            return
         if lane == _LANE_FLOAT:
             var out = vectors.floats[index].unsafe_ptr()
             if source_lane == _LANE_FLOAT:
@@ -584,6 +768,11 @@ def _compute(
                 var x = vectors.ints[left].unsafe_ptr()
                 for k in range(count):
                     out[unsafe_offset=k] = Float64(x[unsafe_offset=k])
+            elif source_lane == _LANE_DECIMAL64:
+                var divisor = Float64(pow10(source.scale()))
+                var x = vectors.ints[left].unsafe_ptr()
+                for k in range(count):
+                    out[unsafe_offset=k] = Float64(x[unsafe_offset=k]) / divisor
             else:
                 # value / 10^scale, as `_decimal_to_float` converts.
                 var divisor = Float64(pow10(source.scale()))
@@ -644,6 +833,9 @@ def _compute(
     var left_type = plan.bound.dtypes[left]
     var right_type = plan.bound.dtypes[right]
     var limit = precision_limit(dtype.precision())
+    if lane == _LANE_DECIMAL64:
+        _decimal64(node.op, vectors, left, right, index, count, left_type, right_type, dtype)
+        return
     if node.op == MUL:
         var shift = left_type.scale() + right_type.scale() - dtype.scale()
         var rescale = pow10(max(shift, 0))
@@ -734,17 +926,19 @@ def _write[
 
 
 def _run[
-    S: DType, scatter: Bool
+    S: DType, scatter: Bool, dense: Bool
 ](
     plan: SelectedPlan,
     columns: List[Series],
     compact: List[Bool],
     rows: List[Int],
+    mask: BoolColumn,
     height: Int,
     name: String,
 ) raises -> Series:
     """Every vector of selected rows through the plan; the root's values
-    are stored as `S`."""
+    are stored as `S`. With `dense`, every row of the morsel instead, a
+    window of 2,048 at a time, and a row `mask` drops is left valid."""
     var vectors = _Vectors(plan)
     var root = len(plan.kinds) - 1
     # Whether each column read has a null, counted once, not per vector.
@@ -753,21 +947,22 @@ def _run[
         if plan.kinds[i] == _NODE_COLUMN:
             has_nulls[i] = columns[plan.bound.sources[i]].null_count() > 0
             vectors.whole[i] = not has_nulls[i]
-    var length = height if scatter else len(rows)
+    var length = height if scatter or dense else len(rows)
     var values = List[Scalar[S]](unsafe_uninit_length=length)
     var bits = List[UInt8](length=(length + 7) // 8, fill=255)
     var nulls = 0
     var next = 0
-    for start in range(0, len(rows), _VECTOR):
-        var count = min(_VECTOR, len(rows) - start)
+    var total = height if dense else len(rows)
+    for start in range(0, total, _VECTOR):
+        var count = min(_VECTOR, total - start)
         for i in range(root + 1):
             var kind = plan.kinds[i]
             if kind == _NODE_COLUMN:
                 var source = plan.bound.sources[i]
-                var through = not compact[source]
+                var through = not compact[source] and not dense
                 ref column = columns[source]
                 var lane = plan.lanes[i]
-                if lane == _LANE_INT:
+                if lane == _LANE_INT or lane == _LANE_DECIMAL64:
                     _load_column[DType.int64](
                         column,
                         through,
@@ -803,8 +998,8 @@ def _run[
             elif kind == _NODE_COMPUTED:
                 _compute(plan, i, vectors, count)
         var lane = plan.lanes[root]
-        if lane == _LANE_INT:
-            _write[S, DType.int64, scatter](
+        if lane == _LANE_INT or lane == _LANE_DECIMAL64:
+            _write[S, DType.int64, scatter and not dense](
                 vectors.ints[root],
                 vectors.valid[root],
                 vectors.whole[root],
@@ -817,7 +1012,7 @@ def _run[
                 next,
             )
         elif lane == _LANE_DECIMAL:
-            _write[S, DType.int128, scatter](
+            _write[S, DType.int128, scatter and not dense](
                 vectors.decimals[root],
                 vectors.valid[root],
                 vectors.whole[root],
@@ -830,7 +1025,7 @@ def _run[
                 next,
             )
         else:
-            _write[S, DType.float64, scatter](
+            _write[S, DType.float64, scatter and not dense](
                 vectors.floats[root],
                 vectors.valid[root],
                 vectors.whole[root],
@@ -845,6 +1040,16 @@ def _run[
     var o = values.unsafe_ptr()
     for gap in range(next, length):
         o[unsafe_offset=gap] = 0
+    comptime if dense:
+        if nulls > 0:
+            # Only a kept row's null counts; a dropped row reads as valid.
+            nulls = 0
+            var b = bits.unsafe_ptr()
+            for r in range(length):
+                if not (mask._valid(r) and mask._get(r)):
+                    b[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
+                elif (b[unsafe_offset=r >> 3] >> UInt8(r & 7)) & 1 == 0:
+                    nulls += 1
     if nulls == 0:
         bits = List[UInt8]()
     return Series(name, Column[Scalar[S]](values=values^, bits=bits^)).with_dtype(
@@ -853,12 +1058,13 @@ def _run[
 
 
 def _run_lanes[
-    scatter: Bool
+    scatter: Bool, dense: Bool
 ](
     plan: SelectedPlan,
     columns: List[Series],
     compact: List[Bool],
     rows: List[Int],
+    mask: BoolColumn,
     height: Int,
     name: String,
 ) raises -> Series:
@@ -866,22 +1072,22 @@ def _run_lanes[
     if dtype.is_decimal():
         var width = dtype.decimal_width()
         if width == 32:
-            return _run[DType.int32, scatter](
-                plan, columns, compact, rows, height, name
+            return _run[DType.int32, scatter, dense](
+                plan, columns, compact, rows, mask, height, name
             )
         if width == 64:
-            return _run[DType.int64, scatter](
-                plan, columns, compact, rows, height, name
+            return _run[DType.int64, scatter, dense](
+                plan, columns, compact, rows, mask, height, name
             )
-        return _run[DType.int128, scatter](
-            plan, columns, compact, rows, height, name
+        return _run[DType.int128, scatter, dense](
+            plan, columns, compact, rows, mask, height, name
         )
     if dtype == DataType.FLOAT64:
-        return _run[DType.float64, scatter](
-            plan, columns, compact, rows, height, name
+        return _run[DType.float64, scatter, dense](
+            plan, columns, compact, rows, mask, height, name
         )
-    return _run[DType.int64, scatter](
-        plan, columns, compact, rows, height, name
+    return _run[DType.int64, scatter, dense](
+        plan, columns, compact, rows, mask, height, name
     )
 
 
@@ -901,9 +1107,43 @@ def evaluate_selected(
     or, with `scatter`, `height` values with each at its row and a valid 0
     at every other row. None when computing a kept row raises: the caller's
     ordinary path then raises it."""
+    var mask = BoolColumn(List[Bool]())
     try:
         if scatter:
-            return _run_lanes[True](plan, columns, compact, rows, height, name)
-        return _run_lanes[False](plan, columns, compact, rows, height, name)
+            return _run_lanes[True, False](
+                plan, columns, compact, rows, mask, height, name
+            )
+        return _run_lanes[False, False](
+            plan, columns, compact, rows, mask, height, name
+        )
+    except:
+        return None
+
+
+def evaluate_masked(
+    plan: SelectedPlan,
+    columns: List[Series],
+    compact: List[Bool],
+    mask: BoolColumn,
+    height: Int,
+    name: String,
+) -> Optional[Series]:
+    """The plan's expression at every row of a morsel of `height` rows
+    whose selection is `mask`, for a morsel read in place: its kept rows
+    are most of it, and listing them to read each through the list cost
+    more than computing the dropped rows too, as `_with_columns_in_place`
+    does. Each window of 2,048 rows is read straight from the columns. A
+    dropped row's value goes unread and it is left valid. None when a
+    column read holds only the kept rows or any row raises; the caller
+    then computes the kept rows alone (`evaluate_selected`), so a dropped
+    row's error is never raised."""
+    for i in range(len(plan.kinds)):
+        if plan.kinds[i] == _NODE_COLUMN and compact[plan.bound.sources[i]]:
+            return None
+    var rows = List[Int]()
+    try:
+        return _run_lanes[True, True](
+            plan, columns, compact, rows, mask, height, name
+        )
     except:
         return None
