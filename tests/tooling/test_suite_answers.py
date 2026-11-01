@@ -291,6 +291,37 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(cell["status"], "wrong answer")
         self.assertNotIn("ms", cell)
 
+    def test_reused_verdict_still_checks_each_receipt(self):
+        # Repetition 1 has the same Parquet bytes as repetition 0, so its
+        # comparison is reused, but its own files are still verified.
+        oracle = self.export([1, 2])
+        first = self.export([1, 2])
+        second = self.export([1, 2], repetition=1)
+        self.assertEqual(first["path_sha256"], second["path_sha256"])
+        base = {
+            "suite": "fixture",
+            "variant": "base",
+            "query": "q1",
+            "status": "ok",
+            "round": 0,
+            "times": [10, 20],
+        }
+        result = {
+            "runs": [
+                dict(
+                    base,
+                    engine="duckdb",
+                    answers=[first, second],
+                    oracles=[oracle],
+                ),
+                dict(base, engine="mojo", answers=[first, second]),
+            ]
+        }
+        key = ("fixture", "base", "q1", "mojo")
+        self.assertEqual(bench.evaluate(result)[key]["status"], "ok")
+        Path(second["schema_path"]).write_text("{}")
+        self.assertEqual(bench.evaluate(result)[key]["status"], "unverified")
+
     def test_missing_round_is_not_a_successful_measurement(self):
         first = self.export([1])
         run = {

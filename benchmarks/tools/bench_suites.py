@@ -904,13 +904,13 @@ def evaluate(result):
         yield from records
 
     def compare(record, suite, query, oracle_key, check):
-        schema = suite_answers.verify_answer(record)
-        key = (
-            oracle_key,
-            record["path_sha256"],
-            json.dumps([schema["columns"], schema["rows"]], sort_keys=True),
-        )
-        if key not in verdicts:
+        # The verdict depends only on the Parquet bytes, which the receipt's
+        # hash names once a check confirms it: a reused answer still gets
+        # every hash and sidecar check, a new one is loaded (and checked).
+        key = (oracle_key, record.get("path_sha256"))
+        if key in verdicts:
+            suite_answers.verify_answer(record)
+        else:
             answer = suite_schema.normalize(
                 suite_answers.load_answer(record), suite, query
             )

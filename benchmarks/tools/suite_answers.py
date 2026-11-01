@@ -430,7 +430,7 @@ class _Engine:
         self.con = duckdb.connect(
             config={
                 "threads": min(8, os.cpu_count() or 1),
-                "memory_limit": "8GB",
+                "memory_limit": "4GB",
                 "temp_directory": self._spill,
                 "preserve_insertion_order": False,
             }
