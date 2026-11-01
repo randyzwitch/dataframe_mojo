@@ -33,7 +33,7 @@ from dataframe.kernels.partition import (
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
-from dataframe.storage.string_view import StringView
+from dataframe.storage.string_view import StringView, _mapped
 from dataframe.trace import trace_path
 
 
@@ -285,27 +285,19 @@ def _match_strings(
         # the next eight bytes (up to twelve) or the bytes' location in
         # the second. Unequal first words settle most unequal pairs
         # without reading the bytes, as DuckDB's string_t compare does.
-        var x = (
-            a._view_storage.value()
-            ._views[]
-            .unsafe_ptr()
-            .unsafe_offset(a._offset)
-            .unsafe_bitcast[UInt64]()
-        )
-        var y = (
-            b._view_storage.value()
-            ._views[]
-            .unsafe_ptr()
-            .unsafe_offset(b._offset)
-            .unsafe_bitcast[UInt64]()
-        )
+        var map_a = a._view_storage.value()._row_map(a._offset)
+        var map_b = b._view_storage.value()._row_map(b._offset)
+        var x = Pointer[UInt64, ImmutAnyOrigin](unsafe_from_address=map_a[0])
+        var y = Pointer[UInt64, ImmutAnyOrigin](unsafe_from_address=map_b[0])
         var long_a = _StringBytes(a)
         var long_b = _StringBytes(b)
         for s in range(count):
             var c = sel[unsafe_offset=s]
             var i = left_rows[unsafe_offset=c]
             var j = right_rows[unsafe_offset=c]
-            var head = x[unsafe_offset=2 * i]
+            var vi = _mapped(map_a[1], map_a[2], i)
+            var vj = _mapped(map_b[1], map_b[2], j)
+            var head = x[unsafe_offset=2 * vi]
             var length = Int(head & 0xFFFFFFFF)
             # Bytes past the string's end in an inline view are masked
             # off: Arrow does not promise they are zero.
@@ -313,7 +305,7 @@ def _match_strings(
             var head_mask = UInt64(0xFFFFFFFF) | (
                 ((UInt64(1) << UInt64(8 * shown)) - 1) << 32
             )
-            var same = ((head ^ y[unsafe_offset=2 * j]) & head_mask) == 0
+            var same = ((head ^ y[unsafe_offset=2 * vj]) & head_mask) == 0
             if same and length > 4:
                 if length <= 12:
                     var tail_mask = (
@@ -321,8 +313,8 @@ def _match_strings(
                     ) if length < 12 else UInt64.MAX
                     same = (
                         (
-                            x[unsafe_offset=2 * i + 1]
-                            ^ y[unsafe_offset=2 * j + 1]
+                            x[unsafe_offset=2 * vi + 1]
+                            ^ y[unsafe_offset=2 * vj + 1]
                         )
                         & tail_mask
                     ) == 0
@@ -371,13 +363,19 @@ struct _StringBytes:
     var offsets: Int
     var base: Int
     var buffers: Int
+    # Views that select their descriptors (`StringViewStorage._row_map`).
+    var rows: Int
+    var shift: Int
 
     def __init__(out self, column: StringColumn):
+        self.rows = 0
+        self.shift = 0
         if column._is_view_storage():
             ref storage = column._view_storage.value()
-            self.views = Int(
-                storage._views[].unsafe_ptr().unsafe_offset(column._offset)
-            )
+            var map = storage._row_map(column._offset)
+            self.views = map[0]
+            self.rows = map[1]
+            self.shift = map[2]
             self.buffers = Int(storage._buffers[].unsafe_ptr())
             self.offsets = 0
             self.base = 0
@@ -403,7 +401,7 @@ struct _StringBytes:
             )
         var view = Pointer[StringView, MutAnyOrigin](
             unsafe_from_address=self.views
-        ).unsafe_offset(i)
+        ).unsafe_offset(_mapped(self.rows, self.shift, i))
         var length = Int(view[].length)
         if length <= 12:
             return (Int(view) + 4, length)
