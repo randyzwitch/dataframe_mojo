@@ -78,7 +78,7 @@ from dataframe.kernels.join_hash import (
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
-from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
+from .join_type import JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from dataframe.kernels.row_encode import encodable
 from dataframe.kernels.runtime_filter import (
     KeyBloom,
@@ -772,7 +772,7 @@ struct Morsel(Movable):
     # The height of the source this morsel was cut from: steps choose
     # their route by it, not by the morsel's own height.
     var source_rows: Int
-    # A right join step's per-worker flags of the build rows matched so
+    # A right or full join step's per-worker flags of the build rows matched so
     # far (the address of the bytes), set before the step runs; 0 for none.
     var marks: Int
 
@@ -2519,9 +2519,18 @@ struct _PipelineJob(Job):
     # Per range with a bloom filter: this worker's rows checked and kept.
     var bloom_checked: List[Int]
     var bloom_kept: List[Int]
-    # A right join step's flags of the build rows this worker's morsels
-    # matched (one byte a build row), by step; empty for other steps.
+    # A right or full join step's flags of the build rows this worker's
+    # morsels matched (one byte a build row), by step; empty for others.
     var marks: List[List[UInt8]]
+    # The step the morsels enter at (0: the source's; past an outer join
+    # step for the build rows it emits after its probe), and the number
+    # of the frame's first morsel among all the morsels sunk.
+    var first_step: Int
+    var first_morsel: Int
+    # Whether this run ends the worker's work (folds its top-k candidates
+    # and derives its grouping sets): not before an outer join's
+    # unmatched build rows have run.
+    var finishes: Bool
 
     def __init__(
         out self,
@@ -2555,12 +2564,17 @@ struct _PipelineJob(Job):
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
         self.marks = List[List[UInt8]](capacity=len(steps))
         for step in steps:
-            if step.kind == STEP_JOIN and step.how == JOIN_RIGHT:
+            if step.kind == STEP_JOIN and (
+                step.how == JOIN_RIGHT or step.how == JOIN_FULL
+            ):
                 self.marks.append(
                     List[UInt8](length=joins[][step.join].height(), fill=0)
                 )
             else:
                 self.marks.append(List[UInt8]())
+        self.first_step = 0
+        self.first_morsel = 0
+        self.finishes = True
         self.layout = layout.copy()
         self.sets = sets.copy()
         self.derived_from = derived_from.copy()
@@ -2772,18 +2786,28 @@ struct _PipelineJob(Job):
         var count = len(self.ranges[]) // 2
         var cursor = _Cursor(self.cursor)
         while True:
-            var k = cursor.take(1)
-            if k >= count:
+            var taken = cursor.take(1)
+            if taken >= count:
+                if not self.finishes:
+                    return
                 # The worker's leftover candidates folded to k, so the
                 # finish sorts at most k rows a worker.
                 if self.top > 0 and self.candidate_rows > self.top:
                     self._fold_candidates()
                 self._derive_sets()
                 return
-            var offset = self.ranges[][2 * k]
-            var length = self.ranges[][2 * k + 1]
+            var k = self.first_morsel + taken
+            var offset = self.ranges[][2 * taken]
+            var length = self.ranges[][2 * taken + 1]
             var morsel = Morsel(self.frame[].slice(offset, length), k)
             morsel.source_rows = self.frame[].height()
+            if self.first_step > 0:
+                # An outer join's unmatched build rows: the source's key
+                # ranges and top-k bound do not apply to them.
+                self._steps_from(morsel, self.first_step)
+                if morsel.height() > 0:
+                    self._consume(morsel, k, offset, length)
+                continue
             self.counts[0] += length
             if not self._in_key_ranges(morsel):
                 continue
@@ -2816,23 +2840,28 @@ struct _PipelineJob(Job):
                 var kept = self.bound.rows(morsel.frame)
                 if kept and 8 * len(kept.value()) <= morsel.height():
                     morsel.narrow(kept.value())
-            for i in range(len(self.steps)):
-                self.counts[2 * i + 1] += morsel.height()
-                var began = Int(perf_counter_ns())
-                if len(self.marks[i]) > 0:
-                    morsel.marks = Int(self.marks[i].unsafe_ptr())
-                morsel.apply(
-                    self.steps[i], self.batch_size, self.joins, self.indexes
-                )
-                self.counts[2 * len(self.steps) + 1 + i] += (
-                    Int(perf_counter_ns()) - began
-                )
-                self.counts[2 * i + 2] += morsel.height()
-                if morsel.height() == 0:
-                    break
+            self._steps_from(morsel, 0)
             if morsel.height() == 0:
                 continue
             self._consume(morsel, k, offset, length)
+
+    def _steps_from(mut self, mut morsel: Morsel, first: Int) raises:
+        """Run the steps from `first` on over one morsel, until one leaves
+        it empty."""
+        for i in range(first, len(self.steps)):
+            self.counts[2 * i + 1] += morsel.height()
+            var began = Int(perf_counter_ns())
+            if len(self.marks[i]) > 0:
+                morsel.marks = Int(self.marks[i].unsafe_ptr())
+            morsel.apply(
+                self.steps[i], self.batch_size, self.joins, self.indexes
+            )
+            self.counts[2 * len(self.steps) + 1 + i] += (
+                Int(perf_counter_ns()) - began
+            )
+            self.counts[2 * i + 2] += morsel.height()
+            if morsel.height() == 0:
+                return
 
     def _consume(
         mut self, mut morsel: Morsel, k: Int, offset: Int, length: Int
@@ -3392,60 +3421,105 @@ def _emit_unmatched(
     indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
     batch_size: Int,
 ) raises:
-    """The build rows no morsel matched, for each right join step in step
-    order, as a final morsel of that step's output (the probe columns null)
-    through the steps after it and into the first worker's sink: Polars'
+    """The build rows no morsel matched, for each right or full join step
+    in step order, as morsels of that step's output (the probe columns
+    null) through the steps after it and into the workers' sinks: Polars'
     `emit_unmatched_build` (`EmitUnmatchedState`, polars-stream equi_join)
-    and the right-outer scan of DuckDB's `PhysicalHashJoin::GetData`. Every
-    worker flagged the build rows its own morsels matched; the flags are
-    merged here, once all have finished."""
+    and the outer scan of DuckDB's `PhysicalHashJoin::GetData`, which
+    hands each thread its share of the build rows. Every worker flagged
+    the build rows its own morsels matched; the flags are merged here,
+    once all have finished. The last round finishes the workers' sinks."""
     var next_morsel = len(jobs[0].ranges[]) // 2
+    var last = -1
     for j in range(len(steps)):
-        if steps[j].kind != STEP_JOIN or steps[j].how != JOIN_RIGHT:
+        if steps[j].kind == STEP_JOIN and (
+            steps[j].how == JOIN_RIGHT or steps[j].how == JOIN_FULL
+        ):
+            last = j
+    if last < 0:
+        return
+    var source = jobs[0].frame[].clear()
+    for j in range(last + 1):
+        if steps[j].kind != STEP_JOIN or not (
+            steps[j].how == JOIN_RIGHT or steps[j].how == JOIN_FULL
+        ):
             continue
         ref build = joins[][steps[j].join]
         var n = build.height()
-        var unmatched = List[Int]()
         var seen = List[UInt8](length=n, fill=0)
         var flags = seen.unsafe_ptr()
+        # Eight flags a word: the workers' flags merge at memory speed.
+        var words = n // 8
+        var merged = flags.unsafe_bitcast[UInt64]()
         for w in range(len(jobs)):
             var mine = jobs[w].marks[j].unsafe_ptr()
-            for r in range(n):
+            var theirs = mine.unsafe_bitcast[UInt64]()
+            for i in range(words):
+                merged[unsafe_offset=i] |= theirs[unsafe_offset=i]
+            for r in range(8 * words, n):
                 flags[unsafe_offset=r] |= mine[unsafe_offset=r]
-        for r in range(n):
+        var count = 0
+        for i in range(words):
+            if merged[unsafe_offset=i] != UInt64(0x0101010101010101):
+                for r in range(8 * i, 8 * i + 8):
+                    count += Int(flags[unsafe_offset=r] == 0)
+        for r in range(8 * words, n):
+            count += Int(flags[unsafe_offset=r] == 0)
+        var unmatched = List[Int](capacity=count)
+        for i in range(words):
+            if merged[unsafe_offset=i] != UInt64(0x0101010101010101):
+                for r in range(8 * i, 8 * i + 8):
+                    if flags[unsafe_offset=r] == 0:
+                        unmatched.append(r)
+        for r in range(8 * words, n):
             if flags[unsafe_offset=r] == 0:
                 unmatched.append(r)
-        if len(unmatched) == 0:
+        var ranges = List[Int]()
+        var tail = source.copy()
+        if len(unmatched) > 0:
+            trace_path("pipeline.join_unmatched")
+            # The probe side's columns at this step: an empty source
+            # through the steps before it.
+            var empty = source.copy()
+            for i in range(j):
+                var probe = Morsel(empty.copy(), 0)
+                probe.apply(steps[i], batch_size, joins, indexes)
+                empty = probe.materialized()
+            tail = empty._join_impl(
+                build._filter_rows(unmatched^),
+                left_on=steps[j].names,
+                right_on=steps[j].right_keys,
+                how=steps[j].how,
+                suffix=steps[j].suffix,
+                coalesce=steps[j].coalesce,
+            )
+            var step = max(1, batch_size)
+            var offset = 0
+            while offset < tail.height():
+                ranges.append(offset)
+                ranges.append(min(step, tail.height() - offset))
+                offset += step
+        if len(ranges) == 0 and j != last:
             continue
-        trace_path("pipeline.join_unmatched")
-        # The probe side's columns at this step: an empty source through
-        # the steps before it.
-        var empty = jobs[0].frame[].clear()
-        for i in range(j):
-            var probe = Morsel(empty.copy(), 0)
-            probe.apply(steps[i], batch_size, joins, indexes)
-            empty = probe.materialized()
-        var tail = empty._join_impl(
-            build._filter_rows(unmatched^),
-            left_on=steps[j].names,
-            right_on=steps[j].right_keys,
-            how=JOIN_RIGHT,
-            suffix=steps[j].suffix,
-            coalesce=False,
-        )
-        var morsel = Morsel(tail^, next_morsel)
-        next_morsel += 1
-        for i in range(j + 1, len(steps)):
-            jobs[0].counts[2 * i + 1] += morsel.height()
-            morsel.apply(steps[i], batch_size, joins, indexes)
-            jobs[0].counts[2 * i + 2] += morsel.height()
-            if morsel.height() == 0:
-                break
-        if morsel.height() == 0:
-            continue
-        jobs[0]._consume(
-            morsel, next_morsel - 1, jobs[0].frame[].height(), morsel.height()
-        )
+        # One more round of the workers over the build rows' morsels,
+        # each into its own sink; the last round also finishes them.
+        var cursor = _Cursor.new()
+        var shared_tail = ArcPointer(tail^)
+        var shared_ranges = ArcPointer(ranges^)
+        for w in range(len(jobs)):
+            jobs[w].frame = shared_tail
+            jobs[w].ranges = shared_ranges
+            jobs[w].cursor = cursor.address
+            jobs[w].first_step = j + 1
+            jobs[w].first_morsel = next_morsel
+            jobs[w].finishes = j == last
+        next_morsel += len(shared_ranges[]) // 2
+        try:
+            run_jobs(jobs)
+        except e:
+            cursor.free()
+            raise e
+        cursor.free()
 
 
 def run_pipeline(
@@ -3654,15 +3728,23 @@ def run_pipeline(
                 key_ranges,
             )
         )
+    # An outer join's unmatched build rows run after every morsel of the
+    # source (`_emit_unmatched`), and the workers finish after them.
+    for step in steps:
+        if step.kind == STEP_JOIN and (
+            step.how == JOIN_RIGHT or step.how == JOIN_FULL
+        ):
+            for w in range(len(jobs)):
+                jobs[w].finishes = False
     try:
         run_jobs(jobs)
+        _emit_unmatched(jobs, steps, joins, indexes, batch_size)
     except e:
         cursor.free()
         shared_bound.free()
         raise e
     cursor.free()
     shared_bound.free()
-    _emit_unmatched(jobs, steps, joins, indexes, batch_size)
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
