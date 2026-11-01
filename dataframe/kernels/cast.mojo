@@ -35,6 +35,7 @@ from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
 from dataframe.kernels.physical_input import _has_physical_storage
+from dataframe.kernels.bitmap_input import _bitmap_byte, _write_bitmap_byte
 
 
 def _dtype(series: Series) -> DataType:
@@ -1793,6 +1794,98 @@ def _decimal_cast_numeric[
     return result^
 
 
+@always_inline
+def _decimal_scaled_validity(
+    mut bits: List[UInt8], row: Int, valid: UInt8, count: Int, n: Int
+):
+    """Append one physical group's bits without materializing all-valid data."""
+    if count == 0:
+        return
+    var mask = UInt8((UInt16(1) << UInt16(count)) - 1)
+    if len(bits) == 0:
+        if valid == mask:
+            return
+        bits.resize((n + 7) // 8, 0)
+        # Every earlier row was valid. Future rows and the final padding stay
+        # zero until their nonoverlapping groups are written below.
+        for byte in range(row // 8):
+            bits[byte] = 255
+        if row % 8 != 0:
+            bits[row // 8] = (UInt8(1) << UInt8(row % 8)) - 1
+    _write_bitmap_byte(bits, row, valid, count)
+
+
+@no_inline
+def _decimal_scaled_failure(
+    plan: _DecimalCastPlan,
+    storage: Storage,
+    row: Int,
+    global_row: Int,
+    offset: Int,
+    value: Int128,
+) raises:
+    # Preserve the shared checked error and original-width rendering, but
+    # prepare runtime source readers only for a strict failure.
+    try:
+        _ = check_limit(value, plan.limit, plan.target)
+    except e:
+        var window = _DecimalCastWindow(storage, plan.source)
+        _decimal_cast_failure(plan, window, row, global_row, offset, String(e))
+
+
+@no_inline
+def _decimal_scaled_chunks[
+    S: DType, W: DType
+](
+    input: Series, plan: _DecimalCastPlan, strict: Bool, offset: Int
+) raises -> Series:
+    """Keep the legacy typed integer arithmetic over admitted cold windows."""
+    var n = len(input)
+    var factor = plan.factor
+    var limit = plan.limit
+    var values = List[Scalar[W]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var bits = List[UInt8]()
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        ref column = storage[Column[Scalar[S]]]
+        var source = column._ptr()
+        var incoming = column._bits[].span()
+        var bit_offset = column._offset
+        var length = len(column)
+        var first = 0
+        while first < length:
+            var count = min(8, length - first)
+            var valid = _bitmap_byte(
+                incoming, bit_offset + first, count, False, 255
+            )
+            for relative in range(count):
+                var row = first + relative
+                var global_row = base + row
+                var bit = UInt8(1) << UInt8(relative)
+                if valid & bit == 0:
+                    out[unsafe_offset=global_row] = 0
+                    continue
+                var value = (
+                    source[unsafe_offset=row].cast[DType.int128]() * factor
+                )
+                if value <= -limit or value >= limit:
+                    if strict:
+                        _decimal_scaled_failure(
+                            plan, storage, row, global_row, offset, value
+                        )
+                    valid &= ~bit
+                    out[unsafe_offset=global_row] = 0
+                else:
+                    out[unsafe_offset=global_row] = value.cast[W]()
+            _decimal_scaled_validity(bits, base + first, valid, count, n)
+            first += count
+        base += length
+    return Series(
+        input.name(), Column[Scalar[W]](values=values^, bits=bits^)
+    ).with_dtype(plan.target)
+
+
 @no_inline
 def _decimal_cast_bool(
     input: Series,
@@ -1889,6 +1982,22 @@ def _cast_decimal_chunks(
     if not _decimal_cast_chunks_host(input, source):
         return None
     var plan = _DecimalCastPlan(source, target)
+    if target.is_decimal() and len(mask) == 0:
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime S = NUMERIC_DTYPES[k]
+            comptime if S.is_integral():
+                if source == DataType.of(S):
+                    if target.decimal_width() == 32:
+                        return _decimal_scaled_chunks[S, DType.int32](
+                            input, plan, strict, offset
+                        )
+                    if target.decimal_width() == 64:
+                        return _decimal_scaled_chunks[S, DType.int64](
+                            input, plan, strict, offset
+                        )
+                    return _decimal_scaled_chunks[S, DType.int128](
+                        input, plan, strict, offset
+                    )
     if target == DataType.STRING:
         return _decimal_cast_string(input, plan, mask)
     if target == DataType.BOOL:

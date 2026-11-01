@@ -661,3 +661,129 @@ def test_decimal_conversion_empty_scalar_identity_and_float64_control() raises:
                 ]
             ),
         )
+
+
+def _integer_decimal_bitmap_result[
+    W: DType
+](
+    actual: Series, target: DataType, expected: List[Int128], valid: List[Bool]
+) raises:
+    assert_equal(actual.dtype(), target)
+    assert_equal(actual.name(), "x")
+    var flat = actual.rechunk()
+    ref column = flat._data[Column[Scalar[W]]]
+    assert_equal(column._offset, 0)
+    assert_equal(len(column), len(expected))
+    var all_valid = True
+    for row in range(len(valid)):
+        all_valid = all_valid and valid[row]
+        assert_equal(column._valid(row), valid[row])
+        assert_equal(column._get(row).cast[DType.int128](), expected[row])
+    if all_valid:
+        assert_equal(len(column._bits[]), 0)
+    else:
+        assert_equal(len(column._bits[]), (len(valid) + 7) // 8)
+        for byte in range(len(column._bits[])):
+            var wanted = UInt8(0)
+            for bit in range(8):
+                var row = byte * 8 + bit
+                if row < len(valid) and valid[row]:
+                    wanted |= UInt8(1) << UInt8(bit)
+            assert_equal(column._bits[][byte], wanted)
+
+
+def _integer_decimal_bitmap_source[
+    S: DType
+](n: Int, prefix: Int, first_cut: Int, pattern: Int) raises -> Series:
+    var raw = List[Scalar[S]](length=prefix, fill=Scalar[S](0))
+    var valid = List[Bool](length=prefix, fill=True)
+    for row in range(n):
+        var present = (
+            pattern < 2 or pattern == 4 or (pattern == 2 and row % 3 != 1)
+        )
+        var value = row % (10 if pattern < 2 else 11)
+        raw.append(Scalar[S](value) if present else Scalar[S].MAX)
+        valid.append(present)
+    var parent = Series(
+        "x", Column[Scalar[S]](raw.copy())
+    ) if pattern == 0 else Series(
+        "x", Column[Scalar[S]](raw.copy(), valid.copy())
+    )
+    var visible = parent.slice(prefix, n)
+    var parts = List[Series]()
+    parts.append(visible.slice(0, 0))
+    var at = min(first_cut, n)
+    parts.append(visible.slice(0, at))
+    var second = min(3, n - at)
+    parts.append(visible.slice(at, second))
+    at += second
+    parts.append(visible.slice(at, n - at))
+    parts.append(visible.slice(n, 0))
+    return Series._from_chunks(parts)
+
+
+def _integer_decimal_bitmap_cases[S: DType](source_name: String) raises:
+    for n in [0, 1, 7, 8, 9, 63, 64, 65]:
+        for layout in range(8):
+            for pattern in range(4):
+                var source = _integer_decimal_bitmap_source[S](
+                    n, layout, layout + 1, pattern
+                )
+                var expected = List[Int128]()
+                var valid = List[Bool]()
+                for row in range(n):
+                    var present = (
+                        pattern < 2
+                        or pattern == 4
+                        or (pattern == 2 and row % 3 != 1)
+                    )
+                    var value = row % (10 if pattern < 2 else 11)
+                    var accepted = present and value < 10
+                    valid.append(accepted)
+                    expected.append(Int128(value * 10) if accepted else 0)
+                for width in [32, 64, 128]:
+                    var target = DataType.decimal(2, 1, width)
+                    var result = source.cast(target, strict=False)
+                    if width == 32:
+                        _integer_decimal_bitmap_result[DType.int32](
+                            result, target, expected, valid
+                        )
+                    elif width == 64:
+                        _integer_decimal_bitmap_result[DType.int64](
+                            result, target, expected, valid
+                        )
+                    else:
+                        _integer_decimal_bitmap_result[DType.int128](
+                            result, target, expected, valid
+                        )
+                    if source._chunked:
+                        assert_equal(
+                            source._chunked.value()[].cache[].state.load(),
+                            Int64(0),
+                        )
+    # Row10 is in a later physical chunk; preserve caller offset37 and
+    # original integer spelling rather than the scaled value100.
+    var strict_source = _integer_decimal_bitmap_source[S](11, 7, 3, 4)
+    for width in [32, 64, 128]:
+        assert_equal(
+            _error(strict_source, DataType.decimal(2, 1, width), []),
+            "cast from "
+            + source_name
+            + " to "
+            + _decimal_name(width, 2, 1)
+            + " failed at row 47 for value '10': value exceeds decimal precision 2",
+        )
+        assert_equal(
+            strict_source._chunked.value()[].cache[].state.load(), Int64(0)
+        )
+
+
+def test_integer_decimal_byte_groups_preserve_raw_bits_and_tail_padding() raises:
+    _integer_decimal_bitmap_cases[DType.int8]("int8")
+    _integer_decimal_bitmap_cases[DType.int16]("int16")
+    _integer_decimal_bitmap_cases[DType.int32]("int32")
+    _integer_decimal_bitmap_cases[DType.int64]("int64")
+    _integer_decimal_bitmap_cases[DType.uint8]("uint8")
+    _integer_decimal_bitmap_cases[DType.uint16]("uint16")
+    _integer_decimal_bitmap_cases[DType.uint32]("uint32")
+    _integer_decimal_bitmap_cases[DType.uint64]("uint64")
