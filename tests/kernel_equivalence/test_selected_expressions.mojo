@@ -170,7 +170,9 @@ def test_only_a_kept_rows_overflow_raises() raises:
         .with_columns([product.copy()])
         .collect()
     )
-    assert_equal(fine.height(), source.filter(col("day") <= lit(Int64(90))).height())
+    assert_equal(
+        fine.height(), source.filter(col("day") <= lit(Int64(90))).height()
+    )
     with assert_raises():
         _ = (
             wide.lazy()

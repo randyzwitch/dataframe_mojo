@@ -182,16 +182,19 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
         if dtype.is_decimal():
             if source.is_decimal():
                 # An upscale must stay within 38 digits before the check.
-                return source.precision() + max(
-                    dtype.scale() - source.scale(), 0
-                ) <= 38
+                return (
+                    source.precision() + max(dtype.scale() - source.scale(), 0)
+                    <= 38
+                )
             return _lane(source) == _LANE_INT
         if dtype == DataType.FLOAT64:
             return True
         if dtype == DataType.INT64:
             return _lane(source) == _LANE_INT
         return False
-    if not (node.op == ADD or node.op == SUB or node.op == MUL or node.op == DIV):
+    if not (
+        node.op == ADD or node.op == SUB or node.op == MUL or node.op == DIV
+    ):
         return False
     if node.left < 0 or node.right < 0:
         return False
@@ -279,9 +282,10 @@ def _narrow_decimals(mut plan: SelectedPlan, columns: List[Series]):
             continue
         if plan.bound.dtypes[i].precision() > 18:
             return
-        if plan.kinds[i] == _NODE_COLUMN and columns[
-            plan.bound.sources[i]
-        ]._data.isa[Column[Int128]]():
+        if (
+            plan.kinds[i] == _NODE_COLUMN
+            and columns[plan.bound.sources[i]]._data.isa[Column[Int128]]()
+        ):
             return
         if plan.kinds[i] == _NODE_CONSTANT:
             var value = plan.decimals[i]
@@ -393,9 +397,9 @@ def _load[
         var b = offset + r
         var flag = (bits[unsafe_offset=b >> 3] >> UInt8(b & 7)) & 1
         flags[unsafe_offset=k] = flag
-        out[unsafe_offset=k] = (
-            source[unsafe_offset=r].cast[T]() if flag != 0 else Scalar[T](0)
-        )
+        out[unsafe_offset=k] = source[unsafe_offset=r].cast[
+            T
+        ]() if flag != 0 else Scalar[T](0)
 
 
 def _load_column[
@@ -462,7 +466,9 @@ def _load_column[
     raise Error("unsupported selected load")
 
 
-def _combine(mut vectors: _Vectors, left: Int, right: Int, index: Int, count: Int):
+def _combine(
+    mut vectors: _Vectors, left: Int, right: Int, index: Int, count: Int
+):
     """Node `index` valid where both children are."""
     var left_whole = vectors.whole[left]
     var right_whole = vectors.whole[right]
@@ -670,9 +676,7 @@ def _float_op[
 
 def _int_op[
     op: Int, whole: Bool
-](
-    mut vectors: _Vectors, left: Int, right: Int, index: Int, count: Int
-) raises:
+](mut vectors: _Vectors, left: Int, right: Int, index: Int, count: Int) raises:
     """Checked Int64 `op` over one vector; a null row holds 0."""
     var x = vectors.ints[left].unsafe_ptr()
     var y = vectors.ints[right].unsafe_ptr()
@@ -834,7 +838,17 @@ def _compute(
     var right_type = plan.bound.dtypes[right]
     var limit = precision_limit(dtype.precision())
     if lane == _LANE_DECIMAL64:
-        _decimal64(node.op, vectors, left, right, index, count, left_type, right_type, dtype)
+        _decimal64(
+            node.op,
+            vectors,
+            left,
+            right,
+            index,
+            count,
+            left_type,
+            right_type,
+            dtype,
+        )
         return
     if node.op == MUL:
         var shift = left_type.scale() + right_type.scale() - dtype.scale()
@@ -1052,9 +1066,9 @@ def _run[
                     nulls += 1
     if nulls == 0:
         bits = List[UInt8]()
-    return Series(name, Column[Scalar[S]](values=values^, bits=bits^)).with_dtype(
-        plan.bound.dtypes[root]
-    )
+    return Series(
+        name, Column[Scalar[S]](values=values^, bits=bits^)
+    ).with_dtype(plan.bound.dtypes[root])
 
 
 def _run_lanes[
