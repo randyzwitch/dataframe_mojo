@@ -7,7 +7,7 @@ Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
 from dataframe.storage.buffer import _Buffer
-from std.bit import count_trailing_zeros
+from std.bit import count_leading_zeros, count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
@@ -1348,6 +1348,21 @@ struct PreparedHashIndex(Copyable):
     # DuckDB pushes one into a join's probe side).
     var filter: ArcPointer[List[UInt64]]
     var filter_base: Int64
+    # Compound integer keys packed into the one Int64 key `right` holds
+    # (`_KeyPacking`); probe keys are packed alike (`probe_keys`).
+    var packing: _KeyPacking
+
+    def probe_keys(self, left_keys: List[Series]) raises -> List[Series]:
+        """The probe keys as this index reads them: packed into one key
+        when the build keys were."""
+        if not self.packing.packs():
+            return left_keys.copy()
+        var flat = List[Series](capacity=len(left_keys))
+        for key in left_keys:
+            flat.append(key.rechunk() if key.is_chunked() else key.copy())
+        var packed = List[Series]()
+        packed.append(_pack_keys(flat, self.packing))
+        return packed^
 
     @always_inline
     def progression_row(self, value: Int64, right_count: Int) -> Int:
@@ -1615,6 +1630,161 @@ def _perfect_slots(key: Series) -> Optional[Tuple[Int64, List[Int32]]]:
     return (least, slots^)
 
 
+# The bits a packed compound key may use (`_key_packing`): below 63, so a
+# packed key is a nonnegative Int64 and takes the integer key's routes.
+comptime _PACKED_BITS = 62
+
+
+@fieldwise_init
+struct _KeyPacking(Copyable, Movable):
+    """How compound integer keys pack into one Int64 key: key `k`'s
+    distance from its least build value (`bases[k]`, as `_int_word`) at
+    bit `shifts[k]`. A probe value past the build range (`spans[k]`) has no
+    match. Empty when the keys are not packed.
+
+    The build keys are kept in a row format whose rows fit one word: the
+    slot holds the whole key, so a probe compares it there, as DuckDB's
+    hash table compares a key row its pointer reaches (and as Polars 2.0's
+    `KeyRowLayout` stores multi-column keys as rows), instead of reading
+    every key column at a random build row. The widths come from the build
+    keys' ranges, as DuckDB's compressed materialization narrows integer
+    keys from their statistics."""
+
+    var bases: List[UInt64]
+    var spans: List[UInt64]
+    var shifts: List[Int]
+
+    @staticmethod
+    def none() -> Self:
+        return Self(List[UInt64](), List[UInt64](), List[Int]())
+
+    def packs(self) -> Bool:
+        return len(self.shifts) > 0
+
+
+def _int_range(key: Series) -> Tuple[UInt64, UInt64]:
+    """An integer key's least valid value as its word (`_int_word`) and the
+    distance to its greatest, in the type's order; (0, 0) when no row is
+    valid."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                var values = column._ptr()
+                var n = len(column)
+                var least = Scalar[D].MAX
+                var most = Scalar[D].MIN
+                if len(column._bits[]) == 0:
+                    for i in range(n):
+                        var v = values[unsafe_offset=i]
+                        least = min(least, v)
+                        most = max(most, v)
+                else:
+                    var bits = column._bits[].unsafe_ptr()
+                    for i in range(n):
+                        if _validity_at(bits, column._offset + i):
+                            var v = values[unsafe_offset=i]
+                            least = min(least, v)
+                            most = max(most, v)
+                if least > most:
+                    return (UInt64(0), UInt64(0))
+                var base = _int_word[D](least)
+                return (base, _int_word[D](most) - base)
+    return (UInt64(0), UInt64(0))
+
+
+def _key_packing(keys: List[Series]) -> Optional[_KeyPacking]:
+    """The packing of two or more integer build keys whose ranges fit
+    `_PACKED_BITS` together; None otherwise."""
+    if len(keys) < 2:
+        return None
+    for key in keys:
+        if not _is_int_key(key):
+            return None
+    var packing = _KeyPacking.none()
+    var used = 0
+    for key in keys:
+        var bounds = _int_range(key)
+        var width = 64 - Int(count_leading_zeros(bounds[1]))
+        packing.bases.append(bounds[0])
+        packing.spans.append(bounds[1])
+        packing.shifts.append(used)
+        used += width
+        if used > _PACKED_BITS:
+            return None
+    return packing^
+
+
+def _pack_key(
+    key: Series,
+    base: UInt64,
+    span: UInt64,
+    shift: Int,
+    packed: Pointer[UInt64, MutAnyOrigin],
+    outside: Pointer[UInt8, MutAnyOrigin],
+):
+    """Add one key's distances from `base` at bit `shift` to every row's
+    packed word, and mark the rows whose key is null or past `span`."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                var values = column._ptr()
+                var n = len(column)
+                var at = UInt64(shift)
+                if len(column._bits[]) == 0:
+                    for i in range(n):
+                        var offset = _int_word[D](values[unsafe_offset=i]) - base
+                        packed[unsafe_offset=i] |= offset << at
+                        outside[unsafe_offset=i] |= UInt8(offset > span)
+                    return
+                var bits = column._bits[].unsafe_ptr()
+                for i in range(n):
+                    var offset = _int_word[D](values[unsafe_offset=i]) - base
+                    packed[unsafe_offset=i] |= offset << at
+                    outside[unsafe_offset=i] |= UInt8(offset > span) | UInt8(
+                        not _validity_at(bits, column._offset + i)
+                    )
+                return
+
+
+def _pack_keys(keys: List[Series], packing: _KeyPacking) -> Series:
+    """The compound keys (in one chunk each) as one Int64 key, packed by
+    `packing`: null where any key is null, or past its build range, so
+    such a row matches no build row."""
+    var n = len(keys[0])
+    var packed = List[UInt64](length=n, fill=0)
+    var outside = List[UInt8](length=n, fill=0)
+    var words = packed.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var marks = outside.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    for k in range(len(keys)):
+        _pack_key(
+            keys[k],
+            packing.bases[k],
+            packing.spans[k],
+            packing.shifts[k],
+            words,
+            marks,
+        )
+    var values = List[Int64](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var unmatchable = 0
+    for i in range(n):
+        out[unsafe_offset=i] = bitcast[DType.int64](words[unsafe_offset=i])
+        unmatchable += Int(marks[unsafe_offset=i])
+    if unmatchable == 0:
+        return Series(keys[0].name(), Column[Int64](values^))
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = bits.unsafe_ptr()
+    for i in range(n):
+        valid[unsafe_offset=i >> 3] |= (UInt8(1) ^ marks[unsafe_offset=i]) << UInt8(
+            i & 7
+        )
+    return Series(keys[0].name(), Column[Int64](values=values^, bits=bits^))
+
+
 def prepare_progression_index(
     right_keys: List[Series],
 ) raises -> Optional[PreparedHashIndex]:
@@ -1645,6 +1815,7 @@ def prepare_progression_index(
         ArcPointer(List[Int32]()),
         ArcPointer(List[UInt64]()),
         0,
+        _KeyPacking.none(),
     )
 
 
@@ -1663,6 +1834,16 @@ def prepare_hash_index(
     var right = List[Series](capacity=len(right_keys))
     for key in right_keys:
         right.append(key.rechunk() if key.is_chunked() else key.copy())
+    # Compound integer keys that fit one word become one Int64 key, and
+    # take every route of one: the slot holds the whole key.
+    var packing = _KeyPacking.none()
+    var packable = _key_packing(right)
+    if packable:
+        trace_path("join.packed_keys")
+        packing = packable.take()
+        var packed = _pack_keys(right, packing)
+        right = List[Series]()
+        right.append(packed^)
     var progression = (False, Int64(0), UInt64(1))
     if (
         allow_progression
@@ -1681,6 +1862,7 @@ def prepare_hash_index(
             ArcPointer(List[Int32]()),
             ArcPointer(List[UInt64]()),
             0,
+            packing.copy(),
         )
     if (
         allow_progression
@@ -1701,6 +1883,7 @@ def prepare_hash_index(
                 ArcPointer(made[1].copy()),
                 ArcPointer(List[UInt64]()),
                 0,
+                packing.copy(),
             )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     # Enough buckets that each one's slot table fits a core's L2 cache:
@@ -1781,6 +1964,7 @@ def prepare_hash_index(
         ArcPointer(List[Int32]()),
         ArcPointer(filter^),
         filter_base,
+        packing^,
     )
 
 
@@ -1808,12 +1992,13 @@ def prepared_hash_semi_anti_rows(
     keep_matches: Bool,
     workers: Int = 0,
 ) raises -> List[Int]:
+    var probe_keys = prepared.probe_keys(left_keys)
     if prepared.progression:
         trace_path("join.progression_membership")
     else:
         trace_path("join.hash_membership")
     if prepared.progression:
-        var key = left_keys[0].rechunk()
+        var key = probe_keys[0].rechunk()
         ref values = key._data[Column[Int64]]
         var rows = List[Int](capacity=len(values))
         var right_count = len(prepared.right[0])
@@ -1825,7 +2010,7 @@ def prepared_hash_semi_anti_rows(
             if matched == keep_matches:
                 rows.append(i)
         return rows^
-    var index = prepared.probe(left_keys, workers)
+    var index = prepared.probe(probe_keys, workers)
     var bounds = partitions(len(index.left[0]), index.workers, 1)
     var jobs = List[_HashProbeJob](capacity=index.workers)
     for worker in range(index.workers):
@@ -1932,12 +2117,13 @@ def prepared_hash_join_gather(
     """`prepared_hash_join_rows` and the gather of the joined columns, one
     block of probe rows at a time (see `fused_gather`): the output is left
     in `request`, and no row list as long as it exists."""
+    var probe_keys = prepared.probe_keys(left_keys)
     if prepared.progression:
         trace_path("join.progression_prepared")
     else:
         trace_path("join.hash_index")
     if prepared.progression:
-        var key = left_keys[0].rechunk()
+        var key = probe_keys[0].rechunk()
         var n = len(key)
         var blocks = probe_blocks(n, request)
         var bounds = partitions(n, blocks, 1)
@@ -1954,7 +2140,7 @@ def prepared_hash_join_gather(
             )
         fused_gather(probes, request, include_unmatched)
         return
-    var index = prepared.probe(left_keys, 0)
+    var index = prepared.probe(probe_keys, 0)
     var n = len(index.left[0])
     var blocks = probe_blocks(n, request)
     var bounds = partitions(n, blocks, 1)
@@ -2084,12 +2270,13 @@ def prepared_hash_join_rows(
     omit_identity: Bool = False,
     workers: Int = 0,
 ) raises -> Tuple[List[Int], List[Int], Bool]:
+    var probe_keys = prepared.probe_keys(left_keys)
     if prepared.progression:
         trace_path("join.progression_prepared")
     else:
         trace_path("join.hash_index")
     if prepared.progression:
-        var key = left_keys[0].rechunk()
+        var key = probe_keys[0].rechunk()
         var n = len(key)
         var lanes = workers if workers > 0 else worker_count(n)
         var bounds = partitions(n, lanes, 1)
@@ -2130,7 +2317,7 @@ def prepared_hash_join_rows(
                 left_rows.extend(Span(jobs[k].left_rows))
             right_rows.extend(Span(jobs[k].right_rows))
         return (left_rows^, right_rows^, identity)
-    var index = prepared.probe(left_keys, workers)
+    var index = prepared.probe(probe_keys, workers)
     var lanes = index.workers
     var bounds = partitions(len(index.left[0]), lanes, 1)
     var jobs = List[_HashProbeJob](capacity=lanes)

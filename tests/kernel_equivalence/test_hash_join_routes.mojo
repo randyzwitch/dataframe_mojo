@@ -632,6 +632,97 @@ def test_build_key_bits_reject_only_absent_keys_in_joins_semi_and_anti() raises:
     assert_equal(len(small.filter[]), 0)
 
 
+def compound_probes(wide: Bool) raises:
+    """Two integer keys of different types (signed with negatives and
+    nulls; unsigned) probed by rows inside, below and past each key's build
+    range, null or not: packed into one word when the ranges fit (`wide`
+    false), compared column by column when they do not, and both give a
+    scalar scan's pairs, in left-major build order, and its semi and anti
+    rows."""
+    var a_values = List[Int32]()
+    var a_valid = List[Bool]()
+    var b_values = List[UInt16]()
+    var b_valid = List[Bool]()
+    for j in range(3_000):
+        a_values.append(Int32(j % 701 - 300))
+        a_valid.append(j % 89 != 4)
+        b_values.append(UInt16(j % 13 + 40))
+        b_valid.append(j % 151 != 9)
+    var wide_values = List[Int64]()
+    for j in range(3_000):
+        # Past 2**62 apart: these keys cannot share one word.
+        wide_values.append(Int64.MIN + Int64(j % 5) if j % 2 == 0 else Int64.MAX - Int64(j % 7))
+    var build: List[Series] = [
+        Series("a", Column[Int32](a_values.copy(), a_valid.copy())),
+        Series("b", Column[UInt16](b_values.copy(), b_valid.copy())),
+    ]
+    var p_a = List[Int32]()
+    var p_a_valid = List[Bool]()
+    var p_b = List[UInt16]()
+    var p_b_valid = List[Bool]()
+    var p_wide = List[Int64]()
+    for i in range(5_000):
+        p_a.append(Int32((i * 7919) % 1_000 - 450))
+        p_a_valid.append(i % 97 != 3)
+        p_b.append(UInt16((i * 31) % 20 + 35))
+        p_b_valid.append(i % 113 != 8)
+        p_wide.append(wide_values[(i * 17) % 3_000] if i % 3 != 0 else Int64(i))
+    var probe: List[Series] = [
+        Series("a", Column[Int32](p_a.copy(), p_a_valid.copy())),
+        Series("b", Column[UInt16](p_b.copy(), p_b_valid.copy())),
+    ]
+    if wide:
+        build.append(Series("w", Column[Int64](wide_values.copy())))
+        probe.append(Series("w", Column[Int64](p_wide.copy())))
+    var prepared = prepare_hash_index(build, allow_progression=False)
+    assert_equal(prepared.packing.packs(), not wide)
+    assert_equal(len(prepared.right), 1 if not wide else 3)
+    var expected = List[Tuple[Int, Int]]()
+    var semi = List[Int]()
+    var anti = List[Int]()
+    var unmatched = List[Bool]()
+    for i in range(len(p_a)):
+        var found = False
+        if p_a_valid[i] and p_b_valid[i]:
+            for j in range(len(a_values)):
+                if (
+                    a_valid[j]
+                    and b_valid[j]
+                    and a_values[j] == p_a[i]
+                    and b_values[j] == p_b[i]
+                    and (not wide or wide_values[j] == p_wide[i])
+                ):
+                    expected.append((i, j))
+                    found = True
+        if found:
+            semi.append(i)
+        else:
+            anti.append(i)
+        unmatched.append(not found)
+    for outer in [False, True]:
+        var rows = prepared_hash_join_rows(probe, prepared, outer)
+        var k = 0
+        var e = 0
+        for i in range(len(p_a)):
+            while e < len(expected) and expected[e][0] == i:
+                assert_equal(rows[0][k], i)
+                assert_equal(rows[1][k], expected[e][1])
+                k += 1
+                e += 1
+            if outer and unmatched[i]:
+                assert_equal(rows[0][k], i)
+                assert_equal(rows[1][k], -1)
+                k += 1
+        assert_equal(k, len(rows[1]))
+    assert_equal(prepared_hash_semi_anti_rows(probe, prepared, True), semi)
+    assert_equal(prepared_hash_semi_anti_rows(probe, prepared, False), anti)
+
+
+def test_compound_integer_keys_pack_into_one_word_only_when_ranges_fit() raises:
+    compound_probes(False)
+    compound_probes(True)
+
+
 def test_eager_join_builds_on_the_side_of_fewer_rows_times_columns() raises:
     # DuckDB's build side: fewer rows times columns builds, the right on a
     # tie, with no minimum size. A 300-row left against a 20,000-row right
