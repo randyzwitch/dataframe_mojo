@@ -77,6 +77,11 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
     var _origin_rows: Dict[Int, Int]
+    # For a frame slot holding a shared subplan's result: the table its
+    # columns read and each column's name there, so the join order reads
+    # their distinct counts from that table's statistics.
+    var _origin_tables: Dict[Int, DataFrame]
+    var _origin_names: Dict[Int, Dict[String, String]]
     # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
     var _accelerator_settings: Optional[ExecutionSettings]
     # Each node's empty result (its output names and types) while an
@@ -126,6 +131,8 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._schemas = schemas^
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._origin_tables = Dict[Int, DataFrame]()
+        self._origin_names = Dict[Int, Dict[String, String]]()
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
