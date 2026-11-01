@@ -4,7 +4,8 @@ one, and computed inputs run over every row, retried on the kept rows when
 that raises. Every result equals grouping the filtered frame eagerly: string
 and integer keys, nulls, float and decimal computed inputs, a key that only
 dropped rows hold, and a computed input that overflows only on dropped
-rows; one that overflows on a kept row still raises."""
+rows; one that overflows on a kept row still raises. A join that keeps most
+rows (as row indices) is read in place the same way."""
 # contract-group: reduce.grouped
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
@@ -111,3 +112,47 @@ def test_only_a_kept_rows_overflow_raises() raises:
             .agg([product^])
             .collect()
         )
+
+
+def test_a_joins_kept_rows_group_in_place() raises:
+    # A join to day keys 0 to 95 keeps the rows a filter on day would, as
+    # row indices: a computed column and the aggregate table read the
+    # morsel through them in place.
+    var source = frame()
+    var days = List[Int64]()
+    for d in range(96):
+        days.append(Int64(d))
+    var calendar = DataFrame([Series("d", Column[Int64](days^))])
+    var aggregations: List[Expr] = [
+        col("net").sum().alias("net"),
+        col("cost").sum().alias("cost"),
+        col("day").len().alias("rows"),
+    ]
+    var computed: List[Expr] = [
+        (col("price") * (lit(1.0) - col("price") / lit(1000.0))).alias("net"),
+        (col("amount") * col("amount")).alias("cost"),
+    ]
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var piped = (
+        source.lazy()
+        .join(calendar.lazy(), left_on=["day"], right_on=["d"])
+        .with_columns(computed.copy())
+        .group_by(["flag", "g"])
+        .agg(aggregations.copy())
+        .sort(["flag", "g"])
+        .collect()
+    )
+    var took = "dataframe-path: pipeline.table_in_place\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the joined rows were compacted, not read in place")
+    var eager = (
+        source.filter(col("day") <= lit(Int64(95)))
+        .with_columns(computed)
+        .group_by(["flag", "g"])
+        .agg(aggregations)
+        .sort(["flag", "g"])
+    )
+    assert_frame(piped, eager)
+    assert_equal(piped.filter(col("g") == lit(Int64(99))).height(), 0)

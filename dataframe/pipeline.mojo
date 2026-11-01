@@ -992,11 +992,15 @@ struct Morsel(Movable):
         (`_in_place_table_rows`). A common subexpression computed below
         an aggregation (PDS-H q1's discounted prices) compacted the whole
         morsel and cost q1 60%. False, with nothing changed, when the
-        selection is sparse or by rows, a column read is already compact,
-        or evaluating every row raises (a dropped row may hold the error,
-        so the compacting path decides what is raised)."""
+        selection is sparse, a column read is already compact, or
+        evaluating every row raises (a dropped row may hold the error,
+        so the compacting path decides what is raised). A join's selection
+        (by rows) qualifies as a filter's does: its mask is kept beside the
+        rows, as DuckDB's projection reads a join's dictionary vectors in
+        place (TPC-DS q23's quantity times price over 96% of store sales
+        gathered both columns first)."""
         var n = self.frame.height()
-        if not self.selected or self.by_rows or 2 * self.count < n:
+        if not self.selected or 2 * self.count < n:
             return False
         var whole = List[Series](capacity=len(names))
         for name in names:
@@ -3073,9 +3077,11 @@ def _in_place_table_rows(
     half the morsel, where compacting every column cost more than reading
     the dropped rows (PDS-H q1 keeps 98.6%: a third of its time went to
     compacting, including two string keys' views and codes). None when the
-    selection is sparse or a column was already compacted."""
+    selection is sparse or a column was already compacted. A join's
+    selection by rows is read the same way, through the mask kept beside
+    its rows."""
     var n = morsel.frame.height()
-    if not morsel.selected or morsel.by_rows or 2 * morsel.count < n:
+    if not morsel.selected or 2 * morsel.count < n:
         return None
     for expression in expressions:
         for node in expression._nodes:
