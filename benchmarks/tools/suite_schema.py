@@ -4,8 +4,6 @@ DuckDB transports HUGEINT integer SUM outputs through Arrow as DECIMAL(38,0).
 Only the declared integer-reduction positions may use that representation.
 The conversion below checks exact integrality and never rounds or uses float.
 """
-from decimal import Decimal
-
 from suite_answers import Answer
 
 
@@ -124,7 +122,10 @@ ALIASES = {
 
 def normalize(answer, suite, query):
     """Apply only declared transport equivalences, preserving exact values."""
-    types, rows = list(answer.types), list(answer.rows)
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    types, table = list(answer.types), answer.table
     for position in INTEGER_SUMS.get((suite, query), ()):
         if position >= len(types):
             raise ValueError("declared integer reduction is missing")
@@ -136,18 +137,13 @@ def normalize(answer, suite, query):
             "decimal128(38, 0)",
         }:
             raise ValueError("integer reduction has an unexpected dtype")
-        converted = []
-        for row in rows:
-            values = list(row)
-            value = values[position]
-            if value is not None:
-                if type(value) not in (int, Decimal) or value != int(value):
-                    raise ValueError(
-                        "integer reduction contains a non-integer value"
-                    )
-                values[position] = int(value)
-            converted.append(tuple(values))
-        rows = converted
+        # Every accepted dtype holds only integers, and DECIMAL(38, 0) holds
+        # every int64 and uint64 exactly, so the cast never rounds.
+        table = table.set_column(
+            position,
+            table.field(position).name,
+            table.column(position).cast(pa.decimal128(38, 0)),
+        )
         types[position] = "integer_sum"
     aliases = ALIASES.get((suite, query), {})
     names = [aliases.get(n, n) for n in answer.names]
@@ -159,16 +155,23 @@ def normalize(answer, suite, query):
     if grouping is not None:
         if grouping >= len(types) or types[grouping] not in {"int32", "int64"}:
             raise ValueError("grouping tag has an unexpected dtype")
+        table = table.set_column(
+            grouping,
+            table.field(grouping).name,
+            table.column(grouping).cast(pa.int64()),
+        )
         types[grouping] = "int64"
     # The upstream SQL spells the projected literal as INTEGER; lit(1) uses
     # Int64 in Mojo. This is a literal-only compatibility rule, with its value
     # checked independently rather than accepting arbitrary integer columns.
     if (suite, query) == ("clickbench", "q34"):
-        if (
-            not types
-            or types[0] not in {"int32", "int64"}
-            or any(r[0] != 1 for r in rows)
-        ):
+        if not types or types[0] not in {"int32", "int64"}:
             raise ValueError("q34 literal column does not contain integer one")
+        column = table.column(0).cast(pa.int64())
+        if column.null_count or pc.any(pc.not_equal(column, 1)).as_py():
+            raise ValueError("q34 literal column does not contain integer one")
+        table = table.set_column(0, table.field(0).name, column)
         types[0] = "int64"
-    return Answer(names, types, rows, answer.original_schema)
+    return Answer(
+        names, types, table.rename_columns(names), answer.original_schema
+    )

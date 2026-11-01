@@ -189,6 +189,7 @@ from dataframe.planning.graph import (
     plan_largest_scan,
     plan_live_parents,
     plan_measurable,
+    plan_merge_inputs,
     plan_node_hash,
     plan_order_free_above,
     plan_parents,
@@ -807,11 +808,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var result = self.copy()
         var left_root = len(result._plan._nodes) - 1
         var shift = len(result._plan._nodes)
-        var frame_shift = len(result._plan._frames)
-        for frame in other._plan._frames:
-            result._plan._frames.append(frame.copy())
-        for schema in other._plan._schemas:
-            result._plan._schemas.append(schema.copy())
+        var slot_of = plan_merge_inputs(result._plan, other._plan)
         for node in other._plan._nodes:
             var copied = node.copy()
             if copied.left >= 0:
@@ -819,7 +816,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if copied.right >= 0:
                 copied.right += shift
             if _is_scan(copied.kind):
-                copied.set_source_slot(copied.source_slot() + frame_shift)
+                copied.set_source_slot(slot_of[copied.source_slot()])
             result._plan._nodes.append(copied^)
         node.left = left_root
         node.right = len(result._plan._nodes) - 1
@@ -1535,11 +1532,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var result = self.copy()
         var left_root = len(result._plan._nodes) - 1
         var shift = len(result._plan._nodes)
-        var frame_shift = len(result._plan._frames)
-        for frame in other._plan._frames:
-            result._plan._frames.append(frame.copy())
-        for schema in other._plan._schemas:
-            result._plan._schemas.append(schema.copy())
+        var slot_of = plan_merge_inputs(result._plan, other._plan)
         for node in other._plan._nodes:
             var copied = node.copy()
             if copied.left >= 0:
@@ -1547,7 +1540,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             if copied.right >= 0:
                 copied.right += shift
             if _is_scan(copied.kind):
-                copied.set_source_slot(copied.source_slot() + frame_shift)
+                copied.set_source_slot(slot_of[copied.source_slot()])
             result._plan._nodes.append(copied^)
         var join = _join_node(
             left=left_root,

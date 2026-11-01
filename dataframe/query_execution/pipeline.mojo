@@ -12,6 +12,7 @@ from dataframe.planning.cost.aggregation import (
     select_aggregation_strategy,
     refine_string_sample,
 )
+from dataframe.kernels.distinct_statistics import distinct_estimate
 from dataframe.planning.cost.eligibility import (
     pipeline_eligibility,
     consider_inline_table,
@@ -1667,21 +1668,26 @@ def plan_reduce_by_probe_keys(
         return None
     trace_path("stream.probe_key_reduction")
     var probed = self._execute(below, False, True, batch_size)
-    var keys = probed.select(key).unique(key)
+    # The probe's keys as they are, duplicates and all: the semi joins
+    # below hash them into their build index, which keeps each key once
+    # (DuckDB's join filters come from the built table, with no distinct
+    # pass of their own). An exact distinct of PDS-H q21's 76K probe rows
+    # ran on one thread for 3 ms.
+    var keys = probed.select(key)
     var plan = self.copy()
     plan._frames.append(probed^)
     plan._schemas.append(Optional[CsvSchema]())
     plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
     plan._nodes[lowest].left = len(plan._nodes) - 1
     var key_frame = len(plan._frames)
-    # Each probe key's distinct values, and each source column's span,
-    # found once: PDS-H q21's two aggregates read one lineitem column.
+    # Each probe key's distinct values, estimated from a sample as the
+    # planner's statistics are (`distinct_estimate`, DuckDB's distinct
+    # statistics), and each source column's span, found once: PDS-H q21's
+    # two aggregates read one lineitem column.
     var distinct = List[Int]()
     for name in key:
-        distinct.append(
-            keys.height() if len(key)
-            == 1 else keys.select([name]).unique([name]).height()
-        )
+        var estimate = distinct_estimate(keys.column(name))
+        distinct.append(estimate if estimate >= 0 else keys.height())
     var spans = Dict[String, Int]()
     plan._frames.append(keys^)
     plan._schemas.append(Optional[CsvSchema]())

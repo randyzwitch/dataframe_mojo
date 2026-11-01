@@ -100,6 +100,26 @@ struct _SeriesChunks(Copyable, Deinitable, Movable):
         self.cache = ArcPointer(_MergedCache())
 
 
+def _storage_shares_buffers(a: Storage, b: Storage) -> Bool:
+    """Whether two arrays read the same Arrow buffers; list and struct
+    arrays never report sharing."""
+    comptime for i in range(len(FixedElements.Ts)):
+        comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+        if a.isa[Column[E]]():
+            return b.isa[Column[E]]() and a[Column[E]]._shares_buffers_with(
+                b[Column[E]]
+            )
+    if a.isa[BoolColumn]():
+        return b.isa[BoolColumn]() and a[BoolColumn]._shares_buffers_with(
+            b[BoolColumn]
+        )
+    if a.isa[StringColumn]():
+        return b.isa[StringColumn]() and a[StringColumn]._shares_buffers_with(
+            b[StringColumn]
+        )
+    return False
+
+
 struct _ChunkCodesJob(Job):
     """One string chunk's dictionary codes as a categorical chunk; a
     gathered chunk gathers its codes here. The caller has checked that the
@@ -627,29 +647,23 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if self.is_chunked() or other.is_chunked():
             if not (self.is_chunked() and other.is_chunked()):
                 return False
-            var mine = self.chunks()
-            var theirs = other.chunks()
-            if len(mine) != len(theirs):
+            # Copies of a chunked series share one array list; otherwise
+            # the arrays are compared in place, without a view per chunk
+            # (the planner compares scanned frames each time it classes
+            # a plan's subtrees).
+            ref mine = self._chunked.value()
+            ref theirs = other._chunked.value()
+            if mine.ptr() == theirs.ptr():
+                return True
+            if len(mine[].arrays) != len(theirs[].arrays):
                 return False
-            for i in range(len(mine)):
-                if not mine[i]._shares_buffers_with(theirs[i]):
+            for i in range(len(mine[].arrays)):
+                if not _storage_shares_buffers(
+                    mine[].arrays[i], theirs[].arrays[i]
+                ):
                     return False
             return True
-        comptime for i in range(len(FixedElements.Ts)):
-            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
-            if self._data.isa[Column[E]]():
-                return other._data.isa[Column[E]]() and self._data[
-                    Column[E]
-                ]._shares_buffers_with(other._data[Column[E]])
-        if self._data.isa[BoolColumn]():
-            return other._data.isa[BoolColumn]() and self._data[
-                BoolColumn
-            ]._shares_buffers_with(other._data[BoolColumn])
-        if self._data.isa[StringColumn]():
-            return other._data.isa[StringColumn]() and self._data[
-                StringColumn
-            ]._shares_buffers_with(other._data[StringColumn])
-        return False
+        return _storage_shares_buffers(self._data, other._data)
 
     def null_count(self) -> Int:
         if self.is_chunked():

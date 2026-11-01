@@ -69,7 +69,7 @@ from dataframe.kernels.binary import (
     _logical_bits,
     _not_bits,
     _logical,
-    _fill_null,
+    _fill_null_numeric,
     _fill_nan,
     validity,
     _keep_nulls,
