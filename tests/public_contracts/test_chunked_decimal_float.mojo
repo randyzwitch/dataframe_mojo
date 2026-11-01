@@ -128,7 +128,7 @@ def test_decimal_float_int128_integer_rounding_and_public_full_schema() raises:
     var public_result = (
         DataFrame([chunks.copy()])
         .lazy()
-        .select([col("amount").cast(DataType.FLOAT64)])
+        .select(col("amount").cast(DataType.FLOAT64))
         .collect()
     )
     assert_frame(public_result, DataFrame([expected.copy()]))
