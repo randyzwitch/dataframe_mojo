@@ -397,6 +397,30 @@ def test_sets_sunk_together_over_a_join_match_group_by() raises:
     check_sets_against_group_by(source, keys, sets, plain)
 
 
+def test_sets_over_a_left_join_keep_missing_build_rows_apart() raises:
+    """A build's string keys group by their codes in every set: the facts
+    no item row matches (a null category and class), the items' own null
+    classes and the nulls a set leaves for a key it rolls up each land
+    in their own groups."""
+    var source = (
+        facts()
+        .lazy()
+        .join(
+            items().lazy().filter(col("item") < 30),
+            on="item",
+            how="left",
+        )
+    )
+    var plain: List[Expr] = [
+        col("m").sum().alias("total"),
+        col("m").len().alias("n"),
+        col("x").mean().alias("avg"),
+    ]
+    var keys: List[String] = ["category", "class"]
+    var sets: List[List[String]] = [["category", "class"], ["category"], []]
+    check_sets_against_group_by(source, keys, sets, plain)
+
+
 def test_sets_with_reductions_the_table_lacks_match_group_by() raises:
     """A median is not an inline state: the sets group the collected input
     one after another, to the same rows."""
