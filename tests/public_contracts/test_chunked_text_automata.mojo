@@ -72,7 +72,7 @@ def _source(mode: Int, offset: Int) raises -> Series:
     return Series._from_chunks(parts)
 
 
-def _unmerged(source: Series):
+def _unmerged(source: Series) raises:
     assert_true(source.is_chunked())
     assert_true(source._chunked.value()[].cache[].state.load() == 0)
 
@@ -119,7 +119,7 @@ def _replace(
         STR_REPLACE_MANY,
         text=pack_literals(patterns),
         text2=pack_literals(replacements),
-        integer=2 if leftmost else 0,
+        integer=Int64(2 if leftmost else 0),
     )
     return text_function(node, source).renamed("result")
 
