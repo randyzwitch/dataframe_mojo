@@ -156,6 +156,7 @@ from dataframe.devices import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    _ReadyIndex,
 )
 from dataframe.planning.explain import (
     plan_describe,
@@ -1660,6 +1661,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan._share_subplans(True, batch_size)
             plan._order_joins(True, batch_size)
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        plan._plan._prefetched_indexes = Optional(
+            ArcPointer(Dict[Int, _ReadyIndex]())
+        )
         var index = len(plan._plan._nodes) - 1
         var schema = plan._execute(index, True, False, batch_size).clear()
         var output = FileSink(
@@ -2042,6 +2046,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        plan._plan._prefetched_indexes = Optional(
+            ArcPointer(Dict[Int, _ReadyIndex]())
+        )
         return plan._execute(
             len(plan._plan._nodes) - 1, False, streaming, batch_size
         )
