@@ -11,6 +11,7 @@ from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
+from std.sys.intrinsics import prefetch
 
 from dataframe.aggregation.reducer import float_key
 from dataframe.storage.boolean import BoolColumn
@@ -27,6 +28,7 @@ from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.partition import (
     Partitioner,
     _hash_bytes,
+    _hash_column,
     _mix,
     _short_hash,
 )
@@ -64,23 +66,30 @@ def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
     return a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
 
 
-def _row_valid(keys: List[Series], row: Int) -> Bool:
-    """Null in any join component makes the build row unmatchable."""
-    for key in keys:
-        var valid = True
-        comptime for k in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[k]
-            if key._data.isa[Column[Scalar[D]]]():
-                valid = key._data[Column[Scalar[D]]]._valid(row)
-        if key._data.isa[Column[Int128]]():
-            valid = key._data[Column[Int128]]._valid(row)
-        if key._data.isa[BoolColumn]():
-            valid = key._data[BoolColumn]._valid(row)
-        elif key._data.isa[StringColumn]():
-            valid = key._data[StringColumn]._valid(row)
-        if not valid:
-            return False
-    return True
+def _bitmap_of(key: Series) -> Tuple[Int, Int]:
+    """A key's validity bitmap address (0 when it has none, so every row is
+    valid) and the bit of its row 0."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if key._data.isa[Column[Scalar[D]]]():
+            ref column = key._data[Column[Scalar[D]]]
+            if len(column._bits[]) == 0:
+                return (0, 0)
+            return (Int(column._bits[].unsafe_ptr()), column._offset)
+    if key._data.isa[Column[Int128]]():
+        ref column = key._data[Column[Int128]]
+        if len(column._bits[]) == 0:
+            return (0, 0)
+        return (Int(column._bits[].unsafe_ptr()), column._offset)
+    if key._data.isa[BoolColumn]():
+        ref column = key._data[BoolColumn]
+        if len(column._bits[]) == 0:
+            return (0, 0)
+        return (Int(column._bits[].unsafe_ptr()), column._offset)
+    ref column = key._data[StringColumn]
+    if len(column._bits[]) == 0:
+        return (0, 0)
+    return (Int(column._bits[].unsafe_ptr()), column._offset)
 
 
 def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
@@ -442,7 +451,8 @@ def _is_int_key(key: Series) -> Bool:
 
 
 def _key_words(key: Series) -> List[UInt64]:
-    """Every row's word (`_int_word`) of an integer key with no nulls."""
+    """Every row's word (`_int_word`) of an integer key; a null row's word
+    is undefined."""
     var words = huge_uninit[UInt64](len(key))
     var out = words.unsafe_ptr()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -455,17 +465,6 @@ def _key_words(key: Series) -> List[UInt64]:
                         values.unsafe_offset(i)[]
                     )
     return words^
-
-
-def _int_key_at(key: Series, row: Int) -> Tuple[Bool, UInt64]:
-    """Whether an integer key's row is valid, and its word."""
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        comptime if not D.is_floating_point():
-            if key._data.isa[Column[Scalar[D]]]():
-                ref values = key._data[Column[Scalar[D]]]
-                return (values._valid(row), _int_word[D](values._get(row)))
-    return (False, UInt64(0))
 
 
 @fieldwise_init
@@ -565,85 +564,77 @@ def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
     return pack_bits[DType.uint16](lanes)
 
 
-struct _TagCursor:
-    """Walks the slots whose tag matches a hash, in probe order, stopping
-    at the first empty slot: `next()` yields each candidate position or
-    -1 when the search is over. Sixteen tags are read per load."""
+# Probe rows hashed, and their slots fetched, together (Polars 2.0's
+# `BLOCK_SIZE`): the block's cache misses are in flight at once instead of
+# one row's at a time, and the block's hashes stay in L1.
+comptime _PREFETCH_BLOCK = 256
+# Slots, over all buckets, from which a probe prefetches (Polars 2.0's
+# `MIN_PREFETCH_BUCKETS`): a smaller table stays in cache.
+comptime _PREFETCH_SLOTS = 1 << 15
 
-    # The tag table's address, as an Int: a struct field cannot hold an
-    # unsafe-origin pointer. The bucket outlives every probe of it.
-    var tags: Int
-    var mask: Int
-    var position: Int
-    var lane: Int
-    var hits: SIMD[DType.bool, 16]
-    var empties: SIMD[DType.bool, 16]
-    var wanted: SIMD[DType.uint8, 16]
-    var done: Bool
-    # Without tags (a bucket past _TAG_BUCKET_BYTES) every occupied slot
-    # in probe order is a candidate.
-    var slots: Int
-    var plain: Bool
 
-    def __init__(out self, index: _HashBucket, hash: UInt64):
-        self.tags = Int(index.tags.unsafe_ptr())
-        self.slots = Int(index.slots.unsafe_ptr())
-        self.plain = len(index.tags) == 0
-        self.mask = len(index.slots) - 1
-        self.position = Int(hash & UInt64(self.mask))
-        self.lane = 0
-        self.wanted = SIMD[DType.uint8, 16](_tag_of(hash))
-        self.hits = SIMD[DType.bool, 16](fill=False)
-        self.empties = SIMD[DType.bool, 16](fill=False)
-        self.done = False
-        if not self.plain:
-            self._load()
+@always_inline
+def _prefetch_probe(index: _HashBucket, hash: UInt64):
+    """Start loading the line a probe of `hash` reads first: its tags, or
+    its slot in a bucket without tags."""
+    var position = Int(hash & UInt64(len(index.slots) - 1))
+    if len(index.tags) > 0:
+        prefetch(index.tags.unsafe_ptr().unsafe_offset(position))
+    else:
+        prefetch(
+            index.slots.unsafe_ptr()
+            .unsafe_offset(position)
+            .unsafe_bitcast[UInt8]()
+        )
 
-    def _load(mut self):
-        """Load groups until one holds a candidate or an empty slot."""
-        while True:
-            var group = (
-                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.tags)
-                .unsafe_offset(self.position)
-                .unsafe_load[width=16]()
-            )
-            self.hits = group.eq(self.wanted)
-            self.empties = group.eq(SIMD[DType.uint8, 16](0))
-            self.lane = 0
-            if self.hits.reduce_or():
-                return
-            # No candidate but an empty slot: the search is over. No
-            # candidate and no empty slot: the next group.
-            if self.empties.reduce_or():
-                self.done = True
-                return
-            self.position = (self.position + _TAG_LANES) & self.mask
 
-    def next(mut self) -> Int:
-        if self.plain:
-            if self.done:
-                return -1
-            var slots = Pointer[_HashSlot, MutAnyOrigin](
-                unsafe_from_address=self.slots
-            )
-            if slots.unsafe_offset(self.position)[].row < 0:
-                self.done = True
-                return -1
-            var at = self.position
-            self.position = (self.position + 1) & self.mask
-            return at
-        while not self.done:
-            while self.lane < _TAG_LANES:
-                var lane = self.lane
-                self.lane += 1
-                if self.empties[lane]:
-                    self.done = True
-                    return -1
-                if self.hits[lane]:
-                    return (self.position + lane) & self.mask
-            self.position = (self.position + _TAG_LANES) & self.mask
-            self._load()
-        return -1
+@always_inline
+def _hash_candidates(
+    index: _HashBucket,
+    hash: UInt64,
+    row: Int,
+    bucket: Int,
+    mut candidates: _Candidates,
+):
+    """Add every slot whose stored hash equals `hash` to `candidates`, in
+    probe order: sixteen tags per load and their matching lanes walked by
+    set bits, as `_tagged_probe` does, so a probe row whose tag matches no
+    slot (most rows of a selective or outer join) reads one tag line and
+    compares nothing. DuckDB's probe (`ProbeForPointers`) likewise skips
+    entries whose salt differs and compares keys only where it matches."""
+    var mask = len(index.slots) - 1
+    var slots = index.slots.unsafe_ptr()
+    var position = Int(hash & UInt64(mask))
+    if len(index.tags) == 0:
+        # A bucket past _TAG_BUCKET_BYTES: the plain slot walk.
+        while slots.unsafe_offset(position)[].row >= 0:
+            ref slot = slots.unsafe_offset(position)[]
+            if slot.key == hash:
+                candidates.add(
+                    row, Int(slot.row), bucket, Int(slot.next_position)
+                )
+            position = (position + 1) & mask
+        return
+    var tags = index.tags.unsafe_ptr()
+    var wanted = SIMD[DType.uint8, 16](_tag_of(hash))
+    while True:
+        var group = tags.unsafe_offset(position).unsafe_load[width=16]()
+        var hits = _lane_bits(group.eq(wanted))
+        var empties = _lane_bits(group.eq(SIMD[DType.uint8, 16](0)))
+        if empties != 0:
+            hits &= (empties & (0 - empties)) - 1
+        while hits != 0:
+            var lane = Int(count_trailing_zeros(hits))
+            hits &= hits - 1
+            var at = (position + lane) & mask
+            ref slot = slots.unsafe_offset(at)[]
+            if slot.key == hash:
+                candidates.add(
+                    row, Int(slot.row), bucket, Int(slot.next_position)
+                )
+        if empties != 0:
+            return
+        position = (position + _TAG_LANES) & mask
 
 
 @always_inline
@@ -732,7 +723,7 @@ struct _HashBuildJob(Job):
     """Build one hash bucket from stable right-row positions."""
 
     var order: ArcPointer[List[Int]]
-    # The hashes, and for an integer key without nulls its words, in
+    # The hashes, and for an integer key its words, in
     # bucket order: read in sequence instead of at each row (#378).
     var ordered_hashes: ArcPointer[List[UInt64]]
     var ordered_words: ArcPointer[List[UInt64]]
@@ -759,7 +750,7 @@ struct _HashBuildJob(Job):
         self.ordered_words = ordered_words.copy()
         self.right_keys = right_keys.copy()
         self.typed_int = typed_int
-        self.skip_nulls = skip_nulls and not typed_int
+        self.skip_nulls = skip_nulls
         self.first = first
         self.last = last
         self.result = _HashBucket(
@@ -786,19 +777,34 @@ struct _HashBuildJob(Job):
         var ordered_hashes = self.ordered_hashes[].unsafe_ptr()
         var words = self.ordered_words[].unsafe_ptr()
         var have_words = len(self.ordered_words[]) > 0
+        # The bitmaps of the keys that have one, through addresses taken
+        # once: a row with a null key component never enters the index,
+        # tested with one bit read per bitmap instead of resolving every
+        # key's type for every row.
+        var bitmaps = List[Int]()
+        var bit_offsets = List[Int]()
+        if self.skip_nulls:
+            for key in self.right_keys:
+                var bitmap = _bitmap_of(key)
+                if bitmap[0] != 0:
+                    bitmaps.append(bitmap[0])
+                    bit_offsets.append(bitmap[1])
         for position in range(self.last - 1, self.first - 1, -1):
             var row = order.unsafe_offset(position)[]
-            if self.skip_nulls and not _row_valid(self.right_keys, row):
+            var valid = True
+            for b in range(len(bitmaps)):
+                valid = valid and _validity_at(
+                    Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=bitmaps[b]
+                    ),
+                    bit_offsets[b] + row,
+                )
+            if not valid:
                 continue
             var hash = ordered_hashes.unsafe_offset(position)[]
             var key = hash
             if have_words:
                 key = words.unsafe_offset(position)[]
-            elif self.typed_int:
-                var word = _int_key_at(self.right_keys[0], row)
-                if not word[0]:
-                    continue
-                key = word[1]
             var slot = Int(hash & UInt64(size - 1))
             var table = slots.unsafe_ptr()
             while table.unsafe_offset(slot)[].row >= 0:
@@ -880,7 +886,6 @@ struct _HashBuildJob(Job):
 struct _HashProbeJob(MatchJob):
     var left_keys: List[Series]
     var right_keys: List[Series]
-    var left_hashes: ArcPointer[List[UInt64]]
     var buckets: ArcPointer[List[_HashBucket]]
     var fold: Int
     var start: Int
@@ -896,12 +901,15 @@ struct _HashProbeJob(MatchJob):
     # The build keys' bits (`PreparedHashIndex.filter`), empty for none.
     var filter: ArcPointer[List[UInt64]]
     var filter_base: Int64
+    # One batch's probe hashes (`_candidates`), for keys hashed on read.
+    var batch_hashes: List[UInt64]
+    # Whether the table is large enough to prefetch (`_PREFETCH_SLOTS`).
+    var prefetching: Bool
 
     def __init__(
         out self,
         left_keys: List[Series],
         right_keys: List[Series],
-        left_hashes: ArcPointer[List[UInt64]],
         buckets: ArcPointer[List[_HashBucket]],
         fold: Int,
         start: Int,
@@ -914,7 +922,6 @@ struct _HashProbeJob(MatchJob):
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
-        self.left_hashes = left_hashes.copy()
         self.buckets = buckets.copy()
         self.fold = fold
         self.start = start
@@ -936,6 +943,11 @@ struct _HashProbeJob(MatchJob):
         )
         self.filter = filter.copy()
         self.filter_base = filter_base
+        self.batch_hashes = List[UInt64]()
+        var slots = 0
+        for bucket in buckets[]:
+            slots += len(bucket.slots)
+        self.prefetching = slots >= _PREFETCH_SLOTS
 
     def take_matches(
         mut self, mut left: List[Int], mut right: List[Int]
@@ -1013,6 +1025,7 @@ struct _HashProbeJob(MatchJob):
                     self.left_rows.append(i)
             return
         var candidates = _Candidates()
+        self.batch_hashes = List[UInt64](length=_MATCH_BATCH, fill=0)
         var row = self.start
         while row < self.end:
             var stop = min(self.end, row + _MATCH_BATCH)
@@ -1049,53 +1062,87 @@ struct _HashProbeJob(MatchJob):
                     if self.left_keys[0]._data.isa[Column[Scalar[D]]]():
                         ref left = self.left_keys[0]._data[Column[Scalar[D]]]
                         var left_all_valid = len(left._bits[]) == 0
-                        # Keys and buckets through pointers: no reference-count
-                        # or bounds check per row (#378).
+                        # Keys, validity and buckets through pointers: no
+                        # reference-count or bounds check per row (#378).
                         var keys = left._ptr()
+                        var valid = left._bits[].unsafe_ptr()
                         var buckets = self.buckets[].unsafe_ptr()
                         var bits = Int(self.filter[].unsafe_ptr())
                         var words = len(self.filter[])
-                        for i in range(self.start, self.end):
-                            if not (left_all_valid or left._valid(i)):
-                                if self.include_unmatched:
-                                    self.left_rows.append(i)
-                                    self.right_rows.append(-1)
-                                continue
-                            comptime if D == DType.int64:
-                                if words > 0 and _key_bit_clear(
-                                    bits,
-                                    words,
-                                    self.filter_base,
-                                    rebind[Int64](keys.unsafe_offset(i)[]),
+                        var bit_offset = left._offset
+                        # The block's hashes, made once in the prefetch pass.
+                        var hashed = List[UInt64](
+                            length=_PREFETCH_BLOCK if self.prefetching else 0,
+                            fill=0,
+                        )
+                        var block_hashes = hashed.unsafe_ptr()
+                        for block in range(
+                            self.start, self.end, _PREFETCH_BLOCK
+                        ):
+                            var block_end = min(
+                                self.end, block + _PREFETCH_BLOCK
+                            )
+                            # The block's slots, fetched before any is
+                            # probed (a null row's line too, harmlessly).
+                            if self.prefetching:
+                                for i in range(block, block_end):
+                                    var hash = _mix(
+                                        _int_word[D](keys.unsafe_offset(i)[])
+                                    )
+                                    block_hashes[unsafe_offset=i - block] = hash
+                                    _prefetch_probe(
+                                        buckets.unsafe_offset(
+                                            Int(hash >> 56) >> self.fold
+                                        )[],
+                                        hash,
+                                    )
+                            for i in range(block, block_end):
+                                if not (
+                                    left_all_valid
+                                    or _validity_at(valid, bit_offset + i)
                                 ):
                                     if self.include_unmatched:
                                         self.left_rows.append(i)
                                         self.right_rows.append(-1)
                                     continue
-                            var key = _int_word[D](keys.unsafe_offset(i)[])
-                            var hash = _mix(key)
-                            var bucket = Int(hash >> 56) >> self.fold
-                            ref index = buckets.unsafe_offset(bucket)[]
-                            var hit = _tagged_probe(index, hash, key)
-                            if hit >= 0:
-                                ref slot = (
-                                    index.slots.unsafe_ptr().unsafe_offset(
-                                        hit
-                                    )[]
-                                )
-                                self.left_rows.append(i)
-                                self.right_rows.append(Int(slot.row))
-                                if slot.next_position >= 0:
-                                    _append_duplicate_rows(
-                                        index,
-                                        Int(slot.next_position),
-                                        i,
-                                        self.left_rows,
-                                        self.right_rows,
+                                comptime if D == DType.int64:
+                                    if words > 0 and _key_bit_clear(
+                                        bits,
+                                        words,
+                                        self.filter_base,
+                                        rebind[Int64](keys.unsafe_offset(i)[]),
+                                    ):
+                                        if self.include_unmatched:
+                                            self.left_rows.append(i)
+                                            self.right_rows.append(-1)
+                                        continue
+                                var key = _int_word[D](keys.unsafe_offset(i)[])
+                                var hash = block_hashes[
+                                    unsafe_offset=i - block
+                                ] if self.prefetching else _mix(key)
+                                var bucket = Int(hash >> 56) >> self.fold
+                                ref index = buckets.unsafe_offset(bucket)[]
+                                var hit = _tagged_probe(index, hash, key)
+                                if hit >= 0:
+                                    ref slot = (
+                                        index.slots.unsafe_ptr().unsafe_offset(
+                                            hit
+                                        )[]
                                     )
-                            elif self.include_unmatched:
-                                self.left_rows.append(i)
-                                self.right_rows.append(-1)
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(Int(slot.row))
+                                    if slot.next_position >= 0:
+                                        _append_duplicate_rows(
+                                            index,
+                                            Int(slot.next_position),
+                                            i,
+                                            self.left_rows,
+                                            self.right_rows,
+                                        )
+                                elif self.include_unmatched:
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(-1)
+                        _ = hashed^
                         return
         if (
             len(self.left_keys) == 1
@@ -1195,6 +1242,7 @@ struct _HashProbeJob(MatchJob):
         # 17.9 -> 8.4 ms, q40 22.8 -> 17.4) once Parquet columns lost their
         # all-valid bitmaps and reached it.
         var candidates = _Candidates()
+        self.batch_hashes = List[UInt64](length=_MATCH_BATCH, fill=0)
         var row = self.start
         while row < self.end:
             var stop = min(self.end, row + _MATCH_BATCH)
@@ -1238,33 +1286,52 @@ struct _HashProbeJob(MatchJob):
             self.right_rows,
         )
 
-    def _candidates(self, start: Int, stop: Int, mut candidates: _Candidates):
+    def _candidates(
+        mut self, start: Int, stop: Int, mut candidates: _Candidates
+    ) raises:
         """The build slots of probe rows [start, stop) whose stored hash
-        equals the row's, matched on the keys."""
+        equals the row's, matched on the keys. The rows' hashes are made
+        here, one batch at a time into a buffer that stays in cache, as
+        DuckDB hashes each probe vector (`JoinHashTable::Hash`) before
+        looking it up, rather than in a pass over the whole probe first."""
         candidates.clear()
-        for i in range(start, stop):
-            var hash = self.left_hashes[][i]
-            var bucket = Int(hash >> 56) >> self.fold
-            ref index = self.buckets[][bucket]
-            var cursor = _TagCursor(index, hash)
-            var position = cursor.next()
-            while position >= 0:
-                ref slot = index.slots[position]
-                if hash == slot.key:
-                    candidates.add(
-                        i, Int(slot.row), bucket, Int(slot.next_position)
+        var hashes = self.batch_hashes.unsafe_ptr()
+        for k in range(len(self.left_keys)):
+            _hash_column(
+                self.left_keys[k],
+                start,
+                stop,
+                Int(hashes),
+                k == 0,
+                output_offset=start,
+            )
+        var buckets = self.buckets[].unsafe_ptr()
+        var block = start
+        while block < stop:
+            var block_end = min(stop, block + _PREFETCH_BLOCK)
+            if self.prefetching:
+                for i in range(block, block_end):
+                    var hash = hashes[unsafe_offset=i - start]
+                    _prefetch_probe(
+                        buckets.unsafe_offset(Int(hash >> 56) >> self.fold)[],
+                        hash,
                     )
-                position = cursor.next()
+            for i in range(block, block_end):
+                var hash = hashes[unsafe_offset=i - start]
+                var bucket = Int(hash >> 56) >> self.fold
+                _hash_candidates(
+                    buckets.unsafe_offset(bucket)[], hash, i, bucket, candidates
+                )
+            block = block_end
         candidates.match(self.left_keys, self.right_keys)
 
 
 @fieldwise_init
 struct _HashIndex(Movable):
-    """A built right-row index; single integer probes hash from their keys."""
+    """A built right-row index and the probe keys, hashed as they are read."""
 
     var left: List[Series]
     var right: List[Series]
-    var left_hashes: ArcPointer[List[UInt64]]
     var indexes: ArcPointer[List[_HashBucket]]
     var fold: Int
     var workers: Int
@@ -1320,24 +1387,13 @@ struct PreparedHashIndex(Copyable):
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
         var lanes = workers if workers > 0 else worker_count(len(left[0]))
-        if len(left) == 1 and (
-            _is_int_key(left[0]) or left[0]._data.isa[StringColumn]()
-        ):
-            # Hash integer and string probe keys as workers read them.
-            # No row-sized hash buffer or separate hashing/histogram pass.
-            return _HashIndex(
-                left^,
-                self.right.copy(),
-                ArcPointer(List[UInt64]()),
-                self.indexes.copy(),
-                self.fold,
-                lanes,
-            )
-        var hashes = Partitioner(left, lanes)
+        # Every key is hashed as the workers read it: integer and string
+        # single keys row by row, compound keys a batch at a time
+        # (`_HashProbeJob._candidates`). No row-sized hash buffer, and no
+        # histogram pass, which only a partitioning build needs.
         return _HashIndex(
             left^,
             self.right.copy(),
-            ArcPointer(hashes^.into_hashes()),
             self.indexes.copy(),
             self.fold,
             lanes,
@@ -1666,8 +1722,10 @@ def prepare_hash_index(
     # size also keeps its tags (_TAG_BUCKET_BYTES), so probes take the
     # branch-free tag path.
     var typed_int = len(right) == 1 and _is_int_key(right[0])
+    # An integer key's words, null rows' included: those rows are skipped
+    # by their validity bit, so no row reads its key through the column.
     var words = List[UInt64]()
-    if typed_int and right[0].null_count() == 0:
+    if typed_int:
         words = _key_words(right[0])
     var right_parts = right_hashes.scatter(
         worker_count(len(right[0])),
@@ -1787,7 +1845,6 @@ def prepared_hash_semi_anti_rows(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[worker],
@@ -1919,7 +1976,6 @@ def prepared_hash_join_gather(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[block],
@@ -2095,7 +2151,6 @@ def prepared_hash_join_rows(
             _HashProbeJob(
                 index.left,
                 index.right,
-                index.left_hashes,
                 index.indexes,
                 index.fold,
                 bounds[worker],
