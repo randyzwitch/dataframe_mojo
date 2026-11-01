@@ -43,6 +43,7 @@ from dataframe.parallel import Job, Pool, configured_workers
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
+from dataframe.storage.allocation import huge_uninit
 
 # Tier codes as stored: a key with nulls or NaN orders tiers first. Values
 # take the lower middle tier ascending and NaN the upper; descending swaps
@@ -796,7 +797,7 @@ def _sort_packed[
     var buckets = 1 << bucket_bits
     var bucket_shift = total_bits - bucket_bits
 
-    var packed = List[Scalar[T]](length=n, fill=0)
+    var packed = huge_uninit[Scalar[T]](n)
     var packs = List[_PackJob[T]](capacity=ranges)
     for r in range(ranges):
         packs.append(
@@ -821,7 +822,7 @@ def _sort_packed[
         for r in range(ranges):
             size += packs[r].counts[b]
         offsets[b + 1] = offsets[b] + size
-    var sorted = List[Scalar[T]](length=n, fill=0)
+    var sorted = huge_uninit[Scalar[T]](n)
     var scatters = List[_ScatterJob[T]](capacity=ranges)
     var running = offsets.copy()
     for r in range(ranges):
@@ -887,7 +888,7 @@ def _sort_packed[
                 settle,
             )
 
-    var rows = List[Int](length=n, fill=0)
+    var rows = huge_uninit[Int](n)
     var mask = (Scalar[T](1) << Scalar[T](row_bits)) - 1
     var unpack = List[_RowsJob[T]](capacity=ranges)
     for r in range(ranges):
@@ -1199,8 +1200,10 @@ def _packed_order(
                 pool.release()
                 return None
         owned.append(column^)
-        order_lists.append(List[UInt64](length=n, fill=0))
-        tier_lists.append(List[UInt8](length=n, fill=0))
+        # Written by the jobs that read them (an order only where its
+        # tier is a value), so first touched on the workers.
+        order_lists.append(huge_uninit[UInt64](n))
+        tier_lists.append(huge_uninit[UInt8](n))
     # Addresses are taken only once the lists stop moving.
     var orders = List[Int]()
     var tiers = List[Int]()
