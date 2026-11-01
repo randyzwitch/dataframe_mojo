@@ -195,6 +195,33 @@ def _scaled_integers[
     var out = values.unsafe_ptr()
     var source = column._ptr()
     var nulls = column.null_count() > 0
+    # Every value of the source type fits the target (BIGINT to
+    # DECIMAL(19,0), INTEGER to DECIMAL(10,0) or wider): no row can
+    # overflow, so the scaling is one unchecked pass over every slot,
+    # which vectorizes, and the source's validity is copied as it is.
+    # DuckDB's binder makes the same choice from the types alone.
+    var bound = Scalar[D].MAX.cast[DType.int128]() + 1
+    if bound <= (limit - 1) // factor:
+        var scaled = Scalar[W](factor.cast[W]())
+        for i in range(n):
+            out[unsafe_offset=i] = source[unsafe_offset=i].cast[W]() * scaled
+        if not nulls:
+            return Series(input.name(), Column[Scalar[W]](values^)).with_dtype(
+                target
+            )
+        var valid = _copy_validity(column._bits[], column._offset, n)
+        # Null slots hold 0, as on the checked path.
+        for k in range(len(valid)):
+            var byte = valid[k]
+            if byte == 255:
+                continue
+            for b in range(8):
+                var row = 8 * k + b
+                if row < n and not (byte >> UInt8(b)) & 1:
+                    out[unsafe_offset=row] = 0
+        return Series(
+            input.name(), Column[Scalar[W]](values=values^, bits=valid^)
+        ).with_dtype(target)
     var overflowed = List[Int]()
     for i in range(n):
         if nulls and not column._valid(i):
