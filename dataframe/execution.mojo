@@ -158,6 +158,7 @@ from dataframe.kernels.binary import (
     binary,
     unary,
     choose,
+    _choice_chunk_input,
     fit_mask,
     math_unary,
     arctan2_series,
@@ -984,6 +985,24 @@ def _masked_branch[
             length,
             False,
             then_mask,
+        )
+    # Boolean/String null-otherwise branches use the same admitted window
+    # choice as explicit otherwise branches, before their legacy merge.
+    if (
+        then.is_chunked()
+        and then.dtype() == bound.dtypes[index]
+        and (len(flags) == 1 or len(flags) == size)
+        and _choice_chunk_input(then, bound.dtypes[index], size)
+    ):
+        if len(selected) == 0:
+            selected = List[Bool](unsafe_uninit_length=size)
+            var then_mask = List[Bool](unsafe_uninit_length=size)
+            var other_mask = List[Bool](unsafe_uninit_length=size)
+            _selection_masks(
+                flags, List[Bool](), selected, then_mask, other_mask
+            )
+        return choose(
+            selected, then, Series.full_null("", bound.dtypes[index], 1)
         )
     # A batch that spans a source's chunks (a Parquet column's row
     # groups) merges its branch once: one copy, where choosing every row
@@ -2899,10 +2918,26 @@ def _partition_ids(keys: List[Series], height: Int) raises -> RowKeys:
     return encode_partitioned(keys, workers, nulls_equal=True)
 
 
-def _has_over(bound: BoundExpr) -> Bool:
+def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
+    """Whether a nested over() in `bound` can see rows outside one
+    partition of `keys`: a global one, or one partitioned without every
+    key. A nested over() partitioned by all of them (perhaps more) splits
+    each partition further, so a run of whole partitions holds its rows,
+    as DuckDB evaluates a window whose partition keys extend another's
+    within the other's sorted partitions."""
+    var outer = split_names(keys)
     for node in bound.expr._nodes:
-        if node.op == OVER:
+        if node.op != OVER:
+            continue
+        if (node.integer & OVER_GLOBAL) != 0:
             return True
+        var inner = split_names(node.text2)
+        for key in outer:
+            var found = False
+            for name in inner:
+                found = found or name == key
+            if not found:
+                return True
     return False
 
 
@@ -3000,6 +3035,17 @@ def _over_contiguous[
     for source in probe.sources:
         if source >= 0:
             used[source] = True
+    # A nested over() finds its partition and order columns by name.
+    for nested in probe.expr._nodes:
+        if nested.op != OVER:
+            continue
+        var names = split_names(nested.text2)
+        if nested.min_count > 0:
+            names.extend(split_names(nested.text))
+        for name in names:
+            for c in range(len(columns)):
+                if columns[c].name() == name:
+                    used[c] = True
     var reads = List[Series]()
     for c in range(len(columns)):
         if used[c]:
@@ -3176,9 +3222,9 @@ def _over[
         return result.take(inverse if inner.shape() == ROWS else ids)
     # Whole partitions laid out contiguously and evaluated many at once,
     # when the rows fill more than one block per thread. A nested over()
-    # partitions differently, so it keeps the row-order route.
+    # that partitions across these partitions keeps the row-order route.
     var lanes = min(configured_workers(), height // _WINDOW_BLOCK)
-    if lanes > 1 and not _has_over(inner):
+    if lanes > 1 and not _crosses_partitions(inner, node.text2):
         var owned = WindowLayouts()
         var cache = Pointer[WindowLayouts, MutAnyOrigin](
             unsafe_from_address=layouts if layouts

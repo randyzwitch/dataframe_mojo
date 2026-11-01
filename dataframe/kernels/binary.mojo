@@ -34,7 +34,7 @@ from dataframe.decimal import (
     pow10,
 )
 from dataframe.storage.string import StringColumn, StringBuilder
-from dataframe.series import Series, FixedElements
+from dataframe.series import Series, FixedElements, Storage
 from dataframe.text.predicates import compare_with_literal
 from dataframe.text.comparisons import compare_chunked_strings
 from dataframe.expr import (
@@ -255,8 +255,8 @@ def _packed_mask[
 
 
 def _binary_validity[
-    T: Copyable & Deinitable
-](left: Column[T], right: Column[T], n: Int) -> List[UInt8]:
+    T: Copyable & Deinitable, U: Copyable & Deinitable
+](left: Column[T], right: Column[U], n: Int) -> List[UInt8]:
     """AND operand windows without expanding validity or packing it again."""
     if len(left._bits[]) == 0:
         if len(right._bits[]) == 0:
@@ -853,6 +853,38 @@ def _decimal_output(
     return Series("", Column[Int32](narrow^, valid)).with_dtype(dtype)
 
 
+def _decimal_output_bits(
+    var values: List[Int128], var bits: List[UInt8], dtype: DataType
+) raises -> Series:
+    """`_decimal_output` with validity as a bitmap aligned to row 0 (empty
+    when every row is valid)."""
+    var width = dtype.decimal_width()
+    if width == 128:
+        if len(bits) == 0:
+            return Series("", Column[Int128](values^)).with_dtype(dtype)
+        return Series(
+            "", Column[Int128](values=values^, bits=bits^)
+        ).with_dtype(dtype)
+    var n = len(values)
+    if width == 64:
+        var narrow = List[Int64](unsafe_uninit_length=n)
+        for i in range(n):
+            narrow[i] = Int64(values[i])
+        if len(bits) == 0:
+            return Series("", Column[Int64](narrow^)).with_dtype(dtype)
+        return Series("", Column[Int64](values=narrow^, bits=bits^)).with_dtype(
+            dtype
+        )
+    var narrow = List[Int32](unsafe_uninit_length=n)
+    for i in range(n):
+        narrow[i] = Int32(values[i])
+    if len(bits) == 0:
+        return Series("", Column[Int32](narrow^)).with_dtype(dtype)
+    return Series("", Column[Int32](values=narrow^, bits=bits^)).with_dtype(
+        dtype
+    )
+
+
 def _decimal_quotient(left: Series, right: Series) raises -> Series:
     """Compute a decimal quotient after converting both sides to Float64;
     return null where the divisor is zero or either side is null."""
@@ -959,43 +991,148 @@ def _decimal_dense[
     rescale: Int128,
     limit: Int128,
     dtype: DataType,
+    valid: List[UInt8],
 ) raises -> List[Int128]:
-    """Decimal ADD, SUB or MUL with no nulls on either side: values through
-    pointers, no validity to build. `divisor` is the multiplication's
+    """Decimal ADD, SUB or MUL through pointers at the operands' storage
+    widths. `valid` is the operands' combined validity bitmap (empty when
+    every row is valid); it is read 64 rows at a time, as DuckDB's flat
+    binary executor reads its validity entries: a block of valid rows is
+    computed without testing a row, a block of nulls is skipped, and only
+    a mixed block tests each row. Null rows hold 0 and are never computed,
+    so their payloads cannot raise. `divisor` is the multiplication's
     rescaling power of ten when it is one the compiler can specialize (0
     otherwise, which divides by `rescale` at run time)."""
     comptime if op == MUL and divisor > 0:
         var narrow = _decimal_mul_narrow[divisor](a, b, n)
         if narrow:
             var values = narrow.take()
-            for i in range(len(values)):
-                values[i] = check_limit(values[i], limit, dtype)
+            var at = values.unsafe_ptr()
+            for base in range(0, n, 64):
+                var end = min(base + 64, n)
+                var state = _block_state(valid, base, end)
+                if state == _BLOCK_ALL:
+                    for i in range(base, end):
+                        _ = check_limit(at[unsafe_offset=i], limit, dtype)
+                elif state == _BLOCK_NONE:
+                    for i in range(base, end):
+                        at[unsafe_offset=i] = 0
+                else:
+                    for i in range(base, end):
+                        if _bit(Span(valid), i):
+                            _ = check_limit(at[unsafe_offset=i], limit, dtype)
+                        else:
+                            at[unsafe_offset=i] = 0
             return values^
     var values = List[Int128](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
-    var xs = a._ptr()
-    var ys = b._ptr()
     var left_one = len(a) == 1
     var right_one = len(b) == 1
-    for i in range(n):
-        # decimal64 inputs are read at their width and widened per value.
-        var x = Int128(xs[unsafe_offset=0 if left_one else i])
-        var y = Int128(ys[unsafe_offset=0 if right_one else i])
-        var value: Int128
-        comptime if op == MUL:
-            value = _decimal_mul(x, y)
-            comptime if divisor > 1:
-                value = _round_div[divisor](value)
-            elif divisor == 0:
-                value = divide_half_even(value, rescale)
+    for base in range(0, n, 64):
+        var end = min(base + 64, n)
+        var state = _block_state(valid, base, end)
+        if state == _BLOCK_ALL:
+            for i in range(base, end):
+                out[unsafe_offset=i] = _decimal_value[op, divisor](
+                    a,
+                    b,
+                    0 if left_one else i,
+                    0 if right_one else i,
+                    left_factor,
+                    right_factor,
+                    rescale,
+                    limit,
+                    dtype,
+                )
+        elif state == _BLOCK_NONE:
+            for i in range(base, end):
+                out[unsafe_offset=i] = 0
         else:
-            if left_factor != 1:
-                x = _decimal_mul(x, left_factor)
-            if right_factor != 1:
-                y = _decimal_mul(y, right_factor)
-            value = x + y if op == ADD else x - y
-        out[unsafe_offset=i] = check_limit(value, limit, dtype)
+            for i in range(base, end):
+                if _bit(Span(valid), i):
+                    out[unsafe_offset=i] = _decimal_value[op, divisor](
+                        a,
+                        b,
+                        0 if left_one else i,
+                        0 if right_one else i,
+                        left_factor,
+                        right_factor,
+                        rescale,
+                        limit,
+                        dtype,
+                    )
+                else:
+                    out[unsafe_offset=i] = 0
     return values^
+
+
+@always_inline
+def _decimal_value[
+    op: Int, divisor: Int, A: DType, B: DType
+](
+    a: Column[Scalar[A]],
+    b: Column[Scalar[B]],
+    ai: Int,
+    bi: Int,
+    left_factor: Int128,
+    right_factor: Int128,
+    rescale: Int128,
+    limit: Int128,
+    dtype: DataType,
+) raises -> Int128:
+    """One row of `_decimal_dense`: decimal64 inputs are read at their
+    width and widened per value."""
+    var x = Int128(a._ptr()[unsafe_offset=ai])
+    var y = Int128(b._ptr()[unsafe_offset=bi])
+    var value: Int128
+    comptime if op == MUL:
+        value = _decimal_mul(x, y)
+        comptime if divisor > 1:
+            value = _round_div[divisor](value)
+        elif divisor == 0:
+            value = divide_half_even(value, rescale)
+    else:
+        if left_factor != 1:
+            x = _decimal_mul(x, left_factor)
+        if right_factor != 1:
+            y = _decimal_mul(y, right_factor)
+        value = x + y if op == ADD else x - y
+    return check_limit(value, limit, dtype)
+
+
+comptime _BLOCK_ALL = 0
+comptime _BLOCK_NONE = 1
+comptime _BLOCK_MIXED = 2
+
+
+@always_inline
+def _block_state(valid: List[UInt8], start: Int, end: Int) -> Int:
+    """Whether rows [start, end) of a bitmap aligned to row 0 are all
+    valid, all null or mixed; an empty bitmap is all valid. `start` is a
+    multiple of 64, so the block is whole bytes but for a final partial
+    one."""
+    if len(valid) == 0:
+        return _BLOCK_ALL
+    var first = start >> 3
+    var full = (end - start) >> 3
+    var any = UInt8(0)
+    var every = UInt8(255)
+    var bytes = valid.unsafe_ptr()
+    for k in range(full):
+        var byte = bytes[unsafe_offset=first + k]
+        any |= byte
+        every &= byte
+    var rest = (end - start) & 7
+    if rest > 0:
+        var keep = (UInt8(1) << UInt8(rest)) - 1
+        var byte = bytes[unsafe_offset=first + full] & keep
+        any |= byte
+        if byte != keep:
+            every = 0
+    if every == 255:
+        return _BLOCK_ALL
+    if any == 0:
+        return _BLOCK_NONE
+    return _BLOCK_MIXED
 
 
 def _dense_decimal[
@@ -1007,9 +1144,11 @@ def _dense_decimal[
     right_dtype: DataType,
     result_dtype: DataType,
 ) raises -> Series:
-    """Decimal ADD, SUB or MUL of columns without nulls, at their storage
-    widths (Int64 or Int128); the result is decimal128."""
+    """Decimal ADD, SUB or MUL of columns at their storage widths (Int64 or
+    Int128), null where either side is; the result is stored at its
+    type's width."""
     var n = _length(len(a), len(b))
+    var valid = _binary_validity(a, b, n)
     var common = max(left_dtype.scale(), right_dtype.scale())
     var lf = pow10(common - left_dtype.scale())
     var rf = pow10(common - right_dtype.scale())
@@ -1020,33 +1159,33 @@ def _dense_decimal[
     comptime if op == MUL:
         if shift <= 0:
             dense = _decimal_dense[op, 1, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 1:
             dense = _decimal_dense[op, 10, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 2:
             dense = _decimal_dense[op, 100, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 3:
             dense = _decimal_dense[op, 1000, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         elif shift == 4:
             dense = _decimal_dense[op, 10000, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
         else:
             dense = _decimal_dense[op, 0, A, B](
-                a, b, n, lf, rf, scale, lim, result_dtype
+                a, b, n, lf, rf, scale, lim, result_dtype, valid
             )
     else:
         dense = _decimal_dense[op, 1, A, B](
-            a, b, n, lf, rf, scale, lim, result_dtype
+            a, b, n, lf, rf, scale, lim, result_dtype, valid
         )
-    return _decimal_output(dense^, List[Bool](), result_dtype)
+    return _decimal_output_bits(dense^, valid^, result_dtype)
 
 
 def _decimal_side64(series: Series) -> Optional[Column[Int64]]:
@@ -1196,9 +1335,10 @@ def _decimal_binary[
     var narrow = (
         left._data.isa[Column[Int64]]() or right._data.isa[Column[Int64]]()
     )
-    var no_nulls = left.null_count() == 0 and right.null_count() == 0
     comptime if op == ADD or op == SUB or op == MUL:
-        if len(mask) == 0 and no_nulls:
+        # Nulls on either side are read through the combined validity
+        # (`_decimal_dense`), not the per-row path below.
+        if len(mask) == 0:
             var ld = left.dtype()
             var rd = right.dtype()
             if left._data.isa[Column[Int64]]():
@@ -3399,6 +3539,259 @@ def _choose_chunked_numeric[
     return Series("", Column[Scalar[D]](values=values^, bits=bits^))
 
 
+@no_inline
+def _choice_bool_host(column: BoolColumn) -> Bool:
+    if not column._data.on_host() or not column._bits.on_host():
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    # Compute ceil((offset + count) / 8) without overflowing the sum.
+    var required = offset // 8 + count // 8 + (offset % 8 + count % 8 + 7) // 8
+    return required <= len(column._data[]) and (
+        len(column._bits[]) == 0 or required <= len(column._bits[])
+    )
+
+
+@no_inline
+def _choice_string_host(column: StringColumn, cold_chunk: Bool) -> Bool:
+    # Cold merges prepare all codes before observation. A flat or published
+    # column's codes are not read by the existing row-choice kernel.
+    if cold_chunk and column._codes:
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    if column._is_view_storage():
+        var storage = column._view_storage_unchecked()
+        if column._bits.ptr() != storage._bits.ptr():
+            return False
+        if not storage._views.on_host() or not storage._bits.on_host():
+            return False
+        for buffer in storage._buffers[]:
+            if not buffer.on_host():
+                return False
+        var rows = len(storage)
+        var descriptors = len(storage._views[])
+        if offset > rows or count > rows - offset:
+            return False
+        if offset > descriptors or count > descriptors - offset:
+            return False
+        var end = offset + count
+        if len(storage._bits[]) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(storage._bits[])
+        ):
+            return False
+        for row in range(offset, end):
+            var view = storage._view_unchecked(row)
+            if not view.is_inline():
+                var index = Int(view.buffer_index)
+                if index >= len(storage._buffers[]):
+                    return False
+                var available = len(storage._buffers[][index])
+                var length = Int(view.length)
+                if length > available or Int(view.offset) > available - length:
+                    return False
+    else:
+        if (
+            not column._bytes.on_host()
+            or not column._offsets.on_host()
+            or not column._bits.on_host()
+        ):
+            return False
+        var entries = len(column._offsets[])
+        if entries == 0 or offset > entries - 1:
+            return False
+        if count > entries - 1 - offset:
+            return False
+        var end = offset + count
+        if len(column._bits[]) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(column._bits[])
+        ):
+            return False
+        var available = Int64(len(column._bytes[]))
+        var previous = column._offsets[][offset]
+        if previous < 0 or previous > available:
+            return False
+        for row in range(offset + 1, end + 1):
+            var next = column._offsets[][row]
+            if next < previous or next > available:
+                return False
+            previous = next
+    return True
+
+
+@no_inline
+def _choice_storage_host(
+    input: Storage, boolean: Bool, cold_chunk: Bool
+) -> Bool:
+    if boolean:
+        return input.isa[BoolColumn]() and _choice_bool_host(input[BoolColumn])
+    return input.isa[StringColumn]() and _choice_string_host(
+        input[StringColumn], cold_chunk
+    )
+
+
+def _choice_storage_length(input: Storage, boolean: Bool) -> Int:
+    # Called only after the physical/host guard admitted this exact array.
+    return len(input[BoolColumn]) if boolean else len(input[StringColumn])
+
+
+@no_inline
+def _choice_chunk_input(input: Series, dtype: DataType, size: Int) -> Bool:
+    """Unsupported shapes/storage keep the selected-row legacy adapter."""
+    if input.dtype() != dtype:
+        return False
+    if dtype != DataType.BOOL and dtype != DataType.STRING:
+        return False
+    if len(input) != 1 and len(input) < size:
+        return False
+    var boolean = dtype == DataType.BOOL
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if chunks.cache[].state.load() == 2:
+            ref merged = chunks.cache[].merged.value()
+            return _choice_storage_host(merged, boolean, False) and (
+                _choice_storage_length(merged, boolean) == len(input)
+            )
+        if len(chunks.arrays) == 0:
+            return False
+        var total = 0
+        for array in chunks.arrays:
+            if not _choice_storage_host(array, boolean, True):
+                return False
+            var count = _choice_storage_length(array, boolean)
+            if count > len(input) - total:
+                return False
+            total += count
+        return total == len(input)
+    return _choice_storage_host(input._data, boolean, False)
+
+
+def _choice_ready(input: Series) raises -> Series:
+    if (
+        input.is_chunked()
+        and input._chunked.value()[].cache[].state.load() == 2
+    ):
+        return input.rechunk()
+    return input.copy()
+
+
+struct _StringChoiceInput(Movable):
+    """Own a forward window; StringBuilder retains its existing row copier."""
+
+    var owner: Series
+    var column: StringColumn
+    var chunk: Int
+    var row: Int
+    var scalar: Bool
+
+    def __init__(out self, input: Series):
+        self.owner = input.copy()
+        self.chunk = 0
+        self.row = 0
+        self.scalar = len(input) == 1
+        self.column = (
+            input._chunked.value()[]
+            .arrays[0][StringColumn]
+            .copy() if input.is_chunked() else input._data[StringColumn]
+            .copy()
+        )
+        self._skip_empty()
+
+    def _skip_empty(mut self):
+        if not self.owner.is_chunked():
+            return
+        ref chunks = self.owner._chunked.value()[]
+        while self.row == len(self.column) and self.chunk + 1 < len(
+            chunks.arrays
+        ):
+            self.chunk += 1
+            self.column = chunks.arrays[self.chunk][StringColumn].copy()
+            self.row = 0
+
+    def available(self, remaining: Int) -> Int:
+        return remaining if self.scalar else min(
+            remaining, len(self.column) - self.row
+        )
+
+    def advance(mut self, count: Int):
+        if not self.scalar:
+            assert count >= 0 and count <= len(self.column) - self.row
+            self.row += count
+            self._skip_empty()
+
+
+@no_inline
+def _choose_chunked_bools(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var n = len(selected)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var valid = List[UInt8](length=(n + 7) // 8, fill=0)
+    if n == 0:
+        return Series("", BoolColumn(values=values^, bits=valid^, length=0))
+    var a = _BoolInput(then)
+    var b = _BoolInput(other)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        count = min(count, 8 - row % 8)
+        var take = UInt8(0)
+        for lane in range(count):
+            take |= UInt8(selected[row + lane]) << UInt8(lane)
+        # Preserve selected hidden values; validity must not clear them.
+        var data = (take & a.values(count)) | (~take & b.values(count))
+        var bits = (take & a.valid(count)) | (~take & b.valid(count))
+        _write_bitmap_byte(values, row, data, count)
+        _write_bitmap_byte(valid, row, bits, count)
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+@no_inline
+def _choose_chunked_strings(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var n = len(selected)
+    var output = StringBuilder(n)
+    if n == 0:
+        return Series("", output^.finish())
+    var a = _StringChoiceInput(then)
+    var b = _StringChoiceInput(other)
+    var row = 0
+    while row < n:
+        var count = min(a.available(n - row), b.available(n - row))
+        for relative in range(count):
+            if selected[row + relative]:
+                output._append_row(
+                    a.column, 0 if a.scalar else a.row + relative
+                )
+            else:
+                output._append_row(
+                    b.column, 0 if b.scalar else b.row + relative
+                )
+        a.advance(count)
+        b.advance(count)
+        row += count
+    return Series("", output^.finish())
+
+
+@no_inline
+def _choose_chunked_bits_or_text(
+    selected: List[Bool], then: Series, other: Series
+) raises -> Series:
+    var a = _choice_ready(then)
+    var b = _choice_ready(other)
+    if then.dtype() == DataType.BOOL:
+        return _choose_chunked_bools(selected, a, b)
+    return _choose_chunked_strings(selected, a, b)
+
+
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
     if then.is_chunked() or other.is_chunked():
@@ -3407,6 +3800,10 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
                 comptime D = NUMERIC_DTYPES[k]
                 if then.dtype() == DataType.of(D):
                     return _choose_chunked_numeric[D](selected, then, other)
+        if _choice_chunk_input(then, then.dtype(), len(selected)) and (
+            _choice_chunk_input(other, then.dtype(), len(selected))
+        ):
+            return _choose_chunked_bits_or_text(selected, then, other)
         return choose(selected, then.rechunk(), other.rechunk())
     if then.dtype().is_decimal() and other.dtype().is_decimal():
         # Decimals are stored as Int32, Int64 or Int128 by declared width.
