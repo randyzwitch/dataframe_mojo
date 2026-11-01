@@ -2010,6 +2010,51 @@ def direct_hash_join_rows(
     )
 
 
+@always_inline
+def _direct_matches[
+    slotted: Bool, nullable: Bool
+](
+    keys: Pointer[Int64, MutAnyOrigin],
+    bits: Pointer[UInt8, MutAnyOrigin],
+    offset: Int,
+    base: UInt64,
+    slots: Pointer[Int32, MutAnyOrigin],
+    span: Int,
+    start: Int,
+    stop: Int,
+    lefts: Pointer[Int, MutAnyOrigin],
+    rights: Pointer[Int, MutAnyOrigin],
+) -> Int:
+    """The rows of [start, stop) that match a perfect hash's slots
+    (`slotted`) or a progression of step one, written to `lefts` and
+    `rights` from the front; their count. A key below the base wraps to a
+    large unsigned offset, so one compare bounds it on both sides."""
+    var count = 0
+    for i in range(start, stop):
+        var at = UInt64(keys[unsafe_offset=i]) - base
+        var inside = at < UInt64(span)
+        var row: Int
+        var hit: Bool
+        comptime if slotted:
+            row = Int(
+                slots[unsafe_offset=Int(at if inside else UInt64(span - 1))]
+            )
+            hit = inside and row >= 0
+        else:
+            row = Int(at)
+            hit = inside
+        comptime if nullable:
+            var bit = offset + i
+            hit = (
+                hit
+                and ((bits[unsafe_offset=bit >> 3] >> UInt8(bit & 7)) & 1) == 1
+            )
+        lefts[unsafe_offset=count] = i
+        rights[unsafe_offset=count] = row
+        count += Int(hit)
+    return count
+
+
 struct _DirectProbeJob(MatchJob):
     """Probe rows [start, stop) of an Int64 key against a progression or
     perfect hash index (`PreparedHashIndex.progression_row`)."""
@@ -2070,6 +2115,82 @@ struct _DirectProbeJob(MatchJob):
         var include = self.include_unmatched
         var count = 0
         var matched = 0
+        var slot_count = len(self.prepared.slots[])
+        if not include and (slot_count > 0 or self.prepared.stride == 1):
+            # An inner probe fills its selection without a branch on the
+            # outcome, as DuckDB's perfect hash probe does: every row is
+            # written at the next free place, which only a matching, valid
+            # row then claims. A key below the base wraps to a large
+            # unsigned offset, so one compare bounds it on both sides.
+            var base = UInt64(self.prepared.base)
+            var slots = (
+                self.prepared.slots[]
+                .unsafe_ptr()
+                .unsafe_origin_cast[MutAnyOrigin]()
+            )
+            var to_left = lefts.unsafe_origin_cast[MutAnyOrigin]()
+            var to_right = rights.unsafe_origin_cast[MutAnyOrigin]()
+            var span = slot_count if slot_count > 0 else right_count
+            var offset = values._offset
+            if slot_count > 0 and nulls:
+                count = _direct_matches[True, True](
+                    keys,
+                    bits,
+                    offset,
+                    base,
+                    slots,
+                    span,
+                    self.start,
+                    self.stop,
+                    to_left,
+                    to_right,
+                )
+            elif slot_count > 0:
+                count = _direct_matches[True, False](
+                    keys,
+                    bits,
+                    offset,
+                    base,
+                    slots,
+                    span,
+                    self.start,
+                    self.stop,
+                    to_left,
+                    to_right,
+                )
+            elif nulls:
+                count = _direct_matches[False, True](
+                    keys,
+                    bits,
+                    offset,
+                    base,
+                    slots,
+                    span,
+                    self.start,
+                    self.stop,
+                    to_left,
+                    to_right,
+                )
+            else:
+                count = _direct_matches[False, False](
+                    keys,
+                    bits,
+                    offset,
+                    base,
+                    slots,
+                    span,
+                    self.start,
+                    self.stop,
+                    to_left,
+                    to_right,
+                )
+            matched = count
+            left_rows.shrink(count)
+            right_rows.shrink(count)
+            self.left_rows = left_rows^
+            self.right_rows = right_rows^
+            self.matched = matched
+            return
         for i in range(self.start, self.stop):
             var first = -1
             if not nulls or _validity_at(bits, values._offset + i):
@@ -2087,6 +2208,154 @@ struct _DirectProbeJob(MatchJob):
         self.left_rows = left_rows^
         self.right_rows = right_rows^
         self.matched = matched
+
+
+@always_inline
+def _direct_matches_at[
+    slotted: Bool, nullable: Bool
+](
+    keys: Pointer[Int64, MutAnyOrigin],
+    bits: Pointer[UInt8, MutAnyOrigin],
+    offset: Int,
+    base: UInt64,
+    slots: Pointer[Int32, MutAnyOrigin],
+    span: Int,
+    at: Pointer[Int, MutAnyOrigin],
+    count: Int,
+    keep_matches: Bool,
+    lefts: Pointer[Int, MutAnyOrigin],
+    rights: Pointer[Int, MutAnyOrigin],
+) -> Int:
+    """`_direct_matches` over the key rows `at[0:count]`: the positions in
+    `at` whose row matches (or, without `keep_matches`, does not), and the
+    build rows they match."""
+    var kept = 0
+    for k in range(count):
+        var i = at[unsafe_offset=k]
+        var distance = UInt64(keys[unsafe_offset=i]) - base
+        var inside = distance < UInt64(span)
+        var row: Int
+        var hit: Bool
+        comptime if slotted:
+            row = Int(
+                slots[
+                    unsafe_offset=Int(distance if inside else UInt64(span - 1))
+                ]
+            )
+            hit = inside and row >= 0
+        else:
+            row = Int(distance)
+            hit = inside
+        comptime if nullable:
+            var bit = offset + i
+            hit = (
+                hit
+                and ((bits[unsafe_offset=bit >> 3] >> UInt8(bit & 7)) & 1) == 1
+            )
+        lefts[unsafe_offset=kept] = k
+        rights[unsafe_offset=kept] = row
+        kept += Int(hit == keep_matches)
+    return kept
+
+
+def prepared_direct_rows_at(
+    key: Series,
+    at: List[Int],
+    prepared: PreparedHashIndex,
+    keep_matches: Bool,
+) raises -> Optional[Tuple[List[Int], List[Int], Bool]]:
+    """A progression or perfect hash index probed with the rows `at` of
+    `key`, read where they are rather than gathered first, as DuckDB
+    probes a dictionary vector through its selection: the positions in
+    `at` that match (or, without `keep_matches`, that do not) and the
+    build rows they match, both ascending with the positions, as
+    `prepared_hash_join_rows` gives them (never the identity). None when
+    the index is a hash table, its progression steps by more than one,
+    or the key is chunked or not stored as Int64."""
+    if not prepared.progression or key.is_chunked():
+        return None
+    if key.dtype().physical() != DataType.INT64:
+        return None
+    var slot_count = len(prepared.slots[])
+    if slot_count == 0 and prepared.stride != 1:
+        return None
+    trace_path("join.direct_rows_at")
+    ref values = key._data[Column[Int64]]
+    var count = len(at)
+    var left_rows = List[Int](unsafe_uninit_length=count)
+    var right_rows = List[Int](unsafe_uninit_length=count)
+    var to_left = left_rows.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var to_right = right_rows.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var rows = Pointer[Int, MutAnyOrigin](
+        unsafe_from_address=Int(at.unsafe_ptr())
+    )
+    var keys = values._ptr()
+    var bits = values._bits[].unsafe_ptr()
+    var nulls = len(values._bits[]) > 0
+    var base = UInt64(prepared.base)
+    var slots = prepared.slots[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var span = slot_count if slot_count > 0 else len(prepared.right[0])
+    var offset = values._offset
+    var kept: Int
+    if slot_count > 0 and nulls:
+        kept = _direct_matches_at[True, True](
+            keys,
+            bits,
+            offset,
+            base,
+            slots,
+            span,
+            rows,
+            count,
+            keep_matches,
+            to_left,
+            to_right,
+        )
+    elif slot_count > 0:
+        kept = _direct_matches_at[True, False](
+            keys,
+            bits,
+            offset,
+            base,
+            slots,
+            span,
+            rows,
+            count,
+            keep_matches,
+            to_left,
+            to_right,
+        )
+    elif nulls:
+        kept = _direct_matches_at[False, True](
+            keys,
+            bits,
+            offset,
+            base,
+            slots,
+            span,
+            rows,
+            count,
+            keep_matches,
+            to_left,
+            to_right,
+        )
+    else:
+        kept = _direct_matches_at[False, False](
+            keys,
+            bits,
+            offset,
+            base,
+            slots,
+            span,
+            rows,
+            count,
+            keep_matches,
+            to_left,
+            to_right,
+        )
+    left_rows.shrink(kept)
+    right_rows.shrink(kept)
+    return (left_rows^, right_rows^, False)
 
 
 def prepared_hash_join_rows(
