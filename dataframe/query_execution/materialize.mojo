@@ -8,13 +8,6 @@ from dataframe.aggregation.expressions import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.join_type import (
-    JOIN_ANTI,
-    JOIN_CROSS,
-    JOIN_INNER,
-    JOIN_LEFT,
-    JOIN_SEMI,
-)
 from dataframe.parallel import (
     run_jobs,
 )
@@ -41,6 +34,7 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.properties import (
     _pinned,
+    _stream_join,
     _stream_rows,
 )
 from dataframe.trace import (
@@ -209,13 +203,7 @@ def plan_prefetch_breakers(
         ref step = self._nodes[probe]
         if _stream_rows(step):
             probe = step.left
-        elif step.kind == JOIN and step.how in [
-            JOIN_INNER,
-            JOIN_LEFT,
-            JOIN_SEMI,
-            JOIN_ANTI,
-            JOIN_CROSS,
-        ]:
+        elif _stream_join(step):
             if (
                 plan_ends_in_breaker(self, step.right)
                 and step.right not in ahead[]

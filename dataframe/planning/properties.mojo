@@ -93,8 +93,10 @@ from dataframe.join_order import (
 )
 from dataframe.join_type import (
     JOIN_ANTI,
+    JOIN_CROSS,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_RIGHT,
     JOIN_SEMI,
     join_type,
 )
@@ -470,6 +472,23 @@ def _stream_rows(node: PlanNode) -> Bool:
                 has_column |= item.op == COL
         return has_column
     return node.kind == DROP or node.kind == EXPLODE or node.kind == UNNEST
+
+
+def _stream_join(node: PlanNode) -> Bool:
+    """Whether a stream runs join `node` as one of its steps: its right
+    side is built in full first, and the left side's rows probe it. The
+    stream itself, and the inputs computed ahead of it
+    (`plan_prefetch_breakers`), walk the same joins, so every build side
+    the stream will run is known before it starts."""
+    if node.kind != JOIN:
+        return False
+    return node.how in [
+        JOIN_INNER,
+        JOIN_LEFT,
+        JOIN_SEMI,
+        JOIN_ANTI,
+        JOIN_CROSS,
+    ] or (node.how == JOIN_RIGHT and not node.coalesce)
 
 
 def _joined(parts: List[DataFrame]) raises -> DataFrame:

@@ -86,7 +86,6 @@ from dataframe.join_type import (
     JOIN_CROSS,
     JOIN_INNER,
     JOIN_LEFT,
-    JOIN_RIGHT,
     JOIN_SEMI,
 )
 from dataframe.parallel import (
@@ -147,6 +146,7 @@ from dataframe.planning.properties import (
     _is_scan,
     _same_names,
     _set_members,
+    _stream_join,
     _stream_rows,
 )
 from dataframe.planning.cost.eligibility import (
@@ -301,17 +301,7 @@ def plan_stream_execute(
         ref step = self._nodes[first]
         if _stream_rows(step):
             first = step.left
-        elif step.kind == JOIN and (
-            step.how
-            in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]
-            or (step.how == JOIN_RIGHT and not step.coalesce)
-        ):
+        elif _stream_join(step):
             first = step.left
         else:
             break
@@ -327,17 +317,7 @@ def plan_stream_execute(
         if _stream_rows(node):
             operations.append(node.copy())
             operation_nodes.append(cursor)
-        elif node.kind == JOIN and (
-            node.how
-            in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]
-            or (node.how == JOIN_RIGHT and not node.coalesce)
-        ):
+        elif _stream_join(node):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
             # right may be the side to hash: decline streaming, so the

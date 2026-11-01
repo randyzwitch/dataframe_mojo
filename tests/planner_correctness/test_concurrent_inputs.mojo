@@ -112,6 +112,46 @@ def test_join_inputs_run_at_once_and_join_as_computed() raises:
     assert_frame(chained, eager_chained)
 
 
+def test_uncoalesced_right_join_inputs_run_ahead_and_match() raises:
+    """A stream over a right join that keeps both key columns
+    (coalesce=False), one aggregate building and another probing: the
+    stream runs this join as a step, so both inputs run ahead of it, as
+    for its inner and left joins. The grouped sums are what joining the
+    separately collected inputs gives."""
+    var frame = source()
+    var a = totals(frame, 0, "a")
+    var b = frame.lazy().group_by("k").agg([col("v").count().alias("c")])
+    var streamed = (
+        a.join(
+            b,
+            left_on=["k"],
+            right_on=["k"],
+            how="right",
+            suffix="_b",
+            coalesce=False,
+        )
+        .group_by("c")
+        .agg([col("a").sum().alias("a"), col("k_b").count().alias("n")])
+        .sort("c")
+        .collect()
+    )
+    var eager = (
+        a.collect()
+        .join(
+            b.collect(),
+            left_on=["k"],
+            right_on=["k"],
+            how="right",
+            suffix="_b",
+            coalesce=False,
+        )
+        .group_by(["c"])
+        .agg([col("a").sum().alias("a"), col("k_b").count().alias("n")])
+        .sort(["c"])
+    )
+    assert_frame(streamed, eager)
+
+
 def test_an_error_in_a_prefetched_input_reaches_the_caller() raises:
     var frame = source()
     var good = totals(frame, 0, "a")
