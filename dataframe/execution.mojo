@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from dataframe.kernels.validity import _valid_lanes
+from dataframe.kernels.bitmap_input import _BoolInput, _write_bitmap_byte
 from dataframe.storage.buffer import _Buffer, _BufferData
 from dataframe.kernels.binary import validity
 from .dtype import DataType, NUMERIC_DTYPES
@@ -820,6 +821,173 @@ def _implode[
     return Series("", ListColumn(offsets^, input.take(order).renamed("item")))
 
 
+@no_inline
+def _conditional_bool_host(column: BoolColumn) -> Bool:
+    if not column._data.on_host() or not column._bits.on_host():
+        return False
+    var offset = column._offset
+    var count = len(column)
+    if offset < 0 or count < 0:
+        return False
+    var required = offset // 8 + count // 8 + (offset % 8 + count % 8 + 7) // 8
+    return required <= len(column._data[]) and (
+        len(column._bits[]) == 0 or required <= len(column._bits[])
+    )
+
+
+@no_inline
+def _conditional_original_host(
+    input: Series, required: Int, broadcast_or_prefix: Bool
+) -> Bool:
+    # Never consult the cache. This also validates the exact boundaries
+    # Series.slice would use, before _BoolInput traverses original arrays.
+    if input.dtype() != DataType.BOOL or required < 0:
+        return False
+    var total = 0
+    if input.is_chunked():
+        ref chunks = input._chunked.value()[]
+        if len(chunks.arrays) == 0 or len(chunks.arrays) != len(chunks.ends):
+            return False
+        for i in range(len(chunks.arrays)):
+            ref array = chunks.arrays[i]
+            if not array.isa[BoolColumn]():
+                return False
+            ref column = array[BoolColumn]
+            if not _conditional_bool_host(column):
+                return False
+            var count = len(column)
+            if count > Int.MAX - total:
+                return False
+            total += count
+            if chunks.ends[i] != total:
+                return False
+    else:
+        if not input._data.isa[BoolColumn]():
+            return False
+        ref column = input._data[BoolColumn]
+        if not _conditional_bool_host(column):
+            return False
+        total = len(column)
+    return (total == 1 or total >= required) if broadcast_or_prefix else (
+        total == required
+    )
+
+
+@fieldwise_init
+struct _ConditionalFlags(Copyable, Sized):
+    # stream_mode is independent of chunking: original flat whole windows
+    # require bounded tail reads too, unlike normal final flat predicates.
+    var owner: Series
+    var stream_mode: Bool
+
+    def __len__(self) -> Int:
+        return len(self.owner)
+
+
+def _conditional_flat_flags(input: Series) raises -> _ConditionalFlags:
+    # Preserve the legacy physical extraction point before branch evaluation
+    # even when later helpers have no rows. Do not use for admitted chunks.
+    var column = input._data[BoolColumn].copy()
+    _ = column^
+    return _ConditionalFlags(input.copy(), False)
+
+
+@no_inline
+def _prepare_conditional_flags(
+    input: Series, required: Int
+) raises -> _ConditionalFlags:
+    if input.is_chunked():
+        if input._chunked.value()[].cache[].state.load() == 2:
+            return _conditional_flat_flags(input.rechunk())
+        if _conditional_original_host(input, required, True):
+            return _ConditionalFlags(input.copy(), True)
+    var legacy = input.rechunk() if input.is_chunked() else input.copy()
+    return _conditional_flat_flags(legacy)
+
+
+@no_inline
+def _original_conditional_flags(
+    input: Series, height: Int
+) -> Optional[_ConditionalFlags]:
+    # For _whole lookup only: ignore even a published cache and stream flat
+    # originals too. A decline must run the original _rows evaluation.
+    if not _conditional_original_host(input, height, False):
+        return None
+    return Optional(_ConditionalFlags(input.copy(), True))
+
+
+@no_inline
+def _evaluated_whole_conditional_flags(
+    input: Series, height: Int
+) raises -> Optional[_ConditionalFlags]:
+    # After ORIGINAL _rows has run: retain old merge-before-length/type-check
+    # fallback. Do not send a non-Bool result to the normal typed extractor.
+    if input.is_chunked():
+        if input._chunked.value()[].cache[].state.load() != 2:
+            if _conditional_original_host(input, height, False):
+                return Optional(_ConditionalFlags(input.copy(), True))
+    var legacy = input.rechunk() if input.is_chunked() else input.copy()
+    if len(legacy) != height or not legacy._data.isa[BoolColumn]():
+        return None
+    return Optional(_conditional_flat_flags(legacy))
+
+
+def _selection_masks(
+    flags: _ConditionalFlags,
+    active: List[Bool],
+    mut selected: List[Bool],
+    mut then_mask: List[Bool],
+    mut other_mask: List[Bool],
+):
+    if not flags.stream_mode:
+        _selection_masks(
+            flags.owner._data[BoolColumn],
+            active,
+            selected,
+            then_mask,
+            other_mask,
+        )
+        return
+    var source = _BoolInput(flags.owner)
+    var size = len(selected)
+    var any_active = len(active) == 0
+    var row = 0
+    while row < size:
+        var count = min(source.available(size - row), 8)
+        var truth = source.values(count) & source.valid(count)
+        for lane in range(count):
+            var take = (truth >> UInt8(lane)) & 1 != 0
+            var seen = any_active or active[row + lane]
+            selected[row + lane] = take
+            then_mask[row + lane] = seen and take
+            other_mask[row + lane] = seen and not take
+        source.advance(count)
+        row += count
+
+
+def _and_validity(
+    flags: _ConditionalFlags, bits: _BufferData[UInt8], base: Int, size: Int
+) -> List[UInt8]:
+    if not flags.stream_mode:
+        return _and_validity(flags.owner._data[BoolColumn], bits, base, size)
+    # Retain eager host-access side effects even when size==0. Predicate
+    # storage was already admitted host-readable; own validity may differ.
+    var own = bits.unsafe_ptr()
+    var own_bytes = len(bits)
+    var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
+    var source = _BoolInput(flags.owner)
+    var row = 0
+    while row < size:
+        var count = min(source.available(size - row), 8 - (base + row) % 8)
+        var truth = source.values(count) & source.valid(count)
+        if own_bytes > 0:
+            truth &= _byte_from(own, own_bytes, base + row)
+        _write_bitmap_byte(out, base + row, truth, count)
+        source.advance(count)
+        row += count
+    return out^
+
+
 def _selection_masks(
     flags: BoolColumn,
     active: List[Bool],
@@ -952,11 +1120,8 @@ def _masked_branch[
         False,
         List[Bool](),
     )
-    var contiguous_predicate = (
-        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
-    )
-    ref flags = contiguous_predicate._data[BoolColumn]
     var size = length if bound.shapes[index] == ROWS else 1
+    var flags = _prepare_conditional_flags(predicate, size)
     var then: Series
     var selected = List[Bool]()
     if _cannot_raise(bound, node.right):
@@ -1113,10 +1278,7 @@ def _conditional[
     var predicate = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
-    var contiguous_predicate = (
-        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
-    )
-    ref flags = contiguous_predicate._data[BoolColumn]
+    var flags = _prepare_conditional_flags(predicate, size)
     var selected = List[Bool](unsafe_uninit_length=size)
     var then_mask = List[Bool](unsafe_uninit_length=size)
     var other_mask = List[Bool](unsafe_uninit_length=size)
@@ -3845,22 +4007,28 @@ def _whole_masked_branch[
             numeric = True
     if not numeric:
         return None
-    var predicate = _rows[width](
-        bound,
-        columns,
-        prepared_columns,
-        states,
-        node.left,
-        height,
-        batch_size,
-        False,
-        workers,
+    var prepared_flags = Optional[_ConditionalFlags]()
+    var original = _whole(
+        bound, prepared_columns, states, node.left, height, False
     )
-    if predicate.is_chunked():
-        predicate = predicate.rechunk()
-    if len(predicate) != height or not predicate._data.isa[BoolColumn]():
+    if original:
+        prepared_flags = _original_conditional_flags(original.take(), height)
+    if not prepared_flags:
+        var predicate = _rows[width](
+            bound,
+            columns,
+            prepared_columns,
+            states,
+            node.left,
+            height,
+            batch_size,
+            False,
+            workers,
+        )
+        prepared_flags = _evaluated_whole_conditional_flags(predicate, height)
+    if not prepared_flags:
         return None
-    ref flags = predicate._data[BoolColumn]
+    var flags = prepared_flags.take()
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():
