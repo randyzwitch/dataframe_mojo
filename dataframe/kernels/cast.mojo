@@ -1376,7 +1376,8 @@ def _decimal_cast_canonical(dtype: DataType) raises -> Bool:
 
 def _decimal_cast_plain_numeric(dtype: DataType) -> Bool:
     comptime for k in range(len(NUMERIC_DTYPES)):
-        if dtype == DataType.of(NUMERIC_DTYPES[k]):
+        comptime D = NUMERIC_DTYPES[k]
+        if dtype == DataType.of(D):
             return True
     return False
 
