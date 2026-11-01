@@ -84,6 +84,7 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -311,6 +312,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (step.how == JOIN_RIGHT and not step.coalesce)
+            or step.how == JOIN_FULL
         ):
             first = step.left
         else:
@@ -337,6 +339,7 @@ def plan_stream_execute(
                 JOIN_CROSS,
             ]
             or (node.how == JOIN_RIGHT and not node.coalesce)
+            or node.how == JOIN_FULL
         ):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
@@ -508,11 +511,22 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
+                # cannot be smaller is never sampled. A right side whose
+                # one key is a progression builds no hash table (the left
+                # looks its rows up by position), so it costs nothing to
+                # build on and is kept, as the planner's build side counts
+                # it (`plan_indexed_relation`) and the swaps above keep
+                # it: TPC-DS q35 hashed 100K customers to stream 1.9M
+                # demographics rows through them, where the customers
+                # look up their demographics by position.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
-                if most < 0 or most * columns < right_cost:
+                if (
+                    most < 0 or most * columns < right_cost
+                ) and not plan_progression_key(
+                    self, node.right, node.right_keys
+                ):
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # The join builds on the smaller left inside the
