@@ -328,12 +328,20 @@ def summarize(matrix, engine, outcome):
     base = "mojo" if engine.startswith("base@") else engine
     pattern = OPERATOR_NAMES[matrix][base]
     walls, busy, cpu, matched = [], [], [], set()
+    untimed = False
     for run in outcome.get("runs", []):
         walls.append(run["wall_ms"])
         nodes = run.get("nodes", [])
         cpu.append(sum(n["busy_ms"] for n in nodes))
         mine = [n for n in nodes if _matches(pattern, n["name"])]
         matched.update(n["name"] for n in mine)
+        if base == "mojo" and any(
+            n["busy_ms"] == 0 and not n["name"].startswith("SCAN")
+            for n in mine
+        ):
+            # Part of the operator went untimed: a partial sum would
+            # understate it.
+            untimed = True
         busy.append(sum(n["busy_ms"] for n in mine))
     out = {
         k: v for k, v in outcome.items() if k not in ("runs",)
@@ -346,7 +354,7 @@ def summarize(matrix, engine, outcome):
         # time it (this library's execution report times streamed steps
         # only); it is reported as missing, not as free.
         op = statistics.median(busy)
-        out["op_busy_ms"] = op if op > 0 else None
+        out["op_busy_ms"] = op if op > 0 and not untimed else None
         out["operators"] = sorted(matched)
         runs = outcome["runs"]
         out["nodes"] = runs[len(runs) // 2].get("nodes", [])
