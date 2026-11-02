@@ -455,3 +455,74 @@ def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
     assert_equal(
         computed._spine_distinct(len(computed._plan._nodes) - 1, "pk"), -1
     )
+
+
+def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
+    # PDS-H q3's shape: filtered customers, orders and lines. The tree
+    # builds on the customers, streams the orders through them inside
+    # the build for the lines, and streams the lines. Only the customers
+    # are built whole, so only they run ahead for their count; the
+    # orders' filter runs in the stream, where running it ahead held
+    # every filtered order.
+    var customer = List[Int64]()
+    var segment = List[Int64]()
+    for c in range(2000):
+        customer.append(Int64(c))
+        segment.append(Int64(c % 5))
+    var order = List[Int64]()
+    var buyer = List[Int64]()
+    var day = List[Int64]()
+    for o in range(20_000):
+        order.append(Int64(o))
+        buyer.append(Int64((o * 7919) % 2000))
+        day.append(Int64(o % 100))
+    var line_order = List[Int64]()
+    var shipped = List[Int64]()
+    var price = List[Int64]()
+    for l in range(80_000):
+        line_order.append(Int64((l * 104729) % 20_000))
+        shipped.append(Int64(l % 100))
+        price.append(Int64(l % 997))
+    var query = (
+        DataFrame([ints("c_id", customer), ints("c_segment", segment)])
+        .lazy()
+        .filter(col("c_segment") == lit(Int64(1)))
+        .join(
+            DataFrame(
+                [
+                    ints("o_id", order),
+                    ints("o_buyer", buyer),
+                    ints("o_day", day),
+                ]
+            )
+            .lazy()
+            .filter(col("o_day") < lit(Int64(50))),
+            left_on=["c_id"],
+            right_on=["o_buyer"],
+        )
+        .join(
+            DataFrame(
+                [
+                    ints("l_order", line_order),
+                    ints("l_shipped", shipped),
+                    ints("l_price", price),
+                ]
+            )
+            .lazy()
+            .filter(col("l_shipped") > lit(Int64(50))),
+            left_on=["o_id"],
+            right_on=["l_order"],
+        )
+        .group_by(["o_id", "o_day"])
+        .agg([col("l_price").sum().alias("revenue")])
+    )
+    var report = query.profile(engine="cpu")[1].copy()
+    var filters = 0
+    for r in range(report.height()):
+        if report.item(r, "operator").string().startswith("FILTER"):
+            filters += 1
+    # The orders' and the lines' filters ran in their streams.
+    assert_equal(filters, 2)
+    assert_frame_unordered(
+        query.collect(), query.collect(optimize=False, engine="cpu")
+    )
