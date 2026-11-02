@@ -519,6 +519,9 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
     # a move changes no node's columns: after one, only the filters
     # around the old and new place are asked again (`_unstick`).
     var stuck = List[Bool](length=len(self._nodes), fill=False)
+    # Each node's parent, kept up to date as filters move rather than
+    # found again by a walk of the plan per move.
+    var parents = plan_parents(self)
     while changed:
         changed = False
         for i in plan_topological(self, root):
@@ -537,6 +540,7 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                 while side >= 0:
                     if i == root:
                         root = child
+                    var before = len(self._nodes)
                     ref below = self._nodes[child]
                     if below.kind == SELECT or below.kind == WITH_COLUMNS:
                         self._nodes[i].exprs = [
@@ -558,8 +562,12 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                             )
                         )
                         self._nodes[child].right = len(self._nodes) - 1
-                    plan_unstick(self, i, child, stuck)
-                    plan_swap_in_place(self, i, child, side == 1)
+                    # A filter added above one input of `child`.
+                    for added in range(before, len(self._nodes)):
+                        parents.append(child)
+                        parents[self._nodes[added].left] = added
+                    plan_unstick(self, i, child, stuck, parents)
+                    plan_swap_in_place(self, i, child, side == 1, parents)
                     child = self._nodes[i].left
                     side = plan_passes(self, i, child)
                 changed = True
@@ -594,8 +602,8 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
             ):
                 if i == root:
                     root = child
-                plan_unstick(self, i, child, stuck)
-                plan_swap_in_place(self, i, child, False)
+                plan_unstick(self, i, child, stuck, parents)
+                plan_swap_in_place(self, i, child, False, parents)
                 changed = True
                 moved = True
                 continue
@@ -608,10 +616,19 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
 def plan_unstick(
     self: QueryContext, filter: Int, child: Int, mut stuck: List[Bool]
 ):
+    plan_unstick(self, filter, child, stuck, plan_parents(self))
+
+
+def plan_unstick(
+    self: QueryContext,
+    filter: Int,
+    child: Int,
+    mut stuck: List[Bool],
+    parents: List[Int],
+):
     """Before `filter` moves below `child`: forget the verdicts it can
     change, those of `filter` and `child` and of the run of filters
     ending at `filter`'s parent, whose input or run below changes."""
-    var parents = plan_parents(self)
     for node in [filter, child]:
         if node >= 0 and node < len(stuck):
             stuck[node] = False
@@ -806,11 +823,23 @@ def plan_swap_down(
 def plan_swap_in_place(
     mut self: QueryContext, filter: Int, child: Int, right_side: Bool
 ):
+    var parents = plan_parents(self)
+    plan_swap_in_place(self, filter, child, right_side, parents)
+
+
+def plan_swap_in_place(
+    mut self: QueryContext,
+    filter: Int,
+    child: Int,
+    right_side: Bool,
+    mut parents: List[Int],
+):
     """`_swap_down` without renumbering the plan: the nodes keep their
     indices, so it is out of children-before-parents order until the
-    next `_reorder`. Only the moved filter's and its old child's
-    schemas are forgotten (a filter keeps its input's columns)."""
-    var parents = plan_parents(self)
+    next `_reorder`; `parents` is updated to match. Only the moved
+    filter's schema is forgotten: a filter keeps its input's columns,
+    so `child`, now over the filter, and the nodes above keep theirs,
+    as DuckDB's bindings stay valid when a filter moves."""
     var parent = parents[filter]
     var target = (
         self._nodes[child].right if right_side else self._nodes[child].left
@@ -825,13 +854,15 @@ def plan_swap_in_place(
             self._nodes[parent].left = child
         else:
             self._nodes[parent].right = child
+    if target >= 0:
+        parents[target] = filter
+    parents[filter] = child
+    parents[child] = parent
     if self._schema_memo:
-        ref memo = self._schema_memo.value()[]
-        for moved in [filter, child]:
-            try:
-                _ = memo.pop(moved)
-            except:
-                pass
+        try:
+            _ = self._schema_memo.value()[].pop(filter)
+        except:
+            pass
 
 
 def plan_push_slices(mut self: QueryContext) raises:
