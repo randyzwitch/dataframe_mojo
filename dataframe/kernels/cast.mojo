@@ -29,6 +29,7 @@ from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
 from dataframe.kernels.physical_input import _has_physical_storage
+from dataframe.kernels.bitmap_input import _bitmap_byte, _write_bitmap_byte
 
 
 def _dtype(series: Series) -> DataType:
@@ -849,6 +850,122 @@ def _decimal_to_float(input: Series) raises -> Series:
 
 
 @no_inline
+def _decimal_float_host[D: DType](input: Series) -> Bool:
+    """Admit complete cold host windows before reading any decimal payload."""
+    ref chunks = input._chunked.value()[]
+    if chunks.cache[].state.load() == 2:
+        return False
+    if len(chunks.arrays) == 0 or len(chunks.arrays) != len(chunks.ends):
+        return False
+    var total = 0
+    for i in range(len(chunks.arrays)):
+        ref storage = chunks.arrays[i]
+        if not storage.isa[Column[Scalar[D]]]():
+            return False
+        ref column = storage[Column[Scalar[D]]]
+        if not column._data.on_host() or not column._bits.on_host():
+            return False
+        var length = len(column)
+        if length <= 0 or column._offset < 0:
+            return False
+        if column._offset > len(column._data):
+            return False
+        if length > len(column._data) - column._offset:
+            return False
+        var end = column._offset + length
+        if len(column._bits) != 0 and (
+            end // 8 + Int(end % 8 != 0) > len(column._bits)
+        ):
+            return False
+        if length > Int.MAX - total:
+            return False
+        total += length
+        if chunks.ends[i] != total:
+            return False
+    return True
+
+
+def _append_decimal_validity(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: Span[UInt8, _],
+    offset: Int,
+    count: Int,
+):
+    """Append an admitted decimal bitmap without a per-row unaligned loop."""
+    if count == 0 or len(incoming) == 0 or offset % 8 == 0:
+        _append_validity(bits, length, incoming, offset, count)
+        return
+    if len(bits) == 0:
+        bits.resize((length + 7) // 8, 255)
+    if length % 8 != 0:
+        bits[len(bits) - 1] &= (UInt8(1) << UInt8(length % 8)) - 1
+    bits.resize((length + count + 7) // 8, 0)
+    var i = 0
+    while i < count:
+        var take = min(8, count - i)
+        var value = _bitmap_byte(incoming, offset + i, take, False, 255)
+        _write_bitmap_byte(bits, length + i, value, take)
+        i += take
+
+
+@no_inline
+def _chunk_decimal_to_float[D: DType](input: Series) raises -> Series:
+    """Convert every initialized payload, including rows hidden by nulls."""
+    var n = len(input)
+    var divisor = Float64(pow10(input.dtype().scale()))
+    var values = List[Float64](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var bits = List[UInt8]()
+    var base = 0
+    for storage in input._chunked.value()[].arrays:
+        ref column = storage[Column[Scalar[D]]]
+        var source = column._ptr()
+        var count = len(column)
+        for i in range(count):
+            out[unsafe_offset=base + i] = (
+                Float64(source[unsafe_offset=i]) / divisor
+            )
+        if len(bits) == 0 and len(column._bits) != 0:
+            bits.reserve((n + 7) // 8)
+        _append_decimal_validity(
+            bits, base, column._bits[].span(), column._offset, count
+        )
+        base += count
+    return Series(input.name(), Column[Float64](values=values^, bits=bits^))
+
+
+def _cast_decimal_float_chunks(
+    input: Series, target: DataType
+) raises -> Optional[Series]:
+    if not input.dtype().is_decimal() or target != DataType.FLOAT64:
+        return None
+    # Published caches retain the existing contiguous adapter and its actual
+    # merged storage, including private cache metadata.
+    if input._chunked.value()[].cache[].state.load() == 2:
+        return None
+    var dtype = input.dtype()
+    var width = dtype.decimal_width()
+    var precision = dtype.precision()
+    var most = 38 if width == 128 else (18 if width == 64 else 9)
+    if precision < 1 or precision > most or dtype.scale() > precision:
+        return None
+    if dtype != DataType.decimal(precision, dtype.scale(), width):
+        return None
+    comptime for k in range(3):
+        comptime D = (
+            DType.int64 if k == 0 else DType.int32 if k == 1 else DType.int128
+        )
+        if input._data.isa[Column[Scalar[D]]]() and (
+            input.dtype().physical() == DataType.of(D)
+        ):
+            if _decimal_float_host[D](input):
+                return _chunk_decimal_to_float[D](input)
+            return None
+    return None
+
+
+@no_inline
 def _primitive_cast_host[S: DType](input: Series) -> Bool:
     """Validate every cold physical window before observing any row."""
     ref chunks = input._chunked.value()[]
@@ -1393,6 +1510,9 @@ def cast_series(
         if text_result:
             return text_result.take()
     if input.is_chunked():
+        var decimal_float = _cast_decimal_float_chunks(input, target)
+        if decimal_float:
+            return decimal_float.take()
         var primitive = _cast_primitive_chunks(
             input, target, strict, offset, mask
         )
