@@ -99,7 +99,7 @@ from dataframe.kernels.partition import (
     _hash_column,
     _mix,
 )
-from dataframe.series import Series
+from dataframe.series import Series, Storage
 from dataframe.kernels.hashing import RowKeys
 from dataframe.trace import trace_path
 from dataframe.text.bytes import _Bytes
@@ -2351,7 +2351,7 @@ struct AggregateSink(Movable):
 
     def sink(
         mut self,
-        keys: List[Series],
+        given: List[Series],
         inputs: List[Series],
         first: Int,
         keep: List[Bool] = List[Bool](),
@@ -2362,8 +2362,23 @@ struct AggregateSink(Movable):
         dropped rows, read in place rather than compacted away) update a
         discarded group row, so no group appears for them. `first` is the source
         row of its first."""
-        if len(keys) == 0:
+        if len(given) == 0:
             raise Error("aggregate table: no keys")
+        # A string key without codes whose views select another column's
+        # descriptors (a join's build side) is read a batch at a time
+        # through pointers: its descriptors are copied out once here, not
+        # once a batch. One with codes is read through them alone.
+        var keys = List[Series](capacity=len(given))
+        for c in range(len(given)):
+            if given[c]._data.isa[StringColumn]():
+                ref strings = given[c]._data[StringColumn]
+                if not strings._codes and strings._is_view_storage():
+                    if strings._view_storage.value()._selects():
+                        var flat = given[c].copy()
+                        flat._data = Storage(strings._flat_views())
+                        keys.append(flat^)
+                        continue
+            keys.append(given[c].copy())
         var length = len(keys[0])
         var width = len(self.addressed)
         var word_ptrs = List[Int](capacity=width)
@@ -2565,10 +2580,12 @@ struct AggregateSink(Movable):
         source: AggregateSink,
         columns: List[Int],
         widths: List[Int],
+        masks: List[Int64] = List[Int64](),
     ) raises:
         """The group rows of another sink, with this table's keys the
         source's `columns` (in this order; none for a constant key of one
-        zero word), into this table with their states merged rather than
+        zero word), each one-word key with only its `masks` entry's bits
+        kept when given (-1 keeps it whole), into this table with their states merged rather than
         rebuilt from values: a coarser grouping from a finer one's groups
         (DuckDB merges grouped states the same way across threads, and
         `_combine` is the finish's merge of the workers'). `widths` is each
@@ -2610,6 +2627,9 @@ struct AggregateSink(Movable):
                         var from_word = _HEAD + starts[c]
                         var part: UInt64
                         var first = row[unsafe_offset=from_word]
+                        if len(masks) > 0 and widths[c] == 1:
+                            # A packed key's fields this set rolls up.
+                            first &= masks[j].cast[DType.uint64]()
                         _words_at(word_ptrs[to])[unsafe_offset=count] = first
                         if (row[unsafe_offset=1] >> UInt64(c)) & 1 != 0:
                             null |= UInt64(1) << UInt64(j)
