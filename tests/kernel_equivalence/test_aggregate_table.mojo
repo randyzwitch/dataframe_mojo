@@ -7,7 +7,7 @@ chunked columns and strings carrying Parquet dictionary codes beside plain
 ones. Worker counts cover tables that clear and keep their rows (three or
 more) and tables that grow (two). Decimal sums and means (decimal32, 64
 and 128 inputs) keep exact 128-bit totals on both routes and raise past
-their precision."""
+their precision; their counts and null counts reach the table too."""
 # contract-group: reduce.grouped
 # contract-group: kernel.reduce
 from std.testing import assert_equal, assert_raises, assert_true
@@ -319,6 +319,14 @@ def assert_decimal_groups(
         assert_true(text in lookup, "unexpected group " + text)
         var g = lookup[text]
         for c in range(3):
+            assert_equal(
+                actual.item(r, names[c] + "_count").int64(),
+                Int64(counts[g][c]),
+            )
+            assert_equal(
+                actual.item(r, names[c] + "_nulls").int64(),
+                Int64(seen_rows[g] - counts[g][c]),
+            )
             var total = actual.column(names[c] + "_sum")
             if counts[g][c] == 0:
                 assert_true(total.get(r).is_null())
@@ -338,6 +346,8 @@ def decimal_reductions() -> List[Expr]:
     for name in ["d32", "d64", "d128"]:
         out.append(col(name).sum(min_count=1).alias(name + "_sum"))
         out.append(col(name).mean().alias(name + "_mean"))
+        out.append(col(name).count().alias(name + "_count"))
+        out.append(col(name).null_count().alias(name + "_nulls"))
     return out^
 
 
@@ -351,7 +361,7 @@ def test_decimal_sums_and_means_match_int128_totals_on_both_routes() raises:
     var eager = frame.group_by(["s", "i"]).agg(decimal_reductions())
     assert_true(
         "dataframe-path: group_by.aggregate_table\n" in observed.text(),
-        "decimal sums did not reach the aggregate table",
+        "decimal reductions did not reach the aggregate table",
     )
     _ = observed^
     assert_decimal_groups(eager, rows, groups, 0)
@@ -365,7 +375,7 @@ def test_decimal_sums_and_means_match_int128_totals_on_both_routes() raises:
     )
     assert_true(
         "dataframe-path: pipeline.group_table\n" in observed.text(),
-        "decimal sums did not reach the aggregate table sink",
+        "decimal reductions did not reach the aggregate table sink",
     )
     _ = observed^
     assert_decimal_groups(piped, rows, groups, 77)
