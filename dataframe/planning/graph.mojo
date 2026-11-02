@@ -80,6 +80,7 @@ from std.collections import (
     Dict,
     Optional,
 )
+from std.math import exp
 from std.memory import (
     ArcPointer,
 )
@@ -1085,6 +1086,8 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
         and _stream_rows(node)
     ):
         return plan_relation_estimate(self, node.left)
+    if node.kind == AGG:
+        return plan_aggregate_estimate(self, index)
     if node.kind != JOIN or node.how == JOIN_INNER or node.how == JOIN_CROSS:
         return -1
     var left = plan_relation_estimate(self, node.left)
@@ -1096,6 +1099,35 @@ def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
     if right < 0:
         return -1
     return max(left, right)
+
+
+def plan_aggregate_estimate(self: QueryContext, index: Int) raises -> Int:
+    """Groups aggregate node `index` yields, estimated without running it,
+    as DuckDB estimates an aggregate relation (`ExtractAggregationStats`,
+    `EstimateDistinctCardinality`): from its input's estimate and its
+    group keys' distinct counts in the table under it. The keys' counts
+    multiply, each key after the first taking 5% off for correlation,
+    and so many distinct values drawn from that many input rows give
+    product * (1 - e^(-rows / product)) groups, at most the input's
+    rows. One row with no keys; -1 when the input has no estimate or a
+    key has no distinct count."""
+    ref node = self._nodes[index]
+    var rows = plan_relation_estimate(self, node.left)
+    if rows < 0:
+        return -1
+    if len(node.names) == 0:
+        return 1
+    var product = 1.0
+    for key in node.names:
+        var count = plan_spine_distinct(self, node.left, key)
+        if count < 0:
+            return -1
+        product *= Float64(max(count, 1))
+    product *= 0.95 ** Float64(len(node.names) - 1)
+    var multiplier = 1.0 - exp(-Float64(rows) / product)
+    var estimate = Float64(rows) if multiplier == 0.0 else product * multiplier
+    var result = Int(min(estimate, Float64(rows)))
+    return max(result, 1) if rows > 0 else 0
 
 
 def plan_spine_source(
@@ -1211,6 +1243,45 @@ def plan_aggregated(self: QueryContext, index: Int) -> Bool:
             return False
         cursor = node.left
     return False
+
+
+def plan_aggregate_input_rows(self: QueryContext, index: Int) -> Int:
+    """Rows of the table under the aggregation at or under node `index`
+    (through the steps `plan_aggregated` passes), along its input's
+    spine (`plan_spine_rows`) and the left inputs of semi and anti
+    joins, which keep at most their left rows; -1 when there is none or
+    it is unknown. TPC-DS q8's listed zip codes are a distinct over a
+    semi join of filtered addresses."""
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == AGG:
+            var below = node.left
+            while below >= 0:
+                ref step = self._nodes[below]
+                if step.kind == JOIN and (
+                    step.how == JOIN_SEMI or step.how == JOIN_ANTI
+                ):
+                    below = step.left
+                elif step.kind == DROP or (
+                    (step.kind == SELECT or step.kind == WITH_COLUMNS)
+                    and _stream_rows(step)
+                ):
+                    below = step.left
+                else:
+                    break
+            return plan_spine_rows(self, below)
+        if not (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _stream_rows(node)
+            )
+        ):
+            return -1
+        cursor = node.left
+    return -1
 
 
 def plan_spine_rows(self: QueryContext, index: Int) -> Int:
