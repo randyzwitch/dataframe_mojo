@@ -179,3 +179,61 @@ def test_an_empty_left_side_keeps_every_right_row() raises:
             joined.select(["r_a", "r_b", "r_v"]),
             right,
         )
+
+
+def test_two_full_joins_over_many_build_morsels_match_the_eager_join() raises:
+    # 150K and 120K build rows: each join's unmatched rows span many
+    # morsels, which the workers scan for them each on its own share. The
+    # second join's build rows that the first one's unmatched rows match
+    # are flagged during that round, before its own round reads them.
+    var left = _side("l", 60_000, 40_000, 1, 97)
+    var middle = _side("m", 150_000, 90_000, 7, 89)
+    var right = _side("r", 120_000, 70_000, 3, 83)
+    var reductions: List[Expr] = [
+        _count_if(col("l_a").is_not_null()).alias("ln"),
+        _count_if(col("m_a").is_not_null()).alias("mn"),
+        _count_if(col("r_a").is_not_null()).alias("rn"),
+        col("l_v").sum().alias("lv"),
+        col("m_v").sum().alias("mv"),
+        col("r_v").sum().alias("rv"),
+        col("m_v").count().alias("mc"),
+    ]
+    var counts = (
+        left.lazy()
+        .join(
+            middle.lazy(),
+            left_on=["l_a", "l_b"],
+            right_on=["m_a", "m_b"],
+            how="full",
+            coalesce=False,
+        )
+        .join(
+            right.lazy(),
+            left_on=["m_a", "m_b"],
+            right_on=["r_a", "r_b"],
+            how="full",
+            coalesce=False,
+        )
+        .select_exprs(reductions)
+        .collect()
+    )
+    var expected = (
+        left.join(
+            middle,
+            left_on=["l_a", "l_b"],
+            right_on=["m_a", "m_b"],
+            how="full",
+            coalesce=False,
+        )
+        .join(
+            right,
+            left_on=["m_a", "m_b"],
+            right_on=["r_a", "r_b"],
+            how="full",
+            coalesce=False,
+        )
+        .lazy()
+        .select_exprs(reductions)
+        .collect()
+    )
+    assert_frame(counts, expected)

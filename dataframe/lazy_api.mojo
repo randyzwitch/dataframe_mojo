@@ -3622,6 +3622,7 @@ def _collect_context(
         optimize=optimize,
         streaming=streaming,
         batch_size=batch_size,
+        optimized=plan._optimized,
     )
 
 

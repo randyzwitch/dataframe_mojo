@@ -18,6 +18,7 @@ from dataframe.frame import (
 from dataframe.kernels.hashing import (
     encode_rows,
 )
+from dataframe.parallel import configured_workers
 from dataframe.join_type import (
     JOIN_FULL,
     JOIN_INNER,
@@ -344,9 +345,43 @@ def select_aggregation_strategy(
         late_table_codes_pay = (
             _key_group_bound(keys, source_frame, joins, sample // 4) >= 0
         )
+    if (
+        grouping
+        and choice.uses_aggregate_table()
+        and choice.uses_pipeline()
+        and len(late_names) > 0
+    ):
+        # Grouping sets cannot group by one build's row number (each set
+        # keeps a different subset of the keys), so their coded keys are
+        # judged on their own, by cost alone: the joined rows' key reads
+        # the codes spare (one unit a key, the workers sharing them)
+        # against coding the builds' key columns on one thread (2 units a
+        # value) and reading the groups' values back (1 a key). Without
+        # codes the sink reads Parquet strings through their dictionary
+        # codes, so a few joined rows do not pay for coding (TPC-DS q86:
+        # 142K web sales; q22 joins 2.3M inventory rows to 18K items).
+        var shape = plan_row_number_shape(
+            self,
+            self._nodes[cursor].source_slot(),
+            keys,
+            late_names,
+            late_builds[0],
+            joins,
+            operations,
+        )
+        var rows = shape[0]
+        var groups = shape[1]
+        var coded = 0.0
+        for k in range(len(late_names)):
+            coded += 2.0 * Float64(joins[late_builds[k]].height())
+        var width = Float64(len(late_names))
+        var shared = Float64(max(1, configured_workers()))
+        late_table_codes_pay = rows >= 0 and rows * width / shared > (
+            coded + groups * width
+        )
     choice.code_late_keys = len(late_names) > 0 and (
         choice.uses_pipeline()
-        and (choice.inserts_groups() or late_table_codes_pay)
+        and (late_table_codes_pay or (choice.inserts_groups() and not grouping))
     )
     if len(late_names) > 0 and not choice.code_late_keys:
         # Coded keys pay only in the insert tables: collecting them
@@ -367,6 +402,7 @@ def select_aggregation_strategy(
             choice.uses_aggregate_table()
             and choice.uses_pipeline()
             and not distinct
+            and not grouping
             and top < 0
         ):
             var best = -1
