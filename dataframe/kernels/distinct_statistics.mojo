@@ -291,6 +291,28 @@ struct TableStatistics(Movable):
         self._release()
         return count
 
+    def known(mut self, name: String, identity: Int, rows: Int) -> Int:
+        """The count kept for column `name` over this storage, or -1."""
+        self._acquire()
+        for entry in self.counts:
+            if (
+                entry.name == name
+                and entry.identity == identity
+                and entry.rows == rows
+            ):
+                var count = entry.count
+                self._release()
+                return count
+        self._release()
+        return -1
+
+    def record(mut self, name: String, identity: Int, rows: Int, count: Int):
+        """Keep a count of column `name` over this storage, taken from
+        another copy of its rows."""
+        self._acquire()
+        self.counts.append(_ColumnCount(name, identity, rows, count))
+        self._release()
+
     def sample(mut self, series: Series, runs: Int, run: Int) raises -> Series:
         """`runs` evenly spaced runs of `run` rows of the column, end to
         end in one array. Evenly spaced runs, not a prefix: tables are often
