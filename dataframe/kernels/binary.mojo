@@ -247,6 +247,21 @@ def _packed_mask[
     if len(bits) == 0:
         return SIMD[DType.bool, width](fill=True)
     var result = SIMD[DType.bool, width](fill=False)
+    comptime if width % 8 == 0:
+        # A register starting on a byte of the bitmap (every block of a
+        # kernel whose validity starts at row 0): each byte spreads to its
+        # eight lanes with one vector compare, not a bit at a time.
+        var first = start >> 3
+        if start & 7 == 0 and first + width // 8 <= len(bits):
+            var at = bits.unsafe_ptr().unsafe_offset(first)
+            var lanes = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+            comptime for byte in range(width // 8):
+                var spread = (
+                    SIMD[DType.uint8, 8](at[unsafe_offset=byte]) & lanes
+                ).ne(SIMD[DType.uint8, 8](0))
+                comptime for lane in range(8):
+                    result[8 * byte + lane] = spread[lane]
+            return result
     comptime for byte in range((width + 7) // 8):
         var value = _window_byte(bits, start + 8 * byte, 255)
         comptime for lane in range(min(8, width - 8 * byte)):
