@@ -11,7 +11,7 @@ through the selection once and replaces its shared version.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
 from std.os import getenv
 from std.ffi import _get_global, external_call
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
@@ -23,7 +23,7 @@ from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
-from dataframe.storage.column import Column
+from dataframe.storage.column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from dataframe.execution import _ReduceJob, _new_reducer
 from dataframe.kernels.validity import _valid_lanes
@@ -1278,15 +1278,53 @@ struct Morsel(Movable):
             # The build side adds no column (a join kept for its keys only):
             # its matched rows are never read.
             return True
-        var sources = List[Series](capacity=len(right_output))
+        # String columns with view descriptors are not gathered: each
+        # reads the build column's descriptors through the matched rows,
+        # as DuckDB's probe emits a build column as a dictionary vector
+        # over it. A consumer that reads only the dictionary codes beside
+        # them (a group key, a comparison) never copies a descriptor; one
+        # that reads bytes copies them out when it does. The rest are
+        # gathered.
+        var rows = Optional[ArcPointer[List[Int]]]()
+        var selected = List[Optional[Series]](capacity=len(right_output))
+        var sources = List[Series]()
         for k in range(len(right_output)):
-            sources.append(right._columns[right_output[k]].copy())
-        var lanes = worker_count(len(pairs[1]))
-        var gathered = take_parallel(
-            sources, pairs[1].copy(), lanes, or_null=False
-        )
+            ref column = right._columns[right_output[k]]
+            var picked = Optional[Series]()
+            if column.dtype() == DataType.STRING:
+                var whole = column.rechunk()
+                if not rows:
+                    rows = ArcPointer(pairs[1].copy())
+                var through = whole._data[StringColumn]._select_rows(
+                    rows.value()
+                )
+                if through:
+                    var series = Series(right_names[k], through.take())
+                    series._dtype = whole._dtype
+                    series._field_metadata = whole._field_metadata
+                    picked = series^
+            if picked:
+                trace_path("pipeline.join_view_selection")
+            else:
+                sources.append(column.copy())
+            selected.append(picked^)
+        var gathered = List[Series]()
+        if len(sources) > 0:
+            gathered = take_parallel(
+                sources,
+                pairs[1].copy(),
+                worker_count(len(pairs[1])),
+                or_null=False,
+            )
+        var next = 0
         for k in range(len(right_output)):
-            self.frame._columns.append(gathered[k].renamed(right_names[k]))
+            if selected[k]:
+                self.frame._columns.append(selected[k].value().copy())
+            else:
+                self.frame._columns.append(
+                    gathered[next].renamed(right_names[k])
+                )
+                next += 1
             self.compact.append(True)
         return True
 
@@ -2551,11 +2589,17 @@ struct _PipelineJob(Job):
     # morsel is sunk into each of them (DuckDB's one sink feeding every
     # grouping set's table, `PhysicalHashAggregate::Sink`).
     var sets: List[List[Int]]
+    # Per set, a mask for each of its key columns: a key packing several
+    # coded keys (one field each) is grouped by the fields the set keeps,
+    # the others masked to zero; -1 keeps the whole value. Empty: none.
+    var set_masks: List[List[Int64]]
     # A set derived from another's group rows rather than sunk from the
     # morsels: its source set (-1 for none) and, per key it groups by, that
     # key's column among the source's.
     var derived_from: List[Int]
     var derived_columns: List[List[Int]]
+    # Per derived set, the mask of each of its key columns (as `set_masks`).
+    var derived_masks: List[List[Int64]]
     # The sets by size, largest first: a set is derived after its source.
     var derive_order: List[Int]
     var workers: Int
@@ -2579,6 +2623,14 @@ struct _PipelineJob(Job):
     # and derives its grouping sets): not before an outer join's
     # unmatched build rows have run.
     var finishes: Bool
+    # While an outer join's unmatched build rows run (`_emit_unmatched`):
+    # that join's step (-1 otherwise), the address of every worker's
+    # marks of its build rows, and the probe side's columns at the step,
+    # empty. The frame is then the build, and each worker finds its
+    # morsel's unmatched rows itself.
+    var unmatched_step: Int
+    var unmatched_marks: ArcPointer[List[Int]]
+    var unmatched_probe: ArcPointer[DataFrame]
 
     def __init__(
         out self,
@@ -2601,8 +2653,10 @@ struct _PipelineJob(Job):
         floating_key: Bool,
         layout: List[AggregateLayout],
         sets: List[List[Int]],
+        set_masks: List[List[Int64]],
         derived_from: List[Int],
         derived_columns: List[List[Int]],
+        derived_masks: List[List[Int64]],
         derive_order: List[Int],
         workers: Int,
         key_ranges: List[_KeyRange],
@@ -2623,10 +2677,15 @@ struct _PipelineJob(Job):
         self.first_step = 0
         self.first_morsel = 0
         self.finishes = True
+        self.unmatched_step = -1
+        self.unmatched_marks = ArcPointer(List[Int]())
+        self.unmatched_probe = frame.copy()
         self.layout = layout.copy()
         self.sets = sets.copy()
+        self.set_masks = set_masks.copy()
         self.derived_from = derived_from.copy()
         self.derived_columns = derived_columns.copy()
+        self.derived_masks = derived_masks.copy()
         self.derive_order = derive_order.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
@@ -2697,6 +2756,7 @@ struct _PipelineJob(Job):
                 self.sinks[from_set if from_set < t else from_set - 1],
                 self.derived_columns[t],
                 layout_widths(self.layout[from_set]),
+                self.derived_masks[t],
             )
             self.sinks.insert(t, target^)
 
@@ -2734,8 +2794,15 @@ struct _PipelineJob(Job):
                     )
                 )
             else:
-                for i in self.sets[s]:
-                    keys.append(all_keys[i].copy())
+                for j in range(len(self.sets[s])):
+                    var i = self.sets[s][j]
+                    var mask = self.set_masks[s][j] if len(
+                        self.set_masks
+                    ) > 0 else Int64(-1)
+                    if mask == -1:
+                        keys.append(all_keys[i].copy())
+                    else:
+                        keys.append(_masked_key(all_keys[i], mask))
             self.sinks[s].sink(keys, inputs, k << 32)
         self.rows += rows
 
@@ -2847,6 +2914,16 @@ struct _PipelineJob(Job):
             var k = self.first_morsel + taken
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
+            if self.unmatched_step >= 0:
+                var rows = self._unmatched(offset, length)
+                if rows.height() == 0:
+                    continue
+                var tail = Morsel(rows^, k)
+                tail.source_rows = self.frame[].height()
+                self._steps_from(tail, self.first_step)
+                if tail.height() > 0:
+                    self._consume(tail, k, offset, length)
+                continue
             var morsel = Morsel(self.frame[].slice(offset, length), k)
             morsel.source_rows = self.frame[].height()
             if self.first_step > 0:
@@ -2892,6 +2969,49 @@ struct _PipelineJob(Job):
             if morsel.height() == 0:
                 continue
             self._consume(morsel, k, offset, length)
+
+    def _unmatched(self, offset: Int, length: Int) raises -> DataFrame:
+        """The build rows in [offset, offset + length) that no worker's
+        morsel matched, as the outer join step's output (the probe columns
+        null): each worker scans its own share of the build rows, as each
+        thread of DuckDB's `PhysicalHashJoin::GetData` scans its share of
+        the hash table's rows for unmatched ones."""
+        ref marks = self.unmatched_marks[]
+        var rows = List[Int]()
+        var stop = offset + length
+        var r = offset
+        while r < stop:
+            # Eight build rows a word while every worker matched them all.
+            if r + 8 <= stop:
+                var all = UInt64(0x0101010101010101)
+                var merged = UInt64(0)
+                for m in marks:
+                    merged |= Pointer[UInt64, MutAnyOrigin](
+                        unsafe_from_address=m + r
+                    )[]
+                if merged == all:
+                    r += 8
+                    continue
+            var seen = UInt8(0)
+            for m in marks:
+                seen |= Pointer[UInt8, MutAnyOrigin](unsafe_from_address=m)[
+                    unsafe_offset=r
+                ]
+            if seen == 0:
+                rows.append(r)
+            r += 1
+        if len(rows) == 0:
+            return self.unmatched_probe[].clear()
+        trace_path("pipeline.join_unmatched")
+        ref step = self.steps[self.unmatched_step]
+        return self.unmatched_probe[]._join_impl(
+            self.frame[]._filter_rows(rows^),
+            left_on=step.names,
+            right_on=step.right_keys,
+            how=step.how,
+            suffix=step.suffix,
+            coalesce=step.coalesce,
+        )
 
     def _steps_from(mut self, mut morsel: Morsel, first: Int) raises:
         """Run the steps from `first` on over one morsel, until one leaves
@@ -3477,8 +3597,11 @@ def _emit_unmatched(
     `emit_unmatched_build` (`EmitUnmatchedState`, polars-stream equi_join)
     and the outer scan of DuckDB's `PhysicalHashJoin::GetData`, which
     hands each thread its share of the build rows. Every worker flagged
-    the build rows its own morsels matched; the flags are merged here,
-    once all have finished. The last round finishes the workers' sinks."""
+    the build rows its own morsels matched; each worker then takes
+    morsels of the build rows, finds those no worker flagged and makes
+    their output rows (`_PipelineJob._unmatched`), so nothing is merged
+    or gathered on one thread. The last round finishes the workers'
+    sinks."""
     var next_morsel = len(jobs[0].ranges[]) // 2
     var last = -1
     for j in range(len(steps)):
@@ -3495,74 +3618,38 @@ def _emit_unmatched(
         ):
             continue
         ref build = joins[][steps[j].join]
-        var n = build.height()
-        var seen = List[UInt8](length=n, fill=0)
-        var flags = seen.unsafe_ptr()
-        # Eight flags a word: the workers' flags merge at memory speed.
-        var words = n // 8
-        var merged = flags.unsafe_bitcast[UInt64]()
-        for w in range(len(jobs)):
-            var mine = jobs[w].marks[j].unsafe_ptr()
-            var theirs = mine.unsafe_bitcast[UInt64]()
-            for i in range(words):
-                merged[unsafe_offset=i] |= theirs[unsafe_offset=i]
-            for r in range(8 * words, n):
-                flags[unsafe_offset=r] |= mine[unsafe_offset=r]
-        var count = 0
-        for i in range(words):
-            if merged[unsafe_offset=i] != UInt64(0x0101010101010101):
-                for r in range(8 * i, 8 * i + 8):
-                    count += Int(flags[unsafe_offset=r] == 0)
-        for r in range(8 * words, n):
-            count += Int(flags[unsafe_offset=r] == 0)
-        var unmatched = List[Int](capacity=count)
-        for i in range(words):
-            if merged[unsafe_offset=i] != UInt64(0x0101010101010101):
-                for r in range(8 * i, 8 * i + 8):
-                    if flags[unsafe_offset=r] == 0:
-                        unmatched.append(r)
-        for r in range(8 * words, n):
-            if flags[unsafe_offset=r] == 0:
-                unmatched.append(r)
         var ranges = List[Int]()
-        var tail = source.copy()
-        if len(unmatched) > 0:
-            trace_path("pipeline.join_unmatched")
-            # The probe side's columns at this step: an empty source
-            # through the steps before it.
-            var empty = source.copy()
-            for i in range(j):
-                var probe = Morsel(empty.copy(), 0)
-                probe.apply(steps[i], batch_size, joins, indexes)
-                empty = probe.materialized()
-            tail = empty._join_impl(
-                build._filter_rows(unmatched^),
-                left_on=steps[j].names,
-                right_on=steps[j].right_keys,
-                how=steps[j].how,
-                suffix=steps[j].suffix,
-                coalesce=steps[j].coalesce,
-            )
-            var step = max(1, batch_size)
-            var offset = 0
-            while offset < tail.height():
-                ranges.append(offset)
-                ranges.append(min(step, tail.height() - offset))
-                offset += step
+        if build.height() > 0:
+            ranges = _morsel_ranges(build, max(1, batch_size), len(jobs))
         if len(ranges) == 0 and j != last:
             continue
+        # The probe side's columns at this step: an empty source through
+        # the steps before it.
+        var empty = source.copy()
+        for i in range(j):
+            var probe = Morsel(empty.copy(), 0)
+            probe.apply(steps[i], batch_size, joins, indexes)
+            empty = probe.materialized()
+        var marks = List[Int](capacity=len(jobs))
+        for w in range(len(jobs)):
+            marks.append(Int(jobs[w].marks[j].unsafe_ptr()))
         # One more round of the workers over the build rows' morsels,
         # each into its own sink; the last round also finishes them.
         var cursor = _Cursor.new()
-        var shared_tail = ArcPointer(tail^)
+        var shared_build = ArcPointer(build.copy())
         var shared_ranges = ArcPointer(ranges^)
+        var shared_marks = ArcPointer(marks^)
+        var shared_probe = ArcPointer(empty^)
         for w in range(len(jobs)):
-            jobs[w].frame = shared_tail
+            jobs[w].frame = shared_build
             jobs[w].ranges = shared_ranges
             jobs[w].cursor = cursor.address
             jobs[w].first_step = j + 1
             jobs[w].first_morsel = next_morsel
             jobs[w].finishes = j == last
+            jobs[w].unmatched_step = j
+            jobs[w].unmatched_marks = shared_marks
+            jobs[w].unmatched_probe = shared_probe
         next_morsel += len(shared_ranges[]) // 2
         try:
             run_jobs(jobs)
@@ -3570,6 +3657,31 @@ def _emit_unmatched(
             cursor.free()
             raise e
         cursor.free()
+
+
+def _set_mask(set_masks: List[List[Int64]], s: Int, j: Int) -> Int64:
+    """Set `s`'s mask for its `j`th key column (-1: the whole value)."""
+    if len(set_masks) == 0:
+        return -1
+    return set_masks[s][j]
+
+
+def _masked_key(key: Series, mask: Int64) raises -> Series:
+    """An Int64 key column's values with only `mask`'s bits kept, its
+    validity unchanged."""
+    ref typed = key._data[Column[Int64]]
+    var n = len(typed)
+    var values = List[Int64](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var source = typed._data[].unsafe_ptr().unsafe_offset(typed._offset)
+    for i in range(n):
+        out[unsafe_offset=i] = source[unsafe_offset=i] & mask
+    return Series(
+        key.name(),
+        Column[Int64](
+            values=values^, bits=_copy_validity(typed._bits[], typed._offset, n)
+        ),
+    )
 
 
 def run_pipeline(
@@ -3593,6 +3705,7 @@ def run_pipeline(
     top_nulls_last: List[Bool] = List[Bool](),
     bounded: Bool = False,
     table: Bool = False,
+    set_masks: List[List[Int64]] = List[List[Int64]](),
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -3604,7 +3717,8 @@ def run_pipeline(
     list of indices into `keys`, one sink per set fed by every morsel,
     whose finished frames (set order) land in `set_frames`, the grand
     total's among them with its one row, and the result is the steps'
-    empty output). `counts` receives the rows fed,
+    empty output; `set_masks`: per set, each key column's mask, for keys
+    that pack several coded keys). `counts` receives the rows fed,
     then each step's input and output rows."""
     trace_path("pipeline.run")
     # The aggregate table's layout, from the steps' output types (an
@@ -3673,9 +3787,11 @@ def run_pipeline(
     # when every reduction merges (`reaggregable`).
     var derived_from = List[Int](length=len(sets), fill=-1)
     var derived_columns = List[List[Int]]()
+    var derived_masks = List[List[Int64]]()
     var derive_order = List[Int]()
     for _ in range(len(sets)):
         derived_columns.append(List[Int]())
+        derived_masks.append(List[Int64]())
     if len(layout) > 0 and len(sets) > 1:
         var merges = True
         for expression in expressions:
@@ -3683,13 +3799,21 @@ def run_pipeline(
                 if is_reduction(node.op) and not reaggregable(node.op):
                     merges = False
         if merges:
+            # A set's size counts its key columns' mask bits (a whole key
+            # all 64), so a set holding another's keys is the larger.
+            var sizes = List[Int](capacity=len(sets))
+            for t in range(len(sets)):
+                var size = 0
+                for j in range(len(sets[t])):
+                    size += Int(pop_count(_set_mask(set_masks, t, j)))
+                sizes.append(size)
             var order = derive_order.copy()
             for t in range(len(sets)):
                 order.append(t)
             # Stable by size, largest first.
             for i in range(1, len(order)):
                 var j = i
-                while j > 0 and len(sets[order[j - 1]]) < len(sets[order[j]]):
+                while j > 0 and sizes[order[j - 1]] < sizes[order[j]]:
                     var held = order[j - 1]
                     order[j - 1] = order[j]
                     order[j] = held
@@ -3700,10 +3824,18 @@ def run_pipeline(
                 var best = -1
                 for q in primaries:
                     var inside = True
-                    for key in sets[t]:
+                    for j in range(len(sets[t])):
+                        var key = sets[t][j]
                         if key not in sets[q]:
                             inside = False
-                    if inside and (best < 0 or len(sets[q]) < len(sets[best])):
+                            break
+                        # A packed key's fields: the source keeps every
+                        # field this set does.
+                        var kept = _set_mask(set_masks, q, sets[q].index(key))
+                        if _set_mask(set_masks, t, j) & ~kept != 0:
+                            inside = False
+                            break
+                    if inside and (best < 0 or sizes[q] < sizes[best]):
                         best = q
                 # Every set made so far is a source, a derived one too: a
                 # rollup's sets come each from the one above it.
@@ -3711,8 +3843,17 @@ def run_pipeline(
                 if best < 0:
                     continue
                 derived_from[t] = best
-                for key in sets[t]:
-                    derived_columns[t].append(sets[best].index(key))
+                for j in range(len(sets[t])):
+                    var key = sets[t][j]
+                    var at = sets[best].index(key)
+                    derived_columns[t].append(at)
+                    # Only a mask the source does not already apply
+                    # narrows the source's word.
+                    var mask = _set_mask(set_masks, t, j)
+                    derived_masks[t].append(
+                        Int64(-1) if mask
+                        == _set_mask(set_masks, best, at) else mask
+                    )
             var primary_count = 0
             for t in range(len(sets)):
                 if derived_from[t] < 0:
@@ -3771,8 +3912,10 @@ def run_pipeline(
                 floating_key,
                 layout,
                 sets,
+                set_masks,
                 derived_from,
                 derived_columns,
+                derived_masks,
                 derive_order,
                 workers,
                 key_ranges,
