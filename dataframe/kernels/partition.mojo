@@ -37,6 +37,7 @@ from dataframe.kernels.hashing import RowKeys, encode_rows
 from dataframe.parallel import Job, partitions, run_jobs
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringView, _mapped
 
 comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
 
@@ -165,18 +166,26 @@ def _hash_column(
                         ) else _NULL_KEY,
                     )
                 return
+            # Values and validity through their pointers: a null's value is
+            # read too and its key replaced, so no row branches on its
+            # validity (floats; integers took the path above).
+            var values = column._ptr()
+            var valid = column._bits[].unsafe_ptr()
+            var offset = column._offset
+            var has_bits = len(column._bits[]) != 0
             for i in range(start, end):
-                if not column._valid(i):
-                    write(i, _NULL_KEY)
-                    continue
-                var value = column._get(i)
+                var value = values.unsafe_offset(i)[]
+                var key: UInt64
 
                 comptime if D.is_floating_point():
-                    write(i, float_key(Float64(value)))
+                    key = float_key(Float64(value))
                 elif D.is_unsigned():
-                    write(i, UInt64(value))
+                    key = UInt64(value)
                 else:
-                    write(i, bitcast[DType.uint64](Int64(value)))
+                    key = bitcast[DType.uint64](Int64(value))
+                if has_bits and not _validity_at(valid, offset + i):
+                    key = _NULL_KEY
+                write(i, key)
             return
     if series._data.isa[Column[Int128]]():
         ref column = series._data[Column[Int128]]
@@ -238,20 +247,17 @@ def _hash_column(
     # Per row, `_get` passed the whole column to a call (a third more
     # hashing time on view keys).
     ref storage = strings._view_storage.value()
-    var views = (
-        storage._views[]
-        .unsafe_ptr()
-        .unsafe_offset(strings._offset)
-        .unsafe_mut_cast[False]()
-        .unsafe_origin_cast[ImmutAnyOrigin]()
-    )
+    # Row i's descriptor: i past the window's start, or the row a
+    # selection names.
+    var map = storage._row_map(strings._offset)
+    var views = Pointer[StringView, ImmutAnyOrigin](unsafe_from_address=map[0])
     var buffers = storage._buffers[].unsafe_ptr()
     var nulls = len(strings._bits[]) != 0
     for i in range(start, end):
         if nulls and not strings._valid(i):
             write(i, _NULL_KEY)
             continue
-        var view = views.unsafe_offset(i)
+        var view = views.unsafe_offset(_mapped(map[1], map[2], i))
         var length = Int(view[].length)
         var inline = view.unsafe_bitcast[UInt8]().unsafe_offset(4)
         if length <= 8:
@@ -800,6 +806,10 @@ struct _KeyView(Copyable, Movable):
     var bit_offset: Int
     # A view-backed string's long-value buffers, by buffer index.
     var buffers: List[Int]
+    # A view-backed string that selects its descriptors: its row list's
+    # address (row 0's entry) and shift (`StringViewStorage._row_map`).
+    var rows: Int
+    var shift: Int
 
     def __init__(out self, key: Series):
         self.kind = _KEY_GENERIC
@@ -809,6 +819,8 @@ struct _KeyView(Copyable, Movable):
         self.bits = 0
         self.bit_offset = 0
         self.buffers = List[Int]()
+        self.rows = 0
+        self.shift = 0
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]
             if key._data.isa[Column[Scalar[D]]]():
@@ -844,9 +856,10 @@ struct _KeyView(Copyable, Movable):
                 # w_warehouse_name).
                 ref storage = strings._view_storage.value()
                 self.kind = _KEY_VIEW
-                self.values = Int(
-                    storage._views[].unsafe_ptr().unsafe_offset(strings._offset)
-                )
+                var map = storage._row_map(strings._offset)
+                self.values = map[0]
+                self.rows = map[1]
+                self.shift = map[2]
                 for buffer in storage._buffers[]:
                     self.buffers.append(Int(buffer[].unsafe_ptr()))
                 if len(strings._bits[]) != 0:
@@ -905,7 +918,7 @@ struct _KeyView(Copyable, Movable):
     def _view_words(self, row: Int) -> Tuple[UInt64, UInt64]:
         var at = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.values
-        ).unsafe_offset(2 * row)
+        ).unsafe_offset(2 * _mapped(self.rows, self.shift, row))
         return (at[], at.unsafe_offset(1)[])
 
     @always_inline

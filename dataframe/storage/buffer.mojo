@@ -28,6 +28,21 @@ struct _ForeignOwner(Movable):
             )
 
 
+struct _RowSelection(Movable):
+    """Rows read through a shared row list: row i is element
+    `rows[first + i] + shift` of the buffer that carries it (see
+    `_Buffer.selecting`)."""
+
+    var rows: ArcPointer[List[Int]]
+    var first: Int
+    var shift: Int
+
+    def __init__(out self, rows: ArcPointer[List[Int]], first: Int, shift: Int):
+        self.rows = rows.copy()
+        self.first = first
+        self.shift = shift
+
+
 struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     var values: List[Self.T]
     var address: Int
@@ -36,6 +51,11 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # Set when the data lives in an accelerator's memory; `address` is then
     # 0 and host reads go through the residence's one-time copy.
     var residence: Optional[ArcPointer[_DeviceResidence]]
+    # Set on a buffer that another storage reads through a row list
+    # (`_Buffer.selecting`): kept here, behind the buffer's one pointer,
+    # because a wider column made every copy slower (TPC-DS q36 9% with
+    # it held in the string storage itself).
+    var selection: Optional[ArcPointer[_RowSelection]]
 
     def __init__(out self, var values: List[Self.T]):
         self.values = values^
@@ -43,6 +63,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.length = 0
         self.owner = None
         self.residence = None
+        self.selection = None
 
     def __init__(
         out self, address: Int, length: Int, owner: ArcPointer[_ForeignOwner]
@@ -52,6 +73,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.length = length
         self.owner = owner
         self.residence = None
+        self.selection = None
 
     def __init__(
         out self, length: Int, residence: ArcPointer[_DeviceResidence]
@@ -63,6 +85,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.length = length
         self.owner = ArcPointer(_ForeignOwner(0, 0))
         self.residence = residence
+        self.selection = None
 
     def __len__(self) -> Int:
         return self.length if self.owner else len(self.values)
@@ -197,6 +220,47 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
         return Self.borrowed(
             Int(self.unsafe_ptr().unsafe_offset(offset)), length, owner
         )
+
+    def _shared_owner(self) -> ArcPointer[_ForeignOwner]:
+        """An owner that keeps this buffer's data alive."""
+        if self._state[].owner:
+            return self._state[].owner.value().copy()
+        var pointer = alloc(
+            Layout[ArcPointer[_BufferData[Self.T]]](length=1)
+        ).unsafe_leak()
+        pointer.unsafe_write(self._state.copy())
+        var callback: _ReleaseForeign = _release_shared_buffer[Self.T]
+        return ArcPointer(
+            _ForeignOwner(
+                Int(pointer), Pointer(to=callback).unsafe_bitcast[Int]()[]
+            )
+        )
+
+    @staticmethod
+    def selecting(
+        source: Self, rows: ArcPointer[List[Int]], first: Int, shift: Int
+    ) -> Self:
+        """`source`'s elements, shared (not copied), carrying a row list a
+        reader maps its rows through (`_RowSelection`). `source` must not
+        select."""
+        var data = _BufferData[Self.T](
+            Int(source.unsafe_ptr()), len(source), source._shared_owner()
+        )
+        data.residence = source._state[].residence.copy()
+        data.selection = ArcPointer(_RowSelection(rows, first, shift))
+        return Self(data^)
+
+    def unselected(self) -> Self:
+        """This buffer's elements without its row list."""
+        if not self._state[].selection:
+            return self.copy()
+        var data = _BufferData[Self.T](
+            self._state[].address,
+            self._state[].length,
+            self._state[].owner.value(),
+        )
+        data.residence = self._state[].residence.copy()
+        return Self(data^)
 
     def is_borrowed(self) -> Bool:
         return Bool(self._state[].owner)

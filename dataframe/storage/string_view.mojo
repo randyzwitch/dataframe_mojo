@@ -77,12 +77,31 @@ def _external_view(
     )
 
 
+@always_inline
+def _mapped(rows: Int, shift: Int, i: Int) -> Int:
+    """Row i's descriptor index under a `_row_map` (`rows` 0: i itself)."""
+    if rows == 0:
+        return i
+    return (
+        Pointer[Int, ImmutAnyOrigin](unsafe_from_address=rows)[unsafe_offset=i]
+        + shift
+    )
+
+
 struct StringViewStorage(Copyable, Sized):
     """Finished zero-copy view descriptors, byte blocks, and validity.
 
     The Arc accessors intentionally expose immutable metadata ownership to
     StringColumn's later slice/gather integration.  No mutable builder state
     is retained after construction.
+
+    A storage can select its rows from another's descriptors instead of
+    holding its own (its descriptor buffer then carries a row list,
+    `_Buffer.selecting`), as DuckDB's dictionary vector is a child vector
+    and a selection vector: a join's build-side strings are
+    then the build's descriptors and the matched rows, and no descriptor
+    is copied until a kernel needs them contiguous (`_flat`). Validity is
+    always the rows' own.
     """
 
     var _views: _Buffer[StringView]
@@ -123,7 +142,105 @@ struct StringViewStorage(Copyable, Sized):
     def __len__(self) -> Int:
         return self._length
 
+    @staticmethod
+    def _selecting(
+        source: Self,
+        rows: ArcPointer[List[Int]],
+        first: Int,
+        shift: Int,
+        length: Int,
+        var bits: List[UInt8],
+    ) -> Self:
+        """`length` rows that read `source`'s descriptors: row i is its
+        descriptor `rows[first + i] + shift`, with validity `bits`. The
+        caller has checked every row; `source` must not select."""
+        var result = Self(
+            views=_Buffer.selecting(source._views, rows, first, shift),
+            buffers=List[_Buffer[UInt8]](),
+            bits=_Buffer(bits^),
+            length=length,
+            total_buffer_bytes=source._total_buffer_bytes,
+        )
+        result._buffers = source._buffers.copy()
+        return result^
+
+    @always_inline
+    def _selects(self) -> Bool:
+        return True if self._views[].selection else False
+
+    @always_inline
+    def _descriptor(self, row: Int) -> Int:
+        """The descriptor row `row` reads."""
+        if self._views[].selection:
+            return self._selected(row)
+        return row
+
+    @no_inline
+    def _selected(self, row: Int) -> Int:
+        # Out of line: every string read inlines `_descriptor`, and the
+        # selection's reads made the common path's code larger.
+        ref selection = self._views[].selection.value()[]
+        return (
+            selection.rows[].unsafe_ptr()[unsafe_offset=selection.first + row]
+            + selection.shift
+        )
+
+    def _row_map(self, offset: Int) -> Tuple[Int, Int, Int]:
+        """For kernels that read descriptors through pointers taken once,
+        the rows of a window from `offset`: the address descriptors are
+        indexed from, the address of the window's first selected row (0
+        when the storage does not select), and the shift added to each
+        selected row. Row i's descriptor is at index i, or at
+        `rows[i] + shift`."""
+        var base = Int(self._views[].unsafe_ptr())
+        if not self._views[].selection:
+            return (base + 16 * offset, 0, 0)
+        ref selection = self._views[].selection.value()[]
+        return (
+            base,
+            Int(
+                selection.rows[]
+                .unsafe_ptr()
+                .unsafe_offset(selection.first + offset)
+            ),
+            selection.shift,
+        )
+
+    def _flat(self) -> Self:
+        """This storage with one descriptor a row (itself when it already
+        has them): what kernels reading descriptors through a pointer
+        need."""
+        if not self._views[].selection:
+            return self.copy()
+        var views = huge_uninit[StringView](self._length)
+        var target = views.unsafe_ptr().unsafe_bitcast[SIMD[DType.uint32, 4]]()
+        var source = (
+            self._views[].unsafe_ptr().unsafe_bitcast[SIMD[DType.uint32, 4]]()
+        )
+        ref selection = self._views[].selection.value()[]
+        var rows = selection.rows[].unsafe_ptr().unsafe_offset(selection.first)
+        var shift = selection.shift
+        var total = 0
+        for k in range(self._length):
+            var word = source[unsafe_offset=rows[unsafe_offset=k] + shift]
+            target[unsafe_offset=k] = word
+            var length = Int(word[0])
+            if length > STRING_VIEW_INLINE_BYTES:
+                total += length
+        var result = Self(
+            views=_Buffer(views^),
+            buffers=List[_Buffer[UInt8]](),
+            bits=self._bits,
+            length=self._length,
+            total_buffer_bytes=total,
+        )
+        result._buffers = self._buffers.copy()
+        return result^
+
     def views_arc(self) -> _Buffer[StringView]:
+        """The descriptors, one a row (copied out of a selection)."""
+        if self._views[].selection:
+            return self._flat()._views.copy()
         return self._views.copy()
 
     def buffers_arc(self) -> ArcPointer[List[_Buffer[UInt8]]]:
@@ -141,7 +258,11 @@ struct StringViewStorage(Copyable, Sized):
     @always_inline
     def _view_unchecked(self, row: Int) -> StringView:
         """Unchecked descriptor copy for StringColumn's borrowed row path."""
-        return self._views[][row].copy()
+        return (
+            self._views[]
+            .unsafe_ptr()[unsafe_offset=self._descriptor(row)]
+            .copy()
+        )
 
     def view(self, row: Int) raises -> StringView:
         if row < 0 or row >= self._length:
@@ -162,12 +283,13 @@ struct StringViewStorage(Copyable, Sized):
     @always_inline
     def _get_unchecked(self, row: Int) -> StringSlice[ImmutAnyOrigin]:
         """Borrow row bytes without a bounds check or payload copy."""
-        var view = self._view_unchecked(row)
+        var at = self._descriptor(row)
+        var view = self._views[].unsafe_ptr()[unsafe_offset=at].copy()
         var length = Int(view.length)
         if view.is_inline():
             # `StringView` is four adjacent UInt32 values. Inline bytes occupy
             # the last three words exactly as Arrow's repr(C) View does.
-            var start = self._views[].unsafe_ptr().unsafe_offset(row)
+            var start = self._views[].unsafe_ptr().unsafe_offset(at)
             var bytes = start.unsafe_bitcast[UInt8]().unsafe_offset(4)
             return StringSlice[ImmutAnyOrigin](
                 unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
@@ -247,6 +369,50 @@ struct StringViewStorage(Copyable, Sized):
         var total_buffer_bytes = 0
         var rows = indices.unsafe_ptr().unsafe_offset(first)
         var limit = self._length - offset
+        if self._views[].selection:
+            # Rows of a selection read the descriptors it selects: the
+            # gather composes the two row lists (validity is this
+            # storage's own, by row).
+            ref selection = self._views[].selection.value()[]
+            var inner = (
+                selection.rows[]
+                .unsafe_ptr()
+                .unsafe_offset(selection.first + offset)
+            )
+            var shift = selection.shift
+            var through = List[Int](unsafe_uninit_length=count)
+            var at = through.unsafe_ptr()
+            for k in range(count):
+                var index = rows[unsafe_offset=k]
+                if index < 0 or index >= limit:
+                    if index == -1 and allow_missing:
+                        at[unsafe_offset=k] = -1
+                        continue
+                    raise Error("string view gather index out of bounds")
+                at[unsafe_offset=k] = inner[unsafe_offset=index] + shift
+            var base = Self(
+                views=self._views.unselected(),
+                buffers=List[_Buffer[UInt8]](),
+                bits=_Buffer(List[UInt8]()),
+                length=len(self._views[]),
+                total_buffer_bytes=self._total_buffer_bytes,
+            )
+            base._buffers = self._buffers.copy()
+            var gathered = base._gather_range(
+                through, 0, count, 0, allow_missing
+            )
+            if not nulls:
+                return gathered^
+            # The rows' validity, from this storage's bits by row.
+            var bits = List[UInt8](length=(count + 7) // 8, fill=0)
+            var out_bits = bits.unsafe_ptr()
+            var in_bits = self._bits[].unsafe_ptr()
+            for k in range(count):
+                var index = rows[unsafe_offset=k]
+                if index >= 0 and _validity_at(in_bits, offset + index):
+                    out_bits[unsafe_offset=k >> 3] |= UInt8(1) << UInt8(k & 7)
+            gathered._bits = _Buffer(bits^)
+            return gathered^
         # Each view is 16 bytes copied as four words into a buffer sized
         # once: a join's gather of seven customer strings per fact row
         # (TPC-DS q4) spent 19 ns a view appending them one by one.
@@ -397,7 +563,9 @@ struct StringViewStorage(Copyable, Sized):
         var total_buffer_bytes = 0
         var row = 0
         for p in range(len(parts)):
-            ref storage = parts[p]
+            # A selecting part's descriptors, one a row, first.
+            var flat = parts[p]._flat()
+            ref storage = flat
             var remap = List[UInt32](capacity=storage.buffer_count())
             for buffer in storage._buffers[]:
                 var key = Int(buffer.ptr())
