@@ -366,7 +366,13 @@ def time_chunk(plan_path):
     plan = json.loads(Path(plan_path).read_text())
     results = {}
     engines = plan["engines"]
+    started = time.monotonic()
     for index, item in enumerate(plan["cells"]):
+        budget = plan.get("budget")
+        if budget and results and time.monotonic() - started > budget:
+            # Leave the rest for the next timed call, so one call holds the
+            # machine for about `budget` seconds plus one cell.
+            break
         cell, paths = item["cell"], item["paths"]
         directory = Path(plan["answers"]) / cell["id"]
         directory.mkdir(parents=True, exist_ok=True)
@@ -641,10 +647,12 @@ def measure(args):
     ]
     answers = Path(tempfile.mkdtemp(prefix="operator-answers-"))
     try:
-        for start in range(0, len(todo), args.chunk):
-            chunk = todo[start: start + args.chunk]
+        total, done = len(todo), 0
+        while todo:
+            chunk, todo = todo[: args.chunk], todo[args.chunk:]
             items = [{"cell": c, "paths": generate(c)} for c in chunk]
             plan = {
+                "budget": args.budget,
                 "cells": items,
                 "engines": engines,
                 "binaries": binaries,
@@ -660,8 +668,12 @@ def measure(args):
                    str(plan_path)]
             subprocess.check_call(_wrapped(args.wrap_timing, cmd))
             timed = json.loads((answers / "chunk.json").read_text())
+            todo = [i["cell"] for i in items if i["cell"]["id"] not in timed] + todo
             for item in items:
                 cell = item["cell"]
+                if cell["id"] not in timed:
+                    continue
+                done += 1
                 found = timed[cell["id"]]
                 checks = check_cell(cell, item["paths"], found)
                 entry = result["cells"].setdefault(
@@ -681,7 +693,7 @@ def measure(args):
             results_path.write_text(json.dumps(result, indent=1))
             (out / "report.md").write_text(report(result))
             print(
-                f"{min(start + args.chunk, len(todo))}/{len(todo)} cells",
+                f"{done}/{total} cells",
                 file=sys.stderr,
             )
     finally:
@@ -885,7 +897,11 @@ def main():
     parser.add_argument("--baseline", default="", help="git revision of this library to A/B")
     parser.add_argument("--reps", type=int, default=5)
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--chunk", type=int, default=10, help="cells per timed call")
+    parser.add_argument("--chunk", type=int, default=40, help="most cells per timed call")
+    parser.add_argument(
+        "--budget", type=int, default=480,
+        help="seconds after which a timed call starts no further cell",
+    )
     parser.add_argument("--timeout", type=int, default=300, help="seconds per worker")
     parser.add_argument("--out", default=str(ROOT / "build" / "operators" / "results"))
     parser.add_argument("--force", action="store_true", help="rerun cells already in results.json")
