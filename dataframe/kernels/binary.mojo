@@ -1400,6 +1400,13 @@ def _decimal_binary[
         return _decimal_binary[op](
             left._decimal128(), right._decimal128(), mask
         )
+    comptime if is_comparison(op):
+        # decimal128 sides at one scale compare as stored, straight into
+        # bitmaps, as decimal64 and other numbers do.
+        if left.dtype().scale() == right.dtype().scale():
+            return _compare_bits[op, DType.int128](
+                left._data[Column[Int128]], right._data[Column[Int128]]
+            )
     ref a = left._data[Column[Int128]]
     ref b = right._data[Column[Int128]]
     var n = _length(len(a), len(b))

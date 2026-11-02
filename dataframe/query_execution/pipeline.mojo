@@ -79,16 +79,14 @@ from dataframe.io.parquet import (
 from dataframe.kernels.join_hash import (
     PreparedHashIndex,
     prefer_left_build,
-    prepare_hash_index,
     prepare_progression_index,
+    serves_probe,
 )
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
-    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
-    JOIN_RIGHT,
     JOIN_SEMI,
 )
 from dataframe.parallel import (
@@ -107,6 +105,10 @@ from dataframe.pipeline import (
 from dataframe.planning.context import (
     FinishAbove,
     QueryContext,
+    _ReadyIndex,
+)
+from dataframe.planning.inputs import (
+    finish_build,
 )
 from dataframe.planning.graph import (
     plan_columns_of,
@@ -152,6 +154,7 @@ from dataframe.planning.properties import (
     _is_scan,
     _same_names,
     _set_members,
+    _stream_join,
     _stream_rows,
 )
 from dataframe.planning.cost.eligibility import (
@@ -424,18 +427,7 @@ def plan_stream_execute(
         ref step = self._nodes[first]
         if _stream_rows(step):
             first = step.left
-        elif step.kind == JOIN and (
-            step.how
-            in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]
-            or (step.how == JOIN_RIGHT and not step.coalesce)
-            or step.how == JOIN_FULL
-        ):
+        elif _stream_join(step):
             first = step.left
         else:
             break
@@ -472,18 +464,7 @@ def plan_stream_execute(
         if _stream_rows(node):
             operations.append(node.copy())
             operation_nodes.append(cursor)
-        elif node.kind == JOIN and (
-            node.how
-            in [
-                JOIN_INNER,
-                JOIN_LEFT,
-                JOIN_SEMI,
-                JOIN_ANTI,
-                JOIN_CROSS,
-            ]
-            or (node.how == JOIN_RIGHT and not node.coalesce)
-            or node.how == JOIN_FULL
-        ):
+        elif _stream_join(node):
             var prepared = Optional[PreparedHashIndex]()
             # A left input that can only be small next to a large known
             # right may be the side to hash: decline streaming, so the
@@ -599,6 +580,12 @@ def plan_stream_execute(
                 )
             )
             var built = self._execute(node.right, False, True, batch_size)
+            # The index a prefetch made with this build, if any.
+            var ready = Optional[_ReadyIndex]()
+            if self._prefetched_indexes:
+                var held = self._prefetched_indexes.value()
+                if node.right in held[]:
+                    ready = held[].pop(node.right)
             if (
                 node.how == JOIN_INNER
                 and not node.sides_fixed
@@ -721,14 +708,12 @@ def plan_stream_execute(
                         return _stream_after_materialization(
                             plan, index, batch_size, sink
                         )
-            if (
-                (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
-                and built.height() >= 524288
-                and plan_known_height(self, node.left) < 0
+            if (node.how == JOIN_SEMI or node.how == JOIN_ANTI) and (
+                built.height() >= 524288
             ):
                 # A semi or anti join whose built right side turned out
-                # large: run the left too, and decide from both real
-                # sizes, as DuckDB does. A left at most a quarter of the
+                # large: run the left too (a known table's rows are only
+                # read), and decide from both real sizes, as DuckDB does. A left at most a quarter of the
                 # right is joined eagerly, hashing the left (PDS-H q4:
                 # about 57K orders against 3.8M late lineitem rows);
                 # otherwise the stream continues from the left's rows.
@@ -766,28 +751,27 @@ def plan_stream_execute(
                 return _stream_after_materialization(
                     plan, index, batch_size, sink
                 )
-            # The build frame in one chunk per column, once: a probe
-            # gathers the build's payload through `take_parallel`,
-            # which rechunks a chunked column every time it is
-            # called, once per morsel or batch (PDS-H q2's 159K-row
-            # build with five string columns: 3.8 ms a probe).
-            for column in built._columns:
-                if column.is_chunked():
-                    built = built.rechunk()
-                    break
-            joins.append(built^)
+            # The build finished: one chunk per column, and its keys'
+            # hash index, unless a prefetch made the same one already.
+            var keys = List[String]()
             if not prepared and node.how != JOIN_CROSS and len(node.names):
-                ref build = joins[len(joins) - 1]
-                var sources = List[Series]()
-                var supported = build.height() <= Int(Int32.MAX)
-                for name in node.right_keys:
-                    var key = build[name]
-                    supported = supported and not key.dtype().is_nested()
-                    sources.append(key.copy())
-                if supported:
-                    prepared = prepare_hash_index(sources, probe_rows=bound)
-                    if prepared:
-                        algorithm = "hash_index"
+                keys = node.right_keys.copy()
+            if (
+                len(keys) > 0
+                and ready
+                and ready.value().keys == keys
+                and serves_probe(
+                    ready.value().index, ready.value().probe_rows, bound
+                )
+            ):
+                prepared = ready.value().index.copy()
+                algorithm = "hash_index"
+                keys = List[String]()
+            var finished = finish_build(built, keys, bound)
+            if finished:
+                prepared = finished^
+                algorithm = "hash_index"
+            joins.append(built^)
             plan_record(
                 self,
                 cursor,

@@ -433,6 +433,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     merged._dtype = self._dtype
                     merged._field_metadata = self._field_metadata
                     return merged^
+            # decimal128 storage, 16 bytes a row.
+            if result._data.isa[Column[Int128]]():
+                var merged = Self(
+                    self._name, _merge_scalars[DType.int128](parts)
+                )
+                merged._dtype = self._dtype
+                merged._field_metadata = self._field_metadata
+                return merged^
         # Utf8View chunks concatenate descriptors and Arc byte blocks; any
         # view chunk makes the whole column views (an offsets chunk becomes
         # descriptors over its own bytes), the canonical layout.

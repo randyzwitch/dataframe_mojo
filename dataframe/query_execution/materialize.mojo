@@ -8,15 +8,11 @@ from dataframe.aggregation.expressions import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.join_type import (
-    JOIN_ANTI,
-    JOIN_CROSS,
-    JOIN_INNER,
-    JOIN_LEFT,
-    JOIN_SEMI,
-)
 from dataframe.frame import (
     DataFrame,
+)
+from dataframe.join_type import (
+    JOIN_CROSS,
 )
 from dataframe.parallel import (
     Job,
@@ -24,12 +20,14 @@ from dataframe.parallel import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    _ReadyIndex,
 )
 from dataframe.planning.graph import (
     plan_aggregated,
     plan_compact_scan_slots,
     plan_cover,
     plan_ends_in_breaker,
+    plan_height_bound,
     plan_reorder,
     plan_spine_rows,
     plan_spine_source,
@@ -47,6 +45,7 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.properties import (
     _pinned,
+    _stream_join,
     _stream_rows,
 )
 from dataframe.series import (
@@ -365,26 +364,41 @@ def plan_prefetch_breakers(
     serial phases left partly idle. These independent inputs can run
     concurrently. The stream's decisions do not
     change: each result waits in `_prefetched` for the `_execute` call
-    that would have computed it."""
+    that would have computed it.
+
+    A build side's job also finishes it as a build (`finish_build`): its
+    columns in one chunk and its keys' hash index, made on that job's
+    thread as soon as its rows are in, while the other inputs still run.
+    DuckDB finalizes each hash join's table at the end of its own build
+    pipeline, which depends on nothing but that pipeline
+    (`BuildPipelineSchedule`); TPC-DS q97, its full join streamed,
+    hashed its catalog side's distinct pairs only after the store side's
+    aggregate had finished, with most of the crew idle. The index waits
+    in `_prefetched_indexes` for the stream, which takes it where it
+    would have made the same one."""
     var ahead = self._prefetched.value()
     var wanted = List[Int]()
+    # A build side's keys, and the bound on the rows that will probe it,
+    # as the stream prepares its index (none for the source or a cross
+    # join).
+    var keys = List[List[String]]()
+    var probe_rows = List[Int]()
     var probe = top
     while probe >= 0:
         ref step = self._nodes[probe]
         if _stream_rows(step):
             probe = step.left
-        elif step.kind == JOIN and step.how in [
-            JOIN_INNER,
-            JOIN_LEFT,
-            JOIN_SEMI,
-            JOIN_ANTI,
-            JOIN_CROSS,
-        ]:
+        elif _stream_join(step):
             if (
                 plan_ends_in_breaker(self, step.right)
                 and step.right not in ahead[]
             ):
                 wanted.append(step.right)
+                if step.how != JOIN_CROSS and len(step.names) > 0:
+                    keys.append(step.right_keys.copy())
+                else:
+                    keys.append(List[String]())
+                probe_rows.append(plan_height_bound(self, step.left))
             probe = step.left
         else:
             break
@@ -395,12 +409,27 @@ def plan_prefetch_breakers(
         and probe not in ahead[]
     ):
         wanted.append(probe)
+        keys.append(List[String]())
+        probe_rows.append(-1)
     if len(wanted) < 2:
         return
     trace_path("stream.prefetch_breakers")
     var jobs = List[_SubplanJob](capacity=len(wanted))
-    for i in wanted:
-        jobs.append(_SubplanJob(self.copy(), i, True, batch_size))
+    for k in range(len(wanted)):
+        jobs.append(
+            _SubplanJob(
+                self.copy(),
+                wanted[k],
+                True,
+                batch_size,
+                keys[k],
+                probe_rows[k],
+            )
+        )
     run_jobs(jobs)
     for k in range(len(wanted)):
         ahead[][wanted[k]] = jobs[k].result.copy()
+        if jobs[k].built and self._prefetched_indexes:
+            self._prefetched_indexes.value()[][wanted[k]] = _ReadyIndex(
+                keys[k], probe_rows[k], jobs[k].built.value().copy()
+            )

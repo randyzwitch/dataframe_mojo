@@ -353,6 +353,41 @@ def statistics_sample(
     return merged^
 
 
+def statistics_known(
+    statistics: ArcPointer[TableStatistics],
+    name: String,
+    identity: Int,
+    rows: Int,
+) -> Int:
+    """The count kept for column `name` over this storage, or -1."""
+    _acquire(statistics)
+    for entry in _shared(statistics).counts:
+        if (
+            entry.name == name
+            and entry.identity == identity
+            and entry.rows == rows
+        ):
+            var count = entry.count
+            _release(statistics)
+            return count
+    _release(statistics)
+    return -1
+
+
+def statistics_record(
+    statistics: ArcPointer[TableStatistics],
+    name: String,
+    identity: Int,
+    rows: Int,
+    count: Int,
+):
+    """Keep a count of column `name` over this storage, taken from
+    another copy of its rows."""
+    _acquire(statistics)
+    _shared(statistics).counts.append(_ColumnCount(name, identity, rows, count))
+    _release(statistics)
+
+
 def _identity(series: Series) -> Int:
     """The address of the series' storage: its chunk list when chunked,
     else its payload buffer."""

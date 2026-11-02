@@ -64,7 +64,7 @@ from dataframe.aggregation.reducer import (
     float_key,
     quantile_in,
 )
-from dataframe.decimal import check_limit, precision_limit
+from dataframe.decimal import check_limit, decimal_mean, precision_limit
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import (
     Column,
@@ -383,6 +383,10 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
     state is not a few fixed words here."""
     if spec.op == LEN:
         return _K_LEN
+    if (spec.op == COUNT or spec.op == NULL_COUNT) and _decimal_part(input):
+        # A count reads only validity, whatever the values' type, as
+        # DuckDB's count(ANY) does: a decimal's counts are the same words.
+        return _K_COUNT if spec.op == COUNT else _K_NULLS
     if (spec.op == SUM or spec.op == MEAN) and input.dtype().is_decimal():
         var state = spec.make(0).dtype
         if state.is_decimal() and _decimal_part(input):
@@ -469,6 +473,32 @@ def _batch_nulls(
     return _count_set(bits, offset + start, count) < count
 
 
+def _update_counts[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    kind: Int,
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+):
+    """Count a batch's valid (`_K_COUNT`) or null (`_K_NULLS`) values of
+    rows [start, start + count) into their groups' state words, reading
+    only the column's validity bits."""
+    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
+    if not nulls:
+        if kind == _K_COUNT:
+            for k in range(count):
+                _words_at(rows[unsafe_offset=k] + base)[] += 1
+        return
+    var valid = column._bits[].unsafe_ptr()
+    var bit = column._offset
+    for k in range(count):
+        if _validity_at(valid, bit + start + k) == (kind == _K_COUNT):
+            _words_at(rows[unsafe_offset=k] + base)[] += 1
+
+
 def _update_slot[
     D: DType
 ](
@@ -490,14 +520,7 @@ def _update_slot[
     var bit = column._offset
     var kind = slot.kind
     if kind == _K_COUNT or kind == _K_NULLS:
-        if not nulls:
-            if kind == _K_COUNT:
-                for k in range(count):
-                    _words_at(rows[unsafe_offset=k] + base)[] += 1
-            return
-        for k in range(count):
-            if _validity_at(valid, bit + start + k) == (kind == _K_COUNT):
-                _words_at(rows[unsafe_offset=k] + base)[] += 1
+        _update_counts(column, kind, start, count, rows, base)
         return
     if kind == _K_VALUES:
         for k in range(count):
@@ -584,7 +607,10 @@ def _update_slot[
 
 
 def _decimal_part(column: Series) -> Bool:
-    """Whether a decimal column's storage is 32-, 64- or 128-bit integers."""
+    """Whether a column is a decimal stored as 32-, 64- or 128-bit
+    integers."""
+    if not column.dtype().is_decimal():
+        return False
     var part = column.chunks()[
         0
     ].copy() if column.is_chunked() else column.copy()
@@ -759,6 +785,14 @@ def _update_states(
                     placed = True
             if not placed:
                 raise Error("aggregate table: unsupported top-rows input")
+            continue
+        if (slot.kind == _K_COUNT or slot.kind == _K_NULLS) and part._data.isa[
+            Column[Int128]
+        ]():
+            # A decimal128's counts (other storage takes `_update_slot`).
+            _update_counts[DType.int128](
+                part._data[Column[Int128]], slot.kind, start, count, rows, base
+            )
             continue
         if slot.kind == _K_DECIMAL_SUM:
             if part._data.isa[Column[Int64]]():
@@ -1085,7 +1119,7 @@ def _unload(
 # How a reduction's result is made from its group rows (`_Finalizer`):
 # its states unloaded into a `Reducer` that finishes them; nothing (top
 # rows, read separately); or the result column written straight from the
-# rows: counts, an integer or float sum, a mean.
+# rows: counts, an integer, float or decimal sum, a mean.
 comptime _F_STATES = 0
 comptime _F_SKIP = 1
 comptime _F_COUNTS = 2
@@ -1093,6 +1127,8 @@ comptime _F_INT_SUM = 3
 comptime _F_FLOAT_SUM = 4
 comptime _F_MEAN = 5
 comptime _F_QUANTILE = 6
+comptime _F_DECIMAL_SUM = 7
+comptime _F_DECIMAL_MEAN = 8
 
 
 def _finalize_mode(slot: _Slot, template: Reducer) -> Int:
@@ -1107,6 +1143,10 @@ def _finalize_mode(slot: _Slot, template: Reducer) -> Int:
         return _F_COUNTS
     if kind == _K_VALUES:
         return _F_QUANTILE
+    if kind == _K_DECIMAL_SUM:
+        # The 128-bit total is the result's unscaled value (its precision
+        # held on every add), as DuckDB's decimal SUM finalizes.
+        return _F_DECIMAL_SUM if template.op == SUM else _F_DECIMAL_MEAN
     var summed = (
         kind == _K_INT_SUM or kind == _K_NARROW_SUM or kind == _K_FLOAT_SUM
     )
@@ -1139,6 +1179,7 @@ struct _Finalizer(Movable):
     var state: Reducer
     var ints: List[Int64]
     var floats: List[Float64]
+    var wides: List[Int128]
     var valid: List[Bool]
     var nulls: Bool
 
@@ -1152,12 +1193,14 @@ struct _Finalizer(Movable):
         self.gathered = List[Float64]()
         var direct = self.mode >= _F_COUNTS
         var integer = self.mode == _F_COUNTS or self.mode == _F_INT_SUM
+        var wide = self.mode == _F_DECIMAL_SUM
         self.ints = List[Int64](
             unsafe_uninit_length=n if direct and integer else 0
         )
         self.floats = List[Float64](
-            unsafe_uninit_length=n if direct and not integer else 0
+            unsafe_uninit_length=n if direct and not integer and not wide else 0
         )
+        self.wides = List[Int128](unsafe_uninit_length=n if wide else 0)
         self.valid = List[Bool](
             unsafe_uninit_length=n if direct and self.mode != _F_COUNTS else 0
         )
@@ -1226,6 +1269,28 @@ struct _Finalizer(Movable):
                         floats[unsafe_offset=g] = result.value()
                 valid[unsafe_offset=g] = ok
                 nulls = nulls or not ok
+        elif self.mode == _F_DECIMAL_SUM or self.mode == _F_DECIMAL_MEAN:
+            var wides = self.wides.unsafe_ptr()
+            var scale = self.state.dtype.scale()
+            for g in range(lo, hi):
+                var w = g * stride + w0
+                var total = bitcast[DType.int128](
+                    (UInt128(at[unsafe_offset=w + 1]) << 64)
+                    | UInt128(at[unsafe_offset=w])
+                )
+                var count = bitcast[DType.int64](at[unsafe_offset=w + 2])
+                if self.mode == _F_DECIMAL_SUM:
+                    var ok = count >= self.min_count
+                    valid[unsafe_offset=g] = ok
+                    nulls = nulls or not ok
+                    wides[unsafe_offset=g] = total if ok else 0
+                else:
+                    var ok = count > 0
+                    valid[unsafe_offset=g] = ok
+                    nulls = nulls or not ok
+                    floats[unsafe_offset=g] = decimal_mean(
+                        total, count, scale
+                    ) if ok else 0
         elif self.mode == _F_MEAN:
             for g in range(lo, hi):
                 var w = g * stride + w0
@@ -1291,6 +1356,10 @@ struct _Finalizer(Movable):
             result = Series("", Column[Int64](self.ints^))
         elif self.mode == _F_INT_SUM:
             result = _sum_typed(self.ints^, bits^, state.input)
+        elif self.mode == _F_DECIMAL_SUM:
+            result = Series(
+                "", Column[Int128](values=self.wides^, bits=bits^)
+            ).with_dtype(state.dtype)
         else:
             result = Series(
                 "", Column[Float64](values=self.floats^, bits=bits^)
@@ -2047,7 +2116,10 @@ def aggregate_layout(
             raise Error("aggregate table: a state that is not inline")
         var floating = False
         if kind != _K_LEN and kind != _K_DECIMAL_SUM and kind != _K_COMOMENT:
-            floating = _numeric_part(inputs[s]).value().dtype().is_float()
+            # None for a decimal's counts, which hold no values.
+            var part = _numeric_part(inputs[s])
+            if part:
+                floating = part.value().dtype().is_float()
         slots.append(
             _Slot(
                 kind,
