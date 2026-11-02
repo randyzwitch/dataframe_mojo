@@ -44,10 +44,17 @@ from dataframe.kernels.join_hash import (
 from dataframe.join_order import (
     FilterEdge,
     JoinEdge,
+    JoinOperator,
     JoinTree,
+    OPERATOR_ANTI,
+    OPERATOR_INNER,
+    OPERATOR_LEFT,
+    OPERATOR_SEMI,
+    build_conflicts,
     order_joins,
 )
 from dataframe.join_type import (
+    JOIN_ANTI,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -68,6 +75,7 @@ from dataframe.planning.context import (
     QueryContext,
 )
 from dataframe.planning.graph import (
+    GraphJoin,
     plan_aggregated,
     plan_available,
     plan_collect_graph,
@@ -76,6 +84,7 @@ from dataframe.planning.graph import (
     plan_filters_rows,
     plan_estimated_rows,
     plan_filtered_table,
+    plan_graph_input,
     plan_graph_step,
     plan_has_join,
     plan_has_kind,
@@ -706,7 +715,12 @@ def plan_cost_order_joins(
     inner joins flattened across nested inputs into relations and key
     pairs, each relation's rows counted after its own filters (run
     when they cannot be counted otherwise, as `_order_chain` measures
-    them), and the cheapest tree built. Choose each hash-build side
+    them), and the cheapest tree built. A semi, anti or left join is an
+    operator of the graph whose right input is one relation, as in
+    DuckDB 2.0 (`JoinOrderOperator`): its conflict rules say where it
+    may go, so a semi join can run before inner joins its keys do not
+    read, and it keeps its sides. A filter reading a left join's right
+    columns stays above that join (`PinFilterAfterLeftJoin`). Choose each hash-build side
     using rows times columns, with a lone relation costing 15% more
     when the other
     side is a join). Filters between joins follow the lowest join
@@ -722,54 +736,122 @@ def plan_cost_order_joins(
     for top in range(count):
         if parents[top] == -2 or not plan_graph_step(self, top):
             continue
-        # The graph's top: no graph step above it.
+        # The graph's top: no graph step above it that it belongs to.
         var up = parents[top]
-        if up >= 0 and plan_graph_step(self, up):
+        if up >= 0 and plan_graph_input(self, up, top):
             continue
         if not plan_order_free_above(self, top, parents):
             continue
         var relations = List[Int]()
         var pairs = List[Tuple[String, String]]()
         var filters = List[Int]()
-        plan_collect_graph(self, top, relations, pairs, filters)
+        var joins = List[GraphJoin]()
+        plan_collect_graph(self, top, relations, pairs, filters, joins)
         var n = len(relations)
         if n < 3 or n > 62:
             continue
+        # The right relations of semi and anti joins: their columns end
+        # at their join, so no other key or filter reads them.
+        var hidden = List[Bool](length=n, fill=False)
+        # The right relations of left joins: always a join's build side.
+        var nullable = List[Bool](length=n, fill=False)
+        for g in joins:
+            ref how = self._nodes[g.node].how
+            if how == JOIN_SEMI or how == JOIN_ANTI:
+                hidden[g.right_from] = True
+            elif how == JOIN_LEFT:
+                nullable[g.right_from] = True
         var provider = Dict[String, Int]()
         var unique = True
         var columns = List[List[String]]()
         for r in range(n):
             var names = plan_columns_of(self, relations[r])
-            for c in names:
-                if c in provider:
-                    unique = False
-                provider[c] = r
+            if not hidden[r]:
+                for c in names:
+                    if c in provider:
+                        unique = False
+                    provider[c] = r
             columns.append(names^)
         if not unique:
             continue
-        # Edges: the key pairs between each two relations.
-        var edges = List[JoinEdge]()
+        # Each join as an operator (`JoinOrderOperator`): its inputs'
+        # relations and the relations its keys read.
+        var ops = List[JoinOperator]()
         var known = True
-        for pair in pairs:
-            var a = provider.get(pair[0], -1)
-            var b = provider.get(pair[1], -1)
-            if a < 0 or b < 0 or a == b:
-                known = False
+        for j in range(len(joins)):
+            ref g = joins[j]
+            ref join = self._nodes[g.node]
+            var left_mask = ((1 << g.right_from) - 1) & ~(
+                (1 << g.left_from) - 1
+            )
+            var right_mask = ((1 << g.end) - 1) & ~((1 << g.right_from) - 1)
+            var syntactic = 0
+            for i in range(len(join.names)):
+                var a = provider.get(join.names[i], -1)
+                var b = g.right_from
+                if join.how == JOIN_INNER:
+                    b = provider.get(join.right_keys[i], -1)
+                if (
+                    a < 0
+                    or b < 0
+                    or left_mask & (1 << a) == 0
+                    or right_mask & (1 << b) == 0
+                ):
+                    known = False
+                    break
+                syntactic |= (1 << a) | (1 << b)
+            if not known:
                 break
-            var found = False
-            for k in range(len(edges)):
-                if edges[k].a == a and edges[k].b == b:
-                    edges[k].a_keys.append(pair[0])
-                    edges[k].b_keys.append(pair[1])
-                    found = True
-                elif edges[k].a == b and edges[k].b == a:
-                    edges[k].a_keys.append(pair[1])
-                    edges[k].b_keys.append(pair[0])
-                    found = True
-            if not found:
-                edges.append(JoinEdge(a, b, [pair[0]], [pair[1]]))
+            var kind = OPERATOR_INNER
+            if join.how == JOIN_SEMI:
+                kind = OPERATOR_SEMI
+            elif join.how == JOIN_ANTI:
+                kind = OPERATOR_ANTI
+            elif join.how == JOIN_LEFT:
+                kind = OPERATOR_LEFT
+            var lefts = List[Int]()
+            for c in range(g.joins_from, g.joins_mid):
+                lefts.append(c)
+            var rights = List[Int]()
+            for c in range(g.joins_mid, j):
+                rights.append(c)
+            ops.append(
+                JoinOperator(
+                    kind, left_mask, right_mask, syntactic, lefts^, rights^
+                )
+            )
         if not known:
             continue
+        build_conflicts(ops)
+        # Edges: the key pairs between each two relations. An inner
+        # join's pairs are free, unless a conflict rule ties them to their
+        # join; a left join's always belong to it; a semi or anti join's
+        # take no part in the estimate.
+        var edges = List[JoinEdge]()
+        for j in range(len(joins)):
+            ref join = self._nodes[joins[j].node]
+            if ops[j].kind == OPERATOR_SEMI or ops[j].kind == OPERATOR_ANTI:
+                continue
+            var owner = j if ops[j].must_apply else -1
+            for i in range(len(join.names)):
+                var left_key = join.names[i]
+                var right_key = join.right_keys[i]
+                var a = provider[left_key]
+                var b = provider[right_key]
+                var found = False
+                for k in range(len(edges)):
+                    if edges[k].owner != owner:
+                        continue
+                    if edges[k].a == a and edges[k].b == b:
+                        edges[k].a_keys.append(left_key)
+                        edges[k].b_keys.append(right_key)
+                        found = True
+                    elif edges[k].a == b and edges[k].b == a:
+                        edges[k].a_keys.append(right_key)
+                        edges[k].b_keys.append(left_key)
+                        found = True
+                if not found:
+                    edges.append(JoinEdge(a, b, [left_key], [right_key], owner))
         # Each filter's relations; one reading a name no relation holds
         # (made along the way) leaves the graph alone.
         var filter_masks = List[Int]()
@@ -785,6 +867,11 @@ def plan_cost_order_joins(
                     known = False
                 else:
                     mask |= 1 << r
+            # One reading a left join's right columns runs after that
+            # join (`PinFilterAfterLeftJoin`).
+            for op in ops:
+                if op.kind == OPERATOR_LEFT and mask & op.right_relations != 0:
+                    mask |= op.syntactic
             filter_masks.append(mask)
         if not known:
             continue
@@ -814,6 +901,11 @@ def plan_cost_order_joins(
         # narrows nothing can never be the largest input. A narrowing
         # relation larger than all of those is estimated instead; when
         # every relation narrows, the one of the largest table is.
+        # A semi or anti join's right relation is in no estimate: it is
+        # neither counted nor run here. A left join's right relation is
+        # estimated, and runs only beside relations that must run (below):
+        # the join keeps every left row, so with no estimate for it the
+        # join's estimate is its left input's.
         #
         # A relation joined to one of a smaller table may instead stream
         # through that one's index inside a build for a third, and is
@@ -826,17 +918,30 @@ def plan_cost_order_joins(
         var deferred = List[Bool](length=n, fill=False)
         var widest_plain = -1
         var largest = 0
+        while largest < n - 1 and hidden[largest]:
+            largest += 1
         for r in range(n):
             narrows.append(
-                self._nodes[relations[r]].kind != SCAN_FRAME
+                not hidden[r]
+                and self._nodes[relations[r]].kind != SCAN_FRAME
                 and plan_filters_rows(self, relations[r])
             )
+            if hidden[r]:
+                continue
             if not narrows[r]:
                 widest_plain = max(widest_plain, tables[r])
             if tables[r] > tables[largest]:
                 largest = r
+        var uncounted = 0
         for r in range(n):
-            if narrows[r] and (
+            if hidden[r]:
+                estimates.append(1)
+            elif nullable[r]:
+                var estimate = plan_relation_estimate(self, relations[r])
+                if estimate < 0:
+                    uncounted |= 1 << r
+                estimates.append(max(estimate, 1))
+            elif narrows[r] and (
                 (tables[r] >= 0 and tables[r] <= widest_plain)
                 or (widest_plain < 0 and r != largest)
             ):
@@ -858,6 +963,16 @@ def plan_cost_order_joins(
                 estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
                 runs.append(r)
+        # A left join's right relation is built whole in every order (no
+        # key set narrows a left join's build side). With no estimate,
+        # when other relations must run anyway, it runs with them, at
+        # once, and is counted: independent pipelines run together, as
+        # `_prefetch_breakers` runs them, not one after another.
+        if len(runs) > 0:
+            for r in range(n):
+                if uncounted & (1 << r) != 0:
+                    runs.append(r)
+                    uncounted &= ~(1 << r)
         # Filters comparing a column of one relation with a column of
         # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
         # which the estimate counts as join conditions.
@@ -894,11 +1009,20 @@ def plan_cost_order_joins(
         plan_run_relations(
             self, relations, runs, aggregated, estimates, streaming, batch_size
         )
+        if plan_empty_graph(
+            self, top, runs, hidden, nullable, estimates, batch_size
+        ):
+            changed = True
+            continue
         for r in range(n):
             var table = tables[r]
             var estimated = estimates[r]
             rows.append(Float64(estimated))
-            domains.append(Float64(table if table > 0 else estimated))
+            if uncounted & (1 << r) != 0 and table <= 0:
+                # No rows known: its keys bound no domain.
+                domains.append(1.0e18)
+            else:
+                domains.append(Float64(table if table > 0 else estimated))
         # An aggregate relation that ran is a new table with statistics
         # of its own (`ExtractAggregationStats`): its columns' counts are
         # read now.
@@ -911,13 +1035,15 @@ def plan_cost_order_joins(
             var count = plan_spine_distinct(self, relations[pair[0]], pair[1])
             if count > 0:
                 distinct[key] = Float64(count)
-        var chosen = order_joins(rows, domains, edges, distinct, compares)
+        var chosen = order_joins(
+            rows, domains, edges, distinct, compares, ops, uncounted
+        )
         if not chosen:
             continue
         var tree = chosen.take()
         # Deferred relations the estimated tree builds on whole run now,
         # and the tree is chosen again with their counts.
-        var swaps = plan_tree_swaps(self, tree, relations, columns, edges)
+        var swaps = plan_tree_swaps(self, tree, relations, columns, edges, ops)
         var later = List[Int]()
         for e in range(n, len(tree.mask)):
             var build = tree.left[e] if swaps[e] else tree.right[e]
@@ -935,14 +1061,21 @@ def plan_cost_order_joins(
             )
             for r in later:
                 rows[r] = Float64(estimates[r])
-            chosen = order_joins(rows, domains, edges, distinct, compares)
+            if plan_empty_graph(
+                self, top, later, hidden, nullable, estimates, batch_size
+            ):
+                changed = True
+                continue
+            chosen = order_joins(
+                rows, domains, edges, distinct, compares, ops, uncounted
+            )
             if not chosen:
                 continue
             tree = chosen.take()
-            swaps = plan_tree_swaps(self, tree, relations, columns, edges)
+            swaps = plan_tree_swaps(self, tree, relations, columns, edges, ops)
         # Build the chosen tree. `node_of` is each tree entry's plan
         # node; `renamed` maps each key a join dropped to the key it
-        # matched; `joined` marks entries holding a join.
+        # matched.
         var entries = len(tree.mask)
         var node_of = List[Int](length=entries, fill=-1)
         for r in range(n):
@@ -954,6 +1087,39 @@ def plan_cost_order_joins(
         for e in range(n, entries):
             var left = tree.left[e]
             var right = tree.right[e]
+            var via = tree.operator[e]
+            if via >= 0 and ops[via].kind != OPERATOR_INNER:
+                # A semi, anti or left join keeps its sides: its left
+                # input holds its left keys' relations.
+                if swaps[e]:
+                    var t = left
+                    left = right
+                    right = t
+                var join = self._nodes[joins[via].node].copy()
+                join.left = node_of[left]
+                join.right = node_of[right]
+                for i in range(len(join.names)):
+                    while join.names[i] in renamed:
+                        join.names[i] = renamed[join.names[i]]
+                if ops[via].kind == OPERATOR_LEFT:
+                    for i in range(len(join.names)):
+                        if join.right_keys[i] != join.names[i]:
+                            renamed[join.right_keys[i]] = join.names[i]
+                added.append(join^)
+                var operator_node = base + len(added) - 1
+                operator_node = _place_graph_filters(
+                    self,
+                    filters,
+                    filter_masks,
+                    placed,
+                    renamed,
+                    tree.mask[e],
+                    added,
+                    base,
+                    operator_node,
+                )
+                node_of[e] = operator_node
+                continue
             if swaps[e]:
                 var t = left
                 left = right
@@ -963,6 +1129,8 @@ def plan_cost_order_joins(
             var left_keys = List[String]()
             var right_keys = List[String]()
             for edge in edges:
+                if edge.owner >= 0 and edge.owner != via:
+                    continue
                 var forward = (
                     lmask & (1 << edge.a) != 0 and rmask & (1 << edge.b) != 0
                 )
@@ -993,25 +1161,17 @@ def plan_cost_order_joins(
                 suffix="_right",
             )
             added.append(join^)
-            var current = base + len(added) - 1
-            # Filters whose relations this join completes, while their
-            # names are all still held.
-            for f in range(len(filters)):
-                if placed[f] or filter_masks[f] & ~tree.mask[e] != 0:
-                    continue
-                var reads = (
-                    _references(self._nodes[filters[f]].exprs[0]).value().copy()
-                )
-                var held = True
-                for name in reads:
-                    held = held and name not in renamed
-                if not held:
-                    continue
-                var filter = self._nodes[filters[f]].copy()
-                filter.left = current
-                added.append(filter^)
-                current = base + len(added) - 1
-                placed[f] = True
+            var current = _place_graph_filters(
+                self,
+                filters,
+                filter_masks,
+                placed,
+                renamed,
+                tree.mask[e],
+                added,
+                base,
+                base + len(added) - 1,
+            )
             node_of[e] = current
         var keep = List[Expr]()
         for name in output:
@@ -1039,19 +1199,53 @@ def plan_cost_order_joins(
     return changed
 
 
+def _place_graph_filters(
+    self: QueryContext,
+    filters: List[Int],
+    filter_masks: List[Int],
+    mut placed: List[Bool],
+    renamed: Dict[String, String],
+    mask: Int,
+    mut added: List[PlanNode],
+    base: Int,
+    current: Int,
+) raises -> Int:
+    """Add after node `current` the graph's filters whose relations a
+    join over relation set `mask` completes, while their names are all
+    still held; the last node added (or `current`)."""
+    var top = current
+    for f in range(len(filters)):
+        if placed[f] or filter_masks[f] & ~mask != 0:
+            continue
+        var reads = _references(self._nodes[filters[f]].exprs[0]).value().copy()
+        var held = True
+        for name in reads:
+            held = held and name not in renamed
+        if not held:
+            continue
+        var filter = self._nodes[filters[f]].copy()
+        filter.left = top
+        added.append(filter^)
+        top = base + len(added) - 1
+        placed[f] = True
+    return top
+
+
 def plan_tree_swaps(
     self: QueryContext,
     tree: JoinTree,
     relations: List[Int],
     columns: List[List[String]],
     edges: List[JoinEdge],
+    ops: List[JoinOperator],
 ) raises -> List[Bool]:
     """For each entry of `tree` that joins two others, whether its left
     child builds rather than its right. DuckDB's build side: the side of
     fewer rows times columns builds, a lone relation 15% dearer against
     a join, and a lone relation joined on one key whose values are a
     progression costs nothing, since it builds no hash table (the other
-    side looks its rows up by position, `join.progression`)."""
+    side looks its rows up by position, `join.progression`). A semi,
+    anti or left join keeps its sides: its right input builds."""
     var n = len(relations)
     var entries = len(tree.mask)
     var swaps = List[Bool](length=entries, fill=False)
@@ -1064,6 +1258,24 @@ def plan_tree_swaps(
     for e in range(n, entries):
         var left = tree.left[e]
         var right = tree.right[e]
+        var via = tree.operator[e]
+        if via >= 0 and ops[via].kind != OPERATOR_INNER:
+            # Its left input holds its left keys' relations.
+            var total = ops[via].left_total
+            swaps[e] = tree.mask[left] & total != total
+            var kept = right if swaps[e] else left
+            var other = left if swaps[e] else right
+            if ops[via].kind == OPERATOR_LEFT:
+                # It drops its right keys: the pairs it owns.
+                var dropped = 0
+                for edge in edges:
+                    if edge.owner == via:
+                        dropped += len(edge.a_keys)
+                width[e] = width[kept] + width[other] - dropped
+            else:
+                width[e] = width[kept]
+            joined[e] = True
+            continue
         var left_cost = tree.rows[left] * Float64(width[left])
         var right_cost = tree.rows[right] * Float64(width[right])
         if not joined[right] and joined[left]:
@@ -1082,6 +1294,8 @@ def plan_tree_swaps(
         # The keys the join drops: one per key pair between its sides.
         var keys = 0
         for edge in edges:
+            if edge.owner >= 0 and edge.owner != via:
+                continue
             var lmask = tree.mask[left]
             var rmask = tree.mask[right]
             if (lmask & (1 << edge.a) != 0 and rmask & (1 << edge.b) != 0) or (
@@ -1091,6 +1305,34 @@ def plan_tree_swaps(
         width[e] = width[left] + width[right] - keys
         joined[e] = True
     return swaps^
+
+
+def plan_empty_graph(
+    mut self: QueryContext,
+    top: Int,
+    counted: List[Int],
+    hidden: List[Bool],
+    nullable: List[Bool],
+    estimates: List[Int],
+    batch_size: Int,
+) raises -> Bool:
+    """Replace the graph at `top` by its empty result when one of the
+    relations `counted` (run, so their counts are exact) has no rows and
+    every output row needs one of its rows: any relation but the right
+    input of an anti or left join (`nullable`, or `hidden` and so never
+    run). DuckDB's `EmptyResultPullup`: an inner or semi join with an
+    empty input is empty, and so are an anti or left join with an empty
+    left. Nothing else of the graph then runs. True when replaced."""
+    for r in counted:
+        if hidden[r] or nullable[r] or estimates[r] != 0:
+            continue
+        var empty = self._execute(top, True, False, batch_size)
+        self._frames.append(empty^)
+        self._schemas.append(Optional[CsvSchema]())
+        self._nodes[top] = _frame_scan_node(slot=len(self._frames) - 1)
+        trace_path("lazy.empty_join_graph")
+        return True
+    return False
 
 
 def plan_run_relations(

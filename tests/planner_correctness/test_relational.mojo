@@ -35,6 +35,7 @@ from tests.support.coverage_compare import (
 )
 from dataframe.lazy import JOIN, FILTER, AGG
 from dataframe.expr import CAST, LIT_INT
+from dataframe.join_type import JOIN_INNER
 
 
 def _layout(model: ReferenceTable, layout: Int) raises -> DataFrame:
@@ -373,10 +374,13 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
             .filter(col("right_value") > 0)
             ._optimized()
         )
+        # No null row passes the filter, so the left join keeps the inner
+        # join's rows and becomes one (DuckDB's `PushdownLeftJoin`); the
+        # filter then moves into the right input.
         ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
-        assert_equal(root.kind, JOIN if how == "inner" else FILTER)
-        if how == "inner":
-            assert_equal(plan._plan._nodes[root.right].kind, FILTER)
+        assert_equal(root.kind, JOIN)
+        assert_equal(root.how, JOIN_INNER)
+        assert_equal(plan._plan._nodes[root.right].kind, FILTER)
     var grouped = (
         source.lazy()
         .group_by("b", maintain_order=True)

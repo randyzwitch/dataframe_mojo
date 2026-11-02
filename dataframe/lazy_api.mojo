@@ -165,6 +165,7 @@ from dataframe.planning.graph import (
     plan_aggregated,
     plan_available,
     plan_canonical_slot,
+    GraphJoin,
     plan_collect_graph,
     plan_columns_of,
     plan_compact_scan_slots,
@@ -2374,7 +2375,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         mut pairs: List[Tuple[String, String]],
         mut filters: List[Int],
     ):
-        plan_collect_graph(self._plan, index, relations, pairs, filters)
+        var joins = List[GraphJoin]()
+        plan_collect_graph(self._plan, index, relations, pairs, filters, joins)
 
     def _indexed_relation(
         self,
