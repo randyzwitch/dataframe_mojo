@@ -578,5 +578,16 @@
       "i_current_price",
       "i_wholesale_cost"
     ]
+  },
+  "float_rank_fields": {
+    "tpcds/q67": {
+      "rk": {
+        "value": "sumsales",
+        "partition": [
+          "i_category"
+        ],
+        "descending": true
+      }
+    }
   }
 }
