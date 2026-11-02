@@ -32,6 +32,7 @@ from dataframe.planning.graph import (
     plan_ends_in_breaker,
     plan_reorder,
     plan_spine_rows,
+    plan_spine_source,
     plan_subplan,
     plan_subplan_classes,
 )
@@ -161,11 +162,18 @@ def plan_share_subplans(
         for best in picks:
             trace_path("lazy.shared_subplan")
             origins.append(plan_spine_rows(self, best))
-        var frames = plan_collect_shared(self, picks, streaming, batch_size)
+        var tables = List[Optional[DataFrame]]()
+        var names = List[Dict[String, String]]()
+        var frames = plan_collect_shared(
+            self, picks, origins, streaming, batch_size, tables, names
+        )
         for k in range(len(picks)):
             self._frames.append(frames[k].copy())
             self._schemas.append(Optional[CsvSchema]())
             var slot = len(self._frames) - 1
+            if tables[k]:
+                self._origin_tables[slot] = tables[k].value().copy()
+                self._origin_names[slot] = names[k].copy()
             var origin = origins[k]
             if origin > 0:
                 self._origin_rows[slot] = origin
@@ -196,27 +204,66 @@ struct _SharedJob(Job):
 
     var plan: QueryContext
     var aggregated: Bool
+    var origin: Int
     var streaming: Bool
     var batch_size: Int
     var result: DataFrame
+    var origin_table: Optional[DataFrame]
+    var origin_names: Dict[String, String]
 
     def __init__(
         out self,
         var plan: QueryContext,
         aggregated: Bool,
+        origin: Int,
         streaming: Bool,
         batch_size: Int,
     ) raises:
         self.plan = plan^
         self.aggregated = aggregated
+        self.origin = origin
         self.streaming = streaming
         self.batch_size = batch_size
         self.result = DataFrame(List[Series]())
+        self.origin_table = None
+        self.origin_names = Dict[String, String]()
 
     def run(mut self) raises:
         var frame = self.plan._collect(
             optimize=True, streaming=self.streaming, batch_size=self.batch_size
         )
+        # A result holding every row of its table reads its columns'
+        # distinct counts from that table: they are the same columns, as
+        # DuckDB carries a column's count through a projection into a
+        # materialized CTE's statistics. TPC-DS q76's three channels share
+        # one projection of date_dim, whose date keys then had no count,
+        # and the join order took the 1,990 dates the sales hold for the
+        # domain, putting the item join first on a date join estimated 37
+        # times too large. A filtered result reads none: DuckDB keeps the
+        # table's counts there too, but a filtered dimension's full key
+        # count is the date-containment estimate of #1083 (a month of
+        # dates joined to sales estimated 37 times too small, TPC-DS q60),
+        # whose low estimates the run-time swaps then undo.
+        if (
+            not self.aggregated
+            and self.origin > 0
+            and frame.height() == self.origin
+        ):
+            var top = len(self.plan._nodes) - 1
+            var origin_slot = -1
+            for name in frame.columns():
+                var source = plan_spine_source(self.plan, top, name)
+                if not source:
+                    continue
+                var found = source.value()
+                if not self.plan._frames[found[0]]._statistics:
+                    continue
+                if origin_slot >= 0 and found[0] != origin_slot:
+                    continue
+                origin_slot = found[0]
+                self.origin_names[name] = found[1]
+            if origin_slot >= 0:
+                self.origin_table = self.plan._frames[origin_slot].copy()
         # An aggregate's result keeps distinct counts of its own
         # columns for the join order, as DuckDB keeps a materialized
         # CTE's statistics (`AddMaterializedCTEStats`) and gives an
@@ -228,7 +275,13 @@ struct _SharedJob(Job):
 
 
 def plan_collect_shared(
-    self: QueryContext, picks: List[Int], streaming: Bool, batch_size: Int
+    self: QueryContext,
+    picks: List[Int],
+    origins: List[Int],
+    streaming: Bool,
+    batch_size: Int,
+    mut origin_tables: List[Optional[DataFrame]],
+    mut origin_names: List[Dict[String, String]],
 ) raises -> List[DataFrame]:
     """Each shared subtree in `picks`, collected on its own. The subtrees
     are independent, so outside an execution report they run as jobs at
@@ -239,11 +292,17 @@ def plan_collect_shared(
     them already optimized each, so only the passes after optimization
     run on it again (join key sets, sharing, join order)."""
     var jobs = List[_SharedJob](capacity=len(picks))
-    for best in picks:
-        var sub = plan_subplan(self, best)
+    for k in range(len(picks)):
+        var sub = plan_subplan(self, picks[k])
         sub._optimized = True
         jobs.append(
-            _SharedJob(sub^, plan_aggregated(self, best), streaming, batch_size)
+            _SharedJob(
+                sub^,
+                plan_aggregated(self, picks[k]),
+                origins[k],
+                streaming,
+                batch_size,
+            )
         )
     if len(jobs) > 1 and not self._report:
         run_jobs(jobs)
@@ -253,6 +312,8 @@ def plan_collect_shared(
     var frames = List[DataFrame](capacity=len(jobs))
     for k in range(len(jobs)):
         frames.append(jobs[k].result.copy())
+        origin_tables.append(jobs[k].origin_table.copy())
+        origin_names.append(jobs[k].origin_names.copy())
     return frames^
 
 
