@@ -1245,6 +1245,45 @@ def plan_aggregated(self: QueryContext, index: Int) -> Bool:
     return False
 
 
+def plan_aggregate_input_rows(self: QueryContext, index: Int) -> Int:
+    """Rows of the table under the aggregation at or under node `index`
+    (through the steps `plan_aggregated` passes), along its input's
+    spine (`plan_spine_rows`) and the left inputs of semi and anti
+    joins, which keep at most their left rows; -1 when there is none or
+    it is unknown. TPC-DS q8's listed zip codes are a distinct over a
+    semi join of filtered addresses."""
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == AGG:
+            var below = node.left
+            while below >= 0:
+                ref step = self._nodes[below]
+                if step.kind == JOIN and (
+                    step.how == JOIN_SEMI or step.how == JOIN_ANTI
+                ):
+                    below = step.left
+                elif step.kind == DROP or (
+                    (step.kind == SELECT or step.kind == WITH_COLUMNS)
+                    and _stream_rows(step)
+                ):
+                    below = step.left
+                else:
+                    break
+            return plan_spine_rows(self, below)
+        if not (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _stream_rows(node)
+            )
+        ):
+            return -1
+        cursor = node.left
+    return -1
+
+
 def plan_spine_rows(self: QueryContext, index: Int) -> Int:
     """Rows of the table under `index` along steps that keep, drop or
     join rows (a filter, a projection, an inner join's left input);
