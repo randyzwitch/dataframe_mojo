@@ -659,3 +659,82 @@ def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
     assert_frame_unordered(
         query.collect(), query.collect(optimize=False, engine="cpu")
     )
+
+
+def test_a_graph_with_an_empty_relation_is_its_empty_result() raises:
+    # The categories' filter keeps nothing. They run ahead for their
+    # count, and an inner join with an empty input is empty, as DuckDB
+    # pulls an empty result up (`EmptyResultPullup`): nothing else of
+    # the graph runs, and the result keeps the graph's columns.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var query = (
+        t[0]
+        .join(t[1], left_on=["f_product"], right_on=["p_id"])
+        .join(
+            t[2].filter(col("c_group") == lit(Int64(99))),
+            left_on=["p_category"],
+            right_on=["c_id"],
+        )
+        .join(t[3], left_on=["f_store"], right_on=["s_id"], how="semi")
+    )
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    assert_true(
+        "dataframe-path: lazy.empty_join_graph\n" in observed.text(),
+        "the graph with an empty relation ran",
+    )
+    _ = observed^
+    _ = trace^
+    var written = query.collect(optimize=False, engine="cpu")
+    assert_equal(rows.height(), 0)
+    assert_equal(written.height(), 0)
+    assert_equal(len(rows.columns()), len(written.columns()))
+    for i in range(len(rows.columns())):
+        assert_equal(rows.columns()[i], written.columns()[i])
+        var name = rows.columns()[i]
+        assert_true(rows.column(name).dtype() == written.column(name).dtype())
+
+
+def test_a_filter_rejecting_nulls_makes_a_left_join_inner() raises:
+    # DuckDB's `PushdownLeftJoin`: a filter on a left join's right
+    # columns that no null row passes drops every unmatched row, so the
+    # join is an inner join and the filter moves into its right input.
+    # One that keeps null rows leaves the left join as it is.
+    var t = tables()
+    var products = t[1].filter(col("p_id") < lit(Int64(1500)))
+    var rejecting = (
+        t[0]
+        .join(products, left_on=["f_product"], right_on=["p_id"], how="left")
+        .filter(col("p_category") > lit(Int64(5)))
+    )
+    var keeping = (
+        t[0]
+        .join(products, left_on=["f_product"], right_on=["p_id"], how="left")
+        .filter(
+            col("p_category").is_null() | (col("p_category") > lit(Int64(5)))
+        )
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var rows = rejecting.collect()
+    assert_true(
+        "dataframe-path: lazy.left_join_to_inner\n" in observed.text(),
+        "the left join under a null-rejecting filter stayed a left join",
+    )
+    _ = observed^
+    var kept_trace = StrategyTrace()
+    var kept = keeping.collect()
+    assert_true(
+        "dataframe-path: lazy.left_join_to_inner\n" not in kept_trace.text(),
+        "a filter keeping null rows made the left join inner",
+    )
+    _ = kept_trace^
+    _ = trace^
+    assert_true(rows.height() > 0)
+    assert_frame_unordered(
+        rows, rejecting.collect(optimize=False, engine="cpu")
+    )
+    var written = keeping.collect(optimize=False, engine="cpu")
+    assert_true(written.height() > rows.height())
+    assert_frame_unordered(kept, written)

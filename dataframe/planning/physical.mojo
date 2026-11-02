@@ -761,16 +761,6 @@ def plan_cost_order_joins(
                 hidden[g.right_from] = True
             elif how == JOIN_LEFT:
                 nullable[g.right_from] = True
-        # Three or more relations other than the right inputs of semi,
-        # anti and left joins, as for a graph of inner joins alone: those
-        # right inputs join where their joins allow, but do not make a
-        # graph of one or two inner-joined relations one to order.
-        var free = 0
-        for r in range(n):
-            if not hidden[r] and not nullable[r]:
-                free += 1
-        if free < 3:
-            continue
         var provider = Dict[String, Int]()
         var unique = True
         var columns = List[List[String]]()
@@ -913,8 +903,9 @@ def plan_cost_order_joins(
         # every relation narrows, the one of the largest table is.
         # A semi or anti join's right relation is in no estimate: it is
         # neither counted nor run here. A left join's right relation is
-        # estimated but never run: the join keeps every left row, so with
-        # no estimate for it the join's estimate is its left input's.
+        # estimated, and runs only beside relations that must run (below):
+        # the join keeps every left row, so with no estimate for it the
+        # join's estimate is its left input's.
         #
         # A relation joined to one of a smaller table may instead stream
         # through that one's index inside a build for a third, and is
@@ -972,6 +963,16 @@ def plan_cost_order_joins(
                 estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
                 runs.append(r)
+        # A left join's right relation is built whole in every order (no
+        # key set narrows a left join's build side). With no estimate,
+        # when other relations must run anyway, it runs with them, at
+        # once, and is counted: independent pipelines run together, as
+        # `_prefetch_breakers` runs them, not one after another.
+        if len(runs) > 0:
+            for r in range(n):
+                if uncounted & (1 << r) != 0:
+                    runs.append(r)
+                    uncounted &= ~(1 << r)
         # Filters comparing a column of one relation with a column of
         # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
         # which the estimate counts as join conditions.
@@ -1008,6 +1009,11 @@ def plan_cost_order_joins(
         plan_run_relations(
             self, relations, runs, aggregated, estimates, streaming, batch_size
         )
+        if plan_empty_graph(
+            self, top, runs, hidden, nullable, estimates, batch_size
+        ):
+            changed = True
+            continue
         for r in range(n):
             var table = tables[r]
             var estimated = estimates[r]
@@ -1055,6 +1061,11 @@ def plan_cost_order_joins(
             )
             for r in later:
                 rows[r] = Float64(estimates[r])
+            if plan_empty_graph(
+                self, top, later, hidden, nullable, estimates, batch_size
+            ):
+                changed = True
+                continue
             chosen = order_joins(
                 rows, domains, edges, distinct, compares, ops, uncounted
             )
@@ -1294,6 +1305,34 @@ def plan_tree_swaps(
         width[e] = width[left] + width[right] - keys
         joined[e] = True
     return swaps^
+
+
+def plan_empty_graph(
+    mut self: QueryContext,
+    top: Int,
+    counted: List[Int],
+    hidden: List[Bool],
+    nullable: List[Bool],
+    estimates: List[Int],
+    batch_size: Int,
+) raises -> Bool:
+    """Replace the graph at `top` by its empty result when one of the
+    relations `counted` (run, so their counts are exact) has no rows and
+    every output row needs one of its rows: any relation but the right
+    input of an anti or left join (`nullable`, or `hidden` and so never
+    run). DuckDB's `EmptyResultPullup`: an inner or semi join with an
+    empty input is empty, and so are an anti or left join with an empty
+    left. Nothing else of the graph then runs. True when replaced."""
+    for r in counted:
+        if hidden[r] or nullable[r] or estimates[r] != 0:
+            continue
+        var empty = self._execute(top, True, False, batch_size)
+        self._frames.append(empty^)
+        self._schemas.append(Optional[CsvSchema]())
+        self._nodes[top] = _frame_scan_node(slot=len(self._frames) - 1)
+        trace_path("lazy.empty_join_graph")
+        return True
+    return False
 
 
 def plan_run_relations(
