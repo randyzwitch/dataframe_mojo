@@ -190,3 +190,94 @@ def test_oversubscribed_parked_pool_preserves_rounds_first_error_and_retry() rai
     _retry_after_capacity(pool, retry)
     assert_job_counts(retry, 7, True)
     pool.release()
+
+
+struct ThreadJob(Job):
+    """Records the thread it ran on, after `micros` of sleep."""
+
+    var micros: Int
+    var thread: UInt64
+
+    def __init__(out self, micros: Int):
+        self.micros = micros
+        self.thread = 0
+
+    def run(mut self) raises:
+        _ = external_call["usleep", Int32](UInt32(self.micros))
+        self.thread = external_call["pthread_self", UInt64]()
+
+
+struct InnerRoundJob(Job):
+    """Runs `count` slow jobs of its own, keeping their threads."""
+
+    var count: Int
+    var thread: UInt64
+    var threads: List[UInt64]
+
+    def __init__(out self, count: Int):
+        self.count = count
+        self.thread = 0
+        self.threads = List[UInt64]()
+
+    def run(mut self) raises:
+        self.thread = external_call["pthread_self", UInt64]()
+        var inner = List[ThreadJob]()
+        for _ in range(self.count):
+            inner.append(ThreadJob(10_000))
+        run_jobs(inner)
+        for k in range(len(inner)):
+            self.threads.append(inner[k].thread)
+
+
+struct OuterJob(Job):
+    """Either a short job, a 5 ms sleep, or a job that starts an inner
+    round of eight 10 ms jobs."""
+
+    var short: Bool
+    var thread: UInt64
+    var threads: List[UInt64]
+
+    def __init__(out self, short: Bool):
+        self.short = short
+        self.thread = 0
+        self.threads = List[UInt64]()
+
+    def run(mut self) raises:
+        if self.short:
+            # Long enough for a crew thread to wake and take the other job.
+            _ = external_call["usleep", Int32](UInt32(5000))
+            self.thread = external_call["pthread_self", UInt64]()
+            return
+        var inner = InnerRoundJob(8)
+        inner.run()
+        self.thread = inner.thread
+        self.threads = inner.threads.copy()
+
+
+def test_a_waiting_caller_runs_the_jobs_a_helper_starts() raises:
+    """With two threads, the helper that takes the long job holds the only
+    budget slot, so its inner round gets no helper of its own. The caller,
+    done with the short job and waiting for the helper, runs some of those
+    inner jobs instead of waiting idle."""
+    var setting = WorkerSetting(2)
+    var crew = Crew.start()
+    var testable = 0
+    for _ in range(20):
+        var jobs = List[OuterJob]()
+        jobs.append(OuterJob(True))
+        jobs.append(OuterJob(False))
+        run_jobs(jobs)
+        var caller = external_call["pthread_self", UInt64]()
+        assert_equal(len(jobs[1].threads), 8)
+        if jobs[1].thread == caller:
+            # The caller took both jobs; nothing waited.
+            continue
+        testable += 1
+        var helped = False
+        for thread in jobs[1].threads:
+            helped = helped or thread == caller
+        assert_true(helped, "the waiting caller ran none of the inner jobs")
+        assert_equal(_helpers().load(), Int64(0))
+    assert_true(testable > 0, "the long job never ran on the helper")
+    crew.release()
+    _ = setting^

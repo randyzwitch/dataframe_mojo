@@ -11,7 +11,7 @@ statistics.
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.math import sqrt
-from std.memory import bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
 from dataframe.storage.boolean import BoolColumn
@@ -262,68 +262,95 @@ struct TableStatistics(Movable):
         self.counts = List[_ColumnCount]()
         self.samples = List[_ColumnSample]()
 
-    def _acquire(mut self):
-        while True:
-            var expected = Int64(0)
-            if self.lock.compare_exchange(expected, 1):
-                return
 
-    def _release(mut self):
-        self.lock.store(0)
+def _shared(
+    statistics: ArcPointer[TableStatistics],
+) -> ref[MutAnyOrigin] TableStatistics:
+    """The statistics every copy of a table shares, reached through their
+    address. Plans run at once (a query's shared subplans) ask for one
+    table's counts on several workers, so the lists are read and changed
+    only under `lock`, through this reference, never through a `mut self`
+    argument: a method's `mut self` promises sole access, and the counts
+    it read before the lock could then be kept and used after it."""
+    return Pointer[TableStatistics, MutAnyOrigin](
+        unsafe_from_address=Int(Pointer(to=statistics[]))
+    )[]
 
-    def distinct(mut self, series: Series) raises -> Int:
-        var identity = _identity(series)
-        var rows = len(series)
-        self._acquire()
-        for entry in self.counts:
-            if (
-                entry.name == series.name()
-                and entry.identity == identity
-                and entry.rows == rows
-            ):
-                var known = entry.count
-                self._release()
-                return known
-        self._release()
-        var count = distinct_estimate(series)
-        self._acquire()
-        self.counts.append(_ColumnCount(series.name(), identity, rows, count))
-        self._release()
-        return count
 
-    def sample(mut self, series: Series, runs: Int, run: Int) raises -> Series:
-        """`runs` evenly spaced runs of `run` rows of the column, end to
-        end in one array. Evenly spaced runs, not a prefix: tables are often
-        stored in date or key order, which a prefix would misjudge. The
-        zero-copy slices are merged once; the planner's row estimates read
-        the kept copy afterwards instead of merging them again."""
-        var identity = _identity(series)
-        var rows = len(series)
-        self._acquire()
-        for entry in self.samples:
-            if (
-                entry.name == series.name()
-                and entry.identity == identity
-                and entry.rows == rows
-                and entry.runs == runs
-                and entry.run == run
-            ):
-                var known = entry.sample.copy()
-                self._release()
-                return known^
-        self._release()
-        var parts = List[Series](capacity=runs)
-        for k in range(runs):
-            parts.append(series.slice(k * (rows // runs), run))
-        var merged = Series._from_chunks(parts).rechunk()
-        self._acquire()
-        self.samples.append(
-            _ColumnSample(
-                series.name(), identity, rows, runs, run, merged.copy()
-            )
-        )
-        self._release()
-        return merged^
+def _acquire(statistics: ArcPointer[TableStatistics]):
+    ref lock = _shared(statistics).lock
+    while True:
+        var expected = Int64(0)
+        if lock.compare_exchange(expected, 1):
+            return
+
+
+def _release(statistics: ArcPointer[TableStatistics]):
+    _shared(statistics).lock.store(0)
+
+
+def statistics_distinct(
+    statistics: ArcPointer[TableStatistics], series: Series
+) raises -> Int:
+    """The column's distinct count, estimated once per column storage."""
+    var identity = _identity(series)
+    var rows = len(series)
+    _acquire(statistics)
+    for entry in _shared(statistics).counts:
+        if (
+            entry.name == series.name()
+            and entry.identity == identity
+            and entry.rows == rows
+        ):
+            var known = entry.count
+            _release(statistics)
+            return known
+    _release(statistics)
+    var count = distinct_estimate(series)
+    _acquire(statistics)
+    _shared(statistics).counts.append(
+        _ColumnCount(series.name(), identity, rows, count)
+    )
+    _release(statistics)
+    return count
+
+
+def statistics_sample(
+    statistics: ArcPointer[TableStatistics],
+    series: Series,
+    runs: Int,
+    run: Int,
+) raises -> Series:
+    """`runs` evenly spaced runs of `run` rows of the column, end to
+    end in one array. Evenly spaced runs, not a prefix: tables are often
+    stored in date or key order, which a prefix would misjudge. The
+    zero-copy slices are merged once; the planner's row estimates read
+    the kept copy afterwards instead of merging them again."""
+    var identity = _identity(series)
+    var rows = len(series)
+    _acquire(statistics)
+    for entry in _shared(statistics).samples:
+        if (
+            entry.name == series.name()
+            and entry.identity == identity
+            and entry.rows == rows
+            and entry.runs == runs
+            and entry.run == run
+        ):
+            var known = entry.sample.copy()
+            _release(statistics)
+            return known^
+    _release(statistics)
+    var parts = List[Series](capacity=runs)
+    for k in range(runs):
+        parts.append(series.slice(k * (rows // runs), run))
+    var merged = Series._from_chunks(parts).rechunk()
+    _acquire(statistics)
+    _shared(statistics).samples.append(
+        _ColumnSample(series.name(), identity, rows, runs, run, merged.copy())
+    )
+    _release(statistics)
+    return merged^
 
 
 def _identity(series: Series) -> Int:

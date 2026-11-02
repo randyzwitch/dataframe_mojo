@@ -15,7 +15,11 @@ from dataframe.join_type import (
     JOIN_LEFT,
     JOIN_SEMI,
 )
+from dataframe.frame import (
+    DataFrame,
+)
 from dataframe.parallel import (
+    Job,
     run_jobs,
 )
 from dataframe.planning.context import (
@@ -44,6 +48,9 @@ from dataframe.planning.properties import (
     _pinned,
     _stream_rows,
 )
+from dataframe.series import (
+    Series,
+)
 from dataframe.trace import (
     trace_path,
 )
@@ -61,9 +68,9 @@ def plan_share_subplans(
     for late shipments both as a join input and under a grouped
     n_unique, TPC-DS q39 joins and groups inventory once per month
     compared. The largest such subtree is collected on its own, and
-    every node holding it becomes a scan of the result. The plan
-    around it already optimized it, so only the passes after
-    optimization run on it again (join key sets, sharing, join order). Runs after join key sets pass sideways: copies that
+    every node holding it becomes a scan of the result; the next
+    largest that holds no copy of it is collected at the same time
+    (`plan_collect_shared`). Runs after join key sets pass sideways: copies that
     receive different key sets are left apart, since one shared
     result could not take either set (TPC-DS q59's weekly sales per
     store are joined with a different year's weeks on each side, and
@@ -103,56 +110,150 @@ def plan_share_subplans(
     # Nodes under a shared subtree are replaced with it.
     var covered = List[Bool](length=len(self._nodes), fill=False)
     var shared = False
-    while True:
-        # The largest subtree that two uncovered nodes hold.
-        var best = -1
-        for i in range(len(self._nodes)):
-            # A reader's pinned filter stays outside what is shared
-            # (`_filter_shared_subplans`): two readers with one filter
-            # in common would otherwise share it, each pair with its
-            # own copy of the subplan below.
-            if covered[i] or _pinned(self._nodes[i]):
-                continue
-            if not reducing[i] and not plan_read_whole(
-                self, i, classes, parents, joining, covered
-            ):
-                continue
-            if best >= 0 and sizes[i] <= sizes[best]:
-                continue
+    var done = False
+    while not done:
+        # This round's shared subtrees, largest first, and the copies each
+        # replaces. None holds another's copy, so they run at once.
+        var picks = List[Int]()
+        var copies = List[List[Int]]()
+        var pending = List[Bool](length=len(self._nodes), fill=False)
+        while True:
+            # The largest subtree that two uncovered nodes hold.
+            var best = -1
+            for i in range(len(self._nodes)):
+                # A reader's pinned filter stays outside what is shared
+                # (`_filter_shared_subplans`): two readers with one filter
+                # in common would otherwise share it, each pair with its
+                # own copy of the subplan below.
+                if covered[i] or _pinned(self._nodes[i]):
+                    continue
+                if not reducing[i] and not plan_read_whole(
+                    self, i, classes, parents, joining, covered
+                ):
+                    continue
+                if best >= 0 and sizes[i] <= sizes[best]:
+                    continue
+                for j in range(len(self._nodes)):
+                    if j != i and not covered[j] and classes[j] == classes[i]:
+                        best = i
+                        break
+            if best < 0:
+                done = True
+                break
+            var held = List[Int]()
+            var reads_pick = False
             for j in range(len(self._nodes)):
-                if j != i and not covered[j] and classes[j] == classes[i]:
-                    best = i
-                    break
-        if best < 0:
-            break
-        trace_path("lazy.shared_subplan")
-        var origin = plan_spine_rows(self, best)
-        var aggregated = plan_aggregated(self, best)
-        var sub = plan_subplan(self, best)
-        sub._optimized = True
-        var frame = sub._collect(
-            optimize=True, streaming=streaming, batch_size=batch_size
-        )
-        # An aggregate's result keeps distinct counts of its own
-        # columns for the join order, as DuckDB keeps a materialized
-        # CTE's statistics (`AddMaterializedCTEStats`) and gives an
-        # aggregate's columns distinct counts (`ExtractAggregationStats`).
-        if aggregated:
-            self._frames.append(frame^._with_statistics())
-        else:
-            self._frames.append(frame^)
-        self._schemas.append(Optional[CsvSchema]())
-        var slot = len(self._frames) - 1
-        if origin > 0:
-            self._origin_rows[slot] = origin
-        for j in range(len(self._nodes)):
-            if not covered[j] and classes[j] == classes[best]:
+                if not covered[j] and classes[j] == classes[best]:
+                    held.append(j)
+                    reads_pick = reads_pick or _holds(self, j, pending)
+            if reads_pick:
+                # A subtree over a copy of this round's pick waits for
+                # the next round, to read that pick's result.
+                break
+            for j in held:
+                plan_cover(self, j, pending)
                 plan_cover(self, j, covered)
+            picks.append(best)
+            copies.append(held^)
+        if len(picks) == 0:
+            break
+        var origins = List[Int](capacity=len(picks))
+        for best in picks:
+            trace_path("lazy.shared_subplan")
+            origins.append(plan_spine_rows(self, best))
+        var frames = plan_collect_shared(self, picks, streaming, batch_size)
+        for k in range(len(picks)):
+            self._frames.append(frames[k].copy())
+            self._schemas.append(Optional[CsvSchema]())
+            var slot = len(self._frames) - 1
+            var origin = origins[k]
+            if origin > 0:
+                self._origin_rows[slot] = origin
+            for j in copies[k]:
                 self._nodes[j] = _frame_scan_node(slot=slot)
         shared = True
     if shared:
         plan_reorder(self)
         plan_compact_scan_slots(self)
+
+
+def _holds(self: QueryContext, index: Int, marked: List[Bool]) -> Bool:
+    """Whether the subtree at `index` holds a `marked` node."""
+    var stack = List[Int]()
+    stack.append(index)
+    while len(stack) > 0:
+        var i = stack.pop()
+        if marked[i]:
+            return True
+        for child in [self._nodes[i].left, self._nodes[i].right]:
+            if child >= 0:
+                stack.append(child)
+    return False
+
+
+struct _SharedJob(Job):
+    """One shared subtree, collected from its own copy of the plan."""
+
+    var plan: QueryContext
+    var aggregated: Bool
+    var streaming: Bool
+    var batch_size: Int
+    var result: DataFrame
+
+    def __init__(
+        out self,
+        var plan: QueryContext,
+        aggregated: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises:
+        self.plan = plan^
+        self.aggregated = aggregated
+        self.streaming = streaming
+        self.batch_size = batch_size
+        self.result = DataFrame(List[Series]())
+
+    def run(mut self) raises:
+        var frame = self.plan._collect(
+            optimize=True, streaming=self.streaming, batch_size=self.batch_size
+        )
+        # An aggregate's result keeps distinct counts of its own
+        # columns for the join order, as DuckDB keeps a materialized
+        # CTE's statistics (`AddMaterializedCTEStats`) and gives an
+        # aggregate's columns distinct counts (`ExtractAggregationStats`).
+        if self.aggregated:
+            self.result = frame^._with_statistics()
+        else:
+            self.result = frame^
+
+
+def plan_collect_shared(
+    self: QueryContext, picks: List[Int], streaming: Bool, batch_size: Int
+) raises -> List[DataFrame]:
+    """Each shared subtree in `picks`, collected on its own. The subtrees
+    are independent, so outside an execution report they run as jobs at
+    once, sharing the crew's thread budget, as DuckDB schedules the
+    pipelines of independent materialized CTEs together: one subtree's
+    serial steps (its planning, a small eager input, an aggregate's
+    final frame) then overlap another's parallel work. The plan around
+    them already optimized each, so only the passes after optimization
+    run on it again (join key sets, sharing, join order)."""
+    var jobs = List[_SharedJob](capacity=len(picks))
+    for best in picks:
+        var sub = plan_subplan(self, best)
+        sub._optimized = True
+        jobs.append(
+            _SharedJob(sub^, plan_aggregated(self, best), streaming, batch_size)
+        )
+    if len(jobs) > 1 and not self._report:
+        run_jobs(jobs)
+    else:
+        for k in range(len(jobs)):
+            jobs[k].run()
+    var frames = List[DataFrame](capacity=len(jobs))
+    for k in range(len(jobs)):
+        frames.append(jobs[k].result.copy())
+    return frames^
 
 
 def plan_read_whole(
