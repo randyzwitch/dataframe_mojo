@@ -3484,9 +3484,7 @@ def _selected_table_rows(
             elif node.left < 0:
                 inputs.append(key_columns[0].copy())
             else:
-                inputs.append(
-                    source.column(expression._nodes[node.left].text)
-                )
+                inputs.append(source.column(expression._nodes[node.left].text))
             at += 1
     return (key_columns^, inputs^)
 
