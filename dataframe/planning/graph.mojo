@@ -7,6 +7,8 @@ from dataframe.dtype import (
 )
 from dataframe.expr import (
     COL,
+    Expr,
+    SELECTOR,
 )
 from dataframe.frame import (
     DataFrame,
@@ -391,12 +393,139 @@ def plan_parents(self: QueryContext) -> List[Int]:
 
 
 def plan_columns_of(self: QueryContext, index: Int) raises -> List[String]:
+    """Node `index`'s output names, derived from its inputs' names where
+    that needs no types (`plan_names_of`), else from its schema."""
+    var names = plan_names_of(self, index)
+    if names:
+        return names.take()
+    return self._execute(index, True).columns()
+
+
+def plan_names_of(
+    self: QueryContext, index: Int
+) raises -> Optional[List[String]]:
+    """Node `index`'s output names from its inputs' names, as Polars'
+    IR and DuckDB's logical operators derive a node's output from its
+    children's without running anything: a scan's table or projection,
+    the row steps that keep their input's columns, a projection's or
+    aggregation's output names, a drop, and an equi-join's two sides
+    (`_join_schema`'s naming). Planner passes ask a node's names far
+    more often than its types, and deriving the whole schema on no rows
+    built every column of every node below it (TPC-DS q4: 5 ms of
+    planning a run). None where the names depend on types (a selector)
+    or on what running the node decides (other kinds, a name collision);
+    the caller then derives the schema."""
     # A remembered schema is read in place, not copied out first.
     if self._schema_memo:
         ref memo = self._schema_memo.value()[]
         if index in memo:
             return memo[index].columns()
-    return self._execute(index, True).columns()
+    ref node = self._nodes[index]
+    if node.kind == SCAN_FRAME:
+        if len(node.scan_projection()) > 0:
+            return node.scan_projection().copy()
+        return self._frames[node.source_slot()].columns()
+    if (
+        node.kind == FILTER
+        or node.kind == SORT
+        or node.kind == SLICE
+        or node.kind == UNIQUE
+    ):
+        return plan_names_of(self, node.left)
+    if node.kind == DROP:
+        var input = plan_names_of(self, node.left)
+        if not input:
+            return None
+        for name in node.names:
+            if name not in input.value():
+                return None
+        var kept = List[String]()
+        for name in input.value():
+            if name not in node.names:
+                kept.append(name)
+        return kept^
+    if node.kind == SELECT or node.kind == AGG:
+        var names = List[String]()
+        if node.kind == AGG:
+            if len(node.names) == 0:
+                return None
+            names = node.names.copy()
+        for e in node.exprs:
+            if _selects(e) or e._name.byte_length() == 0 or e._name in names:
+                return None
+            names.append(e._name)
+        return names^
+    if node.kind == WITH_COLUMNS:
+        var input = plan_names_of(self, node.left)
+        if not input:
+            return None
+        var names = input.take()
+        var added = List[String]()
+        for e in node.exprs:
+            if _selects(e) or e._name.byte_length() == 0 or e._name in added:
+                return None
+            added.append(e._name)
+            if e._name not in names:
+                names.append(e._name)
+        return names^
+    if node.kind == JOIN:
+        return plan_join_names(self, node)
+    return None
+
+
+def plan_join_names(
+    self: QueryContext, node: PlanNode
+) raises -> Optional[List[String]]:
+    """An inner, left, semi or anti equi-join's output names, as
+    `_join_schema` names them: the left columns, then the right ones
+    not coalesced into a left key, a name the left side has taking the
+    suffix. None for other joins and where a name still collides."""
+    if not (
+        node.how == JOIN_INNER
+        or node.how == JOIN_LEFT
+        or node.how == JOIN_SEMI
+        or node.how == JOIN_ANTI
+    ):
+        return None
+    if len(node.names) == 0 or len(node.names) != len(node.right_keys):
+        return None
+    var left = plan_names_of(self, node.left)
+    if not left:
+        return None
+    var right = plan_names_of(self, node.right)
+    if not right:
+        return None
+    for i in range(len(node.names)):
+        if (
+            node.names[i] not in left.value()
+            or node.right_keys[i] not in right.value()
+        ):
+            return None
+        for k in range(i):
+            if node.names[k] == node.names[i]:
+                return None
+    if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+        return left^
+    var names = left.value().copy()
+    for name in right.value():
+        if node.coalesce and name in node.right_keys:
+            continue
+        var output = name
+        if output in left.value():
+            output += node.join_suffix()
+        if output in names:
+            return None
+        names.append(output)
+    return names^
+
+
+def _selects(e: Expr) -> Bool:
+    """Whether expression `e` holds a selector, whose columns (and so
+    the outputs it expands to) depend on the input's types."""
+    for item in e._nodes:
+        if item.op == SELECTOR:
+            return True
+    return False
 
 
 def plan_repeats_a_scan(self: QueryContext) -> Bool:
