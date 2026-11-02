@@ -58,13 +58,15 @@ struct _Bytes(Copyable, Movable):
     var data: Int
 
     def __init__(out self, column: StringColumn):
-        self.column = column.copy()
+        # Views are read one descriptor a row: a column selecting another's
+        # descriptors is copied out here, and held.
+        self.column = column._flat_views()
         self.views = 0
         self.buffers = 0
         self.offsets = 0
         self.data = 0
-        if column._is_view_storage():
-            ref storage = column._view_storage_unchecked()
+        if self.column._is_view_storage():
+            ref storage = self.column._view_storage.value()
             self.views = Int(
                 storage._views[].unsafe_ptr().unsafe_offset(column._offset)
             )

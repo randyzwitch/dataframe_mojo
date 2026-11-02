@@ -668,12 +668,10 @@ def slice_strings(
     var views = List[StringView](unsafe_uninit_length=n)
     var words = views.unsafe_ptr().unsafe_bitcast[UInt64]()
     var buffers = List[_Buffer[UInt8]]()
-    var views_at = 0
     if views_storage:
         var storage = column._view_storage_unchecked()
         for buffer in storage._buffers[]:
             buffers.append(buffer.copy())
-        views_at = Int(storage._views[].unsafe_ptr())
     else:
         buffers.append(column._bytes.copy())
     var nulls = column.null_count() > 0
@@ -687,14 +685,10 @@ def slice_strings(
         var data = text.unsafe_ptr()
         var size = len(text)
         var buffer = UInt64(0)
-        var base = 0
+        var base: Int
         if views_storage:
-            var view = (
-                Pointer[StringView, ImmutAnyOrigin](
-                    unsafe_from_address=views_at
-                )
-                .unsafe_offset(column._offset + k)[]
-                .copy()
+            var view = column._view_storage.value()._view_unchecked(
+                column._offset + k
             )
             buffer = UInt64(view.buffer_index)
             base = Int(view.offset)

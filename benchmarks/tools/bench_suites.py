@@ -196,10 +196,10 @@ LEGACY_CHECKS = {
 
 # The same, for one data variant only: (suite, variant, query).
 LEGACY_VARIANT_CHECKS = {
-    # Independent per-set float sums make subtotal/group ties in q67's rank
-    # thread-dependent; DuckDB's single-set answer is the reference, and a
-    # shared-scan rollup removes it. The decimal variant is exact, so it
-    # still compares rk.
+    # Float sums of the same rows in different rollup sets can differ by
+    # an ulp, which splits q67's rank ties on more threads; the complete
+    # check holds rk to the ties tolerance allows (`tolerant_ranks`). The
+    # decimal variant is exact, so it still compares rk.
     ("tpcds", "base", "q67"): [
         "i_category",
         "i_class",
@@ -978,9 +978,12 @@ def evaluate(result):
                     tolerant = suite_answers.tolerant_columns(
                         suite, query, oracle
                     )
+                    ranks = suite_answers.tolerant_ranks(
+                        suite, query, oracle, tolerant
+                    )
                     prepared = (
                         oracle_key,
-                        suite_answers.OracleCheck(oracle, tolerant),
+                        suite_answers.OracleCheck(oracle, tolerant, ranks),
                     )
                     oracle = None
                     verdicts.clear()
