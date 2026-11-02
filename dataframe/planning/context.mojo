@@ -64,6 +64,26 @@ struct FrameSlots(Copyable, Movable, Sized):
         self._shared[].append(frame^)
 
 
+struct FinishAbove(Movable):
+    """Row-local nodes over an aggregate, for its finish to run: `above`
+    in plan order from the node reading the aggregate at `node` (grouped
+    by `keys`) up. `applied` is set once the aggregate's pipeline has run
+    them, and its result is then theirs."""
+
+    var node: Int
+    var keys: List[String]
+    var above: List[Int]
+    var applied: Bool
+
+    def __init__(
+        out self, node: Int, var keys: List[String], var above: List[Int]
+    ):
+        self.node = node
+        self.keys = keys^
+        self.above = above^
+        self.applied = False
+
+
 struct QueryContext(Copyable, Deinitable, Movable):
     """Plan storage and per-run state, with explicit runtime ports."""
 
@@ -99,6 +119,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # optimizing it again, as Polars optimizes a cached subplan with the
     # plan around it and DuckDB plans a materialized CTE once.
     var _optimized: Bool
+    # Nodes over an aggregate this run's stream of it may run in the
+    # aggregate's finish (`_row_steps_above`); None otherwise.
+    var _finish_above: Optional[ArcPointer[FinishAbove]]
 
     var _executor: def(
         QueryContext, Int, Bool, Bool, Int
@@ -131,6 +154,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._prefetched = None
         self._handoff = HANDOFF_OFF
         self._optimized = False
+        self._finish_above = None
         self._executor = executor
         self._collector = collector
         self._supports = supports

@@ -476,6 +476,55 @@ def table_frame(
     its own thread, each
     output column keeping the parts as its chunks; in first-occurrence
     order when `ordered`."""
+    var parts = table_parts(template, result^)
+    if len(parts) == 0:
+        return template.finish()
+    if ordered:
+        for p in range(len(parts)):
+            parts[p].order_by_firsts()
+        return _finish_parts(parts^)
+    var count = len(parts)
+    var jobs = List[_FinishJob](capacity=count)
+    while len(parts) > 0:
+        jobs.append(_FinishJob(parts.pop(0)))
+    run_jobs(jobs)
+    if count == 1:
+        return jobs[0].frame.copy()
+    var frames = List[DataFrame](capacity=count)
+    for j in range(count):
+        frames.append(jobs[j].frame.copy())
+    return chunks_frame(frames)
+
+
+def chunks_frame(frames: List[DataFrame]) raises -> DataFrame:
+    """Frames of the same columns as one frame whose columns keep each
+    frame's rows as a chunk, in order: no copy of the values. Empty
+    frames add no chunk; with none left, the first frame's empty shape."""
+    var kept = List[Int]()
+    for j in range(len(frames)):
+        if frames[j].height() > 0:
+            kept.append(j)
+    if len(kept) == 0:
+        return frames[0].copy()
+    if len(kept) == 1:
+        return frames[kept[0]].copy()
+    var columns = List[Series](capacity=frames[0].width())
+    var height = 0
+    for j in kept:
+        height += frames[j].height()
+    for c in range(frames[0].width()):
+        var pieces = List[Series](capacity=len(kept))
+        for j in kept:
+            pieces.append(frames[j]._columns[c].copy())
+        columns.append(Series._from_chunks(pieces))
+    return DataFrame(columns^, height=height)
+
+
+def table_parts(
+    template: _StreamReduction, var result: AggregateResult
+) raises -> List[_StreamReduction]:
+    """Each nonempty partition of the aggregate table's `result` as a
+    `_StreamReduction` like `template`, its states loaded, unfinished."""
     var parts = List[_StreamReduction](capacity=len(result.firsts))
     for p in range(len(result.firsts)):
         var size = len(result.firsts[p])
@@ -497,29 +546,7 @@ def table_frame(
                 rows=0,
             )
         )
-    if len(parts) == 0:
-        return template.finish()
-    if ordered:
-        for p in range(len(parts)):
-            parts[p].order_by_firsts()
-        return _finish_parts(parts^)
-    var count = len(parts)
-    var jobs = List[_FinishJob](capacity=count)
-    while len(parts) > 0:
-        jobs.append(_FinishJob(parts.pop(0)))
-    run_jobs(jobs)
-    if count == 1:
-        return jobs[0].frame.copy()
-    var columns = List[Series](capacity=jobs[0].frame.width())
-    var height = 0
-    for j in range(count):
-        height += jobs[j].frame.height()
-    for c in range(jobs[0].frame.width()):
-        var pieces = List[Series](capacity=count)
-        for j in range(count):
-            pieces.append(jobs[j].frame._columns[c].copy())
-        columns.append(Series._from_chunks(pieces))
-    return DataFrame(columns^, height=height)
+    return parts^
 
 
 def _reduction_batch(grouped: Bool) -> Int:

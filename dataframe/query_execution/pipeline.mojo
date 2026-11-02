@@ -103,6 +103,7 @@ from dataframe.pipeline import (
     run_pipeline,
 )
 from dataframe.planning.context import (
+    FinishAbove,
     QueryContext,
 )
 from dataframe.planning.graph import (
@@ -319,6 +320,27 @@ def plan_stream_execute(
         else:
             break
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
+        # Row-local steps all the way up from an aggregate (a filter on
+        # its outputs, as SQL's HAVING, and projections): the aggregate's
+        # finish runs them on each worker's part of its groups, as
+        # DuckDB's pipeline whose source is the aggregate table's scan
+        # runs a filter over each scanned chunk, so the groups they drop
+        # are never assembled and scanned again.
+        var above = _row_steps_above(self, index, first, sink, len(expressions))
+        if len(above) > 0 and top < 0 and limit < 0 and skip == 0:
+            var plan = self.copy()
+            var finish = ArcPointer(
+                FinishAbove(first, self._nodes[first].names.copy(), above^)
+            )
+            plan._finish_above = Optional(finish)
+            var aggregated = plan._execute(first, False, True, batch_size)
+            if finish[].applied:
+                return aggregated^
+            plan._finish_above = None
+            plan._frames.append(aggregated^)
+            plan._schemas.append(Optional[CsvSchema]())
+            plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
+            return _stream_after_materialization(plan, index, batch_size, sink)
         var computed = self._execute(first, False, True, batch_size)
         var plan = self.copy()
         plan._frames.append(computed^)
@@ -1138,6 +1160,26 @@ def plan_stream_execute(
                 for name in members:
                     indices.append(keys.index(name))
                 set_indices.append(indices^)
+        # Nodes above this aggregate that its finish runs, when the stream
+        # over it handed them here (`_row_steps_above`).
+        var finish_nodes = List[Int]()
+        var finish = Optional[ArcPointer[FinishAbove]]()
+        if (
+            self._finish_above
+            and self._finish_above.value()[].node == index
+            and not self._finish_above.value()[].applied
+            and terminal.kind == AGG
+            and self._finish_above.value()[].keys == terminal.names
+            and not grouping
+            and top < 0
+            and len(row_names) == 0
+            and len(late_names) == 0
+        ):
+            finish = self._finish_above
+            finish_nodes = self._finish_above.value()[].above.copy()
+        var finish_operations = List[PlanNode](capacity=len(finish_nodes))
+        for n in finish_nodes:
+            finish_operations.append(self._nodes[n].copy())
         var piped_result = run_pipeline(
             input,
             _steps_of(step_nodes),
@@ -1159,7 +1201,10 @@ def plan_stream_execute(
             top_nulls_last=top_nulls_last,
             bounded=bounded,
             table=decision.uses_aggregate_table(),
+            finish_steps=_steps_of(finish_operations),
         )
+        if finish:
+            finish.value()[].applied = True
         if grouping:
             if len(set_frames) != len(set_indices):
                 return None
@@ -1258,6 +1303,15 @@ def plan_stream_execute(
             else:
                 plan_record(
                     self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
+                )
+            var base = 3 * step_count + 1
+            for k in range(len(finish_nodes)):
+                plan_record(
+                    self,
+                    finish_nodes[k],
+                    "pipeline",
+                    piped_counts[base + 2 * k],
+                    piped_counts[base + 2 * k + 1],
                 )
         return piped_result^
     # An in-memory input hands each round four batches a worker, which
@@ -1628,6 +1682,35 @@ def plan_stream_execute(
                 wall_ns=stream_wall,
             )
     return result^
+
+
+def _row_steps_above(
+    self: QueryContext, index: Int, first: Int, sink: Int, reductions: Int
+) -> List[Int]:
+    """The nodes from the one reading `first` up to `index`, in that
+    order, when `first` is an aggregate and every one of them is a
+    row-local filter, projection or column drop with no reduction of its
+    own; else none."""
+    var nodes = List[Int]()
+    if sink != 0 or reductions > 0 or self._nodes[first].kind != AGG:
+        return nodes^
+    var at = index
+    while at != first:
+        ref node = self._nodes[at]
+        if not (
+            _stream_rows(node)
+            and (
+                node.kind == FILTER
+                or node.kind == SELECT
+                or node.kind == WITH_COLUMNS
+                or node.kind == DROP
+            )
+        ):
+            return List[Int]()
+        nodes.append(at)
+        at = node.left
+    nodes.reverse()
+    return nodes^
 
 
 def plan_reduce_by_probe_keys(

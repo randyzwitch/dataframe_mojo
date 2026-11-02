@@ -2880,6 +2880,31 @@ def _capacity_for(rows: Int) -> Int:
     return capacity
 
 
+struct GroupFilter(Copyable, Movable):
+    """Which finished groups to keep, decided from the results of some of
+    their reductions before the rest are read out: a filter over an
+    aggregate's outputs (SQL's HAVING) run in the finish, so the groups it
+    drops never have their keys or other results written. `slots` are the
+    reductions it reads; `keep` gets those reductions' finished `Reducer`s
+    over a job's groups (in `slots` order) with `context`, and returns the
+    kept groups' indices in increasing order. It runs on the finishing
+    workers at once, so it must only read what `context` points at."""
+
+    var slots: List[Int]
+    var context: Int
+    var keep: def(Int, List[Reducer]) raises thin -> List[Int]
+
+    def __init__(
+        out self,
+        var slots: List[Int],
+        context: Int,
+        keep: def(Int, List[Reducer]) raises thin -> List[Int],
+    ):
+        self.slots = slots^
+        self.context = context
+        self.keep = keep
+
+
 struct _FinishJob(Job):
     """Phase 2: a range of partitions' rows from every worker, merged one
     run of partitions at a time in a table sized for the run, states
@@ -2906,6 +2931,9 @@ struct _FinishJob(Job):
     var top_rows: List[Int]
     # The address of the sinks' `_HeldBuffers`.
     var held: Int
+    var filter: Optional[GroupFilter]
+    # The groups merged, before `filter` dropped any.
+    var merged: Int
 
     def __init__(
         out self,
@@ -2921,7 +2949,10 @@ struct _FinishJob(Job):
         order_bits: Int,
         var run_starts: List[Int],
         var run_rows: List[Int],
+        filter: Optional[GroupFilter],
     ):
+        self.filter = filter.copy()
+        self.merged = 0
         self.sinks = sinks
         self.run_starts = run_starts^
         self.run_rows = run_rows^
@@ -3108,6 +3139,31 @@ struct _FinishJob(Job):
             # The old groups stay alive until their rows are copied.
             swap(final, into)
             _ = into^
+        self.merged = final.count()
+        if self.filter and final.count() > 0:
+            # The reductions the filter reads, finished over every group,
+            # then only the kept groups' rows, in order, for the scan.
+            ref filter = self.filter.value()
+            var results = List[Reducer](capacity=len(filter.slots))
+            for s in filter.slots:
+                var one = _Finalizer(
+                    self.slots[s], self.templates[s], final.count()
+                )
+                for lo in range(0, final.count(), _BATCH):
+                    one.scan(final, lo, min(final.count(), lo + _BATCH))
+                results.append(one^.reducer())
+            var kept = filter.keep(filter.context, results)
+            if len(kept) < final.count():
+                var into = _Groups(
+                    final.width(),
+                    final.addressed.copy(),
+                    final.stride - final.states_at,
+                    len(kept),
+                )
+                for g in kept:
+                    _ = into.copy_row(final.at(g))
+                swap(final, into)
+                _ = into^
         # The groups are scanned out a vector of rows at a time (DuckDB's
         # `Scan`: each chunk of rows gathered into every output column, its
         # states finalized), so each group's row is read from memory once,
@@ -3509,12 +3565,15 @@ struct _CombineJob(Job):
 
 
 def aggregate_finish(
-    mut sinks: List[AggregateSink], layout: AggregateLayout
+    mut sinks: List[AggregateSink],
+    layout: AggregateLayout,
+    filter: Optional[GroupFilter] = None,
 ) raises -> AggregateResult:
     """Phase 2 over every worker's sink: runs of consecutive partitions
     holding about half a 256 KiB block of rows each. This bounds each
     working set so its table and rows can stay in cache while runs merge
-    on separate threads."""
+    on separate threads. With `filter`, only the groups it keeps come
+    out (`GroupFilter`); the result's `merged` counts them all."""
     var result = AggregateResult()
     if len(sinks) == 0:
         return result^
@@ -3600,6 +3659,7 @@ def aggregate_finish(
                         sinks[0].max_bits,
                         starts^,
                         run_rows^,
+                        filter,
                     )
                 )
             starts = List[Int]()
@@ -3614,6 +3674,7 @@ def aggregate_finish(
         var states = List[Reducer]()
         var keys_out = List[Series]()
         result.top_rows.extend(Span(finishes[p].top_rows))
+        result.merged += finishes[p].merged
         swap(firsts, finishes[p].firsts)
         swap(states, finishes[p].states)
         swap(keys_out, finishes[p].keys)
@@ -3633,8 +3694,11 @@ struct AggregateResult(Movable):
     var keys: List[List[Series]]
     # The rows held by top-rows states, every partition's.
     var top_rows: List[Int]
+    # The groups merged, including any a `GroupFilter` dropped.
+    var merged: Int
 
     def __init__(out self):
+        self.merged = 0
         self.firsts = List[List[Int]]()
         self.states = List[List[Reducer]]()
         self.keys = List[List[Series]]()

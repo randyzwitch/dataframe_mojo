@@ -164,3 +164,65 @@ def test_repartitioned_sinks_return_the_same_order_on_every_run() raises:
             assert_same_run(plan.collect(), first)
         _ = workers^
     _ = trace^
+
+
+def test_steps_over_the_groups_run_in_the_finish() raises:
+    # A filter on the aggregate's outputs alone (SQL's HAVING) runs in the
+    # table's finish before the groups' keys are read out; one reading a
+    # key too (in a disjunction, which no pass moves below the aggregate),
+    # and the projections above, run on each worker's part of the groups. The rows are those of the same steps run over the whole
+    # eager result, a filter keeping none of them included.
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var rows = 72_000
+    var groups = 9_000
+    var frame = aggregate_frame(rows, groups)
+    var predicates: List[Expr] = [
+        col("rows") > lit(Int64(7)),
+        col("rows") > lit(Int64(1_000_000)),
+        (col("rows") > lit(Int64(7))) | (col("i") > lit(Int64(100))),
+    ]
+    for p in range(len(predicates)):
+        var eager = (
+            frame.filter(col("r") >= lit(Int64(7)))
+            .group_by(["s", "i"])
+            .agg(reductions())
+            .filter(predicates[p])
+            .with_columns([(col("x_count") + lit(Int64(1))).alias("next")])
+            .select(["s", "i", "next", "w_sum"])
+            .sort(["s", "i"])
+        )
+        if p == 1:
+            assert_equal(eager.height(), 0)
+        else:
+            assert_true(eager.height() > 0)
+        for threads in [1, 3, 8]:
+            var workers = ScopedEnvironment(
+                "DATAFRAME_THREADS", String(threads)
+            )
+            var observed = StrategyTrace()
+            var actual = (
+                frame.lazy()
+                .filter(col("r") >= lit(Int64(7)))
+                .group_by(["s", "i"])
+                .agg(reductions())
+                .filter(predicates[p])
+                .with_columns([(col("x_count") + lit(Int64(1))).alias("next")])
+                .select(["s", "i", "next", "w_sum"])
+                .collect(batch_size=4096)
+            )
+            var text = observed.text()
+            _ = observed^
+            var label = String(" at ") + String(threads) + " for " + String(p)
+            assert_equal(
+                "dataframe-path: pipeline.aggregate_finish_filter\n" in text,
+                p < 2,
+                "the filter's place in the finish" + label,
+            )
+            if p != 1:
+                assert_true(
+                    "dataframe-path: pipeline.aggregate_finish_steps\n" in text,
+                    "the steps ran after the finish" + label,
+                )
+            assert_same_run(actual.sort(["s", "i"]), eager)
+            _ = workers^
+    _ = trace^
