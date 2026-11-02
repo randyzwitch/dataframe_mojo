@@ -11,7 +11,7 @@ through the selection once and replaces its shared version.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
 from std.os import getenv
 from std.ffi import _get_global, external_call
 from std.memory import ArcPointer, Pointer, bitcast
@@ -23,7 +23,7 @@ from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
-from dataframe.storage.column import Column
+from dataframe.storage.column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from dataframe.execution import _ReduceJob, _new_reducer
 from dataframe.kernels.validity import _valid_lanes
@@ -2541,11 +2541,17 @@ struct _PipelineJob(Job):
     # morsel is sunk into each of them (DuckDB's one sink feeding every
     # grouping set's table, `PhysicalHashAggregate::Sink`).
     var sets: List[List[Int]]
+    # Per set, a mask for each of its key columns: a key packing several
+    # coded keys (one field each) is grouped by the fields the set keeps,
+    # the others masked to zero; -1 keeps the whole value. Empty: none.
+    var set_masks: List[List[Int64]]
     # A set derived from another's group rows rather than sunk from the
     # morsels: its source set (-1 for none) and, per key it groups by, that
     # key's column among the source's.
     var derived_from: List[Int]
     var derived_columns: List[List[Int]]
+    # Per derived set, the mask of each of its key columns (as `set_masks`).
+    var derived_masks: List[List[Int64]]
     # The sets by size, largest first: a set is derived after its source.
     var derive_order: List[Int]
     var workers: Int
@@ -2599,8 +2605,10 @@ struct _PipelineJob(Job):
         floating_key: Bool,
         layout: List[AggregateLayout],
         sets: List[List[Int]],
+        set_masks: List[List[Int64]],
         derived_from: List[Int],
         derived_columns: List[List[Int]],
+        derived_masks: List[List[Int64]],
         derive_order: List[Int],
         workers: Int,
         key_ranges: List[_KeyRange],
@@ -2626,8 +2634,10 @@ struct _PipelineJob(Job):
         self.unmatched_probe = frame.copy()
         self.layout = layout.copy()
         self.sets = sets.copy()
+        self.set_masks = set_masks.copy()
         self.derived_from = derived_from.copy()
         self.derived_columns = derived_columns.copy()
+        self.derived_masks = derived_masks.copy()
         self.derive_order = derive_order.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
@@ -2698,6 +2708,7 @@ struct _PipelineJob(Job):
                 self.sinks[from_set if from_set < t else from_set - 1],
                 self.derived_columns[t],
                 layout_widths(self.layout[from_set]),
+                self.derived_masks[t],
             )
             self.sinks.insert(t, target^)
 
@@ -2735,8 +2746,15 @@ struct _PipelineJob(Job):
                     )
                 )
             else:
-                for i in self.sets[s]:
-                    keys.append(all_keys[i].copy())
+                for j in range(len(self.sets[s])):
+                    var i = self.sets[s][j]
+                    var mask = self.set_masks[s][j] if len(
+                        self.set_masks
+                    ) > 0 else Int64(-1)
+                    if mask == -1:
+                        keys.append(all_keys[i].copy())
+                    else:
+                        keys.append(_masked_key(all_keys[i], mask))
             self.sinks[s].sink(keys, inputs, k << 32)
         self.rows += rows
 
@@ -3591,6 +3609,31 @@ def _emit_unmatched(
         cursor.free()
 
 
+def _set_mask(set_masks: List[List[Int64]], s: Int, j: Int) -> Int64:
+    """Set `s`'s mask for its `j`th key column (-1: the whole value)."""
+    if len(set_masks) == 0:
+        return -1
+    return set_masks[s][j]
+
+
+def _masked_key(key: Series, mask: Int64) raises -> Series:
+    """An Int64 key column's values with only `mask`'s bits kept, its
+    validity unchanged."""
+    ref typed = key._data[Column[Int64]]
+    var n = len(typed)
+    var values = List[Int64](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var source = typed._data[].unsafe_ptr().unsafe_offset(typed._offset)
+    for i in range(n):
+        out[unsafe_offset=i] = source[unsafe_offset=i] & mask
+    return Series(
+        key.name(),
+        Column[Int64](
+            values=values^, bits=_copy_validity(typed._bits[], typed._offset, n)
+        ),
+    )
+
+
 def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
@@ -3612,6 +3655,7 @@ def run_pipeline(
     top_nulls_last: List[Bool] = List[Bool](),
     bounded: Bool = False,
     table: Bool = False,
+    set_masks: List[List[Int64]] = List[List[Int64]](),
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -3623,7 +3667,8 @@ def run_pipeline(
     list of indices into `keys`, one sink per set fed by every morsel,
     whose finished frames (set order) land in `set_frames`, the grand
     total's among them with its one row, and the result is the steps'
-    empty output). `counts` receives the rows fed,
+    empty output; `set_masks`: per set, each key column's mask, for keys
+    that pack several coded keys). `counts` receives the rows fed,
     then each step's input and output rows."""
     trace_path("pipeline.run")
     # The aggregate table's layout, from the steps' output types (an
@@ -3692,9 +3737,11 @@ def run_pipeline(
     # when every reduction merges (`reaggregable`).
     var derived_from = List[Int](length=len(sets), fill=-1)
     var derived_columns = List[List[Int]]()
+    var derived_masks = List[List[Int64]]()
     var derive_order = List[Int]()
     for _ in range(len(sets)):
         derived_columns.append(List[Int]())
+        derived_masks.append(List[Int64]())
     if len(layout) > 0 and len(sets) > 1:
         var merges = True
         for expression in expressions:
@@ -3702,13 +3749,21 @@ def run_pipeline(
                 if is_reduction(node.op) and not reaggregable(node.op):
                     merges = False
         if merges:
+            # A set's size counts its key columns' mask bits (a whole key
+            # all 64), so a set holding another's keys is the larger.
+            var sizes = List[Int](capacity=len(sets))
+            for t in range(len(sets)):
+                var size = 0
+                for j in range(len(sets[t])):
+                    size += Int(pop_count(_set_mask(set_masks, t, j)))
+                sizes.append(size)
             var order = derive_order.copy()
             for t in range(len(sets)):
                 order.append(t)
             # Stable by size, largest first.
             for i in range(1, len(order)):
                 var j = i
-                while j > 0 and len(sets[order[j - 1]]) < len(sets[order[j]]):
+                while j > 0 and sizes[order[j - 1]] < sizes[order[j]]:
                     var held = order[j - 1]
                     order[j - 1] = order[j]
                     order[j] = held
@@ -3719,10 +3774,18 @@ def run_pipeline(
                 var best = -1
                 for q in primaries:
                     var inside = True
-                    for key in sets[t]:
+                    for j in range(len(sets[t])):
+                        var key = sets[t][j]
                         if key not in sets[q]:
                             inside = False
-                    if inside and (best < 0 or len(sets[q]) < len(sets[best])):
+                            break
+                        # A packed key's fields: the source keeps every
+                        # field this set does.
+                        var kept = _set_mask(set_masks, q, sets[q].index(key))
+                        if _set_mask(set_masks, t, j) & ~kept != 0:
+                            inside = False
+                            break
+                    if inside and (best < 0 or sizes[q] < sizes[best]):
                         best = q
                 # Every set made so far is a source, a derived one too: a
                 # rollup's sets come each from the one above it.
@@ -3730,8 +3793,17 @@ def run_pipeline(
                 if best < 0:
                     continue
                 derived_from[t] = best
-                for key in sets[t]:
-                    derived_columns[t].append(sets[best].index(key))
+                for j in range(len(sets[t])):
+                    var key = sets[t][j]
+                    var at = sets[best].index(key)
+                    derived_columns[t].append(at)
+                    # Only a mask the source does not already apply
+                    # narrows the source's word.
+                    var mask = _set_mask(set_masks, t, j)
+                    derived_masks[t].append(
+                        Int64(-1) if mask
+                        == _set_mask(set_masks, best, at) else mask
+                    )
             var primary_count = 0
             for t in range(len(sets)):
                 if derived_from[t] < 0:
@@ -3790,8 +3862,10 @@ def run_pipeline(
                 floating_key,
                 layout,
                 sets,
+                set_masks,
                 derived_from,
                 derived_columns,
+                derived_masks,
                 derive_order,
                 workers,
                 key_ranges,
