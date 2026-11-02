@@ -2,7 +2,7 @@
 # contract-group: expr.chunk_windows
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, StringColumn, col
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.expr import STR_LEN_BYTES, STR_LEN_CHARS, _node
 from dataframe.text.kernels import string_op
 from tests.support.coverage_compare import assert_frame

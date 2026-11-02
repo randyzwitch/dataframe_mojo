@@ -3,7 +3,10 @@
 from std.testing import assert_equal, assert_raises
 from dataframe import Column, Series
 from dataframe.expr import ADD, SUB, MUL, ABS, NEG
-from dataframe.expr_kernels import binary, _unary_int
+from dataframe.kernels.binary import (
+    binary,
+    _unary_int,
+)
 
 
 def _input[

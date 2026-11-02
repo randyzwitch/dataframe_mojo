@@ -6,7 +6,7 @@ the retired bench_vs_polars.mojo. Inputs vary to prevent constant folding.
 """
 from std.time import monotonic
 
-from dataframe.parse import parse_float64
+from dataframe.text.parse import parse_float64
 
 
 comptime ITERATIONS = 10000000

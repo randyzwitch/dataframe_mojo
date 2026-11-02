@@ -2,9 +2,15 @@
 # contract-group: kernel.jsonpath
 from std.collections import Optional
 from std.testing import assert_equal, assert_true
-from dataframe.json_path import JsonPath, append_json
-from dataframe.json_reader import JsonReader, json_bytes
-from dataframe.json_number import validate_json_numbers
+from dataframe.json.path import (
+    JsonPath,
+    append_json,
+)
+from dataframe.json.reader import (
+    JsonReader,
+    json_bytes,
+)
+from dataframe.json.number import validate_json_numbers
 
 
 def _unhex(text: StringSlice) -> String:

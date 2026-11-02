@@ -310,7 +310,7 @@ from dataframe.query_execution.reporting import (
 from dataframe.series import (
     Series,
 )
-from dataframe.time_windows import (
+from dataframe.time.windows import (
     negate_period,
 )
 from dataframe.value import (

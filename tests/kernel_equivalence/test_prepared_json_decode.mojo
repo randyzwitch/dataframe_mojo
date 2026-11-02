@@ -2,9 +2,15 @@
 # contract-group: kernel.json
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataType, Series
-from dataframe.json_reader import JsonReader, json_bytes
-from dataframe.json_number import validate_json_numbers
-from dataframe.json_decode import JsonDecoder, JsonDecodeOptions
+from dataframe.json.reader import (
+    JsonReader,
+    json_bytes,
+)
+from dataframe.json.number import validate_json_numbers
+from dataframe.json.decode import (
+    JsonDecoder,
+    JsonDecodeOptions,
+)
 
 
 def _decode(

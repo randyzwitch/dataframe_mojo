@@ -19,7 +19,7 @@ from dataframe import (
     concat_str,
     when,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_frame
 from tests.support.text_binary_reference import like_reference

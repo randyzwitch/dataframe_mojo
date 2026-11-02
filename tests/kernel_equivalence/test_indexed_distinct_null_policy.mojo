@@ -3,7 +3,7 @@
 from std.testing import assert_equal
 from dataframe import Column, Series, DataType, col
 from dataframe.binding import bind
-from dataframe.indexed_reduce import reduce_indexed
+from dataframe.aggregation.selected_rows import reduce_indexed
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES
 from tests.support.reduction_types_reference import (
     typed_reduction_columns,

@@ -1201,7 +1201,7 @@ def _moments_bounds(
 def rolling_by_op(
     node: Node, input: Series, index: Series, ids: List[Int]
 ) raises -> Series:
-    from .time_windows import rolling_bounds, negate_period
+    from dataframe.time.windows import rolling_bounds, negate_period
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
@@ -1310,7 +1310,7 @@ def rolling_by_op(
 def _rolling_decimal_sum_by(
     node: Node, input: Series, index: Series, ids: List[Int]
 ) raises -> Series:
-    from .time_windows import rolling_bounds, negate_period
+    from dataframe.time.windows import rolling_bounds, negate_period
 
     var groups = partitions(len(input), ids)
     var bounds = rolling_bounds(

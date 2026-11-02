@@ -7,7 +7,7 @@ Process-isolated failures require both a precise diagnostic and exact exit code.
 from std.ffi import external_call
 from std.os import getenv
 from std.os.path import exists
-from dataframe.json_value import json_quote
+from dataframe.json.value import json_quote
 from tests.tooling.suite_policy import SuitePolicy
 
 comptime DEFAULT_PACKAGING = "areas"

@@ -18,9 +18,9 @@ from dataframe import (
     null,
     when,
 )
-from dataframe.bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 
