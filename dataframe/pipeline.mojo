@@ -48,6 +48,7 @@ from .expr import (
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
+    GroupFilter,
     aggregate_finish,
     aggregate_layout,
     layout_widths,
@@ -60,7 +61,9 @@ from .frame import (
 )
 from dataframe.aggregation.state import (
     _StreamReduction,
+    chunks_frame,
     table_frame,
+    table_parts,
     table_inputs,
     table_specs,
     table_supported,
@@ -3977,6 +3980,7 @@ def run_pipeline(
     bounded: Bool = False,
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
+    finish_steps: List[Step] = List[Step](),
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -3989,8 +3993,281 @@ def run_pipeline(
     whose finished frames (set order) land in `set_frames`, the grand
     total's among them with its one row, and the result is the steps'
     empty output; `set_masks`: per set, each key column's mask, for keys
-    that pack several coded keys). `counts` receives the rows fed,
-    then each step's input and output rows."""
+    that pack several coded keys). `finish_steps` are row-local steps (no
+    joins) over the reduce sink's output, run where it is made: on each
+    worker finishing a part of the aggregate table, else as a pipeline
+    over the output.
+    `counts` receives the rows fed, then each step's input and output
+    rows, then each finish step's."""
+    var finish_counts = List[Int]()
+    var result = _run_pipeline(
+        frame,
+        steps,
+        joins,
+        indexes,
+        expressions,
+        keys,
+        ordered,
+        insert,
+        workers,
+        morsel_rows,
+        batch_size,
+        counts,
+        set_frames,
+        sets,
+        top,
+        top_names,
+        top_descending,
+        top_nulls_last,
+        bounded,
+        table,
+        set_masks,
+        finish_steps,
+        finish_counts,
+    )
+    if len(finish_steps) > 0 and len(finish_counts) == 0:
+        # The sink finished the output whole: the steps run over it as
+        # a pipeline of their own, morsels on every worker.
+        var inner = List[Int]()
+        var none = List[DataFrame]()
+        result = _run_pipeline(
+            result,
+            finish_steps,
+            joins,
+            indexes,
+            List[Expr](),
+            List[String](),
+            False,
+            False,
+            workers,
+            batch_size,
+            batch_size,
+            inner,
+            none,
+            List[List[Int]](),
+            -1,
+            List[String](),
+            List[Bool](),
+            List[Bool](),
+            False,
+            False,
+            List[List[Int64]](),
+            List[Step](),
+            finish_counts,
+        )
+        for k in range(len(finish_steps)):
+            finish_counts.append(inner[2 * k + 1])
+            finish_counts.append(inner[2 * k + 2])
+    counts.extend(Span(finish_counts))
+    return result^
+
+
+struct _FinishStepsJob(Job):
+    """One part of the aggregate table finished, then run through the
+    row-local steps above the aggregate on the worker that finished it,
+    as DuckDB runs a filter over an aggregate in the pipeline whose source
+    is the aggregate table's scan: the groups it drops are never
+    assembled into the whole result, nor filtered again over it."""
+
+    var state: _StreamReduction
+    var steps: List[Step]
+    var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var batch_size: Int
+    var frame: DataFrame
+    # Each step's input and output rows.
+    var counts: List[Int]
+
+    def __init__(
+        out self,
+        var state: _StreamReduction,
+        steps: List[Step],
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        batch_size: Int,
+    ) raises:
+        self.state = state^
+        self.steps = steps.copy()
+        self.joins = joins
+        self.indexes = indexes
+        self.batch_size = batch_size
+        self.frame = DataFrame(List[Series](), height=0)
+        self.counts = List[Int]()
+
+    def run(mut self) raises:
+        var morsel = Morsel(self.state.finish(), 0)
+        for step in self.steps:
+            self.counts.append(morsel.count)
+            morsel.apply(step, self.batch_size, self.joins, self.indexes)
+            self.counts.append(morsel.count)
+        self.frame = morsel.materialized()
+
+
+struct _HavingFilter(Movable):
+    """A filter over an aggregate's outputs alone (SQL's HAVING), run by
+    the aggregate table's finish before it reads out the groups
+    (`GroupFilter`): `slots` are the reductions the outputs it reads come
+    from, `names` and `dtypes` their states' names and types, and
+    `outputs` those outputs."""
+
+    var predicate: Expr
+    var slots: List[Int]
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
+    var batch_size: Int
+
+    def __init__(
+        out self,
+        var predicate: Expr,
+        var slots: List[Int],
+        var names: List[String],
+        var dtypes: List[DataType],
+        var outputs: List[Expr],
+        batch_size: Int,
+    ):
+        self.predicate = predicate^
+        self.slots = slots^
+        self.names = names^
+        self.dtypes = dtypes^
+        self.outputs = outputs^
+        self.batch_size = batch_size
+
+
+def _having(
+    template: _StreamReduction,
+    step: Step,
+    keys: List[String],
+    batch_size: Int,
+) raises -> Optional[_HavingFilter]:
+    """`step` as a filter the aggregate table's finish runs, when it is a
+    filter reading only outputs of the reductions, no key."""
+    if step.kind != STEP_FILTER:
+        return None
+    var reads = _reads(step.exprs)
+    if not reads or len(reads.value()) == 0:
+        return None
+    var outputs = List[Expr]()
+    var slots = List[Int]()
+    for name in reads.value():
+        if name in keys:
+            return None
+        var found = -1
+        for o in range(len(template.outputs)):
+            if template.outputs[o]._name == name:
+                found = o
+        if found < 0:
+            return None
+        outputs.append(template.outputs[found].copy())
+        var states = _reads([template.outputs[found].copy()])
+        if not states:
+            return None
+        for state in states.value():
+            if state not in template.names:
+                return None
+            var i = template.names.index(state)
+            if i not in slots:
+                slots.append(i)
+    sort(slots)
+    var names = List[String](capacity=len(slots))
+    var dtypes = List[DataType](capacity=len(slots))
+    for i in slots:
+        names.append(template.names[i])
+        dtypes.append(template.dtypes[i])
+    return _HavingFilter(
+        step.exprs[0].copy(),
+        slots^,
+        names^,
+        dtypes^,
+        outputs^,
+        batch_size,
+    )
+
+
+def _having_keep(context: Int, states: List[Reducer]) raises -> List[Int]:
+    """The groups a `_HavingFilter` at `context` keeps, from its
+    reductions' finished results over a finish job's groups."""
+    ref having = Pointer[_HavingFilter, MutAnyOrigin](
+        unsafe_from_address=context
+    )[]
+    var columns = List[Series](capacity=len(states))
+    for i in range(len(states)):
+        columns.append(
+            states[i]
+            .finish()
+            .with_dtype(having.dtypes[i])
+            .renamed(having.names[i])
+        )
+    var height = len(columns[0])
+    var values = DataFrame(columns^, height=height).select_exprs(having.outputs)
+    return true_rows(values._selection(having.predicate, having.batch_size))
+
+
+def _finish_with_steps(
+    template: _StreamReduction,
+    var parts: List[_StreamReduction],
+    steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    batch_size: Int,
+    mut counts: List[Int],
+) raises -> DataFrame:
+    """The aggregate table's `parts` finished and run through `steps`,
+    each part on its own worker, the kept rows of each a chunk of the
+    result; `counts` receives each step's input and output rows. With no
+    part (no groups), the steps run over the empty finished output."""
+    if len(parts) == 0:
+        # No group: the steps over the empty result, for its columns.
+        var morsel = Morsel(template.finish(), 0)
+        for step in steps:
+            counts.append(morsel.count)
+            morsel.apply(step, batch_size, joins, indexes)
+            counts.append(morsel.count)
+        return morsel.materialized()
+    trace_path("pipeline.aggregate_finish_steps")
+    var finishes = List[_FinishStepsJob](capacity=len(parts))
+    while len(parts) > 0:
+        finishes.append(
+            _FinishStepsJob(parts.pop(0), steps, joins, indexes, batch_size)
+        )
+    run_jobs(finishes)
+    var frames = List[DataFrame](capacity=len(finishes))
+    counts = List[Int](length=2 * len(steps), fill=0)
+    for j in range(len(finishes)):
+        frames.append(finishes[j].frame.copy())
+        for k in range(len(counts)):
+            counts[k] += finishes[j].counts[k]
+    return chunks_frame(frames)
+
+
+def _run_pipeline(
+    frame: DataFrame,
+    steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    expressions: List[Expr],
+    keys: List[String],
+    ordered: Bool,
+    insert: Bool,
+    workers: Int,
+    morsel_rows: Int,
+    batch_size: Int,
+    mut counts: List[Int],
+    mut set_frames: List[DataFrame],
+    sets: List[List[Int]],
+    top: Int,
+    top_names: List[String],
+    top_descending: List[Bool],
+    top_nulls_last: List[Bool],
+    bounded: Bool,
+    table: Bool,
+    set_masks: List[List[Int64]],
+    finish_steps: List[Step],
+    mut finish_counts: List[Int],
+) raises -> DataFrame:
+    """`run_pipeline`; `finish_counts` receives each finish step's input
+    and output rows when the aggregate table's finish ran them, and stays
+    empty otherwise."""
     trace_path("pipeline.run")
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
@@ -4258,10 +4535,49 @@ def run_pipeline(
         for j in range(len(jobs)):
             if len(jobs[j].sinks) > 0:
                 sinks.append(jobs[j].sinks.pop())
-        var result = aggregate_finish(sinks, layout[0])
         # Long key strings live in the sinks' heaps until the finish has
         # read them out.
-        var finished = table_frame(template[0], result^, False)
+        var finished: DataFrame
+        if len(finish_steps) == 0:
+            var result = aggregate_finish(sinks, layout[0])
+            finished = table_frame(template[0], result^, False)
+        else:
+            # A first step filtering on the reductions' outputs alone runs
+            # in the finish, before the groups are read out (DuckDB runs
+            # it on each chunk the aggregate's scan yields); the rest run
+            # on each part of the groups that remain.
+            var having = _having(template[0], finish_steps[0], keys, batch_size)
+            var rest = finish_steps.copy()
+            var filter = Optional[GroupFilter]()
+            if having:
+                trace_path("pipeline.aggregate_finish_filter")
+                _ = rest.pop(0)
+                filter = GroupFilter(
+                    having.value().slots.copy(),
+                    Int(Pointer(to=having.value())),
+                    _having_keep,
+                )
+            var result = aggregate_finish(sinks, layout[0], filter)
+            _ = having^
+            var merged = result.merged
+            var kept = 0
+            for p in range(len(result.firsts)):
+                kept += len(result.firsts[p])
+            var parts = table_parts(template[0], result^)
+            var rest_counts = List[Int]()
+            finished = _finish_with_steps(
+                template[0],
+                parts^,
+                rest,
+                joins,
+                indexes,
+                batch_size,
+                rest_counts,
+            )
+            if filter:
+                finish_counts.append(merged)
+                finish_counts.append(kept)
+            finish_counts.extend(Span(rest_counts))
         _ = sinks^
         return finished^
     if len(expressions) > 0 and len(keys) > 0:
