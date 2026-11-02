@@ -152,6 +152,41 @@ def test_uncoalesced_right_join_inputs_run_ahead_and_match() raises:
     assert_frame(streamed, eager)
 
 
+def test_prefetched_builds_hash_their_keys_and_match() raises:
+    """Two aggregates built on, by two keys and by one, under a third
+    that probes (all three computed ahead of the stream): each build's
+    job also hashes its keys, and the stream probes with those indexes.
+    The sums are what joining the separately collected inputs gives."""
+    var frame = source()
+    var pairs = (
+        frame.lazy()
+        .filter(col("v") > lit(Int64(0)))
+        .group_by(["k", "s"])
+        .agg([col("v").sum().alias("p")])
+    )
+    var singles = totals(frame, 1, "b")
+    var probe = (
+        frame.lazy().group_by(["k", "s"]).agg([col("v").count().alias("c")])
+    )
+    var streamed = (
+        probe.join(pairs, ["k", "s"], how="left")
+        .join(singles, ["k"], how="left")
+        .group_by("c")
+        .agg([col("p").sum().alias("p"), col("b").sum().alias("b")])
+        .sort("c")
+        .collect()
+    )
+    var eager = (
+        probe.collect()
+        .join(pairs.collect(), on=["k", "s"], how="left")
+        .join(singles.collect(), on=["k"], how="left")
+        .group_by(["c"])
+        .agg([col("p").sum().alias("p"), col("b").sum().alias("b")])
+        .sort(["c"])
+    )
+    assert_frame(streamed, eager)
+
+
 def test_an_error_in_a_prefetched_input_reaches_the_caller() raises:
     var frame = source()
     var good = totals(frame, 0, "a")
