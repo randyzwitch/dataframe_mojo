@@ -2580,10 +2580,12 @@ struct AggregateSink(Movable):
         source: AggregateSink,
         columns: List[Int],
         widths: List[Int],
+        masks: List[Int64] = List[Int64](),
     ) raises:
         """The group rows of another sink, with this table's keys the
         source's `columns` (in this order; none for a constant key of one
-        zero word), into this table with their states merged rather than
+        zero word), each one-word key with only its `masks` entry's bits
+        kept when given (-1 keeps it whole), into this table with their states merged rather than
         rebuilt from values: a coarser grouping from a finer one's groups
         (DuckDB merges grouped states the same way across threads, and
         `_combine` is the finish's merge of the workers'). `widths` is each
@@ -2625,6 +2627,9 @@ struct AggregateSink(Movable):
                         var from_word = _HEAD + starts[c]
                         var part: UInt64
                         var first = row[unsafe_offset=from_word]
+                        if len(masks) > 0 and widths[c] == 1:
+                            # A packed key's fields this set rolls up.
+                            first &= masks[j].cast[DType.uint64]()
                         _words_at(word_ptrs[to])[unsafe_offset=count] = first
                         if (row[unsafe_offset=1] >> UInt64(c)) & 1 != 0:
                             null |= UInt64(1) << UInt64(j)
