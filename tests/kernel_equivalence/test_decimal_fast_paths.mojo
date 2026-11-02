@@ -5,7 +5,9 @@ and nulls, a strict cast past the precision raising with the row and
 value, a lenient one giving null, and exact products whether or not the
 overflow check runs. Decimal sums and products over nulls read the
 operands' combined validity 64 rows at a time: the same values and nulls
-as row by row, and a null row's payload is never computed."""
+as row by row, and a null row's payload is never computed. decimal128
+comparisons at one scale give the row-by-row flags and nulls, and chunks
+of decimal128 merged on several workers keep every value and null."""
 # contract-group: types.cast
 from std.testing import assert_equal, assert_true, assert_raises
 
@@ -241,3 +243,79 @@ def test_a_null_rows_payload_is_never_computed() raises:
     )
     with assert_raises():
         _ = shown.select_exprs([(col("p") * col("r")).alias("x")])
+
+
+def wide_decimals(rows: Int, salt: Int, scale: Int) raises -> Series:
+    """decimal(30, scale) values past Int64, null on their own rows."""
+    var values = List[Int128]()
+    var valid = List[Bool]()
+    for row in range(rows):
+        var small = Int128((row * 104729 + salt) % 2_001) - 1_000
+        values.append(small * 1_000_000_000_000_000_000)
+        valid.append((row + salt) % 13 != 5)
+    return Series(
+        "w" + String(salt), Column[Int128](values^, valid)
+    ).with_dtype(DataType.decimal(30, scale))
+
+
+def test_decimal128_comparisons_match_row_by_row() raises:
+    var x = wide_decimals(ROWS, 0, 4)
+    var y = wide_decimals(ROWS, 7, 4)
+    var z = wide_decimals(ROWS, 7, 2)
+    var frame = DataFrame([x.copy(), y.copy(), z.renamed("z")])
+    var found = frame.select_exprs(
+        [
+            (col("w0") > col("w7")).alias("gt"),
+            (col("w0") <= col("w7")).alias("le"),
+            (col("w0") == col("w7")).alias("eq"),
+            (col("w0") > col("z")).alias("scaled"),
+            (col("w0") < lit(Int64(0)).cast(DataType.decimal(30, 4))).alias(
+                "neg"
+            ),
+        ]
+    )
+    for row in range(ROWS):
+        var a = x.get(row)
+        var b = y.get(row)
+        var c = z.get(row)
+        var both = not a.is_null() and not b.is_null()
+        assert_equal(found.item(row, "gt").is_null(), not both)
+        assert_equal(found.item(row, "le").is_null(), not both)
+        assert_equal(found.item(row, "eq").is_null(), not both)
+        assert_equal(
+            found.item(row, "scaled").is_null(), a.is_null() or c.is_null()
+        )
+        assert_equal(found.item(row, "neg").is_null(), a.is_null())
+        if a.is_null():
+            continue
+        var av = x._data[Column[Int128]]._get(row)
+        assert_equal(found.item(row, "neg").bool(), av < 0)
+        if not c.is_null():
+            # z's scale is 2: its unscaled values are 100 times larger at w0's.
+            var cv = z._data[Column[Int128]]._get(row) * 100
+            assert_equal(found.item(row, "scaled").bool(), av > cv)
+        if not both:
+            continue
+        var bv = y._data[Column[Int128]]._get(row)
+        assert_equal(found.item(row, "gt").bool(), av > bv)
+        assert_equal(found.item(row, "le").bool(), av <= bv)
+        assert_equal(found.item(row, "eq").bool(), av == bv)
+
+
+def test_decimal128_chunks_merge_on_every_worker() raises:
+    var rows = 300_001
+    var whole = wide_decimals(rows, 3, 4)
+    var parts = List[Series]()
+    var cuts: List[Int] = [0, 1, 70_000, 70_003, 200_000, rows]
+    for k in range(len(cuts) - 1):
+        parts.append(whole.slice(cuts[k], cuts[k + 1] - cuts[k]))
+    var merged = Series._from_chunks(parts).rechunk()
+    assert_true(merged.dtype() == DataType.decimal(30, 4))
+    assert_equal(len(merged), rows)
+    assert_equal(merged.null_count(), whole.null_count())
+    ref expected = whole._data[Column[Int128]]
+    ref actual = merged._data[Column[Int128]]
+    for row in range(rows):
+        assert_equal(actual._valid(row), expected._valid(row))
+        if expected._valid(row):
+            assert_equal(actual._get(row), expected._get(row))
