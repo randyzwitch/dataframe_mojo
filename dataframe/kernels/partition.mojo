@@ -166,18 +166,26 @@ def _hash_column(
                         ) else _NULL_KEY,
                     )
                 return
+            # Values and validity through their pointers: a null's value is
+            # read too and its key replaced, so no row branches on its
+            # validity (floats; integers took the path above).
+            var values = column._ptr()
+            var valid = column._bits[].unsafe_ptr()
+            var offset = column._offset
+            var has_bits = len(column._bits[]) != 0
             for i in range(start, end):
-                if not column._valid(i):
-                    write(i, _NULL_KEY)
-                    continue
-                var value = column._get(i)
+                var value = values.unsafe_offset(i)[]
+                var key: UInt64
 
                 comptime if D.is_floating_point():
-                    write(i, float_key(Float64(value)))
+                    key = float_key(Float64(value))
                 elif D.is_unsigned():
-                    write(i, UInt64(value))
+                    key = UInt64(value)
                 else:
-                    write(i, bitcast[DType.uint64](Int64(value)))
+                    key = bitcast[DType.uint64](Int64(value))
+                if has_bits and not _validity_at(valid, offset + i):
+                    key = _NULL_KEY
+                write(i, key)
             return
     if series._data.isa[Column[Int128]]():
         ref column = series._data[Column[Int128]]
