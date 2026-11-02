@@ -204,10 +204,13 @@ def plan_execute_node(
             if node.source_failure:
                 raise Error(node.source_failure)
             node._record_execution()
-        var frame = self._frames[node.source_slot()].copy()
+        # A projection selects from the shared table without copying
+        # all of it first.
+        ref table = self._frames[node.source_slot()]
         if len(node.scan_projection()) > 0:
-            frame = frame.select(node.scan_projection())
-        return frame.clear() if empty else frame^
+            var frame = table.select(node.scan_projection())
+            return frame.clear() if empty else frame^
+        return table.clear() if empty else table.copy()
     if node.kind == SCAN_CSV:
         if empty:
             # Metadata probes must not use eager n_rows=0: that API

@@ -421,6 +421,55 @@ def test_sets_over_a_left_join_keep_missing_build_rows_apart() raises:
     check_sets_against_group_by(source, keys, sets, plain)
 
 
+def test_sets_of_one_builds_packed_keys_match_group_by() raises:
+    """Three string keys of one build are coded and packed into one word,
+    a field each: a set keeps its own keys' fields and masks the others,
+    and sets that hold no other's keys (brand alone, category with brand)
+    still come from the finest set's groups. The items' null classes are
+    a field of zero, one null group in every set that keeps the class. A
+    left join, whose missing items would make a null packed key, codes
+    the keys apart."""
+    var brands = List[String]()
+    for i in range(40):
+        brands.append("brand " + String(i % 5))
+    var dimension = items().with_column(
+        Series("brand", Column[String](brands^))
+    )
+    var plain: List[Expr] = [
+        col("m").sum().alias("total"),
+        col("m").len().alias("n"),
+        col("x").max().alias("high"),
+    ]
+    var keys: List[String] = ["category", "class", "brand"]
+    var sets: List[List[String]] = [
+        ["category", "class", "brand"],
+        ["category", "class"],
+        ["category", "brand"],
+        ["class"],
+        ["brand"],
+        [],
+    ]
+    for how in ["inner", "left"]:
+        var source = (
+            facts()
+            .lazy()
+            .join(
+                dimension.lazy().filter(col("item") < 34),
+                on="item",
+                how=how,
+            )
+        )
+        check_sets_against_group_by(source, keys, sets, plain)
+        # A plain group-by packs the keys too; the joined rows grouped
+        # once collected are the reference.
+        var got = source.group_by(keys).agg(plain).collect()
+        var expected = source.collect().group_by(keys).agg(plain)
+        assert_frame(got.sort(keys), expected.sort(keys))
+        # With a median, every set groups the input rows by its masked key.
+        var middle: List[Expr] = [col("m").median().alias("mid")]
+        check_sets_against_group_by(source, keys, sets, middle)
+
+
 def test_sets_with_reductions_the_table_lacks_match_group_by() raises:
     """A median is not an inline state: the sets group the collected input
     one after another, to the same rows."""

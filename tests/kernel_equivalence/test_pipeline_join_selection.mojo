@@ -5,7 +5,8 @@ ones) and gathers only the build side's columns; a repeated build key makes
 it gather every column at the repeated rows. Inner, semi and anti joins run
 on fresh morsels and after dense and sparse filters, with nullable keys,
 unmatched keys, a suffixed name and uncoalesced keys, for several worker
-counts and batch sizes."""
+counts and batch sizes. A join after a join probes a direct index (perfect
+hash slots or a progression) through the first one's kept rows."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -231,3 +232,102 @@ def test_repeated_build_keys_repeat_every_probe_column() raises:
             expected[key] -= 1
             assert_true(expected[key] >= 0, "joined row twice: " + key)
     _ = workers^
+
+
+comptime RUN_KEYS = 650
+
+
+def gated(row: Int) -> Bool:
+    return row % 10 != 3
+
+
+def gate() raises -> DataFrame:
+    """Build keys for nine probe rows in ten (perfect hash slots): a join
+    to them narrows a morsel to the rows it keeps, as row indices."""
+    var keys = List[Int64]()
+    var tags = List[Int64]()
+    for g in range(ROWS):
+        if not gated(g):
+            continue
+        keys.append(Int64(g))
+        tags.append(Int64(3 * g))
+    return DataFrame(
+        [
+            Series("gk", Column[Int64](keys^)),
+            Series("tag", Column[Int64](tags^)),
+        ]
+    )
+
+
+def runs() raises -> DataFrame:
+    """Keys 0 to RUN_KEYS - 1 in order: a progression of step one."""
+    var keys = List[Int64]()
+    var names = List[String]()
+    for k in range(RUN_KEYS):
+        keys.append(Int64(k))
+        names.append(name_of(k))
+    return DataFrame(
+        [
+            Series("rk", Column[Int64](keys^)),
+            Series("name", Column[String](names^)),
+        ]
+    )
+
+
+def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
+    # The first join keeps nine rows in ten as row indices; the second
+    # probes its direct index (perfect hash slots, or a progression)
+    # through them, without gathering its key first.
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    for threads in [1, 8]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        for batch in [4096]:
+            for progression in [False, True]:
+                var build = runs() if progression else dimension().select(
+                    ["dk", "name"]
+                )
+                var build_key = "rk" if progression else "dk"
+                for how in ["inner", "semi", "anti"]:
+                    var observed = StrategyTrace()
+                    var actual = (
+                        probe()
+                        .lazy()
+                        .join(gate().lazy(), left_on=["a"], right_on=["gk"])
+                        .join(
+                            build.lazy(),
+                            left_on=["k"],
+                            right_on=[build_key],
+                            how=how,
+                        )
+                        .sort(["a"])
+                        .collect(batch_size=batch)
+                    )
+                    assert_true(
+                        "dataframe-path: join.direct_rows_at\n"
+                        in observed.text(),
+                        "the second join gathered its key",
+                    )
+                    _ = observed^
+                    var r = 0
+                    for row in range(ROWS):
+                        if not gated(row):
+                            continue
+                        var k = key_of(row)
+                        var hit = key_valid(row) and (
+                            k < RUN_KEYS if progression else has_dimension(k)
+                        )
+                        if hit != (how != "anti"):
+                            continue
+                        assert_equal(integer(actual.item(r, "a")), Int128(row))
+                        assert_equal(
+                            integer(actual.item(r, "tag")), Int128(3 * row)
+                        )
+                        assert_equal(actual.item(r, "s").string(), text_of(row))
+                        if how == "inner":
+                            assert_equal(
+                                actual.item(r, "name").string(), name_of(k)
+                            )
+                        r += 1
+                    assert_equal(actual.height(), r)
+        _ = workers^
+    _ = trace^
