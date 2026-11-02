@@ -911,7 +911,8 @@ struct _Crew(Movable):
 
     def retire(mut self, p: Int, claims: Int):
         """Wait until the posting's jobs are done and no crew thread is in
-        it, then free it. New helpers are turned away first."""
+        it, then free it. New helpers are turned away first. While it
+        waits, the caller runs other postings' jobs (`_help`)."""
         ref list = Pointer[_Claims, MutAnyOrigin](unsafe_from_address=claims)[]
         while True:
             var state = self._state(p).load()
@@ -922,8 +923,37 @@ struct _Crew(Movable):
         while self._state(p).load() & ~_CLOSED != 0 or list.done.load() < Int64(
             list.count
         ):
-            _ = external_call["sched_yield", Int32]()
+            if not self._help(p):
+                _ = external_call["sched_yield", Int32]()
         self._claims(p).store(0)
+
+    def _help(mut self, own: Int) -> Bool:
+        """Join another posting that still wants a helper and run its
+        jobs: True when it ran some. A caller whose own jobs are taken
+        waits for the threads running them, and the jobs those threads
+        start wait for helpers; rayon's `join` (Polars' thread pool) and
+        DuckDB's executor thread run queued work while they wait in the
+        same way. The caller's thread already runs jobs, so it joins
+        without a budget slot (`_reserve_helpers`): the threads running
+        jobs stay at the budget plus the callers. A posting it joins was
+        made by a job that does not wait on its own caller, so no wait
+        cycle forms."""
+        for q in range(_POSTINGS):
+            if q == own:
+                continue
+            var state = self._state(q).load()
+            while (state >> 32) > 0:
+                if not self._state(q).compare_exchange(
+                    state, state - (Int64(1) << 32) + 1
+                ):
+                    state = self._state(q).load()
+                    continue
+                Pointer[_Claims, MutAnyOrigin](
+                    unsafe_from_address=Int(self._claims(q).load())
+                )[].run()
+                _ = self._state(q).fetch_sub(1)
+                return True
+        return False
 
 
 def _crew_spawner(address: Int) abi("C") -> Int:

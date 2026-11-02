@@ -20,7 +20,11 @@ from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from .series import Series, sort_indices
-from dataframe.kernels.distinct_statistics import TableStatistics
+from dataframe.kernels.distinct_statistics import (
+    TableStatistics,
+    statistics_distinct,
+    statistics_sample,
+)
 from dataframe.kernels.fused_compare import SelectionTree, fused_mask
 from dataframe.fused_compare import fused_comparisons, selection_tree
 from dataframe.sorted_range import sorted_window
@@ -296,8 +300,7 @@ struct DataFrame(Copyable, Sized, Writable):
             return -1
         for column in self._columns:
             if column.name() == name:
-                var box = self._statistics.value()
-                return box[].distinct(column)
+                return statistics_distinct(self._statistics.value(), column)
         return -1
 
     def _sampled(self, names: List[String], runs: Int, run: Int) raises -> Self:
@@ -309,8 +312,11 @@ struct DataFrame(Copyable, Sized, Writable):
         for name in names:
             var column = self[name]
             if self._statistics:
-                var box = self._statistics.value()
-                columns.append(box[].sample(column, runs, run))
+                columns.append(
+                    statistics_sample(
+                        self._statistics.value(), column, runs, run
+                    )
+                )
             else:
                 var parts = List[Series](capacity=runs)
                 for k in range(runs):

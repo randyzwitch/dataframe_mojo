@@ -6,6 +6,8 @@ from dataframe.aggregation.group_by import (
 from dataframe.kernels.distinct_statistics import (
     _identity,
     distinct_estimate,
+    statistics_known,
+    statistics_record,
 )
 from dataframe.planning.graph import (
     plan_spine_rows,
@@ -162,11 +164,11 @@ def _build_distinct(
                     var identity = _identity(column)
                     var rows = len(column)
                     var box = table._statistics.value()
-                    var known = box[].known(found[1], identity, rows)
+                    var known = statistics_known(box, found[1], identity, rows)
                     if known > 0:
                         return known
                     var count = distinct_estimate(build.column(key))
-                    box[].record(found[1], identity, rows, count)
+                    statistics_record(box, found[1], identity, rows, count)
                     return count
     return distinct_estimate(build.column(key))
 

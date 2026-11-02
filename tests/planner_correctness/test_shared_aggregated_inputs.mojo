@@ -373,3 +373,56 @@ def test_aggregations_apart_by_one_literal_are_not_shared() raises:
             assert_equal(integer(actual.item(r, "t")), 2 * totals[item])
             assert_equal(integer(actual.item(r, "u")), 3 * totals[item])
     _ = trace^
+
+
+def test_two_independent_shared_aggregations_each_run_once() raises:
+    """Two different aggregations, each read twice, are both shared: they
+    hold no copy of each other, so they are collected at once, and every
+    reader still reads its own aggregation's values."""
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var frame = sales()
+    var per_item = (
+        frame.lazy().group_by(["ss_item"]).agg([col("qty").sum().alias("t")])
+    )
+    var per_store = (
+        frame.lazy().group_by(["ss_store"]).agg([col("qty").count().alias("n")])
+    )
+    var items_twice = per_item.join(
+        per_item.select_exprs([col("ss_item").alias("k"), col("t").alias("u")]),
+        left_on=["ss_item"],
+        right_on=["k"],
+    )
+    var stores_twice = per_store.join(
+        per_store.select_exprs(
+            [col("ss_store").alias("s"), col("n").alias("m")]
+        ),
+        left_on=["ss_store"],
+        right_on=["s"],
+    )
+    var query = items_twice.join(stores_twice, how="cross")
+    for optimize in [True, False]:
+        var observed = StrategyTrace()
+        var actual = query.collect(optimize=optimize)
+        if optimize:
+            assert_true(
+                observed.text().count("dataframe-path: lazy.shared_subplan\n")
+                >= 2,
+                "both aggregations were not shared",
+            )
+        _ = observed^
+        var totals = Dict[Int, Int128]()
+        var counts = Dict[Int, Int128]()
+        for row in range(ROWS):
+            var item = item_of(row)
+            var store = store_of(row)
+            totals[item] = totals.get(item, Int128(0)) + Int128(quantity(row))
+            counts[store] = counts.get(store, Int128(0)) + 1
+        assert_equal(actual.height(), len(totals) * len(counts))
+        for r in range(actual.height()):
+            var item = Int(integer(actual.item(r, "ss_item")))
+            var store = Int(integer(actual.item(r, "ss_store")))
+            assert_equal(integer(actual.item(r, "t")), totals[item])
+            assert_equal(integer(actual.item(r, "u")), totals[item])
+            assert_equal(integer(actual.item(r, "n")), counts[store])
+            assert_equal(integer(actual.item(r, "m")), counts[store])
+    _ = trace^
