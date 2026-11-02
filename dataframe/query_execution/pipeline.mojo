@@ -111,6 +111,7 @@ from dataframe.planning.graph import (
     plan_filters_rows,
     plan_grouped_on,
     plan_height_bound,
+    plan_input_name,
     plan_keeps_column,
     plan_key_source,
     plan_known_height,
@@ -289,6 +290,11 @@ def plan_stream_execute(
     var reduced = plan_reduce_by_probe_keys(self, cursor, index, batch_size)
     if reduced:
         return reduced^
+    var filtered = plan_filter_by_build_keys(self, cursor, batch_size)
+    if filtered:
+        return _stream_after_materialization(
+            filtered.take(), index, batch_size, sink
+        )
     if self._prefetched and not self._report:
         plan_prefetch_breakers(self, cursor, batch_size)
     # A computed source (a union, an aggregate, a sort) is run in full
@@ -1740,21 +1746,8 @@ def plan_reduce_by_probe_keys(
         var pays = False
         ref grouped = group_keys[k]
         for i in range(len(grouped)):
-            var source = plan_key_source(plan, input, grouped[i])
-            if not source or not _range_key(source.value().dtype()):
-                continue
-            var named = grouped[i] + "/" + String(len(source.value()))
-            if named not in spans:
-                # From the column's zone maps, kept with its buffers as
-                # DuckDB keeps a table's statistics: scanning the whole
-                # column on one thread each run held PDS-H q20 at 19.6
-                # ms (lineitem's 6M part and supplier keys), 12.3 now.
-                _ensure_zones(source.value())
-                var bounds = _window_bounds(source.value())
-                spans[named] = (
-                    Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
-                ) if bounds else 0
-            pays = pays or 2 * distinct[i] <= spans[named]
+            var span = _key_span(plan, input, grouped[i], spans)
+            pays = pays or (span >= 0 and 2 * distinct[i] <= span)
         if not pays:
             continue
         plan._nodes.append(_frame_scan_node(slot=key_frame))
@@ -1770,6 +1763,165 @@ def plan_reduce_by_probe_keys(
         plan._nodes.append(semi^)
         plan._nodes[aggregate].left = len(plan._nodes) - 1
     return plan._execute(index, False, True, batch_size)
+
+
+def _key_span(
+    plan: QueryContext, input: Int, name: String, mut spans: Dict[String, Int]
+) raises -> Int:
+    """The span of values (greatest less least, plus one) of the integer
+    table column supplying `name` at node `input`, or -1 when no such
+    column supplies it. Found once per column in `spans`."""
+    var source = plan_key_source(plan, input, name)
+    if not source or not _range_key(source.value().dtype()):
+        return -1
+    var named = name + "/" + String(len(source.value()))
+    if named not in spans:
+        # From the column's zone maps, kept with its buffers as DuckDB
+        # keeps a table's statistics: scanning the whole column on one
+        # thread each run held PDS-H q20 at 19.6 ms (lineitem's 6M part
+        # and supplier keys), 12.3 now.
+        _ensure_zones(source.value())
+        var bounds = _window_bounds(source.value())
+        spans[named] = (
+            Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
+        ) if bounds else 0
+    return spans[named]
+
+
+def _group_key_below(
+    self: QueryContext, index: Int, aggregate: Int, key: String
+) -> Optional[String]:
+    """The name column `key` of node `index` has among the group keys of
+    `aggregate`, the stream's source under it, through row-local steps
+    that pass it on (renamed or not) and the probe side of joins, which
+    keep their left columns; None when it is made or dropped on the way
+    or is no group key."""
+    var at = index
+    var name = key
+    while at >= 0:
+        ref node = self._nodes[at]
+        if at == aggregate:
+            if name in node.names:
+                return name
+            return None
+        if node.kind == JOIN:
+            if not (
+                node.how
+                in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI, JOIN_CROSS]
+            ):
+                return None
+            at = node.left
+            continue
+        if not (_stream_rows(node) or node.kind == DROP):
+            return None
+        var below = plan_input_name(self, at, name)
+        if not below:
+            return None
+        name = below.value()
+        at = node.left
+    return None
+
+
+def plan_filter_by_build_keys(
+    self: QueryContext, top: Int, batch_size: Int
+) raises -> Optional[QueryContext]:
+    """DuckDB's join filters through an aggregate's group keys
+    (`JoinFilterPushdownOptimizer::GetPushdownFilterTargets`, the
+    `LOGICAL_AGGREGATE_AND_GROUP_BY` case): when the stream's source is
+    an aggregate and an inner or semi join above probes it on group
+    keys, that join's filtered build side runs first, and the
+    aggregate's input keeps only the rows whose keys the build holds.
+    The build is built whole in any case; DuckDB likewise makes the
+    probe side's pipelines wait for a build (`BuildJoinPipelines`).
+    A probe row whose keys no build row has joins nothing, and a filter
+    on group keys removes whole groups, so the result is unchanged.
+    The filter is the build's key tuples, as the mirror case filters
+    an aggregate on the build side (`plan_reduce_by_probe_keys`), and
+    under the same rule: some key's build values are at most half of
+    the values its aggregate input column spans. PDS-H q20 builds on
+    the 8.5K partsupp rows of its forest parts and probes the lineitem
+    quantities shipped per part and supplier: they keep 9.7K of 909K
+    lineitem rows. The build sides that ran replace their inputs, so
+    nothing runs twice. None when no join qualifies."""
+    var first = top
+    while first >= 0:
+        ref step = self._nodes[first]
+        if _stream_rows(step):
+            first = step.left
+        elif step.kind == JOIN and (
+            step.how
+            in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI, JOIN_CROSS]
+        ):
+            first = step.left
+        else:
+            break
+    if (
+        first < 0
+        or first == top
+        or self._nodes[first].kind != AGG
+        or len(self._nodes[first].names) == 0
+    ):
+        return None
+    var input = self._nodes[first].left
+    var plan = self.copy()
+    var changed = False
+    var spans = Dict[String, Int]()
+    var probe = top
+    while probe >= 0 and probe != first:
+        var j = probe
+        var node = self._nodes[j].copy()
+        probe = node.left
+        if not (
+            node.kind == JOIN
+            and (node.how == JOIN_INNER or node.how == JOIN_SEMI)
+        ):
+            continue
+        if len(node.names) == 0 or len(node.names) != len(node.right_keys):
+            continue
+        # Its keys can be few only if something filters the build side.
+        if not plan_filters_rows(self, node.right):
+            continue
+        var grouped = List[String]()
+        for name in node.names:
+            var found = _group_key_below(self, node.left, first, name)
+            if not found:
+                break
+            grouped.append(found.value())
+        if len(grouped) != len(node.names):
+            continue
+        var built = plan._execute(node.right, False, True, batch_size)
+        var keys = built.select(node.right_keys)
+        plan._frames.append(built^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
+        plan._nodes[j].right = len(plan._nodes) - 1
+        changed = True
+        var pays = False
+        for i in range(len(grouped)):
+            var estimate = distinct_estimate(keys.column(node.right_keys[i]))
+            var distinct = estimate if estimate >= 0 else keys.height()
+            var span = _key_span(self, input, grouped[i], spans)
+            pays = pays or (span >= 0 and 2 * distinct <= span)
+        if not pays:
+            continue
+        trace_path("stream.build_key_reduction")
+        plan._frames.append(keys^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
+        var semi = _join_node(
+            left=plan._nodes[first].left,
+            right=len(plan._nodes) - 1,
+            left_keys=grouped.copy(),
+            join_type="semi",
+            type_code=JOIN_SEMI,
+            right_keys=node.right_keys.copy(),
+            suffix="_right",
+        )
+        plan._nodes.append(semi^)
+        plan._nodes[first].left = len(plan._nodes) - 1
+    if not changed:
+        return None
+    return plan^
 
 
 def _stream_after_materialization(

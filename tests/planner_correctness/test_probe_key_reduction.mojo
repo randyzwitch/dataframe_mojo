@@ -4,7 +4,12 @@ distinct keys filter each aggregate's input. Every result equals the same
 joins over the separately collected inputs: two aggregates on one key above
 a selective join chain (PDS-H q21's shape, distinct counts included), a semi
 join, an aggregate on another key, which is left alone, and an aggregate
-grouped on both keys of a two-key join (PDS-H q20's shape)."""
+grouped on both keys of a two-key join (PDS-H q20's shape).
+
+The other direction too: when the stream's source is an aggregate probed
+on its group keys, the join's filtered build side runs first and its keys
+filter the aggregate's input (DuckDB's join filters through an aggregate's
+groups)."""
 # contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
@@ -240,3 +245,114 @@ def test_an_aggregate_reached_through_a_renamed_key_takes_the_probe_keys() raise
         .sort(["s"])
     )
     assert_frame(reduced, eager)
+
+
+def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
+    # The aggregate streams as the probe side of a two-key inner join
+    # whose build keeps one nation's lines (PDS-H q20 once its join order
+    # builds on partsupp); a filter on the joined sum follows.
+    var line = lines()
+    var supp = suppliers()
+    var totals = (
+        line.lazy()
+        .filter(col("late") <= lit(Int64(1)))
+        .group_by(["o", "s"])
+        .agg([col("late").len().alias("n")])
+    )
+    var chosen = (
+        line.lazy()
+        .join(
+            supp.lazy().filter(col("nation") == lit(Int64(7))),
+            left_on=["s"],
+            right_on=["sk"],
+        )
+        .select_exprs([col("o"), col("s"), col("late")])
+    )
+    var query = (
+        totals.join(chosen, left_on=["o", "s"], right_on=["o", "s"])
+        .filter(col("n") > col("late"))
+        .group_by("s")
+        .agg([col("n").sum().alias("n")])
+        .sort("s")
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var reduced = query.collect()
+    var took = "dataframe-path: stream.build_key_reduction\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the probing aggregate was not reduced by build keys")
+    var eager = (
+        totals.collect()
+        .join(chosen.collect(), on=["o", "s"])
+        .filter(col("n") > col("late"))
+        .group_by(["s"])
+        .agg([col("n").sum().alias("n")])
+        .sort(["s"])
+    )
+    assert_frame(reduced, eager)
+
+
+def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises:
+    # A semi join probing with the order key renamed above the aggregate
+    # takes the build's keys; a left join above the same aggregate keeps
+    # every group, so it is left alone.
+    var line = lines()
+    var supp = suppliers()
+    var busy = (
+        line.lazy()
+        .group_by("o")
+        .agg([col("late").sum().alias("t")])
+        .select_exprs([col("o").alias("order"), col("t")])
+    )
+    var chosen = (
+        line.lazy()
+        .join(
+            supp.lazy().filter(col("nation") == lit(Int64(2))),
+            left_on=["s"],
+            right_on=["sk"],
+        )
+        .select_exprs([col("o")])
+    )
+    var semi = (
+        busy.join(chosen, left_on=["order"], right_on=["o"], how="semi")
+        .group_by("t")
+        .agg([col("order").count().alias("c")])
+        .sort("t")
+    )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var reduced = semi.collect()
+    var took = "dataframe-path: stream.build_key_reduction\n" in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the renamed aggregate key was not reduced")
+    var eager_semi = (
+        busy.collect()
+        .join(chosen.collect(), left_on=["order"], right_on=["o"], how="semi")
+        .group_by(["t"])
+        .agg([col("order").count().alias("c")])
+        .sort(["t"])
+    )
+    assert_frame(reduced, eager_semi)
+    var kept = (
+        busy.join(
+            chosen.unique(), left_on=["order"], right_on=["o"], how="left"
+        )
+        .group_by("t")
+        .agg([col("order").count().alias("c")])
+        .sort("t")
+    )
+    var eager_kept = (
+        busy.collect()
+        .join(
+            chosen.collect().unique(),
+            left_on=["order"],
+            right_on=["o"],
+            how="left",
+        )
+        .group_by(["t"])
+        .agg([col("order").count().alias("c")])
+        .sort(["t"])
+    )
+    assert_frame(kept.collect(), eager_kept)
