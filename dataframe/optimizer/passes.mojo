@@ -20,6 +20,12 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
+from dataframe.series import (
+    Series,
+)
+from dataframe.trace import (
+    trace_path,
+)
 from dataframe.aggregation.expressions import (
     _row_local,
 )
@@ -524,6 +530,7 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
             if i < len(stuck) and stuck[i]:
                 continue
             var child = self._nodes[i].left
+            _ = plan_left_join_to_inner(self, i, child)
             var side = plan_passes(self, i, child)
             if side >= 0:
                 # The filter moves as far as it goes, and the walk goes
@@ -720,6 +727,49 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
         ):
             return 1
     return -1
+
+
+def plan_left_join_to_inner(
+    mut self: QueryContext, filter: Int, join: Int
+) raises -> Bool:
+    """Make the left join at `join` an inner join when the filter above
+    it keeps no row whose right columns are null, DuckDB's
+    `PushdownLeftJoin` (`FilterRemovesNull`): such a filter drops every
+    row the join adds for an unmatched left row, so the join keeps the
+    same rows as an inner join, and the filter can then move into its
+    right input. For a row-local filter reading only right columns,
+    tested on one row of nulls. True when the join changed."""
+    ref node = self._nodes[join]
+    if node.kind != JOIN or node.how != JOIN_LEFT:
+        return False
+    if not _row_local(self._nodes[filter].exprs):
+        return False
+    var predicate = self._nodes[filter].exprs[0].copy()
+    var reads = _references(predicate)
+    if not reads:
+        return False
+    var left_cols = plan_columns_of(self, node.left)
+    var right_cols = List[String]()
+    for c in plan_columns_of(self, node.right):
+        if not (node.coalesce and c in node.right_keys):
+            right_cols.append(c)
+    if not _covers_exclusive(right_cols, left_cols, reads.value()):
+        return False
+    var right = node.right
+    var schema = self._execute(right, True)
+    var nulls = List[Series]()
+    var names = List[String]()
+    for name in reads.value():
+        if name in names:
+            continue
+        names.append(name)
+        nulls.append(Series.full_null(name, schema.column(name).dtype(), 1))
+    if DataFrame(nulls^).filter(predicate).height() > 0:
+        return False
+    self._nodes[join].how = JOIN_INNER
+    self._nodes[join].text = "inner"
+    trace_path("lazy.left_join_to_inner")
+    return True
 
 
 def plan_transfer_key_filter(

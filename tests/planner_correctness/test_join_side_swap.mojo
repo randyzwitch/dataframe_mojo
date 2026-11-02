@@ -327,6 +327,45 @@ def test_ordered_group_bys_and_distinct_counts_swap_and_renamed_columns_keep_the
     _ = workers^
 
 
+def test_a_known_small_left_of_a_semi_join_hashes_the_left() raises:
+    # A semi or anti join whose built right side is large decides from
+    # both real sizes, a left that is already a table included: a few
+    # left rows are hashed and the right rows scanned against them, not
+    # the 600K right rows hashed for three probes.
+    var keys = List[Int64]()
+    for row in range(600_000):
+        keys.append(Int64(row % 1000))
+    var right = DataFrame([Series("k", Column[Int64](keys^))]).lazy()
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64]([5, 2000, 7])),
+            Series("v", Column[Int64]([1, 2, 3])),
+        ]
+    ).lazy()
+    for how in ["semi", "anti"]:
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var query = left.join(
+            right.filter(col("k") >= lit(Int64(0))), on=["k"], how=how
+        ).sort(["k"])
+        var observed = StrategyTrace()
+        var rows = query.collect()
+        assert_true(
+            "dataframe-path: join.membership_left_build\n" in observed.text(),
+            "the small left was not hashed",
+        )
+        _ = observed^
+        _ = trace^
+        var written = query.collect(optimize=False, engine="cpu")
+        assert_equal(rows.height(), written.height())
+        for r in range(rows.height()):
+            assert_equal(
+                rows.item(r, "k").int64(), written.item(r, "k").int64()
+            )
+            assert_equal(
+                rows.item(r, "v").int64(), written.item(r, "v").int64()
+            )
+
+
 def test_a_progression_right_side_is_kept_when_the_left_is_smaller() raises:
     """A right side whose one key is a progression builds no hash table:
     the left looks its rows up by position. The smaller-left check keeps
