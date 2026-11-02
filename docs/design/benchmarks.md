@@ -497,6 +497,37 @@ the query diagram generator live in `benchmarks/tools/`.
 | `bench_csv`, `bench_numeric_parse`, `bench_cast_parse` | CSV ingestion and text-to-number parsing; the suites load data untimed, so these are the only parsing coverage |
 | `bench_parquet_stream`, `bench_arrow_import` | Parquet reads and Arrow import, with their drivers in `benchmarks/tools/` |
 
+## Operator parity harness
+
+`benchmarks/tools/bench_operators.py` times one operator at a time on this
+library, DuckDB and Polars, with the same Parquet tables loaded into memory
+first. Its synthetic inputs (`benchmarks/operators/`) sweep data properties
+rather than benchmark queries: key types, sizes, match rates, duplicates,
+skew, nulls and order, with key values passed through random bijections.
+The join (about 200 cells) and aggregate (about 150) matrices are
+Latin-hypercube samples with a fixed seed; filter -> project -> sum, sort
+and top-N, window and three-build scheduling matrices are full grids.
+
+Each cell records the query's wall time and the operator's busy time
+summed over threads: DuckDB's JSON profile (`timing` per physical
+operator), Polars' `POLARS_LOG_METRICS` node totals, and this library's
+execution report (`LazyFrame.profile`), where the operator times itself.
+Every answer is checked against DuckDB's (sorts against the unsorted
+relation, with the order and limit as rank constraints).
+
+```bash
+pixi run -e oracle bench-operators --out DIR                       # every matrix; hours
+pixi run -e oracle bench-operators --matrix join --cells 0-19 --out DIR
+pixi run -e oracle bench-operators --baseline <rev> --out DIR     # A/B this library
+pixi run -e oracle bench-operators --scale smoke --out DIR        # tiny inputs, minutes
+```
+
+Cells already in `DIR/results.json` are skipped, so a matrix can run in
+pieces; `DIR/report.md` has a table per matrix and the worst cells, flagged
+at 1.25x the faster engine. On a shared host, `--wrap-timing` and
+`--wrap-build` take command prefixes for the timed chunks and the runner
+builds. Results stay out of the repository.
+
 ## Retired benchmarks
 
 These were removed because the external suites cover the same ground with
