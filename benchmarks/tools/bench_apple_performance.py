@@ -277,6 +277,9 @@ def oracle_checks(run, reference):
             suites.suite_answers.load_answer(record), suite, query
         )
         tolerant = suites.suite_answers.tolerant_columns(suite, query, oracle)
+        ranks = suites.suite_answers.tolerant_ranks(
+            suite, query, oracle, tolerant
+        )
         for sample in run.get("samples", []):
             record = sample.get("complete_answer")
             if record is None or record.get("query") != query:
@@ -285,7 +288,7 @@ def oracle_checks(run, reference):
                 suites.suite_answers.load_answer(record), suite, query
             )
             comparison = suites.suite_answers.compare_selection(
-                actual, oracle, tolerant_columns=tolerant
+                actual, oracle, tolerant_columns=tolerant, tolerant_ranks=ranks
             )
             if comparison["status"] == "unverified":
                 raise ValueError(comparison["reason"])

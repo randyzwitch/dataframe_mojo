@@ -31,25 +31,6 @@ from std.memory import (
 )
 
 
-struct _ReadyIndex(Copyable, Movable):
-    """A prefetched build side's hash index: the keys it hashes and the
-    probe rows bound it was made for (`finish_build`)."""
-
-    var keys: List[String]
-    var probe_rows: Int
-    var index: PreparedHashIndex
-
-    def __init__(
-        out self,
-        keys: List[String],
-        probe_rows: Int,
-        var index: PreparedHashIndex,
-    ):
-        self.keys = keys.copy()
-        self.probe_rows = probe_rows
-        self.index = index^
-
-
 struct FrameSlots(Copyable, Movable, Sized):
     """A plan's in-memory tables, by slot, shared by every copy of the plan.
 
@@ -86,6 +67,25 @@ struct FrameSlots(Copyable, Movable, Sized):
         self._shared[].append(frame^)
 
 
+struct _ReadyIndex(Copyable, Movable):
+    """A prefetched build side's hash index: the keys it hashes and the
+    probe rows bound it was made for (`finish_build`)."""
+
+    var keys: List[String]
+    var probe_rows: Int
+    var index: PreparedHashIndex
+
+    def __init__(
+        out self,
+        keys: List[String],
+        probe_rows: Int,
+        var index: PreparedHashIndex,
+    ):
+        self.keys = keys.copy()
+        self.probe_rows = probe_rows
+        self.index = index^
+
+
 struct QueryContext(Copyable, Deinitable, Movable):
     """Plan storage and per-run state, with explicit runtime ports."""
 
@@ -99,6 +99,11 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
     var _origin_rows: Dict[Int, Int]
+    # For a frame slot holding a shared subplan's result: the table its
+    # columns read and each column's name there, so the join order reads
+    # their distinct counts from that table's statistics.
+    var _origin_tables: Dict[Int, DataFrame]
+    var _origin_names: Dict[Int, Dict[String, String]]
     # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
     var _accelerator_settings: Optional[ExecutionSettings]
     # Each node's empty result (its output names and types) while an
@@ -119,6 +124,11 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
     # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
     var _handoff: Int
+    # Whether the logical optimizer passes already ran on these nodes:
+    # a shared subplan cut from an optimized plan is collected without
+    # optimizing it again, as Polars optimizes a cached subplan with the
+    # plan around it and DuckDB plans a materialized CTE once.
+    var _optimized: Bool
 
     var _executor: def(
         QueryContext, Int, Bool, Bool, Int
@@ -146,11 +156,14 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._schemas = schemas^
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._origin_tables = Dict[Int, DataFrame]()
+        self._origin_names = Dict[Int, Dict[String, String]]()
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
         self._prefetched_indexes = None
         self._handoff = HANDOFF_OFF
+        self._optimized = False
         self._executor = executor
         self._collector = collector
         self._supports = supports

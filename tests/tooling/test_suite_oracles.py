@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT / "benchmarks/suites"))
 sys.path.insert(0, str(ROOT / "benchmarks/tools"))
 sys.path.insert(0, str(ROOT / "tests/tooling"))
 from oracle_sql import full_relation
-from suite_answers import compare_selection
+from suite_answers import compare_selection, tolerant_ranks
 from suite_answer_fixture import rows_answer
 
 
@@ -131,6 +131,54 @@ class SelectionTests(unittest.TestCase):
                 "status"
             ],
             "different",
+        )
+
+    def test_q67_rank_allows_only_ties_within_float_tolerance(self):
+        # Two rollup levels over the same rows, exactly equal in decimal:
+        # one ulp apart in float, rank() may split their tie.
+        names = ["i_category", "level", "sumsales", "rk"]
+        types = ["string", "int64", "double", "int64"]
+        oracle = Answer(
+            names,
+            types,
+            [
+                ("a", 0, 300000.0, 1),
+                ("a", 1, 104996.99, 2),
+                ("a", 2, 104996.99, 2),
+                ("a", 3, 50.0, 4),
+            ],
+            {"oracle": {"width": 4, "order": [], "limit": None, "offset": 0}},
+        )
+        ranks = tolerant_ranks("tpcds", "q67", oracle, ["sumsales"])
+        self.assertEqual(list(ranks), ["rk"])
+
+        def check(rows, ranks=ranks, tolerant=("sumsales",)):
+            return compare_selection(
+                Answer(names, types, rows, {}),
+                oracle,
+                tolerant_columns=list(tolerant),
+                tolerant_ranks=ranks,
+            )["status"]
+
+        split = [
+            ("a", 0, 300000.0, 1),
+            ("a", 1, 104996.98999999999, 3),
+            ("a", 2, 104996.99000000002, 2),
+            ("a", 3, 50.0, 4),
+        ]
+        self.assertEqual(check(split), "equal")
+        # Without the rank policy the split tie is a different rank.
+        self.assertEqual(check(split, ranks={}), "different")
+        # Ranks outside the tie, or for a row with no peer, stay exact.
+        beyond = list(split)
+        beyond[1] = ("a", 1, 104996.98999999999, 4)
+        self.assertEqual(check(beyond), "different")
+        alone = list(split)
+        alone[3] = ("a", 3, 50.0, 3)
+        self.assertEqual(check(alone), "different")
+        # A rank over an exact (decimal) value gets no tolerance at all.
+        self.assertEqual(
+            tolerant_ranks("tpcds", "q67", oracle, []), {}
         )
 
     def test_q17_rejects_fabricated_groups_and_duplicate_overuse(self):

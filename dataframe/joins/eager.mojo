@@ -263,10 +263,15 @@ def join_frames(
                     sources, prepared.value(), how == JOIN_SEMI, workers
                 )
             )
+        # A full join probes as a left join (its unmatched probe rows
+        # with no build row) and flags the build rows it matched, as a
+        # right join does: DuckDB's FULL OUTER probe, then its scan of
+        # the build rows no probe found.
+        var outer = how == JOIN_LEFT or how == JOIN_FULL
         var pairs = prepared_hash_join_rows(
             sources,
             prepared.value(),
-            how == JOIN_LEFT,
+            outer,
             omit_identity=True,
             workers=workers,
         )
@@ -281,11 +286,13 @@ def join_frames(
         # The row lists are swapped out of the tuple: copying them
         # doubled the index traffic of a 10M-row join (#335).
         var output_height = len(pairs[1])
-        if marks != 0 and how == JOIN_RIGHT:
+        if marks != 0 and (how == JOIN_RIGHT or how == JOIN_FULL):
             var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=marks)
             var matched = pairs[1].unsafe_ptr()
             for r in range(output_height):
-                flags[unsafe_offset=matched[unsafe_offset=r]] = 1
+                var row = matched[unsafe_offset=r]
+                if row >= 0:
+                    flags[unsafe_offset=row] = 1
         var left_rows = List[Int]()
         var right_rows = List[Int]()
         swap(left_rows, pairs[0])
@@ -299,7 +306,7 @@ def join_frames(
             right_sources,
             right_rows^,
             lanes,
-            or_null=how == JOIN_LEFT,
+            or_null=outer,
         )
         for k in range(len(right_output)):
             columns.append(gathered[k].renamed(right_names[k]))
@@ -568,6 +575,37 @@ def join_frames(
     var left_rows = List[Int]()
     var right_rows = List[Int]()
     var direct_right = False
+    if self.height() == 0 and (
+        how == JOIN_FULL or (how == JOIN_RIGHT and keep_right_keys)
+    ):
+        # No probe rows: every build row comes out once, in order, beside
+        # null probe columns, with nothing hashed or gathered (a
+        # pipeline's unmatched build rows join an empty probe side, as
+        # DuckDB's outer scan reads them straight from its build).
+        var m = right.height()
+        var columns = List[Series](capacity=self.width() + len(right_output))
+        for c in range(self.width()):
+            ref column = self._columns[c]
+            var key = -1
+            if not keep_right_keys:
+                for k in range(len(left_keys)):
+                    if left_keys[k] == c:
+                        key = right_keys[k]
+            if key >= 0:
+                columns.append(
+                    right._columns[key]
+                    .with_dtype(column.dtype())
+                    .renamed(column.name())
+                )
+            else:
+                columns.append(
+                    Series.full_null(column.name(), column.dtype(), m)
+                )
+        for k in range(len(right_output)):
+            columns.append(
+                right._columns[right_output[k]].renamed(right_names[k])
+            )
+        return DataFrame(columns^, height=m)
     if how == JOIN_RIGHT and worker_count(right.height()) > 1:
         var right_probe_keys = List[Series](capacity=len(right_keys))
         var left_build_keys = List[Series](capacity=len(left_keys))

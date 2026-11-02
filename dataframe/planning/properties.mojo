@@ -94,6 +94,7 @@ from dataframe.join_order import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -482,13 +483,18 @@ def _stream_join(node: PlanNode) -> Bool:
     the stream will run is known before it starts."""
     if node.kind != JOIN:
         return False
-    return node.how in [
-        JOIN_INNER,
-        JOIN_LEFT,
-        JOIN_SEMI,
-        JOIN_ANTI,
-        JOIN_CROSS,
-    ] or (node.how == JOIN_RIGHT and not node.coalesce)
+    return (
+        node.how
+        in [
+            JOIN_INNER,
+            JOIN_LEFT,
+            JOIN_SEMI,
+            JOIN_ANTI,
+            JOIN_CROSS,
+        ]
+        or (node.how == JOIN_RIGHT and not node.coalesce)
+        or node.how == JOIN_FULL
+    )
 
 
 def _joined(parts: List[DataFrame]) raises -> DataFrame:
