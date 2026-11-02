@@ -22,6 +22,7 @@ from dataframe.planning.cost.model import trace_decision
 from dataframe.categorical import (
     decode,
 )
+from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import (
     Column,
 )
@@ -511,11 +512,22 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
+                # cannot be smaller is never sampled. A right side whose
+                # one key is a progression builds no hash table (the left
+                # looks its rows up by position), so it costs nothing to
+                # build on and is kept, as the planner's build side counts
+                # it (`plan_indexed_relation`) and the swaps above keep
+                # it: TPC-DS q35 hashed 100K customers to stream 1.9M
+                # demographics rows through them, where the customers
+                # look up their demographics by position.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
-                if most < 0 or most * columns < right_cost:
+                if (
+                    most < 0 or most * columns < right_cost
+                ) and not plan_progression_key(
+                    self, node.right, node.right_keys
+                ):
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # The join builds on the smaller left inside the
@@ -685,7 +697,9 @@ def plan_stream_execute(
     # row and the sink groups by integers; the result's codes become
     # the values again for its few groups. TPC-DS q99 spent a third of
     # its time gathering warehouse, ship mode and call center names
-    # into 287K joined rows that formed 90 groups.
+    # into 287K joined rows that formed 90 groups. Grouping sets code
+    # them too: every set's sink groups by the codes, and the stacked
+    # sets' codes (null where a set leaves the key out) become values.
     var late_names = List[String]()
     var late_builds = List[Int]()
     # Group keys carried as one build's row numbers (see below).
@@ -697,7 +711,6 @@ def plan_stream_execute(
         and len(joins) > 0
         and not ordered
         and top < 0
-        and not grouping
         and self._nodes[cursor].kind == SCAN_FRAME
     ):
         var source_columns = self._frames[
@@ -800,6 +813,8 @@ def plan_stream_execute(
             operations[k].exprs = passed^
     var late_values = List[Series]()
     var late_rows = List[List[Int]]()
+    if len(late_names) > 0:
+        trace_path("pipeline.coded_build_keys")
     for k in range(len(late_names)):
         ref name = late_names[k]
         var b = late_builds[k]
@@ -808,15 +823,26 @@ def plan_stream_execute(
         var groups = encode_rows(columns, nulls_equal=True)
         # A null value gets a null code: a left join's missing build
         # row is null too, and both are one null group.
-        var codes = List[Int64](capacity=len(groups.ids))
-        var valid = List[Bool](capacity=len(groups.ids))
-        var nulls = values.null_count() > 0
-        for r in range(len(groups.ids)):
-            codes.append(Int64(groups.ids[r]))
-            valid.append(not nulls or not values.get(r).is_null())
-        joins[b] = joins[b].with_column(
-            Series(name, Column[Int64](codes^, valid))
-        )
+        var n = len(groups.ids)
+        var codes = List[Int64](length=n, fill=0)
+        var code_at = codes.unsafe_ptr()
+        var id_at = groups.ids.unsafe_ptr()
+        for r in range(n):
+            code_at[unsafe_offset=r] = Int64(id_at[unsafe_offset=r])
+        var coded: Series
+        if values.null_count() > 0:
+            # The validity read once as a bit column: a cell by cell
+            # `get` copied every string (TPC-DS q86's two item keys cost
+            # more than the grouping they spared).
+            var present = values.is_not_null().rechunk()
+            ref bits = present._data[BoolColumn]
+            var valid = List[Bool](length=n, fill=True)
+            for r in range(n):
+                valid[r] = bits._get(r)
+            coded = Series(name, Column[Int64](codes^, valid))
+        else:
+            coded = Series(name, Column[Int64](codes^))
+        joins[b] = joins[b].with_column(coded^)
         late_values.append(values^)
         late_rows.append(groups.representatives.copy())
     if top >= 0:

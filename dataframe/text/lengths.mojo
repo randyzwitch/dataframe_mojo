@@ -4,6 +4,7 @@ from dataframe.storage.column import Column, _append_validity, _copy_validity
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import _mapped
 
 
 @always_inline
@@ -41,14 +42,19 @@ def _write_lengths[
                 out.unsafe_offset(i)[] = _count_chars(rows.get(i))
     else:
         if column._is_view_storage():
-            ref storage = column._view_storage_unchecked()
+            ref storage = column._view_storage.value()
+            var map = storage._row_map(column._offset)
             var views = Pointer[UInt32, ImmutAnyOrigin](
-                unsafe_from_address=Int(
-                    storage._views[].unsafe_ptr().unsafe_offset(column._offset)
-                )
+                unsafe_from_address=map[0]
             )
-            for i in range(n):
-                out.unsafe_offset(i)[] = Int64(views.unsafe_offset(4 * i)[])
+            if map[1] == 0:
+                for i in range(n):
+                    out.unsafe_offset(i)[] = Int64(views.unsafe_offset(4 * i)[])
+            else:
+                for i in range(n):
+                    out.unsafe_offset(i)[] = Int64(
+                        views.unsafe_offset(4 * _mapped(map[1], map[2], i))[]
+                    )
         else:
             var offsets = Pointer[Int64, ImmutAnyOrigin](
                 unsafe_from_address=Int(column.unsafe_offsets())

@@ -1230,15 +1230,53 @@ struct Morsel(Movable):
             trace_path("pipeline.join_selection")
             if not pairs[2]:
                 self._narrow_rows(pairs[0])
-        var sources = List[Series](capacity=len(right_output))
+        # String columns with view descriptors are not gathered: each
+        # reads the build column's descriptors through the matched rows,
+        # as DuckDB's probe emits a build column as a dictionary vector
+        # over it. A consumer that reads only the dictionary codes beside
+        # them (a group key, a comparison) never copies a descriptor; one
+        # that reads bytes copies them out when it does. The rest are
+        # gathered.
+        var rows = Optional[ArcPointer[List[Int]]]()
+        var selected = List[Optional[Series]](capacity=len(right_output))
+        var sources = List[Series]()
         for k in range(len(right_output)):
-            sources.append(right._columns[right_output[k]].copy())
-        var lanes = worker_count(len(pairs[1]))
-        var gathered = take_parallel(
-            sources, pairs[1].copy(), lanes, or_null=False
-        )
+            ref column = right._columns[right_output[k]]
+            var picked = Optional[Series]()
+            if column.dtype() == DataType.STRING:
+                var whole = column.rechunk()
+                if not rows:
+                    rows = ArcPointer(pairs[1].copy())
+                var through = whole._data[StringColumn]._select_rows(
+                    rows.value()
+                )
+                if through:
+                    var series = Series(right_names[k], through.take())
+                    series._dtype = whole._dtype
+                    series._field_metadata = whole._field_metadata
+                    picked = series^
+            if picked:
+                trace_path("pipeline.join_view_selection")
+            else:
+                sources.append(column.copy())
+            selected.append(picked^)
+        var gathered = List[Series]()
+        if len(sources) > 0:
+            gathered = take_parallel(
+                sources,
+                pairs[1].copy(),
+                worker_count(len(pairs[1])),
+                or_null=False,
+            )
+        var next = 0
         for k in range(len(right_output)):
-            self.frame._columns.append(gathered[k].renamed(right_names[k]))
+            if selected[k]:
+                self.frame._columns.append(selected[k].value().copy())
+            else:
+                self.frame._columns.append(
+                    gathered[next].renamed(right_names[k])
+                )
+                next += 1
             self.compact.append(True)
         return True
 
