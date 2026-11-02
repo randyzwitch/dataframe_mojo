@@ -76,6 +76,7 @@ from dataframe.planning.context import (
 )
 from dataframe.planning.graph import (
     GraphJoin,
+    plan_aggregate_input_rows,
     plan_aggregated,
     plan_available,
     plan_collect_graph,
@@ -934,8 +935,30 @@ def plan_cost_order_joins(
                 largest = r
         var uncounted = 0
         for r in range(n):
+            # An aggregate yields at most its input's rows: over a table
+            # no larger than one that narrows nothing, it can never be
+            # the largest input, so it is a build side that runs in
+            # full whatever the order. It runs now, as a narrowing
+            # relation does, rather than have its input's filter
+            # sampled for an estimate and then run anyway. Over a larger
+            # table it is estimated (`plan_aggregate_estimate`), and
+            # runs only where the chosen order puts it: PDS-H q20's
+            # lineitem quantities per part and supplier, against 800K
+            # partsupp rows.
+            var small_aggregate = False
+            if aggregated[r] and not hidden[r]:
+                var input_rows = plan_aggregate_input_rows(self, relations[r])
+                small_aggregate = (
+                    input_rows >= 0 and input_rows <= widest_plain
+                ) or (widest_plain < 0 and r != largest)
             if hidden[r]:
                 estimates.append(1)
+            elif small_aggregate:
+                if nullable[r]:
+                    uncounted |= 1 << r
+                    estimates.append(1)
+                else:
+                    estimates.append(-1)
             elif nullable[r]:
                 var estimate = plan_relation_estimate(self, relations[r])
                 if estimate < 0:
