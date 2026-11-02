@@ -357,8 +357,45 @@ struct _TopRowsJob(Job):
         var spare = k
         var addresses = List[Int](length=width, fill=0)
         var end = self.start + self.length
+        var first_columns: List[Series] = [self.columns[0].copy()]
+        var first_descending: List[Bool] = [self.descending[0]]
+        var first_nulls_last: List[Bool] = [self.nulls_last[0]]
+        var first_nulls: List[Bool] = [self.known_nulls[0]]
+        var selection = List[Int](capacity=_TOP_ROWS_BATCH)
         for batch in range(self.start, end, _TOP_ROWS_BATCH):
             var count = min(_TOP_ROWS_BATCH, end - batch)
+            # Once the heap is full, DuckDB's boundary check
+            # (`TopNHeap::CheckBoundaryValues`): a row whose first key comes
+            # after the worst held row's cannot be among the first k, and
+            # that key's words alone tell; only the other rows have every
+            # key encoded and compared.
+            var picked = held == k
+            selection.clear()
+            if picked:
+                var first = encode_sort_keys(
+                    first_columns,
+                    first_descending,
+                    first_nulls_last,
+                    prefix_only=True,
+                    offset=batch,
+                    length=count,
+                    known_nulls=first_nulls,
+                )
+                var first_width = len(first)
+                var worst = heap[unsafe_offset=0] * width
+                for i in range(count):
+                    var after = False
+                    for w in range(first_width):
+                        var left = first[w].unsafe_ptr()[unsafe_offset=i]
+                        var right = words[unsafe_offset=worst + w]
+                        if left != right:
+                            after = left > right
+                            break
+                    if not after:
+                        selection.append(batch + i)
+                _ = first^
+                if len(selection) == 0:
+                    continue
             var encoded = encode_sort_keys(
                 self.columns,
                 self.descending,
@@ -367,16 +404,19 @@ struct _TopRowsJob(Job):
                 offset=batch,
                 length=count,
                 known_nulls=self.known_nulls,
+                selection=selection,
             )
             for w in range(width):
                 addresses[w] = Int(encoded[w].unsafe_ptr())
             var columns = Pointer[Int, MutAnyOrigin](
                 unsafe_from_address=Int(addresses.unsafe_ptr())
             )
-            for i in range(count):
+            var considered = len(selection) if picked else count
+            for i in range(considered):
+                var row = selection[i] if picked else batch + i
                 var full = held == k
                 if full and not self._before(
-                    columns, i, batch + i, words, owner, heap[unsafe_offset=0]
+                    columns, i, row, words, owner, heap[unsafe_offset=0]
                 ):
                     continue
                 var slot = spare if full else held
@@ -386,7 +426,7 @@ struct _TopRowsJob(Job):
                     ](unsafe_from_address=columns[unsafe_offset=w])[
                         unsafe_offset=i
                     ]
-                owner[unsafe_offset=slot] = batch + i
+                owner[unsafe_offset=slot] = row
                 if not full:
                     heap[unsafe_offset=held] = slot
                     held += 1

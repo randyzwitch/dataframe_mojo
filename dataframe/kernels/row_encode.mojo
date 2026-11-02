@@ -45,6 +45,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
+from dataframe.text.bytes import _Bytes
 
 
 # The longest string this encodes, in bytes. A string key becomes this many
@@ -70,9 +71,12 @@ def encodable(column: Series) -> Bool:
             if not encodable(part):
                 return False
         return True
-    ref typed = column._data[StringColumn]
-    for i in range(len(typed)):
-        if typed._byte_length(i) > STRING_PREFIX_BYTES:
+    # Lengths are read through pointers taken once (`_Bytes`): a
+    # `_byte_length` call per row copied the column's view storage (TPC-DS
+    # q22's top-k spent half its time here).
+    var rows = _Bytes(column._data[StringColumn])
+    for i in range(len(column)):
+        if len(rows.get(i)) > STRING_PREFIX_BYTES:
             return False
     return True
 
@@ -129,11 +133,14 @@ def encode_sort_keys(
     offset: Int = 0,
     length: Int = -1,
     known_nulls: List[Bool] = List[Bool](),
+    selection: List[Int] = List[Int](),
 ) raises -> List[List[Int]]:
     """Order-preserving words for `columns`, lexicographic across the list.
 
     Every column must satisfy `encodable`. The result is what
-    `sort_indices` compares: `result[w][row]`, word-major.
+    `sort_indices` compares: `result[w][row]`, word-major. A nonempty
+    `selection` encodes only those rows, in its order (`offset` and
+    `length` are then ignored).
     """
     if len(columns) == 0:
         raise Error("sort requires at least one column")
@@ -150,7 +157,20 @@ def encode_sort_keys(
                 offset=offset,
                 length=length,
                 known_nulls=known_nulls,
+                selection=selection,
             )
+    if len(selection) > 0:
+        # The selected rows, gathered, encode as a contiguous run.
+        var taken = List[Series](capacity=len(columns))
+        for column in columns:
+            taken.append(column.take(selection))
+        return encode_sort_keys(
+            taken,
+            descending,
+            nulls_last,
+            prefix_only=prefix_only,
+            known_nulls=known_nulls,
+        )
     var rows = length if length >= 0 else len(columns[0]) - offset
     var words = List[List[Int]]()
     for k in range(len(columns)):
@@ -238,12 +258,13 @@ def encode_sort_keys(
             comptime prefix_words = STRING_PREFIX_BYTES // 8
             for _ in range(prefix_words):
                 chunks.append(List[Int](length=rows, fill=0))
+            # Row bytes through pointers taken once, not a `_get` per row.
+            var strings = _Bytes(typed)
             for i in range(rows):
                 if nulls and not typed._valid(offset + i):
                     ranked[i] = null_rank
                     continue
-                var text = typed._get(offset + i)
-                var bytes = text.as_bytes()
+                var bytes = strings.get(offset + i)
                 var length = len(bytes)
                 comptime for w in range(prefix_words):
                     var packed = UInt64(0)
