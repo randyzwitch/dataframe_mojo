@@ -92,8 +92,10 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.parallel import (
+    Job,
     Pool,
     configured_workers,
+    run_jobs,
 )
 from dataframe.pipeline import (
     _TopBound,
@@ -216,6 +218,84 @@ from std.memory import (
 from std.time import (
     perf_counter_ns,
 )
+
+
+struct _CodeKeyJob(Job):
+    """A group key's build column as codes (`encode_rows`'s ids, a
+    representative build row each), for late key materialization."""
+
+    var name: String
+    var values: Series
+    var coded: Series
+    var representatives: List[Int]
+
+    def __init__(out self, name: String, values: Series):
+        self.name = name
+        self.values = values.copy()
+        self.coded = values.copy()
+        self.representatives = List[Int]()
+
+    def run(mut self) raises:
+        var columns: List[Series] = [self.values.copy()]
+        var groups = encode_rows(columns, nulls_equal=True)
+        # A null value gets a null code: a left join's missing build
+        # row is null too, and both are one null group.
+        var n = len(groups.ids)
+        var codes = List[Int64](length=n, fill=0)
+        var code_at = codes.unsafe_ptr()
+        var id_at = groups.ids.unsafe_ptr()
+        for r in range(n):
+            code_at[unsafe_offset=r] = Int64(id_at[unsafe_offset=r])
+        if self.values.null_count() > 0:
+            # The validity read once as a bit column: a cell by cell
+            # `get` copied every string (TPC-DS q86's two item keys cost
+            # more than the grouping they spared).
+            var present = self.values.is_not_null().rechunk()
+            ref bits = present._data[BoolColumn]
+            var valid = List[Bool](length=n, fill=True)
+            for r in range(n):
+                valid[r] = bits._get(r)
+            self.coded = Series(self.name, Column[Int64](codes^, valid))
+        else:
+            self.coded = Series(self.name, Column[Int64](codes^))
+        self.representatives = groups.representatives.copy()
+
+
+struct _DecodeKeyJob(Job):
+    """A coded key's groups back to their values: a code is a
+    representative build row; a left join's missing row is a null code
+    and stays null."""
+
+    var coded: Series
+    var values: Series
+    var representatives: List[Int]
+    var name: String
+    var result: Series
+
+    def __init__(
+        out self,
+        coded: Series,
+        values: Series,
+        representatives: List[Int],
+        name: String,
+    ):
+        self.coded = coded.copy()
+        self.values = values.copy()
+        self.representatives = representatives.copy()
+        self.name = name
+        self.result = coded.copy()
+
+    def run(mut self) raises:
+        var coded = self.coded.rechunk()
+        ref codes = coded._data[Column[Int64]]
+        var representatives = self.representatives.unsafe_ptr()
+        var rows = List[Int](capacity=len(coded))
+        for r in range(len(coded)):
+            if not codes._valid(r):
+                rows.append(-1)
+            else:
+                rows.append(representatives[unsafe_offset=Int(codes._get(r))])
+        self.result = self.values.take_or_null(rows).renamed(self.name)
 
 
 def plan_stream_execute(
@@ -815,36 +895,26 @@ def plan_stream_execute(
     var late_rows = List[List[Int]]()
     if len(late_names) > 0:
         trace_path("pipeline.coded_build_keys")
+    # Each key's build column is coded on its own worker: on one thread,
+    # TPC-DS q22's four item names (18K rows each) were a serial phase
+    # the workers waited through.
+    var coding = List[_CodeKeyJob](capacity=len(late_names))
     for k in range(len(late_names)):
-        ref name = late_names[k]
+        coding.append(
+            _CodeKeyJob(
+                late_names[k], joins[late_builds[k]].column(late_names[k])
+            )
+        )
+    if len(coding) == 1:
+        coding[0].run()
+    elif len(coding) > 1:
+        run_jobs(coding)
+    for k in range(len(late_names)):
         var b = late_builds[k]
-        var values = joins[b].column(name).copy()
-        var columns: List[Series] = [values.copy()]
-        var groups = encode_rows(columns, nulls_equal=True)
-        # A null value gets a null code: a left join's missing build
-        # row is null too, and both are one null group.
-        var n = len(groups.ids)
-        var codes = List[Int64](length=n, fill=0)
-        var code_at = codes.unsafe_ptr()
-        var id_at = groups.ids.unsafe_ptr()
-        for r in range(n):
-            code_at[unsafe_offset=r] = Int64(id_at[unsafe_offset=r])
-        var coded: Series
-        if values.null_count() > 0:
-            # The validity read once as a bit column: a cell by cell
-            # `get` copied every string (TPC-DS q86's two item keys cost
-            # more than the grouping they spared).
-            var present = values.is_not_null().rechunk()
-            ref bits = present._data[BoolColumn]
-            var valid = List[Bool](length=n, fill=True)
-            for r in range(n):
-                valid[r] = bits._get(r)
-            coded = Series(name, Column[Int64](codes^, valid))
-        else:
-            coded = Series(name, Column[Int64](codes^))
-        joins[b] = joins[b].with_column(coded^)
-        late_values.append(values^)
-        late_rows.append(groups.representatives.copy())
+        joins[b] = joins[b].with_column(coding[k].coded.copy())
+        late_values.append(coding[k].values.copy())
+        late_rows.append(coding[k].representatives.copy())
+    _ = coding^
     if top >= 0:
         operations.append(self._nodes[top_node].copy())
         operation_nodes.append(top_node)
@@ -1206,24 +1276,24 @@ def plan_stream_execute(
                 piped_result = (
                     DataFrame(columns^).group_by(original_keys).agg(row_merge)
                 )
+        # The groups' codes back to their values, a key per worker.
+        var decoding = List[_DecodeKeyJob](capacity=len(late_names))
         for i in range(len(late_names)):
-            # The groups' codes back to their values (a code is a
-            # representative build row; a left join's missing row is a
-            # null code and stays null).
-            var coded = piped_result.column(late_names[i]).rechunk()
-            ref codes = coded._data[Column[Int64]]
-            var representatives = late_rows[i].unsafe_ptr()
-            var rows = List[Int](capacity=len(coded))
-            for r in range(len(coded)):
-                if not codes._valid(r):
-                    rows.append(-1)
-                else:
-                    rows.append(
-                        representatives[unsafe_offset=Int(codes._get(r))]
-                    )
-            piped_result = piped_result.with_column(
-                late_values[i].take_or_null(rows).renamed(late_names[i])
+            decoding.append(
+                _DecodeKeyJob(
+                    piped_result.column(late_names[i]),
+                    late_values[i],
+                    late_rows[i],
+                    late_names[i],
+                )
             )
+        if len(decoding) == 1:
+            decoding[0].run()
+        elif len(decoding) > 1:
+            run_jobs(decoding)
+        for i in range(len(decoding)):
+            piped_result = piped_result.with_column(decoding[i].result.copy())
+        _ = decoding^
         if counting:
             plan_record(self, cursor, "pipeline", 0, piped_counts[0])
             var into_terminal = piped_counts[0]
