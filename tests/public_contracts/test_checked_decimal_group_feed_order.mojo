@@ -92,14 +92,15 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
         _ = _frame(131072, -1, 65536).group_by("g").agg(feed_expression())
     with assert_raises(contains="decimal multiplication overflow"):
         _ = _frame(131072, 131071, 65536).group_by("g").agg(feed_expression())
-    # The aggregate table evaluates a morsel's reduction inputs before it
-    # accumulates them, and morsels go to workers as they free up, so an
-    # operand fault anywhere precedes a partial sum's precision fault: here
-    # worker zero's prefix (rows 0 and 1) would exceed precision, but the
-    # operand fault at the last row is raised first.
-    with assert_raises(contains="decimal multiplication overflow"):
-        _ = _frame(131072, 131071).group_by("g").agg(feed_expression())
     _ = parallel^
+    # A batch's operands are evaluated before the batch updates the states,
+    # and no later: on one worker the prefix of rows 0 and 1 exceeds
+    # precision in the first batch, before the operand fault at the last
+    # row is reached. (On several workers either fault may come first.)
+    var one = WorkerSetting(1)
+    with assert_raises(contains="decimal precision 38"):
+        _ = _frame(131072, 131071).group_by("g").agg(feed_expression())
+    _ = one^
 
 
 def test_checked_decimal_over_source_faults_precede_partition_faults() raises:
