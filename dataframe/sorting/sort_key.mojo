@@ -767,76 +767,108 @@ def _string_prefixes(
     c: SortKeyColumn,
     first: Int,
     count: Int,
-    words: Pointer[UInt64, MutAnyOrigin],
+    cursors: Pointer[Int, MutAnyOrigin],
+    limits: Pointer[Int, MutAnyOrigin],
 ):
-    """The first eight key bytes of string rows: the null/valid byte, then
-    up to seven bytes of the value encoded as `_encode_varchar` does and
-    its delimiter, zeros after (a lower bound of what follows)."""
+    """String rows encoded as `_encode_strings` does, but only the bytes
+    before each row's limit (its first key word's end); a cursor past the
+    limit stops there."""
     var rows = _Bytes(column)
     var nulls = c.nulls and column.null_count() > 0
     var flip = UInt8(0xFF) if c.descending else UInt8(0)
     for i in range(count):
-        var row = first + i
-        if nulls and not column._valid(row):
-            words[unsafe_offset=i] = UInt64(c.null_byte) << 56
+        var at = cursors[unsafe_offset=i]
+        var limit = limits[unsafe_offset=i]
+        if at >= limit:
             continue
-        var word = UInt64(c.valid_byte) << 56
+        var row = first + i
+        var out_bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)
+        if nulls and not column._valid(row):
+            out_bytes[] = c.null_byte
+            cursors[unsafe_offset=i] = at + 1
+            continue
+        out_bytes[] = c.valid_byte
         var bytes = rows.get(row)
         var n = len(bytes)
-        for j in range(7):
-            var byte: UInt8
-            if j < n:
-                byte = (bytes.unsafe_ptr()[unsafe_offset=j] + 1) ^ flip
-            elif j == n:
-                byte = flip
-            else:
-                break
-            word |= UInt64(byte) << UInt64(48 - 8 * j)
-        words[unsafe_offset=i] = word
+        var room = limit - at - 1
+        for j in range(min(n, room)):
+            out_bytes[unsafe_offset=1 + j] = (
+                bytes.unsafe_ptr()[unsafe_offset=j] + 1
+            ) ^ flip
+        if n < room:
+            out_bytes[unsafe_offset=1 + n] = flip
+        cursors[unsafe_offset=i] = min(at + n + 2, limit)
 
 
 def key_prefixes(
     layout: SortKeyLayout, lo: Int, hi: Int, mut prefixes: List[UInt64]
 ) raises -> Bool:
     """For rows [lo, hi), a lower bound of each key's first word (the
-    record's `part0`) from the first key column alone, as unsigned
-    integers; False when the first column gives none (binary keys). A
-    row whose bound exceeds a boundary key's first word is worse than
-    that key: CheckBoundaryValues on the first sort column."""
-    ref c = layout.columns[0]
+    record's `part0`), as unsigned integers: the key columns encoded up to
+    the word's eighth byte, zeros past a binary column. A row whose bound
+    exceeds a boundary key's first word is worse than that key:
+    CheckBoundaryValues, over the leading sort columns."""
     var n = hi - lo
-    if c.encoding == _ENC_BLOB or c.encoding == _ENC_ROW:
+    if n <= 0:
         return False
-    prefixes = List[UInt64](length=max(1, n), fill=0)
-    var at = Pointer[UInt64, MutAnyOrigin](
-        unsafe_from_address=Int(prefixes.unsafe_ptr())
-    )
-    if c.encoding == _ENC_VARCHAR:
-        for piece in _for_parts(c.series, lo, hi):
-            _string_prefixes(
-                piece[0]._data[StringColumn],
-                c,
-                piece[1],
-                piece[2],
-                at.unsafe_offset(piece[3]),
-            )
-        return True
-    # A fixed-width value encodes into at most 17 bytes: three words a row.
-    var scratch = List[UInt64](length=max(1, 3 * n), fill=0)
+    if layout.columns[0].encoding == _ENC_BLOB:
+        return False
+    prefixes = List[UInt64](length=n, fill=0)
+    # A row's slot: the word, and room for a fixed-width value (at most
+    # 17 bytes) started before the word's end.
+    comptime SLOT = 32
+    var scratch = List[UInt64](length=n * SLOT // 8, fill=0)
     var base = Int(scratch.unsafe_ptr())
-    var cursors = List[Int](unsafe_uninit_length=max(1, n))
+    var cursors = List[Int](unsafe_uninit_length=n)
+    var limits = List[Int](unsafe_uninit_length=n)
     for i in range(n):
-        cursors[i] = base + 24 * i
+        cursors[i] = base + SLOT * i
+        limits[i] = base + SLOT * i + 8
     var cursor = Pointer[Int, MutAnyOrigin](
         unsafe_from_address=Int(cursors.unsafe_ptr())
     )
-    for piece in _for_parts(c.series, lo, hi):
-        _encode_part(
-            piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
-        )
-    var encoded = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
+    var limit = Pointer[Int, MutAnyOrigin](
+        unsafe_from_address=Int(limits.unsafe_ptr())
+    )
+    for c in layout.columns:
+        if c.encoding == _ENC_BLOB:
+            break
+        var open = False
+        for i in range(n):
+            if cursors[i] < limits[i]:
+                open = True
+                break
+        if not open:
+            break
+        if c.encoding == _ENC_ROW:
+            for i in range(n):
+                var at = cursors[i]
+                if at < limits[i]:
+                    _store_be[DType.uint64](at, UInt64(lo + i))
+                    cursors[i] = at + 8
+        elif c.encoding == _ENC_VARCHAR:
+            for piece in _for_parts(c.series, lo, hi):
+                _string_prefixes(
+                    piece[0]._data[StringColumn],
+                    c,
+                    piece[1],
+                    piece[2],
+                    cursor.unsafe_offset(piece[3]),
+                    limit.unsafe_offset(piece[3]),
+                )
+        else:
+            # Rows already past the word write into their slot's spare
+            # room, which is never read.
+            for piece in _for_parts(c.series, lo, hi):
+                _encode_part(
+                    piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
+                )
+        for i in range(n):
+            cursors[i] = min(cursors[i], limits[i])
+    var words = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
     for i in range(n):
-        at[unsafe_offset=i] = byte_swap(encoded[unsafe_offset=3 * i])
+        prefixes[i] = byte_swap(words[unsafe_offset=SLOT // 8 * i])
     _ = cursors^
+    _ = limits^
     _ = scratch^
     return True
