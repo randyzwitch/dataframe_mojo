@@ -71,6 +71,15 @@ def predicates() raises -> List[Expr]:
         col("s").str().starts_with("k1") | col("a").is_not_null(),
         col("s").is_null() & (col("a") > lit(Int64(0))),
         col("s").is_in(["k1", "a longer key 3", "absent"]),
+        (lit(Int64(-10)) <= col("a")) & (col("a") < lit(Int64(10))),
+        (
+            (col("price") >= lit("100.00").cast(DataType.decimal(7, 2)))
+            & (col("price") <= lit("300.00").cast(DataType.decimal(7, 2)))
+        )
+        | (lit(5.0) < col("f"))
+        | (col("b") == lit(Int32(2))),
+        (col("b") > lit(Int32(3)))
+        & ((col("a") != lit(Int64(7))) | (col("f") < lit(0.0))),
         col("b").is_in([lit(Int32(1)), lit(Int32(4)), lit(Int32(16))])
         | col("a").is_in([lit(Int64(-50)), lit(Int64(7))]),
         col("s").str().like("%key%2")

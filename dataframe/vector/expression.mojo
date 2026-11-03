@@ -348,6 +348,11 @@ struct VectorExpression(Copyable, Movable):
     var member_strings: List[List[StringT]]
     # The composed selection `_entries` writes.
     var composed: List[UInt32]
+    # Select: per comparison node, the column child it compares with a
+    # constant directly at the column's own type (-1: evaluated in lanes);
+    # per AND / OR node, the selections its children write.
+    var direct: List[Int]
+    var select_rows: List[List[UInt32]]
     var scratch: DataChunk
 
     def __init__(out self, expr: Expr, schema: List[Series]) raises:
@@ -389,6 +394,8 @@ struct VectorExpression(Copyable, Movable):
             length=n, fill=List[StringT]()
         )
         self.composed = List[UInt32]()
+        self.direct = List[Int](length=n, fill=-1)
+        self.select_rows = List[List[UInt32]](length=n, fill=List[UInt32]())
         self.scratch = DataChunk(n)
         # Lane buffers are made by each worker's copy when it first
         # evaluates (`_allocate`): the compiled template stays small to copy.
@@ -400,6 +407,7 @@ struct VectorExpression(Copyable, Movable):
         self._plan(self.root)
         self._narrow_decimals()
         self._share_columns()
+        self._plan_direct()
 
     def _share_columns(mut self):
         """Point every node reading a column at one node per column and
@@ -438,6 +446,44 @@ struct VectorExpression(Copyable, Movable):
         for i in range(n):
             if canonical[i] >= 0 and canonical[i] != i:
                 self.kinds[i] = _KIND_UNUSED
+
+    def _plan_direct(mut self):
+        """The comparisons Select runs straight over a column's vector:
+        a column of a numeric type against a constant of the same type
+        (DuckDB's ExpressionExecutor::Select on a BoundComparisonExpression
+        runs the comparison's selection kernel over the column's unified
+        format, never loading the values first)."""
+        for i in range(len(self.kinds)):
+            if self.kinds[i] != _KIND_LANE:
+                continue
+            ref node = self.bound.expr._nodes[i]
+            if not _is_compare(node.op) or node.left < 0 or node.right < 0:
+                continue
+            var l = node.left
+            var r = node.right
+            if self.bound.dtypes[l] != self.bound.dtypes[r]:
+                continue
+            var column = -1
+            if (
+                self.kinds[l] == _KIND_COLUMN
+                and self.kinds[r] == _KIND_CONSTANT
+            ):
+                column = l
+            elif (
+                self.kinds[r] == _KIND_COLUMN
+                and self.kinds[l] == _KIND_CONSTANT
+            ):
+                column = r
+            if column < 0:
+                continue
+            var lane = self.lanes[column]
+            if (
+                lane == _LANE_INT
+                or lane == _LANE_FLOAT
+                or lane == _LANE_DECIMAL
+                or lane == _LANE_DECIMAL64
+            ):
+                self.direct[i] = column
 
     def _allocate(mut self):
         """The buffers every node computed in lanes or read in one writes,
@@ -2136,8 +2182,132 @@ struct VectorExpression(Copyable, Movable):
         """ExpressionExecutor::Select for a Boolean expression: the chunk
         rows among `rows` it is true (and not null) for, written to
         `target` in order; how many."""
-        self.evaluate(input, arena, rows, count)
-        var root = self.root
+        if not self.ready:
+            self._allocate()
+        self.scratch.reset()
+        self.generation += 1
+        return self._select(self.root, input, arena, rows, count, target)
+
+    def _select(
+        mut self,
+        index: Int,
+        mut input: DataChunk,
+        mut arena: ColumnArena,
+        rows: SelectionVector,
+        count: Int,
+        target: SelectionVector,
+    ) raises -> Int:
+        """Select for node `index` (ExpressionExecutor::Select): AND narrows
+        the rows one child after the other (SelectAnd); OR takes the rows
+        either child keeps, the second run only on the rows the first
+        dropped, merged back in row order (SelectOr); a comparison of a
+        column with a constant runs over the column's vector; anything
+        else is evaluated in lanes and its true rows kept."""
+        if count == 0:
+            return 0
+        var op = self.bound.expr._nodes[index].op
+        if self.kinds[index] == _KIND_LANE and (op == AND or op == OR):
+            var left = self.bound.expr._nodes[index].left
+            var right = self.bound.expr._nodes[index].right
+            if len(self.select_rows[index]) == 0:
+                self.select_rows[index] = List[UInt32](
+                    unsafe_uninit_length=3 * STANDARD_VECTOR_SIZE
+                )
+            var base = Int(self.select_rows[index].unsafe_ptr())
+            var first = SelectionVector(base)
+            if op == AND:
+                var kept = self._select(left, input, arena, rows, count, first)
+                return self._select(right, input, arena, first, kept, target)
+            var dropped = SelectionVector(base + 4 * STANDARD_VECTOR_SIZE)
+            var second = SelectionVector(base + 8 * STANDARD_VECTOR_SIZE)
+            var taken = self._select(left, input, arena, rows, count, first)
+            if taken == count:
+                _copy_rows(first.data, target.data, taken)
+                return taken
+            var others = _complement(
+                rows, count, first.data, taken, dropped.data
+            )
+            var more = self._select(
+                right, input, arena, dropped, others, second
+            )
+            return _merge_rows(
+                first.data, taken, second.data, more, target.data
+            )
+        var column = self.direct[index]
+        if column >= 0:
+            return self._select_direct(
+                index, column, input, arena, rows, count, target
+            )
+        self._evaluate(index, input, arena, rows, count)
+        return self._true_rows(index, rows, count, target)
+
+    def _select_direct(
+        mut self,
+        index: Int,
+        column: Int,
+        mut input: DataChunk,
+        mut arena: ColumnArena,
+        rows: SelectionVector,
+        count: Int,
+        target: SelectionVector,
+    ) raises -> Int:
+        """A column compared with a constant over the column's own vector
+        and type; a null constant keeps nothing."""
+        ref node = self.bound.expr._nodes[index]
+        var constant = node.right if column == node.left else node.left
+        if not self.constant_valid[constant]:
+            return 0
+        var op = node.op
+        if column != node.left:
+            # constant OP column: the column on the left.
+            if op == LT:
+                op = GT
+            elif op == LE:
+                op = GE
+            elif op == GT:
+                op = LT
+            elif op == GE:
+                op = LE
+        var format = input.unified(self.bound.sources[column], arena)
+        var lane = self.lanes[column]
+        comptime for s in range(len(_LANE_STORAGE)):
+            comptime D = _LANE_STORAGE[s]
+            if format.physical == physical_of[D]():
+                var value: Scalar[D]
+                var exact: Bool
+                comptime if D.is_floating_point():
+                    value = self.floats[constant].cast[D]()
+                    exact = lane == _LANE_FLOAT
+                else:
+                    if lane == _LANE_DECIMAL:
+                        value = self.decimals[constant].cast[D]()
+                        exact = (
+                            value.cast[DType.int128]()
+                            == self.decimals[constant]
+                        )
+                    else:
+                        value = self.ints[constant].cast[D]()
+                        exact = (
+                            lane != _LANE_FLOAT
+                            and value.cast[DType.int64]() == self.ints[constant]
+                        )
+                if exact:
+                    return _select_compare[D](
+                        op, format, rows, count, value, target
+                    )
+        # A constant past the column's type: evaluated in lanes.
+        self._evaluate(index, input, arena, rows, count)
+        return self._true_rows(index, rows, count, target)
+
+    def _true_rows(
+        mut self,
+        index: Int,
+        rows: SelectionVector,
+        count: Int,
+        target: SelectionVector,
+    ) -> Int:
+        """The rows node `index` (evaluated) is true and valid for."""
+        var root = index
         var kept = 0
         if self.kinds[root] == _KIND_CONSTANT:
             if self.constant_valid[root] and self.ints[root] != 0:
@@ -2341,6 +2511,136 @@ def _copy_bytes(target: Int, source: Int, count: Int):
             src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=source),
             count=count,
         )
+
+
+def _select_compare[
+    D: DType
+](
+    op: Int,
+    format: UnifiedVectorFormat,
+    rows: SelectionVector,
+    count: Int,
+    value: Scalar[D],
+    target: SelectionVector,
+) -> Int:
+    """The rows among `rows` whose value OP `value` holds, valid only,
+    written to `target` in order (DuckDB's SelectComparison over a
+    UnifiedVectorFormat with a constant right side), branch-free."""
+    if op == EQ:
+        return _select_compare_op[D, EQ](format, rows, count, value, target)
+    if op == NE:
+        return _select_compare_op[D, NE](format, rows, count, value, target)
+    if op == LT:
+        return _select_compare_op[D, LT](format, rows, count, value, target)
+    if op == LE:
+        return _select_compare_op[D, LE](format, rows, count, value, target)
+    if op == GT:
+        return _select_compare_op[D, GT](format, rows, count, value, target)
+    return _select_compare_op[D, GE](format, rows, count, value, target)
+
+
+def _select_compare_op[
+    D: DType, OP: Int
+](
+    format: UnifiedVectorFormat,
+    rows: SelectionVector,
+    count: Int,
+    value: Scalar[D],
+    target: SelectionVector,
+) -> Int:
+    var data = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=format.data)
+    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target.data)
+    var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=format.sel.data)
+    var from_rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
+    var through_rows = rows.is_set()
+    var through_sel = format.sel.is_set()
+    var bits = Pointer[UInt8, MutAnyOrigin](
+        unsafe_from_address=format.validity.bits
+    )
+    var nullable = not format.validity.all_valid()
+    var offset = format.validity.offset
+    var kept = 0
+    for k in range(count):
+        var row = Int(from_rows[unsafe_offset=k]) if through_rows else k
+        var entry = Int(sel[unsafe_offset=row]) if through_sel else row
+        var x = data[unsafe_offset=entry]
+        var keep: Bool
+        comptime if OP == EQ:
+            keep = x == value
+        elif OP == NE:
+            keep = x != value
+        elif OP == LT:
+            keep = x < value
+        elif OP == LE:
+            keep = x <= value
+        elif OP == GT:
+            keep = x > value
+        else:
+            keep = x >= value
+        if nullable:
+            var b = offset + entry
+            keep = (
+                keep and ((bits[unsafe_offset=b >> 3] >> UInt8(b & 7)) & 1) == 1
+            )
+        out[unsafe_offset=kept] = UInt32(row)
+        kept += Int(keep)
+    return kept
+
+
+def _copy_rows(source: Int, target: Int, count: Int):
+    if count > 0 and source != target:
+        unsafe_memcpy(
+            dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=target),
+            src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=source),
+            count=4 * count,
+        )
+
+
+def _complement(
+    rows: SelectionVector, count: Int, kept: Int, taken: Int, target: Int
+) -> Int:
+    """The rows among `rows` (ascending) not in the `taken` ascending rows
+    at `kept`, in order: SelectOr's false selection."""
+    var from_rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
+    var a = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=kept)
+    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target)
+    var j = 0
+    var n = 0
+    for k in range(count):
+        var row = from_rows[unsafe_offset=k] if rows.is_set() else UInt32(k)
+        if j < taken and a[unsafe_offset=j] == row:
+            j += 1
+            continue
+        out[unsafe_offset=n] = row
+        n += 1
+    return n
+
+
+def _merge_rows(a: Int, na: Int, b: Int, nb: Int, target: Int) -> Int:
+    """Two disjoint ascending row lists merged in order into `target`."""
+    var x = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=a)
+    var y = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=b)
+    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target)
+    var i = 0
+    var j = 0
+    var n = 0
+    while i < na and j < nb:
+        if x[unsafe_offset=i] < y[unsafe_offset=j]:
+            out[unsafe_offset=n] = x[unsafe_offset=i]
+            i += 1
+        else:
+            out[unsafe_offset=n] = y[unsafe_offset=j]
+            j += 1
+        n += 1
+    while i < na:
+        out[unsafe_offset=n] = x[unsafe_offset=i]
+        i += 1
+        n += 1
+    while j < nb:
+        out[unsafe_offset=n] = y[unsafe_offset=j]
+        j += 1
+        n += 1
+    return n
 
 
 @always_inline
