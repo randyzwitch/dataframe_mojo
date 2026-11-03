@@ -77,6 +77,8 @@ def predicates() raises -> List[Expr]:
         | col("s").str().like("k_")
         | col("s").str().like("a%"),
         col("s").str().slice(2, 6) == lit("onger "),
+        when(col("b") > lit(Int32(8))).then(col("s")).otherwise(lit("k3"))
+        == lit("k3"),
         col("s").str().starts_with("a long")
         | col("s").str().ends_with("4")
         | col("s").str().contains("ey 1", literal=True),
@@ -105,6 +107,12 @@ def projections() raises -> List[Expr]:
         .otherwise(col("a"))
         .alias("z"),
         when(col("f") < lit(0.0)).then(col("price")).alias("zz"),
+        when(col("a") > lit(Int64(20)))
+        .then(col("s"))
+        .when(col("b") == lit(Int32(3)))
+        .then(lit("three"))
+        .otherwise(col("s").str().slice(1, 1))
+        .alias("ws"),
         lit(Int64(7)).alias("y"),
         col("a").fill_null(lit(Int64(5))).abs().alias("fa"),
         col("a").fill_null(col("b").cast(DataType.INT64)).alias("fb"),

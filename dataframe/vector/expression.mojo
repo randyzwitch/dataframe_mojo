@@ -604,8 +604,7 @@ struct VectorExpression(Copyable, Movable):
                 return False
             if self.bound.dtypes[node.left] != DataType.BOOL:
                 return False
-            var lane = _lane(dtype)
-            if lane == _LANE_NONE or lane == _LANE_STRING:
+            if _lane(dtype) == _LANE_NONE:
                 return False
             if self.bound.dtypes[node.right] != dtype:
                 return False
@@ -1325,7 +1324,13 @@ struct VectorExpression(Copyable, Movable):
             self._evaluate(
                 node.right, input, arena, SelectionVector(Int(then_rows)), taken
             )
-            any_null |= self._scatter(index, node.right, Int(then_at), taken)
+            any_null |= self._scatter(
+                index,
+                node.right,
+                Int(then_at),
+                taken,
+                SelectionVector(Int(then_rows)),
+            )
         if others > 0:
             if node.extra >= 0:
                 self._evaluate(
@@ -1336,7 +1341,11 @@ struct VectorExpression(Copyable, Movable):
                     others,
                 )
                 any_null |= self._scatter(
-                    index, node.extra, Int(other_at), others
+                    index,
+                    node.extra,
+                    Int(other_at),
+                    others,
+                    SelectionVector(Int(other_rows)),
                 )
             else:
                 var o = self.valid[index].unsafe_ptr()
@@ -1344,16 +1353,48 @@ struct VectorExpression(Copyable, Movable):
                     o[unsafe_offset=Int(other_at[unsafe_offset=j])] = 0
                 any_null = True
         self.whole[index] = not any_null
+        if self.lanes[index] == _LANE_STRING:
+            self.formats[index] = UnifiedVectorFormat(
+                SelectionVector(),
+                Int(self.lane_strings[index].unsafe_ptr()),
+                ValidityMask(),
+                PHYSICAL_VARCHAR,
+            )
+            self.by_chunk_row[index] = False
 
     def _scatter(
-        mut self, index: Int, child: Int, positions: Int, count: Int
+        mut self,
+        index: Int,
+        child: Int,
+        positions: Int,
+        count: Int,
+        rows: SelectionVector,
     ) -> Bool:
         """The child's `count` values (computed over the rows a branch
         takes) into node `index` at `positions`, with validity; whether
         any is null."""
         var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=positions)
         var lane = self.lanes[index]
-        if lane == _LANE_BOOL:
+        if lane == _LANE_STRING:
+            # A string branch is read where it is (a column's vector, a
+            # constant, a computed string): its string_t are copied.
+            var entries = self._entries(child, rows, count, 1)
+            var data = self.formats[child].data
+            var o = Pointer[StringT, MutAnyOrigin](
+                unsafe_from_address=Int(self.lane_strings[index].unsafe_ptr())
+            )
+            var source = Pointer[StringT, MutAnyOrigin](
+                unsafe_from_address=data
+            )
+            var from_at = Pointer[UInt32, MutAnyOrigin](
+                unsafe_from_address=entries
+            )
+            for j in range(count):
+                var e = j if entries == 0 else Int(from_at[unsafe_offset=j])
+                o[unsafe_offset=Int(at[unsafe_offset=j])] = source[
+                    unsafe_offset=e
+                ]
+        elif lane == _LANE_BOOL:
             _scatter_values[DType.uint8](
                 Int(self.lane_bools[child].unsafe_ptr()),
                 Int(self.lane_bools[index].unsafe_ptr()),
