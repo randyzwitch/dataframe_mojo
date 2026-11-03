@@ -240,23 +240,30 @@ def assert_join_pairs(
     suffix: String = "_right",
 ) raises:
     """Check complete join cells for an independently transformed pair relation."""
-    var names = left.names.copy()
+    # A coalesced right join keeps the right keys among the right
+    # columns and drops the left ones, as Polars does.
+    var right_keys_kept = how == "right" and coalesce
+    var left_fields = List[String]()
+    for name in left.names:
+        if not (right_keys_kept and name in keys):
+            left_fields.append(name.copy())
+    var names = left_fields.copy()
     var right_fields = List[String]()
     if how != "semi" and how != "anti":
         for name in right.names:
             var is_key = False
             for key in keys:
                 is_key = is_key or key == name
-            if how != "cross" and coalesce and is_key:
+            if how != "cross" and coalesce and is_key and not right_keys_kept:
                 continue
             var collision = False
-            for existing in left.names:
+            for existing in left_fields:
                 collision = collision or existing == name
             names.append(name + suffix if collision else name.copy())
             right_fields.append(name.copy())
     assert_equal(actual.columns(), names)
     assert_equal(actual.height(), len(pairs))
-    for name in left.names:
+    for name in left_fields:
         var dtype = (
             DataType.INT64 if name
             == "i" else DataType.FLOAT64 if name
@@ -272,7 +279,7 @@ def assert_join_pairs(
             == "f" else DataType.STRING if name
             == "s" else DataType.BOOL
         )
-        assert_true(actual.column(names[len(left.names) + c]).dtype() == dtype)
+        assert_true(actual.column(names[len(left_fields) + c]).dtype() == dtype)
     # A join promises no row order: each expected pair takes one unused
     # output row whose cells all match it, its own position first.
     var used = List[Bool](length=len(pairs), fill=False)
@@ -329,22 +336,23 @@ def _assert_pair_row(
     names: List[String],
     right_fields: List[String],
 ) raises:
+    var left_count = len(names) - len(right_fields)
     for name in left.names:
         var is_key = False
         for key in keys:
             is_key = is_key or key == name
-        var cell = actual.item(index, name)
         if how == "right" and coalesce and is_key:
-            # A right join preserves its right input's keys, with left names.
-            assert_reference_cell(cell, right.rows[pair.right], name)
-        elif pair.left >= 0:
+            # A right join's keys are the right input's, under its names.
+            continue
+        var cell = actual.item(index, name)
+        if pair.left >= 0:
             assert_reference_cell(cell, left.rows[pair.left], name)
         elif coalesce and is_key:
             assert_reference_cell(cell, right.rows[pair.right], name)
         else:
             assert_true(cell.is_null())
     for c in range(len(right_fields)):
-        var cell = actual.item(index, names[len(left.names) + c])
+        var cell = actual.item(index, names[left_count + c])
         if pair.right >= 0:
             assert_reference_cell(cell, right.rows[pair.right], right_fields[c])
         else:
