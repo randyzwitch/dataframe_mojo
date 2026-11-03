@@ -121,6 +121,9 @@ from dataframe.vector.data_chunk import (
 )
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_VARCHAR,
+    physical_of,
     CONSTANT_VECTOR,
     DICTIONARY_VECTOR,
     FLAT_VECTOR,
@@ -977,6 +980,21 @@ struct _Columns(Copyable, Movable):
         chunk.count = count
 
 
+comptime _RAW_STORAGE = [
+    DType.int64,
+    DType.float64,
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.float32,
+    DType.int128,
+]
+
+
 def _append_rows(mut listed: List[UInt32], v: Vector, count: Int):
     """The at-rest rows of a vector over a source, appended."""
     # Grown geometrically: an exact reservation per chunk copied the
@@ -1000,6 +1018,9 @@ comptime _COLLECT_NONE = 0
 comptime _COLLECT_RANGE = 1
 comptime _COLLECT_ROWS = 2
 comptime _COLLECT_VALUES = 3
+# Values a step computed, as raw fixed-width bytes and a packed validity
+# bitmap, appended a chunk at a time and made a column once.
+comptime _COLLECT_RAW = 4
 
 
 struct _Collector(Movable):
@@ -1014,6 +1035,9 @@ struct _Collector(Movable):
     var starts: List[Int]
     var rows: List[List[UInt32]]
     var parts: List[Series]
+    var raw: List[List[UInt8]]
+    var raw_bits: List[List[UInt8]]
+    var raw_physical: List[Int]
     var height: Int
 
     def __init__(out self, schema: DataFrame):
@@ -1026,6 +1050,9 @@ struct _Collector(Movable):
         self.parts = List[Series](capacity=width)
         for c in range(width):
             self.parts.append(schema._columns[c].copy())
+        self.raw = List[List[UInt8]](length=width, fill=List[UInt8]())
+        self.raw_bits = List[List[UInt8]](length=width, fill=List[UInt8]())
+        self.raw_physical = List[Int](length=width, fill=0)
         self.height = 0
 
     def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
@@ -1061,7 +1088,27 @@ struct _Collector(Movable):
                     self.modes[c] = _COLLECT_ROWS
                 _append_rows(self.rows[c], v, count)
                 continue
-            if mode != _COLLECT_VALUES:
+            var size = physical_size(v.physical)
+            var fixed = (
+                v.source < 0
+                and v.vector_type != SEQUENCE_VECTOR
+                and v.physical != PHYSICAL_BOOL
+                and v.physical != PHYSICAL_VARCHAR
+                and size > 0
+            )
+            if fixed and (
+                (mode == _COLLECT_NONE and self.height == 0)
+                or (mode == _COLLECT_RAW and self.raw_physical[c] == v.physical)
+            ):
+                if mode == _COLLECT_NONE:
+                    self.modes[c] = _COLLECT_RAW
+                    self.raw_physical[c] = v.physical
+                self._append_raw(c, chunk, arena, count, size)
+                continue
+            if mode == _COLLECT_RAW:
+                self.parts[c] = self._raw_series(c)
+                self.modes[c] = _COLLECT_VALUES
+            elif mode != _COLLECT_VALUES:
                 self.parts[c] = self._so_far(c, arena)
                 self.modes[c] = _COLLECT_VALUES
             var piece = to_series(
@@ -1073,6 +1120,75 @@ struct _Collector(Movable):
             )
             self.parts[c]._append_series(piece)
         self.height += count
+
+    def _append_raw(
+        mut self,
+        c: Int,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        count: Int,
+        size: Int,
+    ) raises:
+        var format = chunk.unified(c, arena)
+        ref bytes = self.raw[c]
+        var start = len(bytes)
+        if bytes.capacity() < start + size * count:
+            bytes.reserve(max(start + size * count, 2 * bytes.capacity()))
+        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+        if not format.sel.is_set():
+            bytes.extend(
+                Span[UInt8, MutAnyOrigin](unsafe_ptr=data, length=size * count)
+            )
+        else:
+            for i in range(count):
+                var at = size * format.sel.get_index_unsafe(i)
+                bytes.extend(
+                    Span[UInt8, MutAnyOrigin](
+                        unsafe_ptr=data.unsafe_offset(at), length=size
+                    )
+                )
+        if format.validity.all_valid() and len(self.raw_bits[c]) == 0:
+            return
+        ref bits = self.raw_bits[c]
+        if len(bits) == 0:
+            # The rows before were all valid.
+            bits = List[UInt8](length=(self.height + 7) // 8, fill=255)
+        var row = self.height
+        for i in range(count):
+            var valid = format.validity.row_is_valid(format.sel.get_index(i))
+            var r = row + i
+            if r >> 3 >= len(bits):
+                bits.append(255)
+            if not valid:
+                bits[r >> 3] &= ~(UInt8(1) << UInt8(r & 7))
+
+    def _raw_series(self, c: Int) raises -> Series:
+        """Column `c`'s raw values as a column of its schema type."""
+        ref bytes = self.raw[c]
+        var physical = self.raw_physical[c]
+        var name = self.schema._columns[c].name()
+        var size = physical_size(physical)
+        var n = len(bytes) // size if size > 0 else 0
+        var result = self.schema._columns[c].copy()
+        comptime for k in range(len(_RAW_STORAGE)):
+            comptime D = _RAW_STORAGE[k]
+            if physical == physical_of[D]():
+                var values = List[Scalar[D]](unsafe_uninit_length=n)
+                unsafe_memcpy(
+                    dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    src=bytes.unsafe_ptr(),
+                    count=size * n,
+                )
+                var bits = self.raw_bits[c].copy()
+                if len(bits) > 0:
+                    while len(bits) < (n + 7) // 8:
+                        bits.append(255)
+                var column = Column[Scalar[D]](values=values^, bits=bits^)
+                result = Series(name, column^)
+        var dtype = self.schema._columns[c].dtype()
+        if result.dtype() != dtype:
+            result = result.with_dtype(dtype)
+        return result^
 
     def _so_far(self, c: Int, arena: ColumnArena) raises -> Series:
         """Column `c`'s rows collected so far, as values."""
@@ -1103,6 +1219,10 @@ struct _Collector(Movable):
             if mode == _COLLECT_RANGE:
                 result.handles.append(self.handles[c])
                 result.starts.append(self.starts[c])
+                result.lists.append(-1)
+            elif mode == _COLLECT_RAW:
+                result.handles.append(arena.add(self._raw_series(c)))
+                result.starts.append(0)
                 result.lists.append(-1)
             elif mode == _COLLECT_ROWS:
                 result.handles.append(self.handles[c])
