@@ -315,6 +315,7 @@ struct VectorExpression(Copyable, Movable):
     var whole: List[Bool]
     var formats: List[UnifiedVectorFormat]
     var by_chunk_row: List[Bool]
+    var ready: Bool
     # IN lists, per node: integer values, or string_t over `held`.
     var member_ints: List[List[Int64]]
     # WHEN nodes: the computed rows each branch takes and their chunk rows
@@ -361,11 +362,19 @@ struct VectorExpression(Copyable, Movable):
         self.member_strings = List[List[StringT]](
             length=n, fill=List[StringT]()
         )
-        self.composed = List[UInt32](length=2 * STANDARD_VECTOR_SIZE, fill=0)
+        self.composed = List[UInt32]()
         self.scratch = DataChunk(n)
         self._plan(self.root)
         self._narrow_decimals()
-        # Buffers for every node computed in lanes or read in one.
+        # Lane buffers are made by each worker's copy when it first
+        # evaluates (`_allocate`): the compiled template stays small to copy.
+        self.ready = False
+
+    def _allocate(mut self):
+        """The buffers every node computed in lanes or read in one writes,
+        constants filled in (DuckDB's ExpressionState intermediates)."""
+        var n = len(self.kinds)
+        self.composed = List[UInt32](length=2 * STANDARD_VECTOR_SIZE, fill=0)
         for i in range(n):
             var kind = self.kinds[i]
             if kind == _KIND_UNUSED:
@@ -394,6 +403,11 @@ struct VectorExpression(Copyable, Movable):
                 if not self.constant_valid[i]:
                     for k in range(STANDARD_VECTOR_SIZE):
                         self.valid[i][k] = 0
+            if self.bound.expr._nodes[i].op == WHEN:
+                self.when_rows[i] = List[UInt32](
+                    length=4 * STANDARD_VECTOR_SIZE, fill=0
+                )
+        self.ready = True
 
     # --- compilation -----------------------------------------------------
 
@@ -442,10 +456,7 @@ struct VectorExpression(Copyable, Movable):
                 self._plan(node.right)
             if node.extra >= 0:
                 self._plan(node.extra)
-            if node.op == WHEN:
-                self.when_rows[index] = List[UInt32](
-                    length=4 * STANDARD_VECTOR_SIZE, fill=0
-                )
+
             # Children read in a lane they cannot be read in compute
             # elsewhere: a comparison of a string read through the
             # at-rest evaluator is still a string vector.
@@ -679,6 +690,8 @@ struct VectorExpression(Copyable, Movable):
     ) raises:
         """Compute every node for the `count` chunk rows `rows` selects
         (every row when unset), into the node buffers, children first."""
+        if not self.ready:
+            self._allocate()
         self.scratch.reset()
         self._evaluate(self.root, input, arena, rows, count)
 
