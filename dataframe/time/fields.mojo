@@ -1,8 +1,8 @@
 """Typed temporal field projections with packed validity and no row dispatch."""
-from .calendar import civil_from_days
+from dataframe.time.calendar import civil_from_days
 from dataframe.storage.column import Column, _copy_validity
-from .dtype import DataType
-from .expr import (
+from dataframe.dtype import DataType
+from dataframe.expr import (
     DT_YEAR,
     DT_MONTH,
     DT_DAY,
@@ -13,7 +13,7 @@ from .expr import (
     DT_WEEKDAY,
     DT_QUARTER,
 )
-from .series import Series
+from dataframe.series import Series
 
 
 def _fields[

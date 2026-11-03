@@ -4,7 +4,7 @@
 # contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
-from dataframe.gather import (
+from dataframe.kernels.gather import (
     take_sorted_chunked,
     _take_sorted_chunked_partitioned,
 )

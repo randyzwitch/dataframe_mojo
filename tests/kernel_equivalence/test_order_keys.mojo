@@ -4,8 +4,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
-from dataframe.string_column import StringColumn
-from dataframe.hashing import (
+from dataframe.storage.string import StringColumn
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
     column_codes,

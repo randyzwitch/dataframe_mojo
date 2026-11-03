@@ -9,7 +9,7 @@ from dataframe import Column, Series
 from dataframe.storage.facts import _BufferFacts
 from dataframe.parallel import Job, Pool, run_jobs
 from dataframe.sorted_range import _ascending_cached
-from dataframe.join_hash import int64_progression
+from dataframe.kernels.join_hash import int64_progression
 from dataframe.pipeline import _fill_zones, _zoned_bounds
 from tests.support.lifecycle_jobs import WorkerSetting
 

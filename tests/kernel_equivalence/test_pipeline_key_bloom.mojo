@@ -17,7 +17,11 @@ from dataframe import (
     Series,
     col,
 )
-from dataframe.runtime_filter import KeyBloom, bloom_blocks_for, bloom_mask
+from dataframe.kernels.runtime_filter import (
+    KeyBloom,
+    bloom_blocks_for,
+    bloom_mask,
+)
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,

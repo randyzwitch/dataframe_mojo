@@ -3,7 +3,7 @@ from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from std.ffi import external_call
 from std.sys import CompilationTarget
 from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page
-from dataframe.json_value import JsonValue
+from dataframe.json.value import JsonValue
 from tests.tooling.suite_policy import (
     SuitePolicy,
     ExpectedFailure,

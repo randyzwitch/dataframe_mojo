@@ -17,7 +17,7 @@ not supported.
 """
 from std.os import getenv
 
-from .calendar import (
+from dataframe.time.calendar import (
     civil_from_days,
     days_from_civil,
     days_in_month,

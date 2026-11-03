@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.categorical import decode
 from dataframe.dtype import CategoricalDictionary
-from dataframe.string_column import StringCodes
+from dataframe.storage.string import StringCodes
 
 
 def _dictionary() -> CategoricalDictionary:

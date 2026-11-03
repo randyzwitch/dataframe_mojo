@@ -20,7 +20,7 @@ from dataframe import (
     StringColumn,
 )
 from dataframe.categorical import decode_contiguous, encode
-from dataframe.string_column import StringCodes
+from dataframe.storage.string import StringCodes
 from dataframe.value import AnyValue
 
 

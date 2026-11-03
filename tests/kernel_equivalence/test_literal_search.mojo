@@ -5,7 +5,7 @@ scalar tail."""
 # contract-group: kernel.regex
 from std.testing import assert_equal
 
-from dataframe.string_bytes import _find_bytes
+from dataframe.text.bytes import _find_bytes
 
 
 def _naive(hay: List[UInt8], needle: List[UInt8], start: Int) -> Int:

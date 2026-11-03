@@ -12,8 +12,8 @@ from dataframe.text.bytes import _Bytes
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.series import Series
 from dataframe.text.parse import parse_integer, parse_float64
-from dataframe.temporal import parse_in, zone_of, has_offset
-from dataframe.timezone import TimeZone
+from dataframe.time.temporal import parse_in, zone_of, has_offset
+from dataframe.time.timezone import TimeZone
 from dataframe.decimal import check_precision, pow10
 from dataframe.text.byte_encoding import decode_bytes as _decode_row
 from dataframe.json.wire import parse_duration

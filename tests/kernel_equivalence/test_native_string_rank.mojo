@@ -2,7 +2,7 @@
 # contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, DataType, Series, StringColumn, col
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.window import _rank_strings, _rank
 from tests.support.selection_types_reference import (
     selection_column,

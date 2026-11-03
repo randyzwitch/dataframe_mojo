@@ -1,5 +1,5 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
-from .time_windows import (
+from dataframe.time.windows import (
     positive_period,
     closed_sides,
     negate_period,
@@ -10,7 +10,7 @@ from .time_windows import (
     search_time,
     rolling_bounds,
 )
-from .temporal import zone_of, parse_interval
+from dataframe.time.temporal import zone_of, parse_interval
 from .window import partitions as window_partitions
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import pow10

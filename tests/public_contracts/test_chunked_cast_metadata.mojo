@@ -15,9 +15,9 @@ from dataframe import (
     col,
 )
 from dataframe.dtype import NUMERIC_DTYPES, CategoricalDictionary
-from dataframe.geometry import from_wkb
+from dataframe.geo.geometry import from_wkb
 from dataframe.kernels.cast import cast_series
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_compare import assert_frame
 from tests.support.spatial_reference import point
 

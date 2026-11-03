@@ -4,7 +4,7 @@ grouping by string copies of the keys, which takes the hashed routes."""
 from std.testing import assert_equal, assert_false, assert_true
 from dataframe import AnyValue, Column, DataFrame, DataType, Expr, Series, col
 from dataframe.categorical import encode
-from dataframe.perfect_aggregate import perfect_layout
+from dataframe.aggregation.dense import perfect_layout
 
 
 def _frame(n: Int, span: Int, chunked: Bool) raises -> DataFrame:

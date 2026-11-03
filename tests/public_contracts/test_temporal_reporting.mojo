@@ -18,7 +18,7 @@ from dataframe import (
     duration,
     business_day_count,
 )
-from dataframe.temporal import parse, format
+from dataframe.time.temporal import parse, format
 from tests.public_contracts.test_temporal import tagged, assert_ticks
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.temporal_reference import civil_days
