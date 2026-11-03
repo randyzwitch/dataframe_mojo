@@ -770,9 +770,10 @@ def _string_prefixes(
     cursors: Pointer[Int, MutAnyOrigin],
     limits: Pointer[Int, MutAnyOrigin],
 ):
-    """String rows encoded as `_encode_strings` does, but only the bytes
-    before each row's limit (its first key word's end); a cursor past the
-    limit stops there."""
+    """String rows encoded as `_encode_strings` does, from each value's
+    length and first four bytes alone (an Arrow view holds them inline, as
+    DuckDB's string_t its prefix): a longer value's remaining bytes are
+    left zero, a lower bound, and its row stops there."""
     var rows = _Bytes(column)
     var nulls = c.nulls and column.null_count() > 0
     var flip = UInt8(0xFF) if c.descending else UInt8(0)
@@ -788,16 +789,20 @@ def _string_prefixes(
             cursors[unsafe_offset=i] = at + 1
             continue
         out_bytes[] = c.valid_byte
-        var bytes = rows.get(row)
-        var n = len(bytes)
+        var head = rows.head(row)
+        var n = Int(head & 0xFFFFFFFF)
         var room = limit - at - 1
-        for j in range(min(n, room)):
+        var shown = min(n, 4)
+        for j in range(min(shown, room)):
             out_bytes[unsafe_offset=1 + j] = (
-                bytes.unsafe_ptr()[unsafe_offset=j] + 1
+                UInt8((head >> UInt64(32 + 8 * j)) & 0xFF) + 1
             ) ^ flip
-        if n < room:
-            out_bytes[unsafe_offset=1 + n] = flip
-        cursors[unsafe_offset=i] = min(at + n + 2, limit)
+        if n < 4:
+            if n < room:
+                out_bytes[unsafe_offset=1 + n] = flip
+            cursors[unsafe_offset=i] = min(at + n + 2, limit)
+        else:
+            cursors[unsafe_offset=i] = limit
 
 
 def key_prefixes(
