@@ -1,6 +1,6 @@
 """Arithmetic and casts after a join or a filter are computed for the kept
-rows alone, each column read through the selection where it is
-(`selected_expressions`). Every result equals the eager filtered frame's:
+rows alone, each column read through its vector's selection where it is
+(`vector/expression.mojo`). Every result equals the eager filtered frame's:
 decimal products, sums and differences at different scales, decimal
 rescales up and down and to Float64, integer to decimal and Float64 casts,
 Float64 and Int64 arithmetic, nullable columns and a null constant, after a
@@ -98,9 +98,7 @@ def selected(source: DataFrame, last: Int, join: Bool) raises -> DataFrame:
     else:
         plan = plan.filter(col("day") <= lit(Int64(last)))
     var piped = plan.with_columns(computed()).sort("id").collect()
-    var took = (
-        "dataframe-path: pipeline.with_columns_selected\n" in observed.text()
-    )
+    var took = "dataframe-path: pipeline.vector_projection\n" in observed.text()
     _ = observed^
     _ = trace^
     assert_true(took, "the expressions were not computed through the rows")
@@ -199,7 +197,7 @@ def test_a_projection_keeps_the_selection() raises:
             .sort("id")
             .collect()
         )
-        var took = "dataframe-path: pipeline.select_selected\n" in (
+        var took = "dataframe-path: pipeline.vector_projection\n" in (
             observed.text()
         )
         _ = observed^

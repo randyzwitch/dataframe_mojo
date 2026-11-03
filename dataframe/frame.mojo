@@ -1924,7 +1924,9 @@ struct DataFrame(Copyable, Sized, Writable):
         build on either side. Sort the result when an order matters.
         Output: left columns, then right non-key columns, with suffix on
         names that collide with left names. Key columns keep left names and
-        take whichever side is present. With coalesce=False (inner, left,
+        take whichever side is present; a right join instead keeps the right
+        keys, among the right columns after the left's non-key columns, as
+        Polars does. With coalesce=False (inner, left,
         right and full joins), the right keys are kept as columns of their
         own instead, after the left columns and suffixed where their names
         collide, and the left keys keep the left side's values: a left
