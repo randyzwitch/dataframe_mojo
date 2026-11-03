@@ -366,6 +366,28 @@ def test_a_known_small_left_of_a_semi_join_hashes_the_left() raises:
             )
 
 
+def test_a_large_left_of_a_semi_join_against_a_large_right_streams() raises:
+    # A left more than a quarter of a large right (524,288 rows, the
+    # size at which the join reads both sides) keeps streaming through
+    # the right's index. Two tables used to restart the stream from the
+    # same two tables, deciding again until the stack overflowed.
+    var right_keys = List[Int64]()
+    for row in range(524_288):
+        right_keys.append(Int64(2 * row))
+    var left_keys = List[Int64]()
+    for row in range(200_000):
+        left_keys.append(Int64(row))
+    var right = DataFrame([Series("k", Column[Int64](right_keys^))]).lazy()
+    var left = DataFrame([Series("k", Column[Int64](left_keys^))]).lazy()
+    for how in ["semi", "anti"]:
+        var rows = left.join(right, on=["k"], how=how).collect()
+        assert_equal(rows.height(), 100_000)
+        var odd = 0
+        for r in range(rows.height()):
+            odd += Int(rows.item(r, "k").int64() % 2)
+        assert_equal(odd, 0 if how == "semi" else 100_000)
+
+
 def test_a_progression_right_side_is_kept_when_the_left_is_smaller() raises:
     """A right side whose one key is a progression builds no hash table:
     the left looks its rows up by position. The smaller-left check keeps
