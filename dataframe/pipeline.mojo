@@ -124,8 +124,12 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
+from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_VARCHAR,
+    physical_of,
     CONSTANT_VECTOR,
     DICTIONARY_VECTOR,
     FLAT_VECTOR,
@@ -806,6 +810,15 @@ struct _Columns(Copyable, Movable):
             result.lists.append(made)
         return result^
 
+    def _picked(self, list: Int) -> List[Int]:
+        ref rows = self.row_lists[list]
+        var picked = List[Int](unsafe_uninit_length=self.height)
+        var out = picked.unsafe_ptr()
+        var at = rows.unsafe_ptr()
+        for k in range(self.height):
+            out[unsafe_offset=k] = Int(at[unsafe_offset=k])
+        return picked^
+
     def series(
         self, arena: ColumnArena, c: Int, var name: String
     ) raises -> Series:
@@ -834,9 +847,23 @@ struct _Columns(Copyable, Movable):
         """The named columns as a frame of `height` rows (each gathered
         through its rows): the adapter for operators that read frames."""
         var columns = List[Series](capacity=len(names))
+        # Each row list as gather indices once, for every column reading it.
+        var picked = List[Optional[List[Int]]](
+            length=len(self.row_lists), fill=None
+        )
         for name in names:
             var c = schema._index(name)
-            columns.append(self.series(arena, c, name))
+            var l = self.lists[c]
+            if l < 0:
+                columns.append(self.series(arena, c, name))
+                continue
+            if not picked[l]:
+                picked[l] = self._picked(l)
+            columns.append(
+                arena.columns[self.handles[c]]
+                .take(picked[l].value())
+                .renamed(name)
+            )
         return DataFrame(columns^, height=self.height)
 
     def whole(self, arena: ColumnArena, schema: DataFrame) raises -> DataFrame:
@@ -897,6 +924,21 @@ struct _Columns(Copyable, Movable):
         chunk.count = count
 
 
+comptime _RAW_STORAGE = [
+    DType.int64,
+    DType.float64,
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.float32,
+    DType.int128,
+]
+
+
 def _append_rows(mut listed: List[UInt32], v: Vector, count: Int):
     """The at-rest rows of a vector over a source, appended."""
     # Grown geometrically: an exact reservation per chunk copied the
@@ -920,6 +962,9 @@ comptime _COLLECT_NONE = 0
 comptime _COLLECT_RANGE = 1
 comptime _COLLECT_ROWS = 2
 comptime _COLLECT_VALUES = 3
+# Values a step computed, as raw fixed-width bytes and a packed validity
+# bitmap, appended a chunk at a time and made a column once.
+comptime _COLLECT_RAW = 4
 
 
 struct _Collector(Movable):
@@ -934,6 +979,9 @@ struct _Collector(Movable):
     var starts: List[Int]
     var rows: List[List[UInt32]]
     var parts: List[Series]
+    var raw: List[List[UInt8]]
+    var raw_bits: List[List[UInt8]]
+    var raw_physical: List[Int]
     var height: Int
 
     def __init__(out self, schema: DataFrame):
@@ -946,9 +994,12 @@ struct _Collector(Movable):
         self.parts = List[Series](capacity=width)
         for c in range(width):
             self.parts.append(schema._columns[c].copy())
+        self.raw = List[List[UInt8]](length=width, fill=List[UInt8]())
+        self.raw_bits = List[List[UInt8]](length=width, fill=List[UInt8]())
+        self.raw_physical = List[Int](length=width, fill=0)
         self.height = 0
 
-    def append(mut self, mut chunk: DataChunk, arena: ColumnArena) raises:
+    def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
         var count = chunk.count
         for c in range(len(self.modes)):
             var v = chunk.data[c]
@@ -981,7 +1032,27 @@ struct _Collector(Movable):
                     self.modes[c] = _COLLECT_ROWS
                 _append_rows(self.rows[c], v, count)
                 continue
-            if mode != _COLLECT_VALUES:
+            var size = physical_size(v.physical)
+            var fixed = (
+                v.source < 0
+                and v.vector_type != SEQUENCE_VECTOR
+                and v.physical != PHYSICAL_BOOL
+                and v.physical != PHYSICAL_VARCHAR
+                and size > 0
+            )
+            if fixed and (
+                (mode == _COLLECT_NONE and self.height == 0)
+                or (mode == _COLLECT_RAW and self.raw_physical[c] == v.physical)
+            ):
+                if mode == _COLLECT_NONE:
+                    self.modes[c] = _COLLECT_RAW
+                    self.raw_physical[c] = v.physical
+                self._append_raw(c, chunk, arena, count, size)
+                continue
+            if mode == _COLLECT_RAW:
+                self.parts[c] = self._raw_series(c)
+                self.modes[c] = _COLLECT_VALUES
+            elif mode != _COLLECT_VALUES:
                 self.parts[c] = self._so_far(c, arena)
                 self.modes[c] = _COLLECT_VALUES
             var piece = to_series(
@@ -993,6 +1064,75 @@ struct _Collector(Movable):
             )
             self.parts[c]._append_series(piece)
         self.height += count
+
+    def _append_raw(
+        mut self,
+        c: Int,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        count: Int,
+        size: Int,
+    ) raises:
+        var format = chunk.unified(c, arena)
+        ref bytes = self.raw[c]
+        var start = len(bytes)
+        if bytes.capacity() < start + size * count:
+            bytes.reserve(max(start + size * count, 2 * bytes.capacity()))
+        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+        if not format.sel.is_set():
+            bytes.extend(
+                Span[UInt8, MutAnyOrigin](unsafe_ptr=data, length=size * count)
+            )
+        else:
+            for i in range(count):
+                var at = size * format.sel.get_index_unsafe(i)
+                bytes.extend(
+                    Span[UInt8, MutAnyOrigin](
+                        unsafe_ptr=data.unsafe_offset(at), length=size
+                    )
+                )
+        if format.validity.all_valid() and len(self.raw_bits[c]) == 0:
+            return
+        ref bits = self.raw_bits[c]
+        if len(bits) == 0:
+            # The rows before were all valid.
+            bits = List[UInt8](length=(self.height + 7) // 8, fill=255)
+        var row = self.height
+        for i in range(count):
+            var valid = format.validity.row_is_valid(format.sel.get_index(i))
+            var r = row + i
+            if r >> 3 >= len(bits):
+                bits.append(255)
+            if not valid:
+                bits[r >> 3] &= ~(UInt8(1) << UInt8(r & 7))
+
+    def _raw_series(self, c: Int) raises -> Series:
+        """Column `c`'s raw values as a column of its schema type."""
+        ref bytes = self.raw[c]
+        var physical = self.raw_physical[c]
+        var name = self.schema._columns[c].name()
+        var size = physical_size(physical)
+        var n = len(bytes) // size if size > 0 else 0
+        var result = self.schema._columns[c].copy()
+        comptime for k in range(len(_RAW_STORAGE)):
+            comptime D = _RAW_STORAGE[k]
+            if physical == physical_of[D]():
+                var values = List[Scalar[D]](unsafe_uninit_length=n)
+                unsafe_memcpy(
+                    dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    src=bytes.unsafe_ptr(),
+                    count=size * n,
+                )
+                var bits = self.raw_bits[c].copy()
+                if len(bits) > 0:
+                    while len(bits) < (n + 7) // 8:
+                        bits.append(255)
+                var column = Column[Scalar[D]](values=values^, bits=bits^)
+                result = Series(name, column^)
+        var dtype = self.schema._columns[c].dtype()
+        if result.dtype() != dtype:
+            result = result.with_dtype(dtype)
+        return result^
 
     def _so_far(self, c: Int, arena: ColumnArena) raises -> Series:
         """Column `c`'s rows collected so far, as values."""
@@ -1024,13 +1164,34 @@ struct _Collector(Movable):
                 result.handles.append(self.handles[c])
                 result.starts.append(self.starts[c])
                 result.lists.append(-1)
+            elif mode == _COLLECT_RAW:
+                result.handles.append(arena.add(self._raw_series(c)))
+                result.starts.append(0)
+                result.lists.append(-1)
             elif mode == _COLLECT_ROWS:
                 result.handles.append(self.handles[c])
                 result.starts.append(0)
-                result.lists.append(len(result.row_lists))
                 var listed = List[UInt32]()
                 swap(listed, self.rows[c])
-                result.row_lists.append(listed^)
+                # Columns a filter sliced alike share one row list (one
+                # selection vector for the chunk, as DuckDB's slice).
+                var shared = -1
+                for l in range(len(result.row_lists)):
+                    if len(result.row_lists[l]) == len(listed) and (
+                        external_call["memcmp", Int32](
+                            Int(result.row_lists[l].unsafe_ptr()),
+                            Int(listed.unsafe_ptr()),
+                            4 * len(listed),
+                        )
+                        == 0
+                    ):
+                        shared = l
+                        break
+                if shared >= 0:
+                    result.lists.append(shared)
+                else:
+                    result.lists.append(len(result.row_lists))
+                    result.row_lists.append(listed^)
             else:
                 result.handles.append(arena.add(self.parts[c]))
                 result.starts.append(0)
@@ -1052,11 +1213,14 @@ struct _VectorStep(Copyable, Movable):
     # reads (>= 0) or the expression computing it (-1 - expression).
     var outputs: List[Int]
     var output: DataChunk
+    # FILTER: the order the conjuncts run in (DuckDB's AdaptiveFilter).
+    var adaptive: AdaptiveFilter
 
     def __init__(
         out self, step: Step, input: DataFrame, output: DataFrame
     ) raises:
         self.kind = step.kind
+        self.adaptive = AdaptiveFilter(0, True)
         self.expressions = List[VectorExpression]()
         self.outputs = List[Int]()
         self.output = DataChunk()
@@ -1078,6 +1242,10 @@ struct _VectorStep(Copyable, Movable):
                 if compiled.root_dtype() != DataType.BOOL:
                     raise Error("Filter expression must return Boolean values")
                 self.expressions.append(compiled^)
+            var can_throw = False
+            for e in range(len(self.expressions)):
+                can_throw = can_throw or self.expressions[e].can_throw()
+            self.adaptive = AdaptiveFilter(len(self.expressions), can_throw)
             return
         trace_path("pipeline.vector_projection")
         if step.kind == STEP_DROP:
@@ -1108,7 +1276,9 @@ struct _VectorStep(Copyable, Movable):
         if self.kind == STEP_FILTER:
             var rows = SelectionVector()
             var count = input.count
-            for e in range(len(self.expressions)):
+            var start = self.adaptive.begin()
+            for p in range(len(self.expressions)):
+                var e = self.adaptive.permutation[p]
                 var target = self.output.new_selection()
                 count = self.expressions[e].select(
                     input, arena, rows, count, target
@@ -1116,6 +1286,7 @@ struct _VectorStep(Copyable, Movable):
                 rows = target
                 if count == 0:
                     break
+            self.adaptive.end(start)
             if count == input.count:
                 self.output.set_columns(input.column_count())
                 for c in range(input.column_count()):
