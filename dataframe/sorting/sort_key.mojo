@@ -160,7 +160,13 @@ struct SortKeyLayout(Copyable, Movable):
         descending: List[Bool],
         nulls_last: List[Bool],
         maintain_order: Bool,
+        *,
+        statistics: Bool = True,
     ) raises:
+        """`statistics=False` lays the key out from the column types alone,
+        for keys whose rows arrive later in chunks (`rebind`): a string
+        key's length is unknown, so the key is variable, and every column
+        may hold nulls."""
         if len(keys) == 0:
             raise Error("sort requires at least one column")
         if len(descending) != len(keys) or len(nulls_last) != len(keys):
@@ -181,10 +187,10 @@ struct SortKeyLayout(Copyable, Movable):
             if nulls_last[k]:
                 null_byte = _NULL_LAST_BYTE
                 valid_byte = _NULL_FIRST_BYTE
-            var nulls = column.null_count() > 0
+            var nulls = not statistics or column.null_count() > 0
             var longest = _longest(column) if (
                 encoding[0] == _ENC_VARCHAR or encoding[0] == _ENC_BLOB
-            ) else 0
+            ) and statistics else 0
             columns.append(
                 SortKeyColumn(
                     column^,
@@ -240,7 +246,11 @@ struct SortKeyLayout(Copyable, Movable):
                     sort_width += 1 + c.width
             else:
                 all_constant = False
-                if c.encoding == _ENC_VARCHAR and sort_width >= 0:
+                if (
+                    c.encoding == _ENC_VARCHAR
+                    and sort_width >= 0
+                    and statistics
+                ):
                     sort_width += 1 + c.max_length + 1
                 else:
                     sort_width = -1
@@ -269,6 +279,19 @@ struct SortKeyLayout(Copyable, Movable):
 
     def record_words(self) -> Int:
         return 4 if self.variable else self.words + 1
+
+    def rebind(mut self, keys: List[Series]) raises:
+        """The same key over other rows: `keys` are the key columns of a
+        new chunk, of the types the layout was made for."""
+        if len(keys) == 0:
+            self.rows = 0
+            return
+        self.rows = len(keys[0])
+        for k in range(len(keys)):
+            var column = keys[k].copy()
+            if column.dtype().is_categorical():
+                column = sort_ranks(column)
+            self.columns[k].series = column^
 
 
 @always_inline

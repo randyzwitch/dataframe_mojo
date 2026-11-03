@@ -1,4 +1,4 @@
-"""Streaming jobs, reduction state, and bounded batch helpers."""
+"""Streaming jobs and reduction state."""
 from dataframe.planning.cost.eligibility import _pipeline_steps
 
 from dataframe.categorical import (
@@ -39,8 +39,6 @@ from dataframe.pipeline import (
     STEP_SELECT,
     STEP_WITH_COLUMNS,
     Step,
-    _BOUND_NONE,
-    _TopBound,
 )
 from dataframe.planning.model import (
     DROP,
@@ -231,41 +229,6 @@ def _merge_parts(
         pending.append(carried.pop(0))
 
 
-def _bounded_batch(
-    mut frame: DataFrame, rows: List[Int], first: PlanNode
-) raises -> Bool:
-    """Narrow `frame` to the bounded `rows` of a top-k; when the first
-    operation is a row-local filter, apply it too, reading only its own
-    columns at those rows, and return True (the filter is done). The full
-    rows are copied once, for the rows that pass both: a batch keeps every
-    column, and copying all of them for rows the filter then drops cost
-    more than the bound saved (ClickBench q23 reads ~100 columns)."""
-    if first.kind == FILTER and _row_local(first.exprs):
-        var reads = _references(first.exprs[0])
-        if reads:
-            var names = reads.value().copy()
-            var picked = frame.select(names).take(rows)
-            var positions = List[Int64](capacity=len(rows))
-            for r in rows:
-                positions.append(Int64(r))
-            var marker = String("\x00bounded_row")
-            picked = picked.with_column(
-                Series(marker, Column[Int64](positions^))
-            )
-            var kept = picked.filter(first.exprs[0]).column(marker)
-            if kept.is_chunked():
-                kept = kept.rechunk()
-            ref column = kept._data[Column[Int64]]
-            var final = List[Int](capacity=len(column))
-            for i in range(len(column)):
-                final.append(Int(column._get(i)))
-            frame = frame.take(final)
-            return True
-    if 8 * len(rows) <= frame.height():
-        frame = frame.take(rows)
-    return False
-
-
 struct _StreamJob(Job):
     var decode: List[_DecodeJob]
     var json_decode: List[_JsonDecodeJob]
@@ -302,10 +265,6 @@ struct _StreamJob(Job):
     # (see the stream's `held_states`).
     var split_groups: Int
     var projection: List[String]
-    # A streamed top-k's running bound on its first sort key (DuckDB's
-    # Top-N dynamic filter): rows that cannot beat it are dropped before
-    # any operation runs. See `_TopBound`.
-    var bound: _TopBound
 
     def __init__(
         out self,
@@ -335,7 +294,6 @@ struct _StreamJob(Job):
         self.replay = False
         self.split_groups = 0
         self.projection = List[String]()
-        self.bound = _TopBound()
 
     def _shows_many(self) raises -> Bool:
         """Whether this batch's own rows show a many-group stream, so it
@@ -374,19 +332,7 @@ struct _StreamJob(Job):
         if self.counting:
             self.counts = List[Int](length=2 * len(self.operations), fill=0)
             self.times = List[Int](length=len(self.operations) + 1, fill=0)
-        var start = 0
-        if self.bound.kind != _BOUND_NONE and len(self.operations) > 0:
-            var bounded = self.bound.rows(self.frame)
-            if bounded:
-                var height = self.frame.height()
-                if _bounded_batch(
-                    self.frame, bounded.value(), self.operations[0]
-                ):
-                    start = 1
-                    if self.counting:
-                        self.counts[0] = height
-                        self.counts[1] = self.frame.height()
-        var k = start
+        var k = 0
         while k < len(self.operations):
             var began = 0
             if self.counting:
@@ -554,5 +500,6 @@ def _apply_operation(
                 List[Bool](node.sort_options()[n:]),
                 node.sort_limit(),
                 threads=1,
+                maintain_order=node.maintain_order,
             )
         )
