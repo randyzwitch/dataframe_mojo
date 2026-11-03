@@ -27,7 +27,9 @@ from dataframe.storage.statistics import (
     ROW_GROUP_VECTORS,
     STATISTICS_VECTOR_SIZE,
 )
+from dataframe.storage.column import Column
 from dataframe.table_filter import (
+    DYNAMIC_FILTER,
     TableFilter,
     TableFilterSet,
     check_statistics,
@@ -227,19 +229,90 @@ def prune_scan(
     return ScanPruning(ranges^, always^)
 
 
+struct ScanFilterInfo(Copyable, Movable):
+    """A scan's table filters with their answers per vector, found once
+    (`ScanFilterInfo`): the chunk loop asks `skip` for each vector it
+    is about to read (`CheckZonemapSegments`). Dynamic filters are
+    checked anew on every call, as the operator that sets them tightens
+    them while the scan runs (a TopN boundary)."""
+
+    var filters: TableFilterSet
+    var columns: List[Series]
+    var segments: List[_Segments]
+
+    def __init__(
+        out self, filters: TableFilterSet, columns: List[Series]
+    ) raises:
+        self.filters = filters.copy()
+        self.columns = List[Series]()
+        self.segments = List[_Segments]()
+        for filter in filters.filters:
+            var column = Optional[Series]()
+            for c in columns:
+                if c.name() == filter.column:
+                    column = c.copy()
+                    break
+            var dynamic = (
+                filter.nodes[len(filter.nodes) - 1].kind == DYNAMIC_FILTER
+            )
+            if column and not dynamic:
+                self.segments.append(_filter_segments(filter, column.value()))
+            else:
+                self.segments.append(_Segments(List[Int](), List[Int](), False))
+            if column:
+                self.columns.append(column.take())
+            else:
+                self.columns.append(Series("", Column[Int64]([])))
+
+    def skip(self, start: Int, end: Int) raises -> Bool:
+        """Whether some filter's statistics rule out every row of table
+        rows [start, end)."""
+        for f in range(len(self.filters.filters)):
+            ref segments = self.segments[f]
+            if segments.known:
+                if _ruled_out(segments, start, end):
+                    return True
+                continue
+            ref filter = self.filters.filters[f]
+            if (
+                filter.nodes[len(filter.nodes) - 1].kind != DYNAMIC_FILTER
+                or len(self.columns[f]) < end
+            ):
+                continue
+            var now = _filter_segments(
+                filter, self.columns[f].slice(start, end - start)
+            )
+            if now.known and _ruled_out(now, 0, end - start):
+                return True
+        return False
+
+
+def _ruled_out(segments: _Segments, start: Int, end: Int) -> Bool:
+    """Whether every segment over rows [start, end) rules its rows out."""
+    var lo = 0
+    var hi = len(segments.ends)
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if segments.ends[mid] <= start:
+            lo = mid + 1
+        else:
+            hi = mid
+    var at = lo
+    while at < len(segments.ends):
+        if not _rules_out(segments.answers[at]):
+            return False
+        if segments.ends[at] >= end:
+            return True
+        at += 1
+    return False
+
+
 def zonemap_rows(
     filters: TableFilterSet, columns: List[Series], start: Int, end: Int
 ) raises -> Int:
-    """Whether the filters can keep a row of table rows [start, end) (a
-    vector or chunk of a scan): FILTER_ALWAYS_FALSE when the statistics of
-    some filter rule every row out, else NO_PRUNING_POSSIBLE. The scan's
-    chunk loop skips such a vector unread (`CheckZonemapSegments`), and
-    checks dynamic filters (a TopN boundary) here as they tighten."""
-    var window = List[Series](capacity=len(columns))
-    for c in columns:
-        window.append(c.slice(start, end - start))
-    var found = prune_scan(filters, window, end - start)
-    if found and len(found.value().ranges) == 0:
+    """FILTER_ALWAYS_FALSE when the filters' statistics rule out every row
+    of table rows [start, end), else NO_PRUNING_POSSIBLE."""
+    if ScanFilterInfo(filters, columns).skip(start, end):
         return FILTER_ALWAYS_FALSE
     return NO_PRUNING_POSSIBLE
 
