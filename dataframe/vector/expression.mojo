@@ -56,6 +56,7 @@ from dataframe.expr import (
     STR_CONTAINS,
     STR_ENDS_WITH,
     STR_IS_IN,
+    STR_LIKE,
     STR_STARTS_WITH,
     SUB,
     WHEN,
@@ -573,6 +574,10 @@ struct VectorExpression(Copyable, Movable):
                 and (
                     node.op != STR_CONTAINS
                     or self.bound.expr._nodes[index].integer == 0
+                )
+                and (
+                    node.op != STR_LIKE
+                    or Bool(_like_segments(self.bound.expr._nodes[index].text))
                 )
             )
         if node.op == WHEN:
@@ -1333,6 +1338,9 @@ struct VectorExpression(Copyable, Movable):
         var data = self.formats[left].data
         var n = needle.byte_length()
         var probe = Int(needle.unsafe_ptr())
+        var segments = List[String]()
+        if op == STR_LIKE:
+            segments = _like_segments(needle).value().copy()
         for k in range(count):
             var entry = data + 16 * (
                 k if entries == 0 else Int(at[unsafe_offset=k])
@@ -1344,7 +1352,9 @@ struct VectorExpression(Copyable, Movable):
             )
             var bytes = string_data(entry)
             var found = False
-            if n <= length:
+            if op == STR_LIKE:
+                found = _like_match(bytes, length, segments)
+            elif n <= length:
                 if op == STR_STARTS_WITH:
                     found = (
                         n == 0
@@ -1800,7 +1810,78 @@ struct VectorExpression(Copyable, Movable):
 
 
 def _is_string_predicate(op: Int) -> Bool:
-    return op == STR_STARTS_WITH or op == STR_ENDS_WITH or op == STR_CONTAINS
+    return (
+        op == STR_STARTS_WITH
+        or op == STR_ENDS_WITH
+        or op == STR_CONTAINS
+        or op == STR_LIKE
+    )
+
+
+def _like_segments(pattern: String) -> Optional[List[String]]:
+    """A LIKE pattern without '_' split at its '%' wildcards (the first and
+    last segment are anchored, empty when the pattern starts or ends with
+    '%'); None when it has a '_', which matches one character and is left
+    to the column kernels."""
+    var segments = List[String]()
+    var bytes = pattern.as_bytes()
+    var start = 0
+    for i in range(len(bytes)):
+        if bytes[i] == 95:
+            return None
+        if bytes[i] == 37:
+            segments.append(String(pattern[byte=start:i]))
+            start = i + 1
+    segments.append(String(pattern[byte = start : len(bytes)]))
+    return segments^
+
+
+def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
+    """Whether `length` bytes at `data` match LIKE segments (DuckDB's
+    LikeOperatorFunction over '%' only): the first anchored at the start,
+    the last at the end, the middle ones found in order between."""
+    var n = len(segments)
+    var head = segments[0].byte_length()
+    if n == 1:
+        return head == length and (
+            head == 0
+            or external_call["memcmp", Int32](
+                data, Int(segments[0].unsafe_ptr()), head
+            )
+            == 0
+        )
+    var tail = segments[n - 1].byte_length()
+    if head + tail > length:
+        return False
+    if head > 0 and (
+        external_call["memcmp", Int32](
+            data, Int(segments[0].unsafe_ptr()), head
+        )
+        != 0
+    ):
+        return False
+    if tail > 0 and (
+        external_call["memcmp", Int32](
+            data + length - tail, Int(segments[n - 1].unsafe_ptr()), tail
+        )
+        != 0
+    ):
+        return False
+    var at = head
+    var end = length - tail
+    for k in range(1, n - 1):
+        var size = segments[k].byte_length()
+        if size == 0:
+            continue
+        if at + size > end:
+            return False
+        var found = external_call["memmem", Int](
+            data + at, end - at, Int(segments[k].unsafe_ptr()), size
+        )
+        if found == 0:
+            return False
+        at = found - data + size
+    return True
 
 
 def _scatter_values[

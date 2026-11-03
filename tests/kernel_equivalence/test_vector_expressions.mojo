@@ -72,6 +72,9 @@ def predicates() raises -> List[Expr]:
         col("s").is_in(["k1", "a longer key 3", "absent"]),
         col("b").is_in([lit(Int32(1)), lit(Int32(4)), lit(Int32(16))])
         | col("a").is_in([lit(Int64(-50)), lit(Int64(7))]),
+        col("s").str().like("%key%2")
+        | col("s").str().like("k_")
+        | col("s").str().like("a%"),
         col("s").str().starts_with("a long")
         | col("s").str().ends_with("4")
         | col("s").str().contains("ey 1", literal=True),
