@@ -607,7 +607,7 @@ struct GroupBy(Copyable):
         # however many there are. Neither DuckDB nor Polars picks a route
         # by an estimate of the groups. The per-range routes below keep the
         # reductions the table has no state for.
-        if workers > 1 and self._table_supported(expressions):
+        if self._table_supported(expressions):
             var table = self._agg_table(expressions, workers)
             if table:
                 return _pack_struct_keys(table.value())
