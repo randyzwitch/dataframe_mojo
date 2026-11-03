@@ -9,7 +9,7 @@ filtering and projecting the frame eagerly."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Expr, Series, StringColumn
-from dataframe import col, lit, when
+from dataframe import col, concat_str, lit, when
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -113,6 +113,10 @@ def projections() raises -> List[Expr]:
         .then(lit("three"))
         .otherwise(col("s").str().slice(1, 1))
         .alias("ws"),
+        concat_str([col("s"), lit("-"), col("s").str().slice(0, 2)], "/").alias(
+            "ca"
+        ),
+        concat_str([col("s"), col("s")], "", ignore_nulls=True).alias("cb"),
         lit(Int64(7)).alias("y"),
         col("a").fill_null(lit(Int64(5))).abs().alias("fa"),
         col("a").fill_null(col("b").cast(DataType.INT64)).alias("fb"),

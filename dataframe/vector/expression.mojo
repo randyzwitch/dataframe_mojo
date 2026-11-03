@@ -62,6 +62,7 @@ from dataframe.expr import (
     NOT,
     OR,
     ROUND,
+    STR_CONCAT,
     STR_CONTAINS,
     STR_ENDS_WITH,
     STR_IS_IN,
@@ -326,6 +327,8 @@ struct VectorExpression(Copyable, Movable):
     var lane_bools: List[List[UInt8]]
     # Computed strings (substrings): string_t into their input's bytes.
     var lane_strings: List[List[StringT]]
+    # The bytes of computed strings made here (concatenations).
+    var heaps: List[List[UInt8]]
     var valid: List[List[UInt8]]
     var whole: List[Bool]
     var formats: List[UnifiedVectorFormat]
@@ -370,6 +373,7 @@ struct VectorExpression(Copyable, Movable):
         self.lane_floats = List[List[Float64]](length=n, fill=List[Float64]())
         self.lane_bools = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.lane_strings = List[List[StringT]](length=n, fill=List[StringT]())
+        self.heaps = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.valid = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.whole = List[Bool](length=n, fill=True)
         self.formats = List[UnifiedVectorFormat](
@@ -631,6 +635,14 @@ struct VectorExpression(Copyable, Movable):
                 lane == _LANE_INT
                 or lane == _LANE_FLOAT
                 or lane == _LANE_DECIMAL
+            )
+        if node.op == STR_CONCAT:
+            return (
+                node.left >= 0
+                and node.right >= 0
+                and self.bound.dtypes[node.left] == DataType.STRING
+                and self.bound.dtypes[node.right] == DataType.STRING
+                and dtype == DataType.STRING
             )
         if node.op == STR_SLICE:
             return (
@@ -935,6 +947,8 @@ struct VectorExpression(Copyable, Movable):
             self._date_part(index, left, count, op)
         elif op == STR_SLICE:
             self._slice(index, left, rows, count)
+        elif op == STR_CONCAT:
+            self._concat(index, left, right, rows, count)
         else:
             self._compute(index, count)
 
@@ -1759,6 +1773,90 @@ struct VectorExpression(Copyable, Movable):
         )
         self.by_chunk_row[index] = False
 
+    def _concat(
+        mut self,
+        index: Int,
+        left: Int,
+        right: Int,
+        rows: SelectionVector,
+        count: Int,
+    ):
+        """concat_str of two strings with a separator, as
+        `concat_strings`: a null side makes the row null, or with
+        ignore_nulls the valid side is the row (null when both are). The
+        joined bytes are written to this node's heap, sized for the chunk
+        first so the string_t pointing into it stay put."""
+        var separator = self.bound.expr._nodes[index].text
+        var skip_nulls = self.bound.expr._nodes[index].integer == 1
+        var gap = separator.byte_length()
+        var gap_at = Int(separator.unsafe_ptr())
+        var a_entries = self._entries(left, rows, count, 0)
+        var b_entries = self._entries(right, rows, count, 1)
+        var a_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=a_entries)
+        var b_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=b_entries)
+        var a_data = self.formats[left].data
+        var b_data = self.formats[right].data
+        var a_whole = self.whole[left]
+        var b_whole = self.whole[right]
+        var a_valid = self.valid[left].unsafe_ptr()
+        var b_valid = self.valid[right].unsafe_ptr()
+        var flags = self.valid[index].unsafe_ptr()
+        var out = self.lane_strings[index].unsafe_ptr()
+        var total = 0
+        for k in range(count):
+            var a = a_data + 16 * (
+                k if a_entries == 0 else Int(a_at[unsafe_offset=k])
+            )
+            var b = b_data + 16 * (
+                k if b_entries == 0 else Int(b_at[unsafe_offset=k])
+            )
+            total += _length_at(a) + gap + _length_at(b)
+        if len(self.heaps[index]) < total:
+            self.heaps[index] = List[UInt8](
+                unsafe_uninit_length=max(total, 2 * len(self.heaps[index]))
+            )
+        var heap = Int(self.heaps[index].unsafe_ptr())
+        var used = 0
+        var whole = True
+        for k in range(count):
+            var a = a_data + 16 * (
+                k if a_entries == 0 else Int(a_at[unsafe_offset=k])
+            )
+            var b = b_data + 16 * (
+                k if b_entries == 0 else Int(b_at[unsafe_offset=k])
+            )
+            var x = a_whole or a_valid[unsafe_offset=k] != 0
+            var y = b_whole or b_valid[unsafe_offset=k] != 0
+            if x and y:
+                var a_len = _length_at(a)
+                var b_len = _length_at(b)
+                var at = heap + used
+                _copy_bytes(at, string_data(a), a_len)
+                _copy_bytes(at + a_len, gap_at, gap)
+                _copy_bytes(at + a_len + gap, string_data(b), b_len)
+                var size = a_len + gap + b_len
+                used += size
+                out[unsafe_offset=k] = StringT.make(at, size)
+                flags[unsafe_offset=k] = 1
+            elif skip_nulls and (x or y):
+                out[unsafe_offset=k] = Pointer[StringT, MutAnyOrigin](
+                    unsafe_from_address=a if x else b
+                )[]
+                flags[unsafe_offset=k] = 1
+            else:
+                out[unsafe_offset=k] = StringT(0, 0, 0)
+                flags[unsafe_offset=k] = 0
+                whole = False
+        _ = separator^
+        self.whole[index] = whole
+        self.formats[index] = UnifiedVectorFormat(
+            SelectionVector(),
+            Int(self.lane_strings[index].unsafe_ptr()),
+            ValidityMask(),
+            PHYSICAL_VARCHAR,
+        )
+        self.by_chunk_row[index] = False
+
     def _date_part(mut self, index: Int, left: Int, count: Int, op: Int):
         """The year, month or day of dates (`_fields`' civil calendar)."""
         self._copy_validity(index, left, count)
@@ -2225,6 +2323,24 @@ def _scatter_values[
     var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=positions)
     for j in range(count):
         o[unsafe_offset=Int(at[unsafe_offset=j])] = x[unsafe_offset=j]
+
+
+@always_inline
+def _length_at(entry: Int) -> Int:
+    """The byte length of the string_t stored at `entry`."""
+    return Int(
+        Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[].length
+    )
+
+
+@always_inline
+def _copy_bytes(target: Int, source: Int, count: Int):
+    if count > 0:
+        unsafe_memcpy(
+            dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=target),
+            src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=source),
+            count=count,
+        )
 
 
 @always_inline
