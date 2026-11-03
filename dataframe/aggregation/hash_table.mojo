@@ -58,7 +58,7 @@ from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 
-from dataframe.aggregation.reducer import Reducer, validity_of
+from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.function import (
     AggregateFunction,
     ReducerSpec,
@@ -1967,6 +1967,34 @@ struct _CombineJob(Job):
         )[][self.index].repartition(self.bits)
 
 
+def _valid_rows(column: Series) raises -> List[Bool]:
+    """Whether each row of an unchunked column of any storage is valid."""
+    var n = len(column)
+    var valid = List[Bool](capacity=n)
+    if column._data.isa[StringColumn]():
+        ref strings = column._data[StringColumn]
+        for i in range(n):
+            valid.append(strings._valid(i))
+    elif column._data.isa[BoolColumn]():
+        ref bools = column._data[BoolColumn]
+        for i in range(n):
+            valid.append(bools._valid(i))
+    elif column._data.isa[Column[Int128]]():
+        ref wide = column._data[Column[Int128]]
+        for i in range(n):
+            valid.append(wide._valid(i))
+    else:
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if column._data.isa[Column[Scalar[D]]]():
+                ref typed = column._data[Column[Scalar[D]]]
+                for i in range(n):
+                    valid.append(typed._valid(i))
+    if len(valid) != n:
+        raise Error("aggregate table: unsupported distinct value storage")
+    return valid^
+
+
 struct _DistinctJob(Job):
     """One partition of a distinct table's finished (keys, value) groups
     sunk into a new sink of the main table, each adding one to its group's
@@ -2004,7 +2032,7 @@ struct _DistinctJob(Job):
         var valid = List[Bool]()
         if not self.nulls:
             # A null value is no distinct value: its group adds nothing.
-            valid = validity_of(self.value)
+            valid = _valid_rows(self.value)
         var step = 1 << 16
         for lo in range(0, n, step):
             var length = min(step, n - lo)
