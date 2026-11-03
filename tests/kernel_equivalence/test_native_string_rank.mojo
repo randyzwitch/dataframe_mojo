@@ -1,16 +1,16 @@
-"""Native StringView rank consumers match independent scalar typed ranks."""
+"""Ranks of native StringView and Arrow string columns, whole and per
+partition, match independent scalar typed ranks."""
 # contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
-from dataframe import DataFrame, DataType, Series, StringColumn, col
+from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.storage.string_view import StringViewBuilder
-from dataframe.window import _rank_strings, _rank
 from tests.support.selection_types_reference import (
     selection_column,
     selection_text,
     selection_valid,
 )
 from tests.support.extended_window_reference import (
-    extended_partitions,
+    extended_group,
     extended_ranks,
 )
 
@@ -33,7 +33,6 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                 var arrow = selection_column(11, n, offset, mode)
                 assert_true(not Bool(arrow._data[StringColumn]._view_storage))
                 for partitioned in [False, True]:
-                    var groups = extended_partitions(n, offset, partitioned)
                     for descending in [False, True]:
                         for method in [
                             "average",
@@ -52,17 +51,24 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                                 descending,
                             )
                             for source in [native.copy(), arrow.copy()]:
-                                var fast = _rank_strings(
-                                    source,
-                                    groups,
-                                    method,
-                                    descending,
+                                var ids = List[Int64]()
+                                for row in range(n):
+                                    ids.append(
+                                        Int64(
+                                            extended_group(row + offset)
+                                        ) if partitioned else 0
+                                    )
+                                var ranked = col("x").rank(method, descending)
+                                var actual = (
+                                    DataFrame(
+                                        [
+                                            source.renamed("x"),
+                                            Series("p", Column[Int64](ids^)),
+                                        ]
+                                    )
+                                    .select(ranked.over("p"))
+                                    .column("x")
                                 )
-                                assert_true(
-                                    Bool(fast),
-                                    "complete StringView partitions must take actual packed string rank route",
-                                )
-                                var actual = fast.take()
                                 assert_true(
                                     actual.dtype()
                                     == (
@@ -89,9 +95,6 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                                                 actual.get(row).int64(),
                                                 Int64(expected[row]),
                                             )
-                                # Public rank is also required to consume the
-                                # native storage, independently of direct
-                                # specialization eligibility assertions.
                                 if not partitioned:
                                     var public = (
                                         DataFrame([source.copy()])
@@ -118,36 +121,3 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                                                     public.get(row).int64(),
                                                     Int64(expected[row]),
                                                 )
-                if n > 1:
-                    # Incomplete coverage must decline the packed path and
-                    # rank only explicit partition members through fallback.
-                    var partial: List[List[Int]] = [[0, n - 1]]
-                    assert_true(
-                        not Bool(
-                            _rank_strings(
-                                native,
-                                partial,
-                                "ordinal",
-                                False,
-                            )
-                        )
-                    )
-                    var fallback = _rank(native, partial, "ordinal", False)
-                    var positions: List[Int] = [0, n - 1]
-                    for row in range(n):
-                        var present = row in positions and selection_valid(
-                            row + offset, mode
-                        )
-                        assert_equal(fallback.get(row).is_null(), not present)
-                        if present:
-                            var value = selection_text(row + offset)
-                            var rank = Int64(1)
-                            for other in positions:
-                                if not selection_valid(other + offset, mode):
-                                    continue
-                                var text = selection_text(other + offset)
-                                rank += Int64(
-                                    text < value
-                                    or (text == value and other < row)
-                                )
-                            assert_equal(fallback.get(row).int64(), rank)

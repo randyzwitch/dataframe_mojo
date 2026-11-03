@@ -540,16 +540,22 @@ struct Partitioner(Movable):
         workers: Int,
         with_hashes: Bool = False,
         words: Int = 0,
+        bucket_count: Int = 0,
     ) raises -> Partitioned:
         """Build the stable permutation, folding slots into buckets; with
         `with_hashes`, also each row's hash in the same order, and given
         `words` (the address of one UInt64 a row), those in the same order.
+        `bucket_count`, a power of two up to 256, fixes the bucket count (0:
+        twice the workers).
         """
-        var buckets = 1
+        var count = 1
         var fold = 8
-        while buckets < 2 * workers and buckets < _SLOTS:
-            buckets *= 2
+        while (
+            count < bucket_count if bucket_count > 0 else count < 2 * workers
+        ) and count < _SLOTS:
+            count *= 2
             fold -= 1
+        var buckets = count
 
         var starts = List[Int](length=buckets + 1, fill=0)
         for s in range(_SLOTS):

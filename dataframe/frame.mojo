@@ -27,7 +27,8 @@ from dataframe.kernels.distinct_statistics import (
 )
 from dataframe.kernels.fused_compare import SelectionTree, fused_mask
 from dataframe.fused_compare import fused_comparisons, selection_tree
-from dataframe.sorted_range import sorted_window
+from dataframe.table_scan import conjunction, scan_filtered
+from dataframe.kernels.segment_statistics import compute_table_statistics
 from .expr import (
     Expr,
     MODE,
@@ -178,7 +179,6 @@ from dataframe.joins.rows import (
     _parallel_left_major,
 )
 from dataframe.joins.range import (
-    _JoinRangeProbeJob,
     _PROGRESSION_PARALLEL_KEY_BYTES,
     _ProgressionProbeJob,
     _RANGE_MEMBERSHIP_MAX_BYTES,
@@ -195,8 +195,6 @@ from dataframe.joins.range import (
     _bounded_int64_join_rows,
     _dense_right_int64_rows,
     _int64_distance,
-    _join_range_possible,
-    _join_range_rows,
     _parallel_progression_rows,
     _parallel_range_build_workers,
     _range_int64_membership_chunks,
@@ -274,6 +272,13 @@ struct DataFrame(Copyable, Sized, Writable):
         """Mark this as a loaded table so column distinct counts are
         estimated on first request and shared across copies."""
         self._statistics = Optional(ArcPointer(TableStatistics()))
+        return self^
+
+    def _with_storage_statistics(var self) raises -> Self:
+        """Compute the segment statistics of every column's buffers, as a
+        table is stored (DuckDB fills them while appending): scans of this
+        table and of its windows check their filters against them."""
+        compute_table_statistics(self._columns)
         return self^
 
     def _distinct_count(self, name: String) raises -> Int:
@@ -2128,6 +2133,17 @@ struct DataFrame(Copyable, Sized, Writable):
         returned: the predicate still reads any column, but columns only it
         reads are never copied (a lazy filter whose later steps read fewer
         columns than it does)."""
+        return self._filter(predicate, batch_size, keep, True)
+
+    def _filter(
+        self,
+        predicate: Expr,
+        batch_size: Int,
+        keep: List[String],
+        scan: Bool,
+    ) raises -> Self:
+        """`filter`; `scan` checks the parts that are table filters against
+        the buffers' statistics first."""
         # A literal true keeps every row as it is (a filter whose parts an
         # ordered column answered leaves one behind).
         if (
@@ -2144,30 +2160,20 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("Filter expression must return Boolean values")
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        # Parts comparing a column stored in ascending order with a constant
-        # keep one run of rows: two binary searches and a zero-copy slice
-        # (ClickBench q36-q42 filter CounterID and EventDate, the order the
-        # hits table is stored in).
-        if self._height > 0 and _row_local(predicates):
+        # A scan with table filters: vectors whose statistics rule every
+        # row out are not read, and parts that keep every row of those
+        # left are not evaluated (DuckDB's zone maps).
+        if scan and self._height > 0 and _row_local(predicates):
             var parts = conjuncts(predicates[0])
-            var window = sorted_window(self._columns, self._height, parts)
-            var any = False
-            for answered in window.used:
-                any = any or answered
-            if any:
-                trace_path("filter.sorted_range")
-                var narrowed = self.slice(window.low, window.high - window.low)
-                var rest = List[Expr]()
-                for k in range(len(parts)):
-                    if not window.used[k]:
-                        rest.append(parts[k].copy())
+            var scanned = scan_filtered(self, parts)
+            if scanned:
+                trace_path("filter.table_filters")
+                ref narrowed = scanned.value().frame
+                ref rest = scanned.value().remaining
                 if len(rest) == 0 or narrowed.height() == 0:
                     return narrowed._kept(keep)
-                var remaining = rest[0].copy()
-                for k in range(1, len(rest)):
-                    remaining = remaining & rest[k]
-                return narrowed.filter(
-                    remaining, batch_size=batch_size, keep=keep
+                return narrowed._filter(
+                    conjunction(rest), batch_size, keep, False
                 )
         # Each partition's first k rows by ordinal rank: no rank computed.
         var top = top_k_mask(bound, self._columns, self._height)
@@ -2224,10 +2230,10 @@ struct DataFrame(Copyable, Sized, Writable):
         self, predicate: Expr, batch_size: Int, source_rows: Int = 0
     ) raises -> BoolColumn:
         """The rows `predicate` keeps, as a mask over this frame, chosen the
-        way `filter` chooses its path: a run answered by a column stored in
-        ascending order, a top-k per partition, selective conjuncts (the
-        cheap parts first, strings only on the rows they kept, fused
-        comparisons), or the predicate's own mask. A pipeline's morsel
+        way `filter` chooses its path (the table-filter scan aside: a
+        pipeline's source has applied it already): a top-k per partition,
+        selective conjuncts (the cheap parts first, strings only on the rows
+        they kept, fused comparisons), or the predicate's own mask. A pipeline's morsel
         narrows its selection with this and copies nothing; it passes its
         source's height as `source_rows`, so the route is the one the
         whole source would take, however finely it is cut."""
@@ -2243,29 +2249,6 @@ struct DataFrame(Copyable, Sized, Writable):
         var bound = bind(predicates[0], self._columns)
         if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
             raise Error("Filter expression must return Boolean values")
-        if self._height > 0 and _row_local(predicates):
-            var parts = conjuncts(predicates[0])
-            var window = sorted_window(self._columns, self._height, parts)
-            var any = False
-            for answered in window.used:
-                any = any or answered
-            if any:
-                trace_path("filter.sorted_range")
-                var low = window.low
-                var length = window.high - window.low
-                var rest = List[Expr]()
-                for k in range(len(parts)):
-                    if not window.used[k]:
-                        rest.append(parts[k].copy())
-                if len(rest) == 0 or length == 0:
-                    return _window_mask(low, length, self._height)
-                var remaining = rest[0].copy()
-                for k in range(1, len(rest)):
-                    remaining = remaining & rest[k]
-                var inner = self.slice(low, length)._selection(
-                    remaining, batch_size, source_rows
-                )
-                return _placed_mask(inner, low, self._height)
         var top = top_k_mask(bound, self._columns, self._height)
         if top:
             trace_path("filter.top_k_per_partition")
@@ -3532,36 +3515,6 @@ def _rows_mask(
     else:
         var bits = values.unsafe_ptr()
         for r in rows:
-            bits[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
-    return BoolColumn(values=values^, bits=List[UInt8](), length=height)
-
-
-def _window_mask(low: Int, length: Int, height: Int) raises -> BoolColumn:
-    """A mask of `height` rows with rows [low, low + length) set."""
-    var values = List[UInt8](length=(height + 7) // 8, fill=0)
-    var bits = values.unsafe_ptr()
-    var r = low
-    var end = low + length
-    while r < end and (r & 7) != 0:
-        bits[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
-        r += 1
-    while r + 8 <= end:
-        bits[unsafe_offset=r >> 3] = 255
-        r += 8
-    while r < end:
-        bits[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
-        r += 1
-    return BoolColumn(values=values^, bits=List[UInt8](), length=height)
-
-
-def _placed_mask(inner: BoolColumn, low: Int, height: Int) raises -> BoolColumn:
-    """`inner` (a mask over rows [low, low + len(inner))) as a mask over
-    `height` rows, zero elsewhere."""
-    var values = List[UInt8](length=(height + 7) // 8, fill=0)
-    var bits = values.unsafe_ptr()
-    for i in range(len(inner)):
-        if inner._get(i) and inner._valid(i):
-            var r = low + i
             bits[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
     return BoolColumn(values=values^, bits=List[UInt8](), length=height)
 

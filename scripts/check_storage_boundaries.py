@@ -63,8 +63,7 @@ def check():
             for dependency in sorted(set(imports(path)) & legacy):
                 failures.append(f"{name} imports legacy storage facade: {dependency}")
     methods = {
-        "first", "last", "order_state", "publish_order", "progression_state",
-        "publish_progression", "zones_ready", "zones", "publish_zones",
+        "first", "last", "progression_state", "publish_progression",
         "initialize_window",
     }
     for tree in ("dataframe", "dataframe_metal", "tests"):
