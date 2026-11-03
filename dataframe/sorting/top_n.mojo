@@ -117,11 +117,11 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
     def version(self) -> Int64:
         return self._atomic(_VERSION)[].load()
 
-    def publish[W: Int, VAR: Bool](self, rec: Rec):
+    def publish[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
         """UpdateValue: take `rec` when there is no boundary yet or it is
-        better than the boundary."""
+        better than the boundary; whether it was taken."""
         if self.address == 0:
-            return
+            return False
         comptime K = SortKeys[W, VAR]
         self._lock()
         if self.version() != 0:
@@ -130,7 +130,7 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
                 current[k] = self._word(_WORDS + k)[]
             if not K.less(rec, current):
                 self._unlock()
-                return
+                return False
         var stored = rec
         comptime if VAR:
             var size = Int(rec[1])
@@ -155,6 +155,7 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
             self._word(_WORDS + k)[] = stored[k]
         _ = self._atomic(_VERSION)[].fetch_add(1)
         self._unlock()
+        return True
 
 
 struct _BoundaryView(Movable):
@@ -326,12 +327,19 @@ struct TopNHeap(Movable):
             self.add[W, VAR](rec)
         self.compact_keys[W, VAR]()
 
-    def publish[W: Int, VAR: Bool](mut self, shared: TopNBoundary):
+    def publish[W: Int, VAR: Bool](mut self, shared: TopNBoundary) -> Bool:
         """A full heap's worst key to the shared boundary, then the
-        boundary back (it may be another thread's, tighter)."""
+        boundary back (it may be another thread's, tighter); whether this
+        heap's key became the boundary."""
+        var taken = False
         if self.full():
-            shared.publish[W, VAR](self.keys[W, VAR]().get(0))
+            taken = shared.publish[W, VAR](self.keys[W, VAR]().get(0))
         self.view.refresh[W, VAR](shared)
+        return taken
+
+    def top_payload[W: Int, VAR: Bool](self) -> Int:
+        """The worst entry's payload."""
+        return self.keys[W, VAR]().payload(0)
 
     def bound_word[W: Int, VAR: Bool](self) -> Tuple[Bool, UInt64]:
         """The first key word no entering row can exceed: the full heap's

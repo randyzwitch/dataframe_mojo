@@ -34,7 +34,7 @@ from std.bit import byte_swap
 from std.memory import Pointer, bitcast
 from std.sys import bit_width_of
 
-from dataframe.categorical import sort_ranks
+from dataframe.categorical import codes_to_ranks, dictionary_ranks
 from dataframe.dtype import DataType
 from dataframe.series import Series
 from dataframe.sorting.algorithms import SkaInfo
@@ -81,6 +81,8 @@ struct SortKeyColumn(Copyable, Movable):
     var nulls: Bool
     # Strings: the longest value's bytes.
     var max_length: Int
+    # A categorical key: each code's rank, by which its rows sort.
+    var ranks: List[UInt32]
 
     def constant_size(self) -> Bool:
         return self.encoding != _ENC_VARCHAR and self.encoding != _ENC_BLOB
@@ -179,8 +181,10 @@ struct SortKeyLayout(Copyable, Movable):
             var column = keys[k].copy()
             if len(column) != rows:
                 raise Error("sort key columns must have the same length")
+            var ranks = List[UInt32]()
             if column.dtype().is_categorical():
-                column = sort_ranks(column)
+                ranks = dictionary_ranks(column.dtype())
+                column = codes_to_ranks(column, ranks)
             var encoding = _encoding_of(column)
             var null_byte = _NULL_FIRST_BYTE
             var valid_byte = _NULL_LAST_BYTE
@@ -188,9 +192,12 @@ struct SortKeyLayout(Copyable, Movable):
                 null_byte = _NULL_LAST_BYTE
                 valid_byte = _NULL_FIRST_BYTE
             var nulls = not statistics or column.null_count() > 0
-            var longest = _longest(column) if (
-                encoding[0] == _ENC_VARCHAR or encoding[0] == _ENC_BLOB
-            ) and statistics else 0
+            var longest = (
+                _longest(column) if (
+                    encoding[0] == _ENC_VARCHAR or encoding[0] == _ENC_BLOB
+                )
+                and statistics else 0
+            )
             columns.append(
                 SortKeyColumn(
                     column^,
@@ -201,6 +208,7 @@ struct SortKeyLayout(Copyable, Movable):
                     valid_byte,
                     nulls,
                     longest,
+                    ranks^,
                 )
             )
         if maintain_order:
@@ -214,6 +222,7 @@ struct SortKeyLayout(Copyable, Movable):
                     _NULL_LAST_BYTE,
                     False,
                     0,
+                    List[UInt32](),
                 )
             )
         # TupleDataLayout::Initialize(orders): the widest key, and the null
@@ -290,7 +299,8 @@ struct SortKeyLayout(Copyable, Movable):
         for k in range(len(keys)):
             var column = keys[k].copy()
             if column.dtype().is_categorical():
-                column = sort_ranks(column)
+                # The chunk's codes through the ranks found once.
+                column = codes_to_ranks(column, self.columns[k].ranks)
             self.columns[k].series = column^
 
 
@@ -866,7 +876,11 @@ def key_prefixes(
             # room, which is never read.
             for piece in _for_parts(c.series, lo, hi):
                 _encode_part(
-                    piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
+                    piece[0],
+                    c,
+                    piece[1],
+                    piece[2],
+                    cursor.unsafe_offset(piece[3]),
                 )
         for i in range(n):
             cursors[i] = min(cursors[i], limits[i])

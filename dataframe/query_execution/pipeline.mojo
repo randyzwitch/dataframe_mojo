@@ -1277,6 +1277,24 @@ def plan_stream_execute(
     # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
     # while every worker still gets a batch: a 150K-row customer table
     # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
+    # A TopN pushes a dynamic filter into the scan when its first sort
+    # column is read from the source as it is: no join, and no operation
+    # that writes a column of that name.
+    var top_scan_key = top > 0 and len(shared_joins[]) == 0
+    if top_scan_key:
+        for operation in operations:
+            if operation.kind == WITH_COLUMNS or operation.kind == SELECT:
+                for e in operation.exprs:
+                    if e._name != top_names[0]:
+                        continue
+                    var r = _references(e)
+                    if not (
+                        r
+                        and len(r.value()) == 1
+                        and r.value()[0] == e._name
+                        and len(e._nodes) == 1
+                    ):
+                        top_scan_key = False
     var rows_per_batch = batch_size
     if (
         len(shared_joins[]) > 0
@@ -1406,6 +1424,7 @@ def plan_stream_execute(
             top_descending=top_descending,
             top_nulls_last=top_nulls_last,
             top_maintain_order=top_maintain_order,
+            top_scan_key=top_scan_key,
             table=decision.uses_aggregate_table(),
             set_masks=set_masks,
             finish_steps=_steps_of(finish_operations),

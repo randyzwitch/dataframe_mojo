@@ -68,6 +68,19 @@ from .frame import (
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.storage.statistics import (
+    STATISTICS_VECTOR_SIZE,
+    COMPARE_GREATERTHAN,
+    COMPARE_GREATERTHANOREQUALTO,
+    COMPARE_LESSTHAN,
+    COMPARE_LESSTHANOREQUALTO,
+)
+from dataframe.table_filter import (
+    DynamicFilterData,
+    TableFilterSet,
+    column_domain,
+)
+from dataframe.table_scan import ScanFilterInfo
 from dataframe.aggregation.state import (
     _StreamReduction,
     chunks_frame,
@@ -2367,6 +2380,9 @@ struct _PipelineJob(Job):
     var top_maintain_order: Bool
     var topn: List[TopNSink]
     var boundary: TopNBoundary
+    # The scan's dynamic filter on the first sort column (DuckDB's TopN
+    # filter pushdown), when that column is the source's own.
+    var top_filter: _TopScanFilter
     # Materialize sink: the morsels' frames and their sequence numbers.
     var parts: List[DataFrame]
     var sequences: List[Int]
@@ -2449,6 +2465,7 @@ struct _PipelineJob(Job):
         top_nulls_last: List[Bool],
         top_maintain_order: Bool,
         boundary: TopNBoundary,
+        top_filter: _TopScanFilter,
         layout: List[AggregateLayout],
         sets: List[List[Int]],
         set_masks: List[List[Int64]],
@@ -2493,6 +2510,7 @@ struct _PipelineJob(Job):
         self.sinks = List[AggregateSink]()
         self.workers = workers
         self.boundary = boundary
+        self.top_filter = top_filter.copy()
         self.top_maintain_order = top_maintain_order
         self.topn = List[TopNSink]()
         self.top = top
@@ -2721,6 +2739,17 @@ struct _PipelineJob(Job):
                     self._consume(output, k, offset, length)
                 continue
             self.runner.counts[0] += length
+            var vectors = Optional[List[Int]]()
+            if self.top_filter.info:
+                # The TopN's dynamic filter against the scan's vector
+                # statistics (CheckZonemapSegments): vectors it rules out
+                # are not read.
+                vectors = _vectors_kept(
+                    self.top_filter.info.value()[], offset, length
+                )
+                if vectors and len(vectors.value()) == 0:
+                    trace_path("pipeline.top_dynamic_skip")
+                    continue
             var keyed = self._key_mask(morsel)
             if not keyed[0]:
                 continue
@@ -2729,6 +2758,8 @@ struct _PipelineJob(Job):
                 rows = _mask_rows(
                     keyed[1].value(), true_count(keyed[1].value())
                 )
+            if vectors:
+                rows = _rows_in_vectors(rows, vectors.value(), length)
             var source = _Columns.of_frame(self.runner.arena, morsel)
             if rows:
                 if len(rows.value()) == 0:
@@ -2931,10 +2962,16 @@ struct _PipelineJob(Job):
                     TopNSink(
                         output,
                         _top_keys(self.top_names, self.top_maintain_order),
-                        _top_flags(self.top_descending, self.top_maintain_order),
-                        _top_flags(self.top_nulls_last, self.top_maintain_order),
+                        _top_flags(
+                            self.top_descending, self.top_maintain_order
+                        ),
+                        _top_flags(
+                            self.top_nulls_last, self.top_maintain_order
+                        ),
                         self.top,
                         self.boundary,
+                        self.top_filter.dynamic,
+                        self.top_filter.op,
                     )
                 )
             self.topn[0].sink(output)
@@ -2993,6 +3030,95 @@ def _top_flags(flags: List[Bool], maintain_order: Bool) -> List[Bool]:
     var out = flags.copy()
     if maintain_order:
         out.append(False)
+    return out^
+
+
+@fieldwise_init
+struct _TopScanFilter(Copyable, Movable):
+    """A TopN's dynamic filter on its first sort column, pushed into the
+    scan (`TopN::PushdownDynamicFilters`): `info` checks it against the
+    source's statistics, `dynamic` is the shared constant the sinks set,
+    `op` its comparison."""
+
+    var info: Optional[ArcPointer[ScanFilterInfo]]
+    var dynamic: Optional[ArcPointer[DynamicFilterData]]
+    var op: Int
+
+
+def _top_scan_filter(
+    frame: DataFrame,
+    top: Int,
+    names: List[String],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    scan_key: Bool,
+) raises -> _TopScanFilter:
+    """The dynamic filter for a TopN whose first sort column is read from
+    the source unchanged (`scan_key`): `c < boundary` ascending and
+    `c > boundary` descending, `<=` / `>=` with later keys to settle ties.
+    DuckDB ORs `IS NULL` for nulls first; a statistics check cannot keep
+    a vector's nulls apart, so a nulls-first key pushes nothing. Columns
+    whose order is not their storage's (categoricals) push nothing."""
+    var none = _TopScanFilter(None, None, 0)
+    if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
+        return none^
+    if names[0] not in frame.columns():
+        return none^
+    var dtype = frame.column(names[0]).dtype()
+    if column_domain(dtype) < 0:
+        return none^
+    var op: Int
+    if len(names) == 1:
+        op = COMPARE_GREATERTHAN if descending[0] else COMPARE_LESSTHAN
+    else:
+        op = COMPARE_GREATERTHANOREQUALTO if descending[
+            0
+        ] else COMPARE_LESSTHANOREQUALTO
+    var dynamic = ArcPointer(DynamicFilterData(dtype, op))
+    var filters = TableFilterSet()
+    filters.push_dynamic(names[0], dynamic)
+    var info = ScanFilterInfo(filters, [frame.column(names[0])])
+    return _TopScanFilter(ArcPointer(info^), dynamic, op)
+
+
+def _vectors_kept(
+    info: ScanFilterInfo, offset: Int, length: Int
+) raises -> Optional[List[Int]]:
+    """The starts (within the morsel) of the 2,048-row vectors the filter
+    does not rule out; None when it rules none out."""
+    var kept = List[Int]()
+    var ruled_out = False
+    var at = 0
+    while at < length:
+        var end = min(length, at + STATISTICS_VECTOR_SIZE)
+        if info.skip(offset + at, offset + end):
+            ruled_out = True
+        else:
+            kept.append(at)
+        at = end
+    if not ruled_out:
+        return None
+    return kept^
+
+
+def _rows_in_vectors(
+    rows: Optional[List[Int]], vectors: List[Int], length: Int
+) -> List[Int]:
+    """The rows of `rows` (None: every row of the morsel) inside the kept
+    vectors."""
+    var out = List[Int]()
+    if not rows:
+        for start in vectors:
+            for r in range(start, min(length, start + STATISTICS_VECTOR_SIZE)):
+                out.append(r)
+        return out^
+    ref mine = rows.value()
+    var v = 0
+    for r in mine:
+        while v < len(vectors) and vectors[v] + STATISTICS_VECTOR_SIZE <= r:
+            v += 1
+        if v < len(vectors) and vectors[v] <= r:
+            out.append(r)
     return out^
 
 
@@ -3284,6 +3410,7 @@ def run_pipeline(
     top_descending: List[Bool] = List[Bool](),
     top_nulls_last: List[Bool] = List[Bool](),
     top_maintain_order: Bool = False,
+    top_scan_key: Bool = False,
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
     finish_steps: List[Step] = List[Step](),
@@ -3326,6 +3453,7 @@ def run_pipeline(
         top_descending,
         top_nulls_last,
         top_maintain_order,
+        top_scan_key,
         table,
         set_masks,
         finish_steps,
@@ -3355,6 +3483,7 @@ def run_pipeline(
             List[String](),
             List[Bool](),
             List[Bool](),
+            False,
             False,
             False,
             List[List[Int64]](),
@@ -3564,6 +3693,7 @@ def _run_pipeline(
     top_descending: List[Bool],
     top_nulls_last: List[Bool],
     top_maintain_order: Bool,
+    top_scan_key: Bool,
     table: Bool,
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
@@ -3714,6 +3844,9 @@ def _run_pipeline(
                 trace_path("pipeline.group_table_derived_sets")
     var cursor = _Cursor.new()
     var boundary = TopNBoundary.new() if top > 0 else TopNBoundary.none()
+    var top_filter = _top_scan_filter(
+        frame, top, top_names, top_descending, top_nulls_last, top_scan_key
+    )
     var key_ranges = _key_ranges(frame, steps, joins[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
@@ -3746,6 +3879,7 @@ def _run_pipeline(
                 top_nulls_last,
                 top_maintain_order,
                 boundary,
+                top_filter,
                 layout,
                 sets,
                 set_masks,

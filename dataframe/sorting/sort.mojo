@@ -343,15 +343,13 @@ struct _TopNJob[W: Int, VAR: Bool](Job):
             var end = min(self.hi, at + STANDARD_VECTOR_SIZE)
             if key_prefixes(
                 layout, at, end, prefixes
-            ) and not self.heap.can_enter[Self.W, Self.VAR](
-                prefixes, end - at
-            ):
+            ) and not self.heap.can_enter[Self.W, Self.VAR](prefixes, end - at):
                 # No row of the vector can be in the result.
                 at = end
                 continue
             var block = encode_keys(layout, at, end)
             self.heap.sink[Self.W, Self.VAR](block)
-            self.heap.publish[Self.W, Self.VAR](self.boundary)
+            _ = self.heap.publish[Self.W, Self.VAR](self.boundary)
             _ = block^
             at = end
             if self.heap.added >= self.heap.reduce_threshold():
