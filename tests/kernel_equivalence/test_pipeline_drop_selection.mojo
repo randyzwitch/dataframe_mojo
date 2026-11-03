@@ -1,9 +1,13 @@
-"""Dropping columns preserves mixed source/compact pipeline coordinates."""
+"""Dropping columns from data chunks whose vectors are dictionaries through
+a filter's selection keeps every other column's rows, nulls and text."""
 # contract-group: table.join
 # contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, StringColumn, col, lit
-from dataframe.pipeline import Morsel
+from std.memory import ArcPointer
+from dataframe import Expr
+from dataframe.kernels.join_hash import PreparedHashIndex
+from dataframe.pipeline import STEP_DROP, STEP_FILTER, Step, _steps_over_frame
 
 
 def source(n: Int, offset: Int) raises -> DataFrame:
@@ -29,36 +33,57 @@ def source(n: Int, offset: Int) raises -> DataFrame:
 
 
 def test_drop_keeps_deferred_mixed_columns_and_empty_schema_row_counts() raises:
-    for n in [0, 1, 9, 65]:
+    for n in [0, 1, 9, 65, 5000]:
         for offset in [0, 3]:
             for keep in [0, 1, 3, 4]:
                 for drop_all in [False, True]:
                     var input = source(n, offset)
-                    var morsel = Morsel(input^, 0)
-                    morsel.filter(
-                        col("x") % lit(Int64(4)) < lit(Int64(keep)), 8192
-                    )
-                    morsel.gather(["y"])
-                    var expected = List[Int]()
-                    for row in range(n):
-                        if row % 4 < keep:
-                            expected.append(row)
                     var dropped: List[String] = [
                         "x",
                         "y",
                         "s",
                     ] if drop_all else ["x"]
-                    morsel.drop(dropped)
-                    assert_equal(morsel.height(), len(expected))
-                    assert_equal(morsel.frame.height(), n)
-                    if not drop_all and len(expected) < n:
-                        # Dropping a name does not gather unrelated text.
-                        assert_equal(len(morsel.frame.column("s")), n)
-                        assert_equal(
-                            len(morsel.frame.column("y")), len(expected)
+                    var steps = List[Step]()
+                    steps.append(
+                        Step(
+                            STEP_FILTER,
+                            [col("x") % lit(Int64(4)) < lit(Int64(keep))],
+                            List[String](),
+                            -1,
+                            List[String](),
+                            0,
+                            String(),
+                            False,
                         )
-                    var result = morsel.materialized()
-                    _ = morsel^
+                    )
+                    steps.append(
+                        Step(
+                            STEP_DROP,
+                            List[Expr](),
+                            dropped^,
+                            -1,
+                            List[String](),
+                            0,
+                            String(),
+                            False,
+                        )
+                    )
+                    var counts = List[Int]()
+                    var result = _steps_over_frame(
+                        input,
+                        steps,
+                        ArcPointer(List[DataFrame]()),
+                        ArcPointer(List[Optional[PreparedHashIndex]]()),
+                        counts,
+                    )
+                    var expected = List[Int]()
+                    for row in range(n):
+                        if row % 4 < keep:
+                            expected.append(row)
+                    # Each step's rows in and out.
+                    assert_equal(counts[0], n)
+                    assert_equal(counts[1], len(expected))
+                    assert_equal(counts[3], len(expected))
                     assert_equal(result.height(), len(expected))
                     if drop_all:
                         assert_equal(result.width(), 0)

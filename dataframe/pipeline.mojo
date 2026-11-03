@@ -1,13 +1,20 @@
-"""Thread-owned pipelines over morsels (docs/design/executor-design.md, #538).
+"""Thread-owned pipelines over data chunks (docs/design/executor-design.md,
+#538).
 
 A pipeline is a source, a list of row-local steps, and a sink. Each worker
-thread takes morsels from the source cursor, runs the full sequence of
-steps, and updates its own sink state. Sink states are combined once the
-source is exhausted; the main thread does no per-morsel work.
+thread takes morsels (ranges of the source) from the shared cursor, cuts
+each into data chunks of STANDARD_VECTOR_SIZE rows (DuckDB's DataChunk,
+`dataframe/vector`), runs the chunks through the steps, and updates its
+own sink state. Sink states are combined once the source is exhausted;
+the main thread does no per-morsel work.
 
-A morsel is a frame and a selection. A filter narrows the selection
-without copying data. When a step reads a column, that column is gathered
-through the selection once and replaces its shared version.
+A row-local step reads its input chunk's vectors through the unified
+format: a filter's result is the same vectors as dictionaries through its
+selection, so nothing is copied for it, and a projection computes only
+the rows the selection keeps. Join probes and sinks do not read vectors
+yet: a morsel's chunks are collected for them (`_Collector`), each column
+kept as a range or a row list over the column it reads, and gathered
+through it only when one reads a frame.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
@@ -103,11 +110,25 @@ from .series import Series
 from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
-from .selected_expressions import (
-    SelectedPlan,
-    evaluate_masked,
-    evaluate_selected,
-    selected_plan,
+from .selectors import expand
+from .expr import LIT_BOOL, conjuncts
+from dataframe.aggregation.expressions import _bind_all
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    flat_over,
+    to_series,
+)
+from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
+from dataframe.vector.types import (
+    CONSTANT_VECTOR,
+    DICTIONARY_VECTOR,
+    FLAT_VECTOR,
+    SEQUENCE_VECTOR,
+    STANDARD_VECTOR_SIZE,
+    SelectionVector,
+    Vector,
+    physical_size,
 )
 
 # Step kinds, the row-local plan nodes a pipeline runs between its source
@@ -190,14 +211,17 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
 
 
 def _row_counted(
-    morsel: Morsel, expressions: List[Expr]
+    columns: _Columns,
+    arena: ColumnArena,
+    schema: DataFrame,
+    expressions: List[Expr],
 ) raises -> Tuple[List[Expr], List[String], List[String]]:
     """`expressions` with each count of a column that holds no null in the
     morsel's source turned into a row count, the columns they still read
     values of, and the columns read only by row counts. DuckDB's rule (its
     count statistics callback): a count of a column without nulls is
-    count(*), so over a selection it is the kept-row count, and the column
-    is never gathered through the selection."""
+    count(*), so it is the kept-row count, and the column is never
+    gathered through its rows."""
     var rewritten = List[Expr](capacity=len(expressions))
     var valued = List[String]()
     var counted = List[String]()
@@ -209,8 +233,8 @@ def _row_counted(
             if child < 0 or nodes[child].op != COL:
                 continue
             if nodes[k].op == COUNT:
-                var at = morsel._index(nodes[child].text)
-                if morsel.frame._columns[at].null_count() == 0:
+                var at = schema._index(nodes[child].text)
+                if arena.columns[columns.handles[at]].null_count() == 0:
                     nodes[k].op = LEN
             if nodes[k].op == LEN:
                 under_len[child] = True
@@ -374,15 +398,6 @@ def _zoned_top(frame: DataFrame, bound: _TopBound) raises -> Int:
         if high <= bound.integer:
             return _ZONE_ALL
     return _ZONE_SOME
-
-
-def _bare_columns(exprs: List[Expr]) -> Bool:
-    """Whether every expression is one column, under its own name or an
-    alias."""
-    for e in exprs:
-        if len(e._nodes) != 1 or e._nodes[0].op != COL:
-            return False
-    return True
 
 
 @fieldwise_init
@@ -760,826 +775,752 @@ def _key_ranges(
     return ranges^
 
 
-struct Morsel(Movable):
-    """A frame and a selection over its rows.
+struct _Columns(Copyable, Movable):
+    """A morsel's columns between the steps that read vectors and the
+    operators that do not yet (a join's probe, a sink): column c is the
+    rows from `starts[c]` of arena column `handles[c]`, or, when
+    `lists[c] >= 0`, the rows `row_lists[lists[c]]` of it, a dictionary
+    vector over the column (of any length) as DuckDB's join emits its
+    build side. Every column has `height` rows. Chunks of
+    STANDARD_VECTOR_SIZE rows are cut from it without a copy."""
 
-    Columns not yet `compact` are the source's, shared, and read through
-    `mask`; a compact column already holds only the selected rows.
-    """
+    var handles: List[Int]
+    var starts: List[Int]
+    var lists: List[Int]
+    var row_lists: List[List[UInt32]]
+    var height: Int
 
-    var frame: DataFrame
-    var mask: BoolColumn
-    var selected: Bool
-    var count: Int
-    var compact: List[Bool]
-    var sequence: Int
-    # The selected rows' frame indices, when known (`by_rows`): a join's
-    # or a top-k's selection, read through them as DuckDB reads a
-    # selection vector, so a gather costs the rows kept rather than a scan
-    # of the whole mask.
-    var rows: List[Int]
-    var by_rows: Bool
-    # The height of the source this morsel was cut from: steps choose
-    # their route by it, not by the morsel's own height.
-    var source_rows: Int
-    # A right or full join step's per-worker flags of the build rows matched so
-    # far (the address of the bytes), set before the step runs; 0 for none.
-    var marks: Int
+    def __init__(out self):
+        self.handles = List[Int]()
+        self.starts = List[Int]()
+        self.lists = List[Int]()
+        self.row_lists = List[List[UInt32]]()
+        self.height = 0
 
-    def __init__(out self, var frame: DataFrame, sequence: Int):
-        self.marks = 0
-        self.source_rows = frame.height()
-        self.count = frame.height()
-        self.compact = List[Bool](length=frame.width(), fill=True)
-        self.frame = frame^
-        self.mask = BoolColumn(List[Bool]())
-        self.selected = False
-        self.sequence = sequence
-        self.rows = List[Int]()
-        self.by_rows = False
+    @staticmethod
+    def of_frame(mut arena: ColumnArena, frame: DataFrame) raises -> _Columns:
+        """Every column of `frame`, held in the arena, read whole."""
+        var result = _Columns()
+        for column in frame._columns:
+            result.handles.append(arena.add(column))
+            result.starts.append(0)
+            result.lists.append(-1)
+        result.height = frame.height()
+        return result^
 
-    def height(self) -> Int:
-        return self.count
+    def width(self) -> Int:
+        return len(self.handles)
 
-    def _index(self, name: String) raises -> Int:
-        for i in range(self.frame.width()):
-            if self.frame._columns[i].name() == name:
-                return i
-        raise Error("Column not found: " + name)
+    def through(self, rows: List[Int]) -> _Columns:
+        """Every column read at its rows `rows` (positions among this one's
+        `height`), the dictionaries merged: a row list over a row list is
+        one row list over the column (SelectionVector::Slice). Columns
+        sharing a list, or a start, share the merged list."""
+        var result = _Columns()
+        result.height = len(rows)
+        var from_list = List[Int]()
+        var to_list = List[Int]()
+        var from_start = List[Int]()
+        var start_list = List[Int]()
+        var at = rows.unsafe_ptr()
+        var n = len(rows)
+        for c in range(self.width()):
+            result.handles.append(self.handles[c])
+            result.starts.append(0)
+            var made = -1
+            if self.lists[c] >= 0:
+                for m in range(len(from_list)):
+                    if from_list[m] == self.lists[c]:
+                        made = to_list[m]
+                if made < 0:
+                    var merged = List[UInt32](unsafe_uninit_length=n)
+                    var out = merged.unsafe_ptr()
+                    var source = self.row_lists[self.lists[c]].unsafe_ptr()
+                    for k in range(n):
+                        out[unsafe_offset=k] = source[
+                            unsafe_offset=at[unsafe_offset=k]
+                        ]
+                    made = len(result.row_lists)
+                    result.row_lists.append(merged^)
+                    from_list.append(self.lists[c])
+                    to_list.append(made)
+            else:
+                for m in range(len(from_start)):
+                    if from_start[m] == self.starts[c]:
+                        made = start_list[m]
+                if made < 0:
+                    var merged = List[UInt32](unsafe_uninit_length=n)
+                    var out = merged.unsafe_ptr()
+                    var start = self.starts[c]
+                    for k in range(n):
+                        out[unsafe_offset=k] = UInt32(
+                            start + at[unsafe_offset=k]
+                        )
+                    made = len(result.row_lists)
+                    result.row_lists.append(merged^)
+                    from_start.append(self.starts[c])
+                    start_list.append(made)
+            result.lists.append(made)
+        return result^
 
-    def gather(mut self, names: List[String]) raises:
-        """Make the named columns compact: gathered through the selection
-        in one pass over the mask for all of them."""
-        if not self.selected:
-            return
-        var indices = List[Int]()
-        var pending = List[Series]()
-        for name in names:
-            var i = self._index(name)
-            if not self.compact[i]:
-                indices.append(i)
-                pending.append(self.frame._columns[i].copy())
-        if len(pending) == 0:
-            return
-        # Sparse selections read the kept rows by index; dense ones scan
-        # the mask in order, as the top-k narrows a morsel only when at
-        # most one row in eight can enter (reading scattered rows costs
-        # more than reading every row past that).
-        if self.by_rows and 8 * self.count <= self.frame.height():
-            var taken = take_parallel(
-                pending,
-                self.rows.copy(),
-                worker_count(len(self.rows)),
-                or_null=False,
-            )
-            for k in range(len(indices)):
-                self.frame._columns[indices[k]] = taken[k].copy()
-                self.compact[indices[k]] = True
-            return
-        var filtered = filter_columns(pending, self.mask)
-        ref others = filtered[1]
-        if len(others) > 0:
-            # String and nested columns: the row-list route.
-            var rows = true_rows(self.mask)
-            var next_fixed = 0
-            var next_other = 0
-            for k in range(len(indices)):
-                if next_other < len(others) and others[next_other] == k:
-                    self.frame._columns[indices[k]] = pending[k].take(rows)
-                    next_other += 1
-                else:
-                    self.frame._columns[indices[k]] = filtered[0][
-                        next_fixed
-                    ].copy()
-                    next_fixed += 1
+    def series(
+        self, arena: ColumnArena, c: Int, var name: String
+    ) raises -> Series:
+        """Column `c` as an at-rest column of `height` rows: a slice of its
+        arena column when read whole, else its rows gathered."""
+        ref column = arena.columns[self.handles[c]]
+        var result: Series
+        if self.lists[c] < 0:
+            if self.starts[c] == 0 and len(column) == self.height:
+                result = column.copy()
+            else:
+                result = column.slice(self.starts[c], self.height)
         else:
-            for k in range(len(indices)):
-                self.frame._columns[indices[k]] = filtered[0][k].copy()
-        for i in indices:
-            self.compact[i] = True
+            ref rows = self.row_lists[self.lists[c]]
+            var picked = List[Int](unsafe_uninit_length=self.height)
+            var out = picked.unsafe_ptr()
+            var at = rows.unsafe_ptr()
+            for k in range(self.height):
+                out[unsafe_offset=k] = Int(at[unsafe_offset=k])
+            result = column.take(picked)
+        return result.renamed(name^)
 
-    def gather_all(mut self) raises:
-        """Every column compact; the selection is then dropped."""
-        if not self.selected:
-            return
-        var names = List[String]()
-        for i in range(self.frame.width()):
-            if not self.compact[i]:
-                names.append(self.frame._columns[i].name())
-        self.gather(names)
-        self.frame._height = self.count
-        self.selected = False
-
-    def _compact_frame(mut self, names: List[String]) raises -> DataFrame:
-        """The named columns, compact, as a frame of `count` rows."""
-        self.gather(names)
+    def frame(
+        self, arena: ColumnArena, schema: DataFrame, names: List[String]
+    ) raises -> DataFrame:
+        """The named columns as a frame of `height` rows (each gathered
+        through its rows): the adapter for operators that read frames."""
         var columns = List[Series](capacity=len(names))
         for name in names:
-            columns.append(self.frame._columns[self._index(name)].copy())
-        return DataFrame(columns^, height=self.count)
+            var c = schema._index(name)
+            columns.append(self.series(arena, c, name))
+        return DataFrame(columns^, height=self.height)
 
-    def filter(mut self, predicate: Expr, batch_size: Int) raises:
-        """Narrow the selection to the rows `predicate` keeps."""
-        var reads = _reads([predicate.copy()])
-        var names: List[String]
-        if reads:
-            names = reads.take()
-        else:
-            names = self.frame.columns()
-        var narrowed: BoolColumn
-        if not self.selected:
-            var input = self._compact_frame(names)
-            narrowed = input._selection(predicate, batch_size, self.source_rows)
-            var kept = true_count(narrowed)
-            if kept == self.count:
-                return
-            self.mask = narrowed^
-            self.selected = True
-            self.by_rows = False
-            self.count = kept
-            for i in range(len(self.compact)):
-                self.compact[i] = False
-            return
-        var input = self._compact_frame(names)
-        narrowed = input._selection(predicate, batch_size, self.source_rows)
-        var kept = true_count(narrowed)
-        if kept == self.count:
-            return
-        # Compact columns are at the old selection's rows: filter them by
-        # the new mask directly. Shared columns are read through the
-        # composed mask: the new mask's bits spread over the old mask's
-        # set bits.
-        var compact_columns = List[Series]()
-        var compact_at = List[Int]()
-        for i in range(self.frame.width()):
-            if self.compact[i]:
-                compact_at.append(i)
-                compact_columns.append(self.frame._columns[i].copy())
-        if len(compact_columns) > 0:
-            var sliced = DataFrame(compact_columns^, height=self.count).filter(
-                narrowed
-            )
-            for k in range(len(compact_at)):
-                self.frame._columns[compact_at[k]] = sliced._columns[k].copy()
-        if self.by_rows:
-            # The kept rows' frame indices, from the selected rows'.
-            var rows = List[Int](capacity=kept)
-            for k in range(self.count):
-                if narrowed._get(k) and narrowed._valid(k):
-                    rows.append(self.rows[k])
-            self.rows = rows^
-            # The mask from the kept rows, set where they are: no pass
-            # over every row of the source (a filter after a join keeps a
-            # few of a morsel's rows).
-            self.mask = _rows_mask(self.rows, self.frame._height)
-        else:
-            self.mask = _spread(self.mask, narrowed)
-        self.count = kept
+    def whole(self, arena: ColumnArena, schema: DataFrame) raises -> DataFrame:
+        """Every column as a frame of `height` rows."""
+        return self.frame(arena, schema, schema.columns())
 
-    def select(mut self, exprs: List[Expr], batch_size: Int) raises:
-        # A select of bare columns (renamed or not) only picks columns:
-        # they keep the selection, as a projection of column references
-        # does in DuckDB, instead of every kept row being gathered here.
-        if self.selected and _bare_columns(exprs):
-            trace_path("pipeline.projection_selection")
-            var columns = List[Series](capacity=len(exprs))
-            var compact = List[Bool](capacity=len(exprs))
-            for e in exprs:
-                var i = self._index(e._nodes[0].text)
-                columns.append(self.frame._columns[i].renamed(e._name))
-                compact.append(self.compact[i])
-            # Gathered and source columns differ in length, as they do in
-            # every morsel, so the columns are set in place.
-            self.frame._columns = columns^
-            self.compact = compact^
-            return
-        if self._select_selected(exprs):
-            return
-        var reads = _reads(exprs)
-        var names: List[String]
-        if reads:
-            names = reads.take()
+    def selection_mask(self, length: Int) raises -> BoolColumn:
+        """The morsel rows these columns read, as a mask over its `length`
+        rows (empty: every row), for a pipeline whose steps only filter:
+        its columns are all the source's, read through one row list."""
+        if self.width() == 0 or (self.lists[0] < 0 and self.height == length):
+            return BoolColumn(List[Bool]())
+        var rows = List[Int](capacity=self.height)
+        if self.lists[0] < 0:
+            for r in range(self.height):
+                rows.append(self.starts[0] + r)
         else:
-            names = self.frame.columns()
-        var input = self._compact_frame(names)
-        var result = input.select_exprs(exprs, batch_size=batch_size)
-        self.frame = result^
-        self.count = self.frame.height()
-        self.compact = List[Bool](length=self.frame.width(), fill=True)
-        self.selected = False
+            for r in self.row_lists[self.lists[0]]:
+                rows.append(Int(r))
+        return _rows_mask(rows, length)
 
-    def _evaluate_selected(
+    def bases(self, arena: ColumnArena) -> List[Vector]:
+        """Per column, a flat vector over its arena column from row 0."""
+        var result = List[Vector](capacity=self.width())
+        for c in range(self.width()):
+            result.append(flat_over(arena, self.handles[c], 0))
+        return result^
+
+    def fill(
         self,
-        plan: SelectedPlan,
-        scatter: Bool,
-        name: String,
-        mut masked_rows: Optional[List[Int]],
-    ) -> Optional[Series]:
-        """`evaluate_selected` over this morsel's selection: its rows, or
-        the rows its mask keeps, listed once into `masked_rows`. A mask
-        whose values are placed at their rows (`scatter`) is computed at
-        every row instead (`evaluate_masked`), as `_with_columns_in_place`
-        computes it, and its rows are listed only when that returns
-        None."""
-        var n = self.frame.height()
-        if self.by_rows:
-            return evaluate_selected(
-                plan,
-                self.frame._columns,
-                self.compact,
-                self.rows,
-                n,
-                scatter,
-                name,
-            )
-        if scatter:
-            var whole = evaluate_masked(
-                plan, self.frame._columns, self.compact, self.mask, n, name
-            )
-            if whole:
-                return whole^
-        if not masked_rows:
-            masked_rows = _mask_rows(self.mask, self.count)
-        return evaluate_selected(
-            plan,
-            self.frame._columns,
-            self.compact,
-            masked_rows.value(),
-            n,
-            scatter,
-            name,
-        )
-
-    def _select_selected(mut self, exprs: List[Expr]) raises -> Bool:
-        """A projection of columns and of arithmetic and casts over them
-        that keeps the selection: a column is picked as it is, as a bare
-        projection's is, and each computed one is computed for the
-        selected rows alone (`_with_columns_selected`), so nothing is
-        gathered here. False, with nothing changed, otherwise."""
-        if not self.selected:
-            return False
-        var plans = List[Optional[SelectedPlan]](capacity=len(exprs))
-        var named = Dict[String, Bool]()
-        for e in exprs:
-            # Repeated names raise on the ordinary path.
-            if e._name in named:
-                return False
-            named[e._name] = True
-            if len(e._nodes) == 1 and e._nodes[0].op == COL:
-                plans.append(None)
-                continue
-            var plan = selected_plan(e, self.frame._columns)
-            if not plan:
-                return False
-            plans.append(plan^)
-        var n = self.frame.height()
-        var scatter = 2 * self.count >= n
-        var masked_rows = Optional[List[Int]]()
-        var columns = List[Series](capacity=len(exprs))
-        var compact = List[Bool](capacity=len(exprs))
-        for k in range(len(exprs)):
-            if not plans[k]:
-                var i = self._index(exprs[k]._nodes[0].text)
-                columns.append(self.frame._columns[i].renamed(exprs[k]._name))
-                compact.append(self.compact[i])
-                continue
-            var result = self._evaluate_selected(
-                plans[k].value(), scatter, exprs[k]._name, masked_rows
-            )
-            if not result:
-                return False
-            columns.append(result.take())
-            compact.append(not scatter)
-        trace_path("pipeline.select_selected")
-        self.frame._columns = columns^
-        self.frame._statistics = None
-        self.compact = compact^
-        return True
-
-    def with_columns(mut self, exprs: List[Expr], batch_size: Int) raises:
-        var reads = _reads(exprs)
-        var names: List[String]
-        if reads:
-            names = reads.take()
-        else:
-            names = self.frame.columns()
-        if self._with_columns_selected(exprs):
-            return
-        if self._with_columns_in_place(exprs, names, batch_size):
-            return
-        var input = self._compact_frame(names)
-        var result = input.with_columns(exprs, batch_size=batch_size)
-        # Columns the expressions produced or replaced join the frame as
-        # compact; the rest stay as they are.
-        for c in range(result.width()):
-            ref column = result._columns[c]
-            var found = -1
-            for i in range(self.frame.width()):
-                if self.frame._columns[i].name() == column.name():
-                    found = i
-            if found >= 0:
-                self.frame._columns[found] = column.copy()
-                self.compact[found] = True
+        bases: List[Vector],
+        arena: ColumnArena,
+        mut chunk: DataChunk,
+        low: Int,
+        count: Int,
+    ):
+        """`chunk` as rows [low, low + count) of these columns: flat
+        windows of the columns read whole, dictionaries through a window of
+        the row lists of the others (no copy)."""
+        chunk.reset()
+        chunk.set_columns(self.width())
+        for c in range(self.width()):
+            var v = bases[c]
+            if self.lists[c] < 0:
+                var at = self.starts[c] + low
+                if v.data != 0:
+                    v.data += physical_size(v.physical) * at
+                if not v.validity.all_valid():
+                    v.validity.offset += at
+                v.source_offset = at
             else:
-                self.frame._columns.append(column.copy())
-                self.compact.append(True)
-
-    def _with_columns_selected(mut self, exprs: List[Expr]) raises -> Bool:
-        """Arithmetic and casts computed for the selected rows alone,
-        each column read through the selection where it is, as DuckDB's
-        expression executor reads a join's dictionary vectors through
-        their selection (`selected_expressions`). No input column is
-        gathered and no dropped row is computed: TPC-DS q23's 128-bit
-        decimal product over the 56% of store sales a date join keeps
-        cost more over every row than gathering, and gathering cost more
-        than this. A selection that keeps at least half the morsel gets
-        each value at its row, so the morsel stays readable in place
-        (`_in_place_table_rows`), as `_with_columns_in_place` leaves it;
-        a sparser one gets one value per kept row. False, with nothing
-        changed, when an expression uses anything else or a kept row
-        raises (the ordinary path then raises it)."""
-        if not self.selected:
-            return False
-        var plans = List[SelectedPlan](capacity=len(exprs))
-        for e in exprs:
-            var plan = selected_plan(e, self.frame._columns)
-            if not plan:
-                return False
-            plans.append(plan.take())
-        var n = self.frame.height()
-        var scatter = 2 * self.count >= n
-        var results = List[Series](capacity=len(exprs))
-        var masked_rows = Optional[List[Int]]()
-        for k in range(len(plans)):
-            var result = self._evaluate_selected(
-                plans[k], scatter, exprs[k]._name, masked_rows
-            )
-            if not result:
-                return False
-            results.append(result.take())
-        trace_path("pipeline.with_columns_selected")
-        for column in results:
-            var found = -1
-            for i in range(self.frame.width()):
-                if self.frame._columns[i].name() == column.name():
-                    found = i
-            if found >= 0:
-                self.frame._columns[found] = column.copy()
-                self.compact[found] = not scatter
-            else:
-                self.frame._columns.append(column.copy())
-                self.compact.append(not scatter)
-        return True
-
-    def _with_columns_in_place(
-        mut self, exprs: List[Expr], names: List[String], batch_size: Int
-    ) raises -> Bool:
-        """Row-local columns computed over every row of a morsel whose
-        selection keeps at least half of it, joining it uncompacted and
-        read through the selection: the selection survives, so the
-        aggregate table can still read the morsel in place
-        (`_in_place_table_rows`). A common subexpression computed below
-        an aggregation (PDS-H q1's discounted prices) compacted the whole
-        morsel and cost q1 60%. False, with nothing changed, when the
-        selection is sparse, a column read is already compact, or
-        evaluating every row raises (a dropped row may hold the error,
-        so the compacting path decides what is raised). A join's selection
-        (by rows) qualifies as a filter's does: its mask is kept beside the
-        rows, as DuckDB's projection reads a join's dictionary vectors in
-        place (TPC-DS q23's quantity times price over 96% of store sales
-        gathered both columns first)."""
-        var n = self.frame.height()
-        if not self.selected or 2 * self.count < n:
-            return False
-        var whole = List[Series](capacity=len(names))
-        for name in names:
-            var at = self._index(name)
-            if self.compact[at]:
-                return False
-            whole.append(self.frame._columns[at].copy())
-        var result: DataFrame
-        try:
-            result = DataFrame(whole^, height=n).with_columns(
-                exprs, batch_size=batch_size
-            )
-        except:
-            return False
-        var produced = List[String]()
-        for e in exprs:
-            produced.append(e._name)
-        for c in range(result.width()):
-            ref column = result._columns[c]
-            # New columns, and read ones an expression replaces.
-            if column.name() in names and column.name() not in produced:
-                continue
-            var found = -1
-            for i in range(self.frame.width()):
-                if self.frame._columns[i].name() == column.name():
-                    found = i
-            if found >= 0:
-                self.frame._columns[found] = column.copy()
-                self.compact[found] = False
-            else:
-                self.frame._columns.append(column.copy())
-                self.compact.append(False)
-        return True
-
-    def drop(mut self, names: List[String]) raises:
-        var kept = List[Series]()
-        var kept_compact = List[Bool]()
-        for i in range(self.frame.width()):
-            if self.frame._columns[i].name() not in names:
-                kept.append(self.frame._columns[i].copy())
-                kept_compact.append(self.compact[i])
-        # Source columns retain source coordinates; compact columns hold
-        # only selected rows. As in select(), preserve those different
-        # lengths until gather_all() materializes the selection.
-        self.frame._columns = kept^
-        self.frame._statistics = None
-        self.compact = kept_compact^
-
-    def _narrow_rows(mut self, rows: List[Int]) raises:
-        """Keep only the selected rows at positions `rows` (ascending, among
-        the `count` selected rows): compact columns are taken at them, and
-        shared columns are read through a mask whose set bits are those of
-        the old mask the positions name, built a word at a time."""
-        var kept = len(rows)
-        if kept == self.count:
-            return
-        var height = self.frame.height()
-        var words = (height + 63) // 64
-        var out = List[UInt64](length=words, fill=0)
-        var put = out.unsafe_ptr()
-        var at = rows.unsafe_ptr()
-        var frame_rows = List[Int](capacity=kept)
-        if not self.selected:
-            frame_rows = rows.copy()
-            for k in range(kept):
-                var r = at[unsafe_offset=k]
-                put[unsafe_offset=r >> 6] |= UInt64(1) << UInt64(r & 63)
-        elif self.by_rows:
-            # The selected rows' frame indices are known: the kept ones are
-            # read at the positions, and the mask set from them, without a
-            # pass over the old mask.
-            var old_rows = self.rows.unsafe_ptr()
-            frame_rows = List[Int](unsafe_uninit_length=kept)
-            var to = frame_rows.unsafe_ptr()
-            for k in range(kept):
-                var r = old_rows[unsafe_offset=at[unsafe_offset=k]]
-                to[unsafe_offset=k] = r
-                put[unsafe_offset=r >> 6] |= UInt64(1) << UInt64(r & 63)
-        else:
-            # The old mask's set bits, in order: position j of the selected
-            # rows is the j-th set bit.
-            var j = 0
-            var next = 0
-            # A mask starting on a byte, every entry valid, is read a word
-            # at a time; any other bit by bit.
-            var aligned = self.mask._offset % 8 == 0 and (
-                self.mask.null_count() == 0
-            )
-            var data = (
-                self.mask._data[]
-                .unsafe_ptr()
-                .unsafe_offset(self.mask._offset // 8)
-            )
-            var data_bytes = (height + 7) // 8
-            for w in range(words):
-                var word = UInt64(0)
-                if aligned:
-                    for k in range(min(8, data_bytes - 8 * w)):
-                        word |= UInt64(data[unsafe_offset=8 * w + k]) << UInt64(
-                            8 * k
-                        )
-                    if 64 * (w + 1) > height:
-                        word &= (UInt64(1) << UInt64(height - 64 * w)) - 1
-                else:
-                    for b in range(64):
-                        var r = 64 * w + b
-                        if r >= height:
-                            break
-                        if self.mask._get(r) and self.mask._valid(r):
-                            word |= UInt64(1) << UInt64(b)
-                while word != 0 and next < kept:
-                    var b = Int(count_trailing_zeros(word))
-                    word &= word - 1
-                    if j == at[unsafe_offset=next]:
-                        put[unsafe_offset=w] |= UInt64(1) << UInt64(b)
-                        frame_rows.append(64 * w + b)
-                        next += 1
-                    j += 1
-        if self.selected:
-            var compact_at = List[Int]()
-            var compact_columns = List[Series]()
-            for i in range(self.frame.width()):
-                if self.compact[i]:
-                    compact_at.append(i)
-                    compact_columns.append(self.frame._columns[i].copy())
-            for k in range(len(compact_at)):
-                self.frame._columns[compact_at[k]] = compact_columns[k].take(
-                    rows
+                v.vector_type = DICTIONARY_VECTOR
+                v.sel = SelectionVector(
+                    Int(self.row_lists[self.lists[c]].unsafe_ptr()) + 4 * low
                 )
-        var bytes = List[UInt8](unsafe_uninit_length=8 * words)
-        unsafe_memcpy(
-            dest=bytes.unsafe_ptr(),
-            src=out.unsafe_ptr().unsafe_bitcast[UInt8](),
-            count=8 * words,
-        )
-        _ = out^
-        var mask = BoolColumn(List[Bool]())
-        mask._data = _Buffer(bytes^)
-        # Every entry valid: no validity bitmap, as `_rows_mask` builds.
-        mask._bits = _Buffer(List[UInt8]())
-        mask._length = height
-        mask._offset = 0
-        if not self.selected:
-            for i in range(len(self.compact)):
-                self.compact[i] = False
-        self.mask = mask^
-        self.selected = True
-        self.rows = frame_rows^
-        self.by_rows = True
-        self.count = kept
+                v.dictionary_size = len(arena.columns[self.handles[c]])
+            chunk.data[c] = v
+        chunk.count = count
 
-    def _join_selected(
-        mut self,
-        step: Step,
+
+def _append_rows(mut listed: List[UInt32], v: Vector, count: Int):
+    """The at-rest rows of a vector over a source, appended."""
+    # Grown geometrically: an exact reservation per chunk copied the
+    # list again for every chunk.
+    if listed.capacity() < len(listed) + count:
+        listed.reserve(max(len(listed) + count, 2 * listed.capacity()))
+    var base = UInt32(v.source_offset)
+    if v.vector_type == DICTIONARY_VECTOR and v.sel.data != 0:
+        var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=v.sel.data)
+        for i in range(count):
+            listed.append(base + sel[unsafe_offset=i])
+    elif v.vector_type == CONSTANT_VECTOR:
+        for _ in range(count):
+            listed.append(base)
+    else:
+        for i in range(count):
+            listed.append(base + UInt32(i))
+
+
+comptime _COLLECT_NONE = 0
+comptime _COLLECT_RANGE = 1
+comptime _COLLECT_ROWS = 2
+comptime _COLLECT_VALUES = 3
+
+
+struct _Collector(Movable):
+    """A morsel's chunks gathered into `_Columns` for an operator that
+    reads frames (the adapter the join and aggregate ports delete): a
+    column whose chunks read one arena column is kept as that column's
+    range or row list, and only values a step computed are copied."""
+
+    var schema: DataFrame
+    var modes: List[Int]
+    var handles: List[Int]
+    var starts: List[Int]
+    var rows: List[List[UInt32]]
+    var parts: List[Series]
+    var height: Int
+
+    def __init__(out self, schema: DataFrame):
+        self.schema = schema.copy()
+        var width = schema.width()
+        self.modes = List[Int](length=width, fill=_COLLECT_NONE)
+        self.handles = List[Int](length=width, fill=-1)
+        self.starts = List[Int](length=width, fill=0)
+        self.rows = List[List[UInt32]](length=width, fill=List[UInt32]())
+        self.parts = List[Series](capacity=width)
+        for c in range(width):
+            self.parts.append(schema._columns[c].copy())
+        self.height = 0
+
+    def append(mut self, mut chunk: DataChunk, arena: ColumnArena) raises:
+        var count = chunk.count
+        for c in range(len(self.modes)):
+            var v = chunk.data[c]
+            var mode = self.modes[c]
+            if (
+                v.source >= 0
+                and v.vector_type != SEQUENCE_VECTOR
+                and (
+                    mode == _COLLECT_NONE
+                    or (mode != _COLLECT_VALUES and self.handles[c] == v.source)
+                )
+            ):
+                if mode == _COLLECT_NONE:
+                    self.handles[c] = v.source
+                    if v.vector_type == FLAT_VECTOR:
+                        self.modes[c] = _COLLECT_RANGE
+                        self.starts[c] = v.source_offset
+                        continue
+                    self.modes[c] = _COLLECT_ROWS
+                elif mode == _COLLECT_RANGE:
+                    if v.vector_type == FLAT_VECTOR and (
+                        v.source_offset == self.starts[c] + self.height
+                    ):
+                        continue
+                    # The range so far as rows, then this chunk's.
+                    var listed = List[UInt32](capacity=self.height + count)
+                    for r in range(self.height):
+                        listed.append(UInt32(self.starts[c] + r))
+                    self.rows[c] = listed^
+                    self.modes[c] = _COLLECT_ROWS
+                _append_rows(self.rows[c], v, count)
+                continue
+            if mode != _COLLECT_VALUES:
+                self.parts[c] = self._so_far(c, arena)
+                self.modes[c] = _COLLECT_VALUES
+            var piece = to_series(
+                chunk,
+                c,
+                arena,
+                self.schema._columns[c].name(),
+                self.schema._columns[c].dtype(),
+            )
+            self.parts[c]._append_series(piece)
+        self.height += count
+
+    def _so_far(self, c: Int, arena: ColumnArena) raises -> Series:
+        """Column `c`'s rows collected so far, as values."""
+        var name = self.schema._columns[c].name()
+        if self.modes[c] == _COLLECT_NONE or self.height == 0:
+            return self.schema._columns[c].copy()
+        ref column = arena.columns[self.handles[c]]
+        var result: Series
+        if self.modes[c] == _COLLECT_RANGE:
+            result = column.slice(self.starts[c], self.height)
+            # Owned, so later chunks append to it.
+            if result.is_chunked():
+                result = result.rechunk()
+            var owned = self.schema._columns[c].copy()
+            owned._append_series(result)
+            return owned^
+        var picked = List[Int](capacity=self.height)
+        for r in self.rows[c]:
+            picked.append(Int(r))
+        result = column.take(picked).renamed(name)
+        return result^
+
+    def finish(mut self, mut arena: ColumnArena) raises -> _Columns:
+        var result = _Columns()
+        result.height = self.height
+        for c in range(len(self.modes)):
+            var mode = self.modes[c]
+            if mode == _COLLECT_RANGE:
+                result.handles.append(self.handles[c])
+                result.starts.append(self.starts[c])
+                result.lists.append(-1)
+            elif mode == _COLLECT_ROWS:
+                result.handles.append(self.handles[c])
+                result.starts.append(0)
+                result.lists.append(len(result.row_lists))
+                var listed = List[UInt32]()
+                swap(listed, self.rows[c])
+                result.row_lists.append(listed^)
+            else:
+                result.handles.append(arena.add(self.parts[c]))
+                result.starts.append(0)
+                result.lists.append(-1)
+        return result^
+
+
+struct _VectorStep(Copyable, Movable):
+    """One row-local step compiled for its input columns, with its output
+    chunk (DuckDB's operator state and output DataChunk), reused for
+    every chunk a worker runs through it."""
+
+    var kind: Int
+    # FILTER: the predicate's conjuncts, run one after another, each on
+    # the rows the ones before kept (ExpressionExecutor::Select); none
+    # for a literal true. SELECT / WITH_COLUMNS: the computed columns.
+    var expressions: List[VectorExpression]
+    # SELECT / WITH_COLUMNS / DROP: per output column, the input column it
+    # reads (>= 0) or the expression computing it (-1 - expression).
+    var outputs: List[Int]
+    var output: DataChunk
+
+    def __init__(
+        out self, step: Step, input: DataFrame, output: DataFrame
+    ) raises:
+        self.kind = step.kind
+        self.expressions = List[VectorExpression]()
+        self.outputs = List[Int]()
+        self.output = DataChunk()
+        var schema = input._columns.copy()
+        if step.kind == STEP_FILTER:
+            ref predicate = step.exprs[0]
+            if (
+                len(predicate._nodes) == 1
+                and predicate._nodes[0].op == LIT_BOOL
+                and predicate._nodes[0].integer != 0
+            ):
+                return
+            var expanded = expand(predicate, schema)
+            if len(expanded) != 1:
+                raise Error("A filter selector must match exactly one column")
+            trace_path("pipeline.vector_filter")
+            for part in conjuncts(expanded[0]):
+                var compiled = VectorExpression(part, schema)
+                if compiled.root_dtype() != DataType.BOOL:
+                    raise Error("Filter expression must return Boolean values")
+                self.expressions.append(compiled^)
+            return
+        trace_path("pipeline.vector_projection")
+        if step.kind == STEP_DROP:
+            for c in range(input.width()):
+                if input._columns[c].name() not in step.names:
+                    self.outputs.append(c)
+            return
+        var bound = _bind_all(step.exprs, schema)
+        var produced = Dict[String, Int]()
+        for b in bound:
+            var compiled = VectorExpression(b.expr, schema)
+            if compiled.root_kind() == _KIND_COLUMN:
+                produced[b.expr._name] = compiled.root_column()
+            else:
+                produced[b.expr._name] = -1 - len(self.expressions)
+                self.expressions.append(compiled^)
+        for c in range(output.width()):
+            var name = output._columns[c].name()
+            var found = produced.get(name)
+            if found:
+                self.outputs.append(found.value())
+            else:
+                self.outputs.append(input._index(name))
+
+    def run(mut self, mut input: DataChunk, mut arena: ColumnArena) raises:
+        """This step over one chunk, into `output`."""
+        self.output.reset()
+        if self.kind == STEP_FILTER:
+            var rows = SelectionVector()
+            var count = input.count
+            for e in range(len(self.expressions)):
+                var target = self.output.new_selection()
+                count = self.expressions[e].select(
+                    input, arena, rows, count, target
+                )
+                rows = target
+                if count == 0:
+                    break
+            if count == input.count:
+                self.output.set_columns(input.column_count())
+                for c in range(input.column_count()):
+                    self.output.data[c] = input.data[c]
+                self.output.count = count
+                return
+            self.output.slice(input, rows, count)
+            return
+        self.output.set_columns(len(self.outputs))
+        self.output.count = input.count
+        for j in range(len(self.outputs)):
+            var source = self.outputs[j]
+            if source >= 0:
+                self.output.data[j] = input.data[source]
+            else:
+                self.expressions[-1 - source].write(
+                    input, arena, self.output, j
+                )
+
+
+def _step_schemas(
+    frame: DataFrame, steps: List[Step], joins: List[DataFrame]
+) raises -> List[DataFrame]:
+    """The empty frame each step reads, then the steps' output: the
+    eager operators over no rows decide every name and type."""
+    var schemas = List[DataFrame](capacity=len(steps) + 1)
+    var current = frame.clear()
+    schemas.append(current.copy())
+    for step in steps:
+        if step.kind == STEP_FILTER:
+            current = current.filter(step.exprs[0])
+        elif step.kind == STEP_SELECT:
+            current = current.select_exprs(step.exprs)
+        elif step.kind == STEP_WITH_COLUMNS:
+            current = current.with_columns(step.exprs)
+        elif step.kind == STEP_JOIN:
+            current = current._join_impl(
+                joins[step.join].clear(),
+                left_on=step.names,
+                right_on=step.right_keys,
+                how=step.how,
+                suffix=step.suffix,
+                coalesce=step.coalesce,
+            )
+        else:
+            var kept = List[Series]()
+            for column in current._columns:
+                if column.name() not in step.names:
+                    kept.append(column.copy())
+            current = DataFrame(kept^, height=0)
+        if current.height() != 0:
+            current = current.clear()
+        schemas.append(current.copy())
+    return schemas^
+
+
+def _compile_steps(
+    steps: List[Step], schemas: List[DataFrame]
+) raises -> List[Optional[_VectorStep]]:
+    """Every row-local step compiled for its input columns."""
+    var compiled = List[Optional[_VectorStep]](capacity=len(steps))
+    for s in range(len(steps)):
+        if steps[s].kind == STEP_JOIN:
+            compiled.append(None)
+        else:
+            compiled.append(_VectorStep(steps[s], schemas[s], schemas[s + 1]))
+    return compiled^
+
+
+struct _ChunkRunner(Movable):
+    """A worker's run of a pipeline's steps over data chunks of
+    STANDARD_VECTOR_SIZE rows: each row-local step reads its input chunk
+    through the unified vector format and writes its own output chunk;
+    a join step, not yet on vectors, takes the morsel's chunks collected
+    (`_Collector`) and gives its output back as columns the next steps
+    cut chunks from. `counts` receives the rows fed, each step's input
+    and output rows, and each step's busy nanoseconds."""
+
+    var steps: List[Step]
+    var schemas: ArcPointer[List[DataFrame]]
+    var compiled: List[Optional[_VectorStep]]
+    # The steps compiled once for every worker (bound, constants
+    # evaluated); each worker copies its own (DuckDB's operator state is
+    # per thread, its expressions bound once).
+    var templates: ArcPointer[List[Optional[_VectorStep]]]
+    var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var arena: ColumnArena
+    # The arena's columns held for the whole pipeline (join builds); a
+    # morsel's are dropped when the next one starts.
+    var held: Int
+    # Per join step, the arena handles of its build's columns.
+    var builds: List[List[Int]]
+    var source: DataChunk
+    var counts: List[Int]
+    # Whether to stop at a step that leaves no row (a pipeline's morsel),
+    # or to run on so the output has every step's columns.
+    var stop_empty: Bool
+
+    def __init__(
+        out self,
+        steps: List[Step],
+        schemas: ArcPointer[List[DataFrame]],
         joins: ArcPointer[List[DataFrame]],
         indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-    ) raises -> Bool:
-        """An inner, semi or anti join through its prepared index, kept as a
-        selection when each probe row matches at most once: the probe
-        reads the key columns only, the matched rows narrow the morsel's
-        selection, and only the build side's output columns are gathered,
-        for the matched rows. The probe side's columns stay where they are
-        until an operator reads them, so a column no later step reads is
-        never copied. A probe row that matches more than once makes the
-        output repeat rows: every column is then gathered at them. False,
-        with nothing changed, when the keys need the general join
-        (categorical, nested or differing types)."""
-        if not (
+        stop_empty: Bool,
+        templates: ArcPointer[List[Optional[_VectorStep]]] = ArcPointer(
+            List[Optional[_VectorStep]]()
+        ),
+    ) raises:
+        self.steps = steps.copy()
+        self.schemas = schemas
+        self.templates = templates
+        if len(self.templates[]) != len(steps):
+            self.templates = ArcPointer(
+                List[Optional[_VectorStep]](length=len(steps), fill=None)
+            )
+        self.joins = joins
+        self.indexes = indexes
+        self.compiled = List[Optional[_VectorStep]](capacity=len(steps))
+        self.arena = ColumnArena()
+        self.builds = List[List[Int]](capacity=len(steps))
+        for s in range(len(steps)):
+            self.compiled.append(None)
+            var handles = List[Int]()
+            if steps[s].kind == STEP_JOIN:
+                for column in joins[][steps[s].join]._columns:
+                    handles.append(self.arena.add(column))
+            self.builds.append(handles^)
+        self.held = self.arena.mark()
+        self.source = DataChunk()
+        self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
+        self.stop_empty = stop_empty
+
+    def begin_morsel(mut self):
+        """Drop the previous morsel's columns."""
+        self.arena.truncate(self.held)
+
+    def schema(self, at: Int) -> DataFrame:
+        return self.schemas[][at].copy()
+
+    def output_schema(self) -> DataFrame:
+        return self.schemas[][len(self.steps)].copy()
+
+    def run(
+        mut self, var columns: _Columns, first: Int, marks: List[Int]
+    ) raises -> _Columns:
+        """The steps from `first` on over `columns` (the input of step
+        `first`); `marks` is per step the address of a right or full
+        join's matched-row flags (0 for none)."""
+        var at = first
+        var n = len(self.steps)
+        while at < n:
+            if self.stop_empty and columns.height == 0:
+                return columns^
+            if self.steps[at].kind == STEP_JOIN:
+                self.counts[2 * at + 1] += columns.height
+                var began = Int(perf_counter_ns())
+                columns = self._join(columns, at, marks[at])
+                self.counts[2 * n + 1 + at] += Int(perf_counter_ns()) - began
+                self.counts[2 * at + 2] += columns.height
+                at += 1
+                continue
+            var stop = at
+            while stop < n and self.steps[stop].kind != STEP_JOIN:
+                stop += 1
+            columns = self._vector_steps(columns, at, stop)
+            at = stop
+        return columns^
+
+    def _compiled(mut self, s: Int) raises:
+        if not self.compiled[s]:
+            if self.templates[][s]:
+                self.compiled[s] = self.templates[][s].value().copy()
+            else:
+                self.compiled[s] = _VectorStep(
+                    self.steps[s], self.schemas[][s], self.schemas[][s + 1]
+                )
+
+    def _vector_steps(
+        mut self, columns: _Columns, first: Int, stop: Int
+    ) raises -> _Columns:
+        """Steps [first, stop), all row-local, chunk by chunk."""
+        for s in range(first, stop):
+            self._compiled(s)
+        var n = len(self.steps)
+        var collector = _Collector(self.schemas[][stop])
+        var bases = columns.bases(self.arena)
+        var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
+            unsafe_from_address=Int(self.compiled.unsafe_ptr())
+        )
+        var source = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.source))
+        )
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            columns.fill(bases, self.arena, source[], low, count)
+            var input = source
+            var empty = False
+            for s in range(first, stop):
+                self.counts[2 * s + 1] += input[].count
+                var began = Int(perf_counter_ns())
+                ref step = compiled[unsafe_offset=s].value()
+                step.run(input[], self.arena)
+                self.counts[2 * n + 1 + s] += Int(perf_counter_ns()) - began
+                self.counts[2 * s + 2] += step.output.count
+                input = Pointer[DataChunk, MutAnyOrigin](
+                    unsafe_from_address=Int(Pointer(to=step.output))
+                )
+                if step.output.count == 0:
+                    empty = True
+                    break
+            if not empty:
+                collector.append(input[], self.arena)
+        return collector.finish(self.arena)
+
+    def _join(
+        mut self, columns: _Columns, s: Int, marks: Int
+    ) raises -> _Columns:
+        """A join step over a morsel's collected columns. An inner, semi or
+        anti join through its prepared index probes the key columns only
+        and keeps every other column a dictionary over where it is: the
+        probe side through the matched probe rows, the build side through
+        the matched build rows (no payload is gathered, as DuckDB's probe
+        slices the probe chunk and emits build columns as dictionary
+        vectors). Any other join runs on the morsel's frame."""
+        ref step = self.steps[s]
+        ref input = self.schemas[][s]
+        ref output = self.schemas[][s + 1]
+        ref right = self.joins[][step.join]
+        var dictionary = (
             step.how == JOIN_INNER
             or step.how == JOIN_SEMI
             or step.how == JOIN_ANTI
-        ):
-            return False
-        if not indexes[][step.join]:
-            return False
-        ref right = joins[][step.join]
-        for i in range(len(step.names)):
-            var lt = self.frame._columns[self._index(step.names[i])].dtype()
-            var rt = right._columns[right._index(step.right_keys[i])].dtype()
-            if lt != rt or lt.is_categorical() or lt.is_nested():
-                return False
-        # A selection's key rows probe a direct index where they are, as
-        # DuckDB probes a join's dictionary vector through its selection:
-        # the key is not gathered first (TPC-DS q23's customer join after
-        # its date join copied the customer keys of every kept row).
+        ) and Bool(self.indexes[][step.join])
+        if dictionary:
+            for i in range(len(step.names)):
+                var lt = input.column(step.names[i]).dtype()
+                var rt = right.column(step.right_keys[i]).dtype()
+                if lt != rt or lt.is_categorical() or lt.is_nested():
+                    dictionary = False
+        if not dictionary:
+            var frame = columns.whole(self.arena, input)
+            var joined = frame._join_impl(
+                right,
+                left_on=step.names,
+                right_on=step.right_keys,
+                how=step.how,
+                suffix=step.suffix,
+                coalesce=step.coalesce,
+                prepared=self.indexes[][step.join],
+                workers=0,
+                marks=marks,
+            )
+            return _Columns.of_frame(self.arena, joined)
+        trace_path("pipeline.join_dictionary")
+        # A key read through a row list probes a direct index where it
+        # is, as DuckDB probes a dictionary vector through its selection:
+        # the key is not gathered first.
         var through = Optional[Tuple[List[Int], List[Int], Bool]]()
-        if self.selected and self.by_rows and len(step.names) == 1:
-            var at = self._index(step.names[0])
-            if not self.compact[at]:
+        if len(step.names) == 1:
+            var c = input._index(step.names[0])
+            if columns.lists[c] >= 0:
+                ref listed = columns.row_lists[columns.lists[c]]
+                var at = List[Int](unsafe_uninit_length=columns.height)
+                var to = at.unsafe_ptr()
+                var source = listed.unsafe_ptr()
+                for k in range(columns.height):
+                    to[unsafe_offset=k] = Int(source[unsafe_offset=k])
                 through = prepared_direct_rows_at(
-                    self.frame._columns[at],
-                    self.rows,
-                    indexes[][step.join].value(),
+                    self.arena.columns[columns.handles[c]],
+                    at,
+                    self.indexes[][step.join].value(),
                     step.how != JOIN_ANTI,
                 )
         if step.how != JOIN_INNER:
+            var kept: List[Int]
             if through:
-                self._narrow_rows(through.value()[0])
-                return True
-            var keys = self._compact_frame(step.names)
-            self._narrow_rows(
-                prepared_hash_semi_anti_rows(
+                kept = through.value()[0].copy()
+            else:
+                var keys = columns.frame(self.arena, input, step.names)
+                kept = prepared_hash_semi_anti_rows(
                     keys._columns,
-                    indexes[][step.join].value(),
+                    self.indexes[][step.join].value(),
                     step.how == JOIN_SEMI,
                     0,
                 )
-            )
-            return True
+            if len(kept) == columns.height:
+                return columns.copy()
+            return columns.through(kept)
         var pairs: Tuple[List[Int], List[Int], Bool]
         if through:
             pairs = through.take()
         else:
-            var keys = self._compact_frame(step.names)
+            var keys = columns.frame(self.arena, input, step.names)
             pairs = prepared_hash_join_rows(
                 keys._columns,
-                indexes[][step.join].value(),
+                self.indexes[][step.join].value(),
                 False,
                 omit_identity=True,
                 workers=0,
             )
-        # A probe row matching twice (a build key repeated) repeats rows:
-        # no selection can hold them, so every column is gathered at them
-        # from the pairs already probed.
-        var repeated = False
-        # A progression or perfect hash holds each build key once: no probe
-        # row can match twice.
-        if not pairs[2] and not indexes[][step.join].value().progression:
-            var at = pairs[0].unsafe_ptr()
-            for k in range(1, len(pairs[0])):
-                if at[unsafe_offset=k] <= at[unsafe_offset=k - 1]:
-                    repeated = True
-                    break
-        # The build side's output columns, named as the join names them.
-        var names = Dict[String, Bool]()
-        for column in self.frame._columns:
-            names[column.name()] = True
-        var left_names = names.copy()
+        var result: _Columns
+        if pairs[2]:
+            result = columns.copy()
+        else:
+            result = columns.through(pairs[0])
+        result.height = len(pairs[1])
+        # The build side's output columns, in the join's output order.
+        var build_rows = List[UInt32](unsafe_uninit_length=len(pairs[1]))
+        var at = build_rows.unsafe_ptr()
+        var rows = pairs[1].unsafe_ptr()
+        for k in range(len(pairs[1])):
+            at[unsafe_offset=k] = UInt32(rows[unsafe_offset=k])
+        var list = len(result.row_lists)
+        result.row_lists.append(build_rows^)
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))
-        var right_output = List[Int]()
-        var right_names = List[String]()
         for i in range(right.width()):
             if step.coalesce and i in right_keys:
                 continue
-            var name = right._columns[i].name()
-            if name in left_names:
-                name += step.suffix
-            if name in names:
-                raise Error("Join output name collision: " + name)
-            names[name] = True
-            right_output.append(i)
-            right_names.append(name)
-        if repeated:
-            var input = self.materialized()
-            var columns = take_parallel(
-                input._columns.copy(),
-                pairs[0].copy(),
-                worker_count(len(pairs[0])),
-                or_null=False,
-            )
-            self.frame = DataFrame(columns^, height=len(pairs[0]))
-            self.count = len(pairs[0])
-            self.compact = List[Bool](length=self.frame.width(), fill=True)
-            self.mask = BoolColumn(List[Bool]())
-            self.selected = False
-            self.by_rows = False
-        else:
-            trace_path("pipeline.join_selection")
-            if not pairs[2]:
-                self._narrow_rows(pairs[0])
-        if len(right_output) == 0:
-            # The build side adds no column (a join kept for its keys only):
-            # its matched rows are never read.
-            return True
-        # String columns with view descriptors are not gathered: each
-        # reads the build column's descriptors through the matched rows,
-        # as DuckDB's probe emits a build column as a dictionary vector
-        # over it. A consumer that reads only the dictionary codes beside
-        # them (a group key, a comparison) never copies a descriptor; one
-        # that reads bytes copies them out when it does. The rest are
-        # gathered.
-        var rows = Optional[ArcPointer[List[Int]]]()
-        var selected = List[Optional[Series]](capacity=len(right_output))
-        var sources = List[Series]()
-        for k in range(len(right_output)):
-            ref column = right._columns[right_output[k]]
-            var picked = Optional[Series]()
-            if column.dtype() == DataType.STRING:
-                var whole = column.rechunk()
-                if not rows:
-                    rows = ArcPointer(pairs[1].copy())
-                var through = whole._data[StringColumn]._select_rows(
-                    rows.value()
-                )
-                if through:
-                    var series = Series(right_names[k], through.take())
-                    series._dtype = whole._dtype
-                    series._field_metadata = whole._field_metadata
-                    picked = series^
-            if picked:
-                trace_path("pipeline.join_view_selection")
-            else:
-                sources.append(column.copy())
-            selected.append(picked^)
-        var gathered = List[Series]()
-        if len(sources) > 0:
-            gathered = take_parallel(
-                sources,
-                pairs[1].copy(),
-                worker_count(len(pairs[1])),
-                or_null=False,
-            )
-        var next = 0
-        for k in range(len(right_output)):
-            if selected[k]:
-                self.frame._columns.append(selected[k].value().copy())
-            else:
-                self.frame._columns.append(
-                    gathered[next].renamed(right_names[k])
-                )
-                next += 1
-            self.compact.append(True)
-        return True
-
-    def join(
-        mut self,
-        step: Step,
-        joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-    ) raises:
-        """Probe the join's prepared index with this morsel's rows: the
-        output is the matched rows of both sides; the probe runs on this
-        worker alone."""
-        var input = self.materialized()
-        var joined = input._join_impl(
-            joins[][step.join],
-            left_on=step.names,
-            right_on=step.right_keys,
-            how=step.how,
-            suffix=step.suffix,
-            coalesce=step.coalesce,
-            prepared=indexes[][step.join],
-            workers=0,
-            marks=self.marks,
-        )
-        self.count = joined.height()
-        self.compact = List[Bool](length=joined.width(), fill=True)
-        self.frame = joined^
-        self.mask = BoolColumn(List[Bool]())
-        self.selected = False
-        self.by_rows = False
-
-    def apply(
-        mut self,
-        step: Step,
-        batch_size: Int,
-        joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-    ) raises:
-        if step.kind == STEP_FILTER:
-            self.filter(step.exprs[0], batch_size)
-        elif step.kind == STEP_SELECT:
-            self.select(step.exprs, batch_size)
-        elif step.kind == STEP_WITH_COLUMNS:
-            self.with_columns(step.exprs, batch_size)
-        elif step.kind == STEP_JOIN:
-            if not self._join_selected(step, joins, indexes):
-                self.join(step, joins, indexes)
-        else:
-            self.drop(step.names)
-
-    def keep(mut self, mask: BoolColumn, kept: Int) raises:
-        """Narrow the selection to the source rows `mask` sets (over the
-        whole frame), before any step has run."""
-        if self.selected:
-            self.mask = both_true(self.mask, mask)
-            self.count = true_count(self.mask)
-        else:
-            self.mask = mask.copy()
-            self.count = kept
-        self.selected = True
-        self.by_rows = False
-        for i in range(len(self.compact)):
-            self.compact[i] = False
-
-    def narrow(mut self, rows: List[Int]) raises:
-        """Select only `rows` (ascending) of a fresh morsel: a top-k's
-        bound applied before any step reads a column."""
-        self.mask = _rows_mask(rows, self.frame._height)
-        self.selected = True
-        self.rows = rows.copy()
-        self.by_rows = True
-        self.count = len(rows)
-        for i in range(len(self.compact)):
-            self.compact[i] = False
-
-    def materialized(mut self) raises -> DataFrame:
-        self.gather_all()
-        return self.frame.copy()
+            result.handles.append(self.builds[s][i])
+            result.starts.append(0)
+            result.lists.append(list)
+        if result.width() != output.width():
+            raise Error("pipeline join: output columns differ from its schema")
+        return result^
 
 
-def _spread(outer: BoolColumn, inner: BoolColumn) raises -> BoolColumn:
-    """`outer` with its set bits replaced, in order, by `inner`'s bits:
-    the selection of a filter applied to an already selected morsel. Only
-    the set bits are visited, a byte of the mask at a time."""
-    var height = len(outer)
-    var values = List[UInt8](length=(height + 7) // 8, fill=0)
-    var out = values.unsafe_ptr()
-    var next = 0
-    if outer._offset % 8 == 0 and outer.null_count() == 0:
-        var data = outer._data[].unsafe_ptr().unsafe_offset(outer._offset // 8)
-        for i in range((height + 7) // 8):
-            var byte = Int(data[unsafe_offset=i])
-            if 8 * (i + 1) > height:
-                byte &= (1 << (height - 8 * i)) - 1
-            while byte != 0:
-                var bit = Int(count_trailing_zeros(byte))
-                byte &= byte - 1
-                if inner._get(next) and inner._valid(next):
-                    out[unsafe_offset=i] |= UInt8(1) << UInt8(bit)
-                next += 1
-    else:
-        for r in range(height):
-            if outer._get(r) and outer._valid(r):
-                if inner._get(next) and inner._valid(next):
-                    out[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
-                next += 1
-    return BoolColumn(values=values^, bits=List[UInt8](), length=height)
+def _steps_over_frame(
+    frame: DataFrame,
+    steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    mut counts: List[Int],
+) raises -> DataFrame:
+    """`steps` over all of `frame` on this thread, chunk by chunk; `counts`
+    receives each step's input and output rows."""
+    var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    var runner = _ChunkRunner(steps, schemas, joins, indexes, False)
+    var source = _Columns.of_frame(runner.arena, frame)
+    var marks = List[Int](length=len(steps), fill=0)
+    var result = runner.run(source^, 0, marks)
+    for i in range(len(steps)):
+        counts.append(runner.counts[2 * i + 1])
+        counts.append(runner.counts[2 * i + 2])
+    return result.whole(runner.arena, runner.output_schema())
 
 
 @fieldwise_init
@@ -2779,6 +2720,8 @@ struct _PipelineJob(Job):
     var unmatched_step: Int
     var unmatched_marks: ArcPointer[List[Int]]
     var unmatched_probe: ArcPointer[DataFrame]
+    # The steps over data chunks, with this worker's vectors and arena.
+    var runner: _ChunkRunner
 
     def __init__(
         out self,
@@ -2808,7 +2751,12 @@ struct _PipelineJob(Job):
         derive_order: List[Int],
         workers: Int,
         key_ranges: List[_KeyRange],
-    ):
+        schemas: ArcPointer[List[DataFrame]],
+        templates: ArcPointer[List[Optional[_VectorStep]]],
+    ) raises:
+        self.runner = _ChunkRunner(
+            steps, schemas, joins, indexes, True, templates
+        )
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
@@ -2908,13 +2856,16 @@ struct _PipelineJob(Job):
             )
             self.sinks.insert(t, target^)
 
-    def _sink_sets(mut self, mut morsel: Morsel, k: Int) raises:
+    def _sink_sets(mut self, columns: _Columns, k: Int) raises:
         """A morsel into every grouping set's sink: the reduction inputs
         are evaluated once, and each set takes the key columns it groups
         by (the grand total a constant one)."""
-        var source = morsel._compact_frame(self._table_reads()) if _reads(
-            self.expressions
-        ) else morsel.materialized()
+        var schema = self.runner.output_schema()
+        var source = columns.frame(
+            self.runner.arena, schema, self._table_reads()
+        ) if _reads(self.expressions) else columns.whole(
+            self.runner.arena, schema
+        )
         var all_keys = List[Series](capacity=len(self.keys))
         for name in self.keys:
             all_keys.append(canonical_labels(_unchunked(source.column(name))))
@@ -2974,45 +2925,41 @@ struct _PipelineJob(Job):
             self.shared_bound.publish(self.bound)
         self.parts = [merged^]
 
-    def _in_key_ranges(mut self, mut morsel: Morsel) raises -> Bool:
-        """Narrow a fresh morsel to the rows inside every join build's key
-        range; False when none is. A morsel whose keys all fall outside a
-        range is skipped whole, and one whose keys all fall inside is left
-        as it is, both told by its keys' least and greatest values (a
-        zone map); only a morsel straddling the range is filtered row by
-        row."""
+    def _key_mask(
+        mut self, frame: DataFrame
+    ) raises -> Tuple[Bool, Optional[BoolColumn]]:
+        """The rows of a fresh morsel inside every join build's key range
+        and bloom filter: False when none is, else their mask (None: every
+        row). A morsel whose keys all fall outside a range is skipped
+        whole, and one whose keys all fall inside is left as it is, both
+        told by its keys' least and greatest values (a zone map); a morsel
+        straddling the range is filtered row by row. The rows kept become
+        the selection the morsel's chunks start from, read through it
+        whatever share it keeps, as DuckDB's dynamic join filters are
+        table filters of the probe's scan."""
+        var mask = Optional[BoolColumn]()
         for k in range(len(self.key_ranges)):
             ref r = self.key_ranges[k]
             if not r.any:
-                return False
-            var column = morsel.frame.column(r.column)
+                return (False, None)
+            var column = frame.column(r.column)
             var bounds = _window_bounds(column)
             if not bounds:
-                return False
+                return (False, None)
             var least = bounds.value()[0]
             var most = bounds.value()[1]
             if most < r.low or least > r.high:
-                return False
+                return (False, None)
             if not (least >= r.low and most <= r.high):
-                # The share of the morsel's key span the range covers: when
-                # over half, the range likely keeps most rows, and the steps
-                # would read them through a selection for little gain.
-                var span = Float64(most) - Float64(least) + 1.0
-                var covered = (
-                    Float64(min(most, r.high))
-                    - Float64(max(least, r.low))
-                    + 1.0
-                )
-                if 2.0 * covered <= span:
-                    var narrowed = _range_mask(
-                        _unchunked(column), r.low, r.high
-                    )
-                    if narrowed[1] == 0:
-                        return False
-                    if 2 * narrowed[1] <= morsel.frame.height():
-                        morsel.keep(narrowed[0], narrowed[1])
-                        if morsel.count == 0:
-                            return False
+                var narrowed = _range_mask(_unchunked(column), r.low, r.high)
+                if narrowed[1] == 0:
+                    return (False, None)
+                if mask:
+                    mask = both_true(mask.value(), narrowed[0])
+                    if true_count(mask.value()) == 0:
+                        return (False, None)
+                else:
+                    mask = narrowed[0].copy()
             if not r.bloom:
                 continue
             var shared = r.bloom.value().copy()
@@ -3024,33 +2971,45 @@ struct _PipelineJob(Job):
             ) >= _BLOOM_PAUSE_SHARE * Float64(self.bloom_checked[k]):
                 continue
             var plain = (
-                morsel.selected
-                and morsel.mask._offset == 0
-                and len(morsel.mask._bits[]) == 0
+                mask
+                and mask.value()._offset == 0
+                and len(mask.value()._bits[]) == 0
             )
-            var selection = Optional[BoolColumn]()
-            if plain:
-                selection = Optional(morsel.mask.copy())
             # Only the rows still selected are looked up and counted: what
             # the filter prunes is what earlier filters left.
-            var found = bloom_mask(_unchunked(column), shared[], selection)
+            var found = bloom_mask(
+                _unchunked(column),
+                shared[],
+                mask.copy() if plain else Optional[BoolColumn](),
+            )
             self.bloom_checked[k] += found[1]
             self.bloom_kept[k] += found[2]
             if found[2] == 0:
-                return False
-            var rows = morsel.count if plain else morsel.frame.height()
-            if 2 * found[2] <= rows:
-                morsel.keep(found[0], found[2])
-            if morsel.count == 0:
-                return False
-        return True
+                return (False, None)
+            if mask and not plain:
+                mask = both_true(mask.value(), found[0])
+            else:
+                mask = found[0].copy()
+        return (True, mask^)
+
+    def _marks(self) -> List[Int]:
+        """Per step, the address of a right or full join's matched-row
+        flags on this worker (0 for none)."""
+        var marks = List[Int](capacity=len(self.marks))
+        for i in range(len(self.marks)):
+            marks.append(
+                Int(self.marks[i].unsafe_ptr()) if len(self.marks[i]) > 0 else 0
+            )
+        return marks^
 
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
         var cursor = _Cursor(self.cursor)
+        var marks = self._marks()
         while True:
             var taken = cursor.take(1)
             if taken >= count:
+                self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
                 # The worker's leftover candidates folded to k, so the
@@ -3062,28 +3021,34 @@ struct _PipelineJob(Job):
             var k = self.first_morsel + taken
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
+            self.runner.begin_morsel()
             if self.unmatched_step >= 0:
                 var rows = self._unmatched(offset, length)
                 if rows.height() == 0:
                     continue
-                var tail = Morsel(rows^, k)
-                tail.source_rows = self.frame[].height()
-                self._steps_from(tail, self.first_step)
-                if tail.height() > 0:
-                    self._consume(tail, k, offset, length)
+                var tail = _Columns.of_frame(self.runner.arena, rows)
+                var output = self.runner.run(tail^, self.first_step, marks)
+                if output.height > 0:
+                    self._consume(output, k, offset, length)
                 continue
-            var morsel = Morsel(self.frame[].slice(offset, length), k)
-            morsel.source_rows = self.frame[].height()
+            var morsel = self.frame[].slice(offset, length)
             if self.first_step > 0:
                 # An outer join's unmatched build rows: the source's key
                 # ranges and top-k bound do not apply to them.
-                self._steps_from(morsel, self.first_step)
-                if morsel.height() > 0:
-                    self._consume(morsel, k, offset, length)
+                var source = _Columns.of_frame(self.runner.arena, morsel)
+                var output = self.runner.run(source^, self.first_step, marks)
+                if output.height > 0:
+                    self._consume(output, k, offset, length)
                 continue
-            self.counts[0] += length
-            if not self._in_key_ranges(morsel):
+            self.runner.counts[0] += length
+            var keyed = self._key_mask(morsel)
+            if not keyed[0]:
                 continue
+            var rows = Optional[List[Int]]()
+            if keyed[1]:
+                rows = _mask_rows(
+                    keyed[1].value(), true_count(keyed[1].value())
+                )
             if self.top > 0 and self.bounded:
                 self.shared_bound.tighten(
                     self.bound,
@@ -3091,32 +3056,32 @@ struct _PipelineJob(Job):
                     self.top_descending[0],
                     self.floating_key,
                 )
-            var zoned = _ZONE_SOME
             if self.top > 0 and self.bound.kind != _BOUND_NONE:
+                var zoned = _ZONE_SOME
                 if self.bound.kind == _BOUND_INT:
-                    zoned = _zoned_top(morsel.frame, self.bound)
+                    zoned = _zoned_top(morsel, self.bound)
                 if zoned == _ZONE_NONE:
-                    # No row of the morsel can enter: it is left empty
-                    # and read no further.
+                    # No row of the morsel can enter: it is read no
+                    # further.
                     trace_path("pipeline.top_zone_skip")
-                    morsel.narrow(List[Int]())
-            if (
-                self.top > 0
-                and self.bound.kind != _BOUND_NONE
-                and zoned == _ZONE_SOME
-            ):
-                # Narrow to the rows that can still enter the top k when
-                # at most one in eight can: gathering a step's columns at
-                # scattered rows costs more than reading them whole past
-                # that (ClickBench q26's string filter on 15% of the rows:
-                # 31 ms busy against 6 reading every row).
-                var kept = self.bound.rows(morsel.frame)
-                if kept and 8 * len(kept.value()) <= morsel.height():
-                    morsel.narrow(kept.value())
-            self._steps_from(morsel, 0)
-            if morsel.height() == 0:
+                    continue
+                if zoned == _ZONE_SOME:
+                    # The rows that can still enter the top k start the
+                    # morsel's selection, read through it whatever share
+                    # it keeps (the bound is DuckDB's dynamic filter on
+                    # the top-k's key).
+                    var kept = self.bound.rows(morsel)
+                    if kept:
+                        rows = _intersect_rows(rows, kept.take())
+            var source = _Columns.of_frame(self.runner.arena, morsel)
+            if rows:
+                if len(rows.value()) == 0:
+                    continue
+                source = source.through(rows.value())
+            var output = self.runner.run(source^, 0, marks)
+            if output.height == 0:
                 continue
-            self._consume(morsel, k, offset, length)
+            self._consume(output, k, offset, length)
 
     def _unmatched(self, offset: Int, length: Int) raises -> DataFrame:
         """The build rows in [offset, offset + length) that no worker's
@@ -3161,67 +3126,31 @@ struct _PipelineJob(Job):
             coalesce=step.coalesce,
         )
 
-    def _steps_from(mut self, mut morsel: Morsel, first: Int) raises:
-        """Run the steps from `first` on over one morsel, until one leaves
-        it empty."""
-        for i in range(first, len(self.steps)):
-            self.counts[2 * i + 1] += morsel.height()
-            var began = Int(perf_counter_ns())
-            if len(self.marks[i]) > 0:
-                morsel.marks = Int(self.marks[i].unsafe_ptr())
-            morsel.apply(
-                self.steps[i], self.batch_size, self.joins, self.indexes
-            )
-            self.counts[2 * len(self.steps) + 1 + i] += (
-                Int(perf_counter_ns()) - began
-            )
-            self.counts[2 * i + 2] += morsel.height()
-            if morsel.height() == 0:
-                return
-
     def _consume(
-        mut self, mut morsel: Morsel, k: Int, offset: Int, length: Int
+        mut self, columns: _Columns, k: Int, offset: Int, length: Int
     ) raises:
         """Sink one morsel that has run every step into this worker's
         state: `k` numbers it, `offset` and `length` place its rows in the
-        source."""
+        source. The sinks read frames: the morsel's columns are gathered
+        through their rows here (the adapter the aggregate, top-k and
+        materialize ports delete)."""
+        var schema = self.runner.output_schema()
         if len(self.layout) > 0 and len(self.sets) > 0:
-            self._sink_sets(morsel, k)
+            self._sink_sets(columns, k)
             return
         if len(self.layout) > 0:
-            if len(self.sinks) == 0:
-                self.sinks.append(AggregateSink(self.layout[0], self.workers))
-            var in_place = _in_place_table_rows(
-                morsel, self.keys, self.expressions
-            )
-            if in_place:
-                trace_path("pipeline.table_in_place")
-                ref rows = in_place.value()
-                self.sinks[0].sink(rows[0], rows[1], k << 32, rows[2])
-                self.rows += rows[3]
-                return
             # The aggregate table: the morsel's keys and reduction
             # inputs into this worker's sink, no matter how many groups
             # (its tables adapt), with strings compared in place.
-            var keys = List[Series](capacity=len(self.keys))
-            var inputs: List[Series]
-            var selected = _selected_table_rows(
-                morsel, self.keys, self.expressions
+            var source = columns.frame(
+                self.runner.arena, schema, self._table_reads()
+            ) if _reads(self.expressions) else columns.whole(
+                self.runner.arena, schema
             )
-            if selected:
-                trace_path("pipeline.table_inputs_selected")
-                ref rows = selected.value()
-                keys = rows[0].copy()
-                inputs = rows[1].copy()
-            else:
-                var source = morsel._compact_frame(
-                    self._table_reads()
-                ) if _reads(self.expressions) else morsel.materialized()
-                for name in self.keys:
-                    keys.append(
-                        canonical_labels(_unchunked(source.column(name)))
-                    )
-                inputs = table_inputs(source, keys, self.expressions)
+            var keys = List[Series](capacity=len(self.keys))
+            for name in self.keys:
+                keys.append(canonical_labels(_unchunked(source.column(name))))
+            var inputs = table_inputs(source, keys, self.expressions)
             for i in range(len(inputs)):
                 inputs[i] = _unchunked(inputs[i])
             if len(self.sinks) == 0:
@@ -3241,42 +3170,47 @@ struct _PipelineJob(Job):
             if len(self.grouped) == 0:
                 self.grouped.append(
                     _GroupedSink(
-                        morsel.frame,
+                        schema,
                         self.expressions,
                         self.keys,
                         True,
                         self.batch_size,
                     )
                 )
-            if morsel.selected:
-                self.grouped[0].select(offset, length, morsel.mask)
-            else:
-                self.grouped[0].select(offset, length, BoolColumn(List[Bool]()))
-            self.rows += morsel.height()
+            self.grouped[0].select(
+                offset, length, columns.selection_mask(length)
+            )
+            self.rows += columns.height
             return
         if len(self.expressions) > 0:
             var reads = _reads(self.expressions)
             var expressions = self.expressions.copy()
             var input: DataFrame
-            if reads and morsel.selected and len(self.keys) == 0:
-                var counts = _row_counted(morsel, self.expressions)
+            if reads and len(self.keys) == 0:
+                var counts = _row_counted(
+                    columns, self.runner.arena, schema, self.expressions
+                )
                 expressions = counts[0].copy()
-                input = morsel._compact_frame(counts[1])
+                input = columns.frame(self.runner.arena, schema, counts[1])
                 for name in counts[2]:
-                    # Only row counts read it: a window of the kept-row
+                    # Only row counts read it: a column of the kept-row
                     # height stands in, and its values are never read.
-                    var at = morsel._index(name)
                     input = input.with_column(
-                        morsel.frame._columns[at].slice(0, morsel.count)
+                        Series(
+                            name,
+                            Column[Int8](
+                                List[Int8](length=columns.height, fill=0)
+                            ),
+                        )
                     )
             elif reads:
                 var names = reads.take()
                 for key in self.keys:
                     if key not in names:
                         names.append(key)
-                input = morsel._compact_frame(names)
+                input = columns.frame(self.runner.arena, schema, names)
             else:
-                input = morsel.materialized()
+                input = columns.whole(self.runner.arena, schema)
             if len(self.keys) > 0 and len(self.reduction) == 0:
                 # Rows go straight into this worker's per-part key
                 # indexes and reducer states (DuckDB's thread-local
@@ -3326,10 +3260,10 @@ struct _PipelineJob(Job):
                         self.reduction[p].merge_all(batch, parallel=False)
                     p += 1
         elif self.top > 0:
-            var output = morsel.materialized()
+            var output = columns.whole(self.runner.arena, schema)
             var h = output.height()
             var places = List[Int64](capacity=h)
-            var base = Int64(morsel.sequence) << 40
+            var base = Int64(k) << 40
             for r in range(h):
                 places.append(base + Int64(r))
             output = output.with_column(
@@ -3348,45 +3282,30 @@ struct _PipelineJob(Job):
                 self._fold_candidates()
                 self.fold_at = min(_FOLD_ROWS, 2 * self.fold_at)
         else:
-            self.parts.append(morsel.materialized())
-            self.sequences.append(morsel.sequence)
+            self.parts.append(columns.whole(self.runner.arena, schema))
+            self.sequences.append(k)
 
 
-def _scatter(
-    compact: Series, rows: List[Int], n: Int
-) raises -> Optional[Series]:
-    """A numeric or decimal column of the kept rows placed back at their
-    positions `rows` among `n` (the others hold zero, for rows nothing
-    reads); None for other storage."""
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if compact._data.isa[Column[Scalar[D]]]():
-            return _scatter_typed[D](compact, rows, n)
-    if compact._data.isa[Column[Int128]]():
-        return _scatter_typed[DType.int128](compact, rows, n)
-    return None
-
-
-def _scatter_typed[
-    D: DType
-](compact: Series, rows: List[Int], n: Int) raises -> Series:
-    ref column = compact._data[Column[Scalar[D]]]
-    var values = List[Scalar[D]](length=n, fill=0)
-    var out = values.unsafe_ptr()
-    var source = column._ptr()
-    var at = rows.unsafe_ptr()
-    for j in range(len(rows)):
-        out[unsafe_offset=at[unsafe_offset=j]] = source[unsafe_offset=j]
-    if column.null_count() == 0:
-        return Series(compact.name(), Column[Scalar[D]](values^)).with_dtype(
-            compact.dtype()
-        )
-    var valid = List[Bool](length=n, fill=True)
-    for j in range(len(rows)):
-        valid[at[unsafe_offset=j]] = column._valid(j)
-    return Series(compact.name(), Column[Scalar[D]](values^, valid)).with_dtype(
-        compact.dtype()
-    )
+def _intersect_rows(
+    rows: Optional[List[Int]], var other: List[Int]
+) -> Optional[List[Int]]:
+    """The rows in both ascending lists (`rows` None: every row)."""
+    if not rows:
+        return other^
+    ref mine = rows.value()
+    var result = List[Int](capacity=min(len(mine), len(other)))
+    var i = 0
+    var j = 0
+    while i < len(mine) and j < len(other):
+        if mine[i] == other[j]:
+            result.append(mine[i])
+            i += 1
+            j += 1
+        elif mine[i] < other[j]:
+            i += 1
+        else:
+            j += 1
+    return result^
 
 
 def _mask_rows(mask: BoolColumn, count: Int) -> List[Int]:
@@ -3414,206 +3333,6 @@ def _mask_rows(mask: BoolColumn, count: Int) -> List[Int]:
         if mask._valid(i) and mask._get(i):
             rows.append(i)
     return rows^
-
-
-def _selected_table_rows(
-    mut morsel: Morsel, keys: List[String], expressions: List[Expr]
-) raises -> Optional[Tuple[List[Series], List[Series]]]:
-    """A selected morsel's aggregate-table keys and reduction inputs in
-    `table_inputs`' order, one row per kept row, where every computed
-    input is arithmetic or a cast (`selected_expressions`): those are
-    computed for the kept rows straight from the columns, and only the
-    keys and plain inputs are gathered. The columns a computed input alone
-    reads are never copied (PDS-H's discounted prices read two lineitem
-    columns after a join that keeps few rows). None when the morsel is
-    not selected or an input is anything else."""
-    if not morsel.selected:
-        return None
-    var plans = List[Optional[SelectedPlan]]()
-    var plain = List[String]()
-    var any_computed = False
-    for expression in expressions:
-        for node in expression._nodes:
-            if not is_reduction(node.op):
-                continue
-            if node.op == CORR or node.op == COV:
-                return None
-            if node.left < 0:
-                plans.append(None)
-                continue
-            ref input = expression._nodes[node.left]
-            if input.op == COL and input.text in morsel.frame.columns():
-                plans.append(None)
-                if input.text not in plain:
-                    plain.append(input.text)
-                continue
-            var plan = selected_plan(
-                subtree(expression, node.left), morsel.frame._columns
-            )
-            if not plan:
-                return None
-            plans.append(plan^)
-            any_computed = True
-    if not any_computed:
-        return None
-    var computed = List[Optional[Series]](capacity=len(plans))
-    var masked_rows = Optional[List[Int]]()
-    for k in range(len(plans)):
-        if not plans[k]:
-            computed.append(None)
-            continue
-        var result = morsel._evaluate_selected(
-            plans[k].value(), False, "__input", masked_rows
-        )
-        if not result:
-            return None
-        computed.append(result^)
-    var names = keys.copy()
-    for name in plain:
-        if name not in names:
-            names.append(name)
-    var source = morsel._compact_frame(names)
-    var key_columns = List[Series](capacity=len(keys))
-    for name in keys:
-        key_columns.append(canonical_labels(_unchunked(source.column(name))))
-    var inputs = List[Series](capacity=len(plans))
-    var at = 0
-    for expression in expressions:
-        for node in expression._nodes:
-            if not is_reduction(node.op):
-                continue
-            if computed[at]:
-                inputs.append(computed[at].value().copy())
-            elif node.left < 0:
-                inputs.append(key_columns[0].copy())
-            else:
-                inputs.append(source.column(expression._nodes[node.left].text))
-            at += 1
-    return (key_columns^, inputs^)
-
-
-def _in_place_table_rows(
-    mut morsel: Morsel, keys: List[String], expressions: List[Expr]
-) raises -> Optional[Tuple[List[Series], List[Series], List[Bool], Int]]:
-    """A filtered morsel's aggregate-table rows without compacting it: its
-    key and plain input columns as they are, with a flag a row for the rows
-    the filter keeps; each computed input evaluated over every row, or,
-    when that raises, on the kept rows alone and placed back at their
-    positions, so only a kept row's error is raised. For a selection that
-    keeps at least
-    half the morsel, where compacting every column cost more than reading
-    the dropped rows (PDS-H q1 keeps 98.6%: a third of its time went to
-    compacting, including two string keys' views and codes). None when the
-    selection is sparse or a column was already compacted. A join's
-    selection by rows is read the same way, through the mask kept beside
-    its rows."""
-    var n = morsel.frame.height()
-    if not morsel.selected or 2 * morsel.count < n:
-        return None
-    for expression in expressions:
-        for node in expression._nodes:
-            if node.op == CORR or node.op == COV:
-                return None
-    var key_columns = List[Series](capacity=len(keys))
-    for name in keys:
-        var at = morsel._index(name)
-        if morsel.compact[at]:
-            return None
-        key_columns.append(
-            canonical_labels(_unchunked(morsel.frame._columns[at]))
-        )
-    # Plain inputs are taken before any computed input compacts a column.
-    var inputs = List[Series]()
-    var computed = List[Int]()
-    var sources = List[Expr]()
-    for expression in expressions:
-        for i in range(len(expression._nodes)):
-            ref node = expression._nodes[i]
-            if not is_reduction(node.op):
-                continue
-            if node.left < 0:
-                inputs.append(key_columns[0].copy())
-                continue
-            ref input = expression._nodes[node.left]
-            if input.op == COL and input.text in morsel.frame.columns():
-                var at = morsel._index(input.text)
-                if morsel.compact[at]:
-                    return None
-                inputs.append(_unchunked(morsel.frame._columns[at]))
-                continue
-            computed.append(len(inputs))
-            sources.append(subtree(expression, node.left))
-            inputs.append(key_columns[0].copy())
-    var masked_rows = Optional[List[Int]]()
-    for c in range(len(computed)):
-        # Arithmetic and casts are computed for the kept rows alone, each
-        # value at its row (`selected_expressions`).
-        var plan = selected_plan(sources[c], morsel.frame._columns)
-        if plan:
-            var placed = morsel._evaluate_selected(
-                plan.value(), True, "__input", masked_rows
-            )
-            if placed:
-                inputs[computed[c]] = placed.take()
-                continue
-        var reads = _reads([sources[c].copy()])
-        if not reads:
-            return None
-        var whole = List[Series]()
-        for name in reads.value():
-            var at = morsel._index(name)
-            if morsel.compact[at]:
-                return None
-            whole.append(morsel.frame._columns[at].copy())
-        # Over every row, dropped ones included; an error is retried on
-        # the kept rows alone, so only a kept row's error is raised.
-        var evaluated: Series
-        try:
-            evaluated = (
-                DataFrame(whole^, height=n)
-                .select_exprs([sources[c].alias("__input")])
-                ._columns[0]
-                .copy()
-            )
-        except:
-            var rows = true_rows(morsel.mask)
-            var kept = morsel._compact_frame(reads.value())
-            var placed = _scatter(
-                _unchunked(
-                    kept.select_exprs([sources[c].alias("__input")])._columns[0]
-                ),
-                rows,
-                n,
-            )
-            if not placed:
-                return None
-            evaluated = placed.take()
-        inputs[computed[c]] = _unchunked(evaluated)
-    ref mask = morsel.mask
-    var keep = List[Bool](unsafe_uninit_length=n)
-    var out = keep.unsafe_ptr()
-    var done = 0
-    if mask._offset % 8 == 0:
-        # A byte of the mask (its values ANDed with its validity) at a
-        # time, spread to eight flags with one compare, where reading each
-        # row's two bits took a tenth of PDS-H q1.
-        var values = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
-        var all_valid = len(mask._bits[]) == 0
-        var valid = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)
-        var lanes = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
-        var flags = out.unsafe_bitcast[UInt8]()
-        for j in range(n // 8):
-            var byte = values[unsafe_offset=j]
-            if not all_valid:
-                byte &= valid[unsafe_offset=j]
-            var spread = (SIMD[DType.uint8, 8](byte) & lanes).ne(
-                SIMD[DType.uint8, 8](0)
-            )
-            flags.unsafe_offset(8 * j).unsafe_store(spread.cast[DType.uint8]())
-        done = 8 * (n // 8)
-    for i in range(done, n):
-        out[unsafe_offset=i] = mask._valid(i) and mask._get(i)
-    return (key_columns^, inputs^, keep^, morsel.count)
 
 
 def _unchunked(column: Series) raises -> Series:
@@ -3899,11 +3618,7 @@ def _emit_unmatched(
             continue
         # The probe side's columns at this step: an empty source through
         # the steps before it.
-        var empty = source.copy()
-        for i in range(j):
-            var probe = Morsel(empty.copy(), 0)
-            probe.apply(steps[i], batch_size, joins, indexes)
-            empty = probe.materialized()
+        var empty = jobs[0].runner.schema(j)
         var marks = List[Int](capacity=len(jobs))
         for w in range(len(jobs)):
             marks.append(Int(jobs[w].marks[j].unsafe_ptr()))
@@ -4095,12 +3810,13 @@ struct _FinishStepsJob(Job):
         self.counts = List[Int]()
 
     def run(mut self) raises:
-        var morsel = Morsel(self.state.finish(), 0)
-        for step in self.steps:
-            self.counts.append(morsel.count)
-            morsel.apply(step, self.batch_size, self.joins, self.indexes)
-            self.counts.append(morsel.count)
-        self.frame = morsel.materialized()
+        self.frame = _steps_over_frame(
+            self.state.finish(),
+            self.steps,
+            self.joins,
+            self.indexes,
+            self.counts,
+        )
 
 
 struct _HavingFilter(Movable):
@@ -4218,12 +3934,9 @@ def _finish_with_steps(
     part (no groups), the steps run over the empty finished output."""
     if len(parts) == 0:
         # No group: the steps over the empty result, for its columns.
-        var morsel = Morsel(template.finish(), 0)
-        for step in steps:
-            counts.append(morsel.count)
-            morsel.apply(step, batch_size, joins, indexes)
-            counts.append(morsel.count)
-        return morsel.materialized()
+        return _steps_over_frame(
+            template.finish(), steps, joins, indexes, counts
+        )
     trace_path("pipeline.aggregate_finish_steps")
     var finishes = List[_FinishStepsJob](capacity=len(parts))
     while len(parts) > 0:
@@ -4269,17 +3982,17 @@ def _run_pipeline(
     and output rows when the aggregate table's finish ran them, and stays
     empty otherwise."""
     trace_path("pipeline.run")
+    # Every step's input columns and the output, typed once, and the
+    # row-local steps compiled once for every worker.
+    var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
     var layout = List[AggregateLayout]()
     var template = List[_StreamReduction]()
     var set_empty = List[DataFrame]()
     if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
-        var empty = frame.clear()
-        for step in steps:
-            var morsel = Morsel(empty.copy(), 0)
-            morsel.apply(step, batch_size, joins, indexes)
-            empty = morsel.materialized()
+        var empty = schemas[][len(steps)].copy()
         if len(sets) > 0 and table_supported(empty, keys, expressions):
             set_empty.append(empty.copy())
             var empty_inputs = table_inputs(
@@ -4467,6 +4180,8 @@ def _run_pipeline(
                 derive_order,
                 workers,
                 key_ranges,
+                schemas,
+                templates,
             )
         )
     # An outer join's unmatched build rows run after every morsel of the
@@ -4586,11 +4301,7 @@ def _run_pipeline(
             if len(jobs[j].grouped) > 0:
                 sink = j
         if sink < 0:
-            var empty = frame.clear()
-            for step in steps:
-                var morsel = Morsel(empty.copy(), 0)
-                morsel.apply(step, batch_size, joins, indexes)
-                empty = morsel.materialized()
+            var empty = schemas[][len(steps)].copy()
             return _StreamReduction(empty, expressions, keys).finish()
         if jobs[sink].grouped[0].collecting:
             # Every worker's rows, grouped once by the eager partitioned
@@ -4682,11 +4393,7 @@ def _run_pipeline(
                 merged[0].merge(jobs[j].reduction[0])
         if len(merged) == 0:
             # No row survived: reduce an empty frame of the right schema.
-            var empty = frame.clear()
-            for step in steps:
-                var morsel = Morsel(empty.copy(), 0)
-                morsel.apply(step, batch_size, joins, indexes)
-                empty = morsel.materialized()
+            var empty = schemas[][len(steps)].copy()
             return _StreamReduction(empty, expressions, List[String]()).finish()
         return merged[0].finish()
     # Morsels in source order: each worker's parts are in the order it
@@ -4712,11 +4419,7 @@ def _run_pipeline(
         parts.append(jobs[best].parts[next[best]].copy())
         next[best] += 1
     if len(parts) == 0:
-        var empty = frame.clear()
-        for step in steps:
-            var morsel = Morsel(empty.copy(), 0)
-            morsel.apply(step, batch_size, joins, indexes)
-            empty = morsel.materialized()
+        var empty = schemas[][len(steps)].copy()
         return empty^
     if top > 0:
         # Every worker's candidates, sorted once to the k best, ties by
