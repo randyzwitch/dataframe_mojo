@@ -51,10 +51,16 @@ from dataframe.joins.keys import (
 from dataframe.joins.range import (
     _bounded_int64_join_rows,
     _dense_right_int64_rows,
-    _join_range_rows,
     _range_int64_membership_chunks,
     _range_int64_membership_rows,
 )
+from dataframe.kernels.segment_statistics import (
+    ensure_statistics,
+    series_statistics,
+)
+from dataframe.storage.statistics import NUMERIC_STATS
+from dataframe.table_filter import TableFilterSet, range_filter
+from dataframe.table_scan import scan_ranges
 from dataframe.joins.rows import (
     _group_index,
     _group_rows,
@@ -240,14 +246,39 @@ def join_frames(
         and (how == JOIN_INNER or how == JOIN_LEFT)
         and prefer_left_build(self.height(), right.height())
     ):
+        # The build's key range as an optional filter on the probe
+        # side's scan (DuckDB's join filter pushdown of min/max): vectors
+        # whose statistics hold no key in range are not probed. Rows left
+        # are probed as usual, so the filter is checked against
+        # statistics only.
+        var filters = TableFilterSet()
         for k in range(len(left_keys)):
-            var selected = _join_range_rows(
-                self._columns[left_keys[k]], right._columns[right_keys[k]]
+            ref build = self._columns[left_keys[k]]
+            ref probe = right._columns[right_keys[k]]
+            if build.dtype() != probe.dtype():
+                continue
+            if not series_statistics(probe):
+                continue
+            ensure_statistics(build)
+            var bounds = series_statistics(build)
+            if not bounds or bounds.value().stats_type != NUMERIC_STATS:
+                continue
+            if not bounds.value().has_min_max:
+                continue
+            var filter = range_filter(
+                probe.name(),
+                probe.dtype(),
+                bounds.value().int_min,
+                bounds.value().int_max,
             )
-            if selected:
-                var filtered = right._filter_rows(selected.take())
+            if filter:
+                filters.push_filter(filter.take())
+        if filters.has_filters():
+            var pruned = scan_ranges(filters, right)
+            if pruned:
+                trace_path("join.range_filter")
                 return self._join_impl(
-                    filtered,
+                    pruned.value(),
                     left_on=left_on,
                     right_on=right_on,
                     how=how,

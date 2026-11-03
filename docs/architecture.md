@@ -267,14 +267,17 @@ remain their existing domains; later PRs organize computational and text code.
 `kernels/` owns work over typed in-memory columns: binary/float arithmetic,
 casts and temporal/list operations; gather and mask selection; key hashing,
 partitioning, joins, distinct sketches and code remapping; row encoding,
-sorting, top-k and rank; fused comparisons, sorted search and validity decoding.
+sorting, top-k and rank; fused comparisons, segment statistics and validity
+decoding.
 Legacy root modules re-export their declarations. Engine and provider imports
 use the canonical modules. Existing tests continue exercising legacy imports.
 
 Expression preparation remains above this boundary. `fused_compare.mojo`
 binds/evaluates constants and prepares comparisons and selection trees, then
-calls the comparison kernel. `sorted_range.mojo` binds/evaluates filter bounds
-and combines them before calling typed sorted-search kernels. Neither kernel
+calls the comparison kernel. `table_filter.mojo` binds/evaluates the constants
+of a scan's table filters and checks them against the statistics
+`kernels/segment_statistics.mojo` keeps with each buffer; `table_scan.mojo`
+prunes the scan's vectors with them (DuckDB's zone maps). Neither kernel
 imports its adapter or the expression evaluator. The shared eight-lane bitmap
 primitive lives in `kernels/validity.mojo`; execution re-exports it for existing
 consumers. Existing bound-expression value models and operation tags can be
