@@ -591,7 +591,7 @@ struct GroupBy(Copyable):
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
-        if _stream_reductions(expressions) and not self._many_distinct(
+        if _stream_reductions(expressions) and not self._counts_distinct(
             expressions
         ):
             var perfect = self._agg_perfect(expressions, key_names, workers)
@@ -622,7 +622,7 @@ struct GroupBy(Copyable):
         if (
             workers > 1
             and _stream_reductions(expressions)
-            and not self._many_distinct(expressions)
+            and not self._counts_distinct(expressions)
         ):
             ranged = self._agg_ranges(expressions, key_names, workers, whole)
         if ranged:
@@ -725,36 +725,13 @@ struct GroupBy(Copyable):
             return grouped^
         return grouped.take(sort_indices([firsts.copy()]))
 
-    def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
-        """Whether some `n_unique` reads many distinct values (#336).
-
-        Per-range sets of (group, value) pairs merge on one thread, which
-        is cheap only when values repeat: grouping IsRefresh by RegionID's
-        3,586 values takes 57 ms that way and 75 ms through the whole-frame
-        path's hash partitions, while UserID's 1.5M values take 314 ms and
-        87 ms. A sample of evenly spaced rows tells them apart: at most a
-        tenth of it distinct (RegionID shows 9%, SearchPhrase 14%, UserID
-        all) keeps the ranges. Any input that is not a column is assumed
-        to have many values.
-        """
-        var height = self._frame.height()
-        var sample = min(height, 4096)
-        if sample == 0:
-            return False
-        var rows = List[Int](capacity=sample)
-        for k in range(sample):
-            rows.append(k * height // sample)
+    def _counts_distinct(self, expressions: List[Expr]) -> Bool:
+        """Whether some expression counts distinct values: the aggregate
+        table counts them in its distinct tables (`AggregateSink.distinct`),
+        which the per-worker and per-range states do not have."""
         for expression in expressions:
-            ref nodes = expression._nodes
-            for node in nodes:
-                if node.op != N_UNIQUE:
-                    continue
-                ref input = nodes[node.left]
-                if input.op != COL:
-                    return True
-                var picked = self._frame.column(input.text).take(rows)
-                var distinct = encode_rows([picked^], nulls_equal=True).count()
-                if 10 * distinct > sample:
+            for node in expression._nodes:
+                if node.op == N_UNIQUE:
                     return True
         return False
 

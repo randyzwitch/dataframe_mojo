@@ -52,6 +52,7 @@ from dataframe.expr import (
     ALL,
     ANY,
     CORR,
+    N_UNIQUE,
     COUNT,
     COV,
     FIRST,
@@ -129,6 +130,7 @@ def reduction_supported(op: Int) -> Bool:
         LAST,
         ANY,
         ALL,
+        N_UNIQUE,
     ]
 
 
@@ -182,6 +184,11 @@ comptime _K_LOGIC = 17
 # value is held.
 comptime _K_WIDE_MIN = 18
 comptime _K_WIDE_MAX = 19
+# A distinct count (DuckDB's distinct aggregate): the number of the
+# group's distinct values, which the sink's distinct table of (keys, value)
+# groups adds to its group (`AggregateSink.distinct`); a row's update
+# leaves it alone.
+comptime _K_DISTINCT = 20
 # The most pairs a group row holds inline: 33 state words, four cache lines.
 comptime TOP_ROWS_INLINE = 16
 
@@ -693,6 +700,8 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
         # A count reads only validity, whatever the values' type, as
         # DuckDB's count(ANY) does.
         return _K_COUNT if spec.op == COUNT else _K_NULLS
+    if spec.op == N_UNIQUE:
+        return _K_DISTINCT if storage != _VALUE_NONE else -1
     if input.dtype().is_categorical():
         return -1
     if (spec.op == FIRST or spec.op == LAST) and storage != _VALUE_NONE:
@@ -1234,15 +1243,25 @@ def _update_states(
     arena: Pointer[_ValueArena, MutAnyOrigin],
     discard: Int,
     scratch: Int,
+    only: Int = -1,
 ) raises:
     """Every reduction's `update` for a batch (`inputs` are the morsel's
     slices, one chunk each; `rows` the addresses of the rows' groups, whose
     states start at word `states_at`; `first` the source row of the
     morsel's first, rows numbered on from it; `scratch` three vectors of
-    words for value states)."""
+    words for value states). With `only`, each row adds one to that
+    reduction's state alone (a distinct table's groups into their distinct
+    counts)."""
+    if only >= 0:
+        var base = 8 * (states_at + slots[only].offset)
+        for k in range(count):
+            _words_at(rows[unsafe_offset=k] + base)[] += 1
+        return
     for s in range(len(slots)):
         ref slot = slots[s]
         var base = 8 * (states_at + slot.offset)
+        if slot.kind == _K_DISTINCT:
+            continue
         if slot.kind == _K_LEN:
             for k in range(count):
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
@@ -1508,7 +1527,7 @@ def combine(slots: List[AggregateFunction], into: Int, other: Int) raises:
                 Pointer[UInt64, MutAnyOrigin](unsafe_from_address=into + 8 * w),
                 other + 8 * w,
             )
-        elif kind <= _K_NULLS:
+        elif kind <= _K_NULLS or kind == _K_DISTINCT:
             a[unsafe_offset=w] += b[unsafe_offset=w]
         elif kind == _K_NARROW_SUM:
             a[unsafe_offset=w] += b[unsafe_offset=w]
@@ -1711,7 +1730,12 @@ def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
         return _F_LOGIC
     if kind == _K_WIDE_MIN or kind == _K_WIDE_MAX:
         return _F_WIDE
-    if kind == _K_LEN or kind == _K_COUNT or kind == _K_NULLS:
+    if (
+        kind == _K_LEN
+        or kind == _K_COUNT
+        or kind == _K_NULLS
+        or kind == _K_DISTINCT
+    ):
         return _F_COUNTS
     if kind == _K_VALUES:
         return _F_QUANTILE
