@@ -451,23 +451,23 @@ def window_layout(
         for k in range(len(order_keys)):
             desc.append(descending[k])
             last.append(nulls_last[k])
-        # Largest groups first, as CreateTaskList schedules them.
-        var by_size = List[Int]()
-        for b in range(parts.buckets()):
-            if parts.bounds[b + 1] > parts.bounds[b]:
-                by_size.append(b)
-        for i in range(1, len(by_size)):
-            var b = by_size[i]
-            var j = i
-            while j > 0 and (
-                parts.bounds[by_size[j - 1] + 1] - parts.bounds[by_size[j - 1]]
-                < parts.bounds[b + 1] - parts.bounds[b]
-            ):
-                by_size[j] = by_size[j - 1]
-                j -= 1
-            by_size[j] = b
-        var jobs = List[_GroupSortJob](capacity=len(by_size))
-        for b in by_size:
+        # Hash groups are sorted by tasks of about equal rows, each at
+        # least one STANDARD_VECTOR_SIZE block (CreateTaskList sizes window
+        # tasks in blocks per thread). A task takes consecutive hash groups
+        # and sorts their rows together: every partition lies in one hash
+        # group, so the task's range is a hash group of the layout.
+        var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
+        var tasks = max(1, min(workers, blocks))
+        var share = (height + tasks - 1) // tasks
+        var cuts = List[Int]()
+        cuts.append(0)
+        for b in range(1, parts.buckets()):
+            var at = parts.bounds[b]
+            if at < height and at - cuts[len(cuts) - 1] >= share:
+                cuts.append(at)
+        cuts.append(height)
+        var jobs = List[_GroupSortJob](capacity=len(cuts) - 1)
+        for t in range(len(cuts) - 1):
             jobs.append(
                 _GroupSortJob(
                     keys,
@@ -475,18 +475,19 @@ def window_layout(
                     desc,
                     last,
                     Int(parts.order.unsafe_ptr()),
-                    parts.bounds[b],
-                    parts.bounds[b + 1],
+                    cuts[t],
+                    cuts[t + 1],
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
                     Int(partitioner.hashes.unsafe_ptr()),
                 )
             )
-        run_jobs(jobs)
-        for b in range(parts.buckets()):
-            if parts.bounds[b + 1] > parts.bounds[b]:
-                bounds.append(parts.bounds[b])
+            bounds.append(cuts[t])
+        if len(jobs) == 1:
+            jobs[0].run()
+        else:
+            run_jobs(jobs)
         _ = parts^
     elif len(order_keys) > 0:
         # FullSort: one group, sorted on every thread; peers are marked
