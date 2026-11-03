@@ -21,6 +21,7 @@ are evaluated independently.
 Sorts are DuckDB's (`dataframe.sorting.sort_rows`), kept stable (ties in
 input order), as `over(order_by=...)` keeps input order on ties.
 """
+from std.ffi import external_call
 from std.memory import Pointer
 
 from dataframe.storage.allocation import huge_uninit
@@ -29,10 +30,10 @@ from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.kernels.partition import Partitioner, _same_value
+from dataframe.aggregation.reducer import float_key
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
 from dataframe.sorting.sort import sort_rows
-from dataframe.kernels.gather import take_parallel
 from dataframe.kernels.binary import validity
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
@@ -97,6 +98,16 @@ struct WindowLayout(Movable):
 
 
 @always_inline
+def _row_at(rows: Int, k: Int) -> Int:
+    """Sorted position k's row: rows[k], or k when `rows` is 0."""
+    if rows == 0:
+        return k
+    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[
+        unsafe_offset=k
+    ]
+
+
+@always_inline
 def _numeric_changes[
     D: DType
 ](
@@ -105,22 +116,100 @@ def _numeric_changes[
     lo: Int,
     hi: Int,
     bit: UInt8,
+    rows: Int,
 ):
     """Mark positions of [lo + 1, hi) whose value differs from the one
-    before (integers: nulls equal to each other)."""
+    before (nulls equal to each other; floats as the sort compares them:
+    every NaN one value, -0.0 equal to 0.0)."""
     var values = column._ptr()
-    if len(column._bits[]) == 0:
-        for k in range(lo + 1, hi):
-            if values[unsafe_offset=k] != values[unsafe_offset=k - 1]:
-                flags[unsafe_offset=k] |= bit
-        return
+    var bits = len(column._bits[]) != 0
+    var previous = _row_at(rows, lo)
     for k in range(lo + 1, hi):
-        var a = column._valid(k - 1)
-        var b = column._valid(k)
-        if a != b or (
-            b and values[unsafe_offset=k] != values[unsafe_offset=k - 1]
-        ):
+        var row = _row_at(rows, k)
+        var differs: Bool
+        comptime if D.is_floating_point():
+            differs = float_key(
+                Float64(values[unsafe_offset=row])
+            ) != float_key(Float64(values[unsafe_offset=previous]))
+        else:
+            differs = values[unsafe_offset=row] != values[
+                unsafe_offset=previous
+            ]
+        if bits:
+            var a = column._valid(previous)
+            var b = column._valid(row)
+            differs = a != b or (b and differs)
+        if differs:
             flags[unsafe_offset=k] |= bit
+        previous = row
+
+
+def _string_changes(
+    strings: StringColumn,
+    flags: Pointer[UInt8, MutAnyOrigin],
+    lo: Int,
+    hi: Int,
+    bit: UInt8,
+    rows: Int,
+):
+    """String keys: lengths first, then bytes, with the column's buffers
+    read through pointers hoisted out of the loop."""
+    var bits = strings.null_count() > 0
+    var previous = _row_at(rows, lo)
+    if strings._is_view_storage():
+        ref views = strings._view_storage.value()
+        var base = strings._offset
+        for k in range(lo + 1, hi):
+            var row = _row_at(rows, k)
+            var differs: Bool
+            var a = views._view_unchecked(base + previous)
+            var b = views._view_unchecked(base + row)
+            if a.length != b.length or a.prefix != b.prefix:
+                differs = True
+            elif a.is_inline():
+                differs = a.buffer_index != b.buffer_index or (
+                    a.offset != b.offset
+                )
+            else:
+                var x = views._get_unchecked(base + previous).as_bytes()
+                var y = views._get_unchecked(base + row).as_bytes()
+                differs = (
+                    external_call["memcmp", Int32](
+                        Int(x.unsafe_ptr()), Int(y.unsafe_ptr()), len(x)
+                    )
+                    != 0
+                )
+            if bits:
+                var u = strings._valid(previous)
+                var v = strings._valid(row)
+                differs = u != v or (v and differs)
+            if differs:
+                flags[unsafe_offset=k] |= bit
+            previous = row
+        return
+    var offsets = strings._offsets[].unsafe_ptr().unsafe_offset(
+        strings._offset
+    )
+    var data = strings._base()
+    for k in range(lo + 1, hi):
+        var row = _row_at(rows, k)
+        var a0 = Int(offsets[unsafe_offset=previous])
+        var a1 = Int(offsets[unsafe_offset=previous + 1])
+        var b0 = Int(offsets[unsafe_offset=row])
+        var b1 = Int(offsets[unsafe_offset=row + 1])
+        var differs = a1 - a0 != b1 - b0 or (
+            external_call["memcmp", Int32](
+                Int(data.unsafe_offset(a0)), Int(data.unsafe_offset(b0)), a1 - a0
+            )
+            != 0
+        )
+        if bits:
+            var u = strings._valid(previous)
+            var v = strings._valid(row)
+            differs = u != v or (v and differs)
+        if differs:
+            flags[unsafe_offset=k] |= bit
+        previous = row
 
 
 def mark_changes(
@@ -129,31 +218,29 @@ def mark_changes(
     lo: Int,
     hi: Int,
     bit: UInt8,
+    rows: Int = 0,
 ) raises:
-    """Set `bit` in flags[k] for every k in (lo, hi) where the sorted key
-    column's row k differs from row k - 1, as the sort compares them:
-    nulls equal, NaN one value, -0.0 equal to 0.0 (VectorOperations::
-    DistinctFrom in ComputeMasks)."""
+    """Set `bit` in flags[k] for every k in (lo, hi) where the key's row at
+    sorted position k differs from the row at k - 1, as the sort compares
+    them: nulls equal, NaN one value, -0.0 equal to 0.0 (VectorOperations::
+    DistinctFrom in ComputeMasks). Position k's row is rows[k] (the
+    address of the sorted order), or k itself when `rows` is 0."""
     var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_address)
     var column = key.rechunk() if key.is_chunked() else key.copy()
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
-        comptime if not D.is_floating_point():
-            if column._data.isa[Column[Scalar[D]]]():
-                _numeric_changes[D](
-                    column._data[Column[Scalar[D]]], flags, lo, hi, bit
-                )
-                return
+        if column._data.isa[Column[Scalar[D]]]():
+            _numeric_changes[D](
+                column._data[Column[Scalar[D]]], flags, lo, hi, bit, rows
+            )
+            return
     if column._data.isa[StringColumn]():
-        ref strings = column._data[StringColumn]
-        for k in range(lo + 1, hi):
-            var a = strings._valid(k - 1)
-            var b = strings._valid(k)
-            if a != b or (b and not strings._equal_at_valid(strings, k, k - 1)):
-                flags[unsafe_offset=k] |= bit
+        _string_changes(
+            column._data[StringColumn], flags, lo, hi, bit, rows
+        )
         return
     for k in range(lo + 1, hi):
-        if not _same_value(column, k, k - 1):
+        if not _same_value(column, _row_at(rows, k), _row_at(rows, k - 1)):
             flags[unsafe_offset=k] |= bit
 
 
@@ -186,6 +273,8 @@ struct _GroupSortJob(Job):
     var order: Int
     var flags: Int
     var stable: Bool
+    # Each input row's partition key hash (0: none).
+    var hashes: Int
 
     def __init__(
         out self,
@@ -199,6 +288,7 @@ struct _GroupSortJob(Job):
         order: Int,
         flags: Int,
         stable: Bool,
+        hashes: Int,
     ):
         self.keys = keys.copy()
         self.partition_keys = partition_keys
@@ -210,6 +300,7 @@ struct _GroupSortJob(Job):
         self.order = order
         self.flags = flags
         self.stable = stable
+        self.hashes = hashes
 
     def run(mut self) raises:
         var n = self.hi - self.lo
@@ -217,30 +308,31 @@ struct _GroupSortJob(Job):
             return
         var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
         var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
-        var flags = Pointer[UInt8, MutAnyOrigin](
-            unsafe_from_address=self.flags + self.lo
-        )
-        var mine = List[Int](unsafe_uninit_length=n)
-        for k in range(n):
-            mine[k] = rows[unsafe_offset=self.lo + k]
-        var gathered = List[Series](capacity=len(self.keys))
-        var identity = True
-        for k in range(n):
-            identity = identity and mine[k] == self.lo + k
-        for key in self.keys:
-            gathered.append(
-                key.copy() if identity and n == len(key) else key.take(mine)
-            )
-        var sorted = gathered^
+        var flags_at = self.flags + self.lo
+        var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_at)
+        var group_rows = self.rows + self.lo * size_of[Int]()
         var count = len(self.keys)
+        for k in range(n):
+            flags[unsafe_offset=k] = 0
         var bypass = count == self.partition_keys
+        if bypass and self.hashes != 0:
+            # PartitionKeyTracker: rows that all hash alike may hold one
+            # key; the keys themselves decide.
+            var hashes = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=self.hashes
+            )
+            var first = hashes[unsafe_offset=rows[unsafe_offset=self.lo]]
+            for k in range(1, n):
+                if (
+                    hashes[unsafe_offset=rows[unsafe_offset=self.lo + k]]
+                    != first
+                ):
+                    bypass = False
+                    break
         if bypass:
-            # PartitionKeyTracker: one key in the group skips the sort.
-            for k in range(n):
-                flags[unsafe_offset=k] = 0
             for c in range(count):
                 mark_changes(
-                    sorted[c], self.flags + self.lo, 0, n, PARTITION_START
+                    self.keys[c], flags_at, 0, n, PARTITION_START, group_rows
                 )
             for k in range(1, n):
                 if flags[unsafe_offset=k] != 0:
@@ -248,28 +340,40 @@ struct _GroupSortJob(Job):
                     break
         if bypass:
             for k in range(n):
-                order[unsafe_offset=self.lo + k] = mine[k]
+                order[unsafe_offset=self.lo + k] = rows[
+                    unsafe_offset=self.lo + k
+                ]
         else:
-            var perm = sort_key_rows(
-                sorted, self.descending, self.nulls_last, self.stable
-            )
-            var in_order = True
+            # The sort reads the group's keys; boundaries are then read
+            # through the sorted order from the whole columns.
+            var mine = List[Int](unsafe_uninit_length=n)
+            var identity = True
             for k in range(n):
-                in_order = in_order and perm[k] == k
-            if not in_order:
-                for c in range(count):
-                    sorted[c] = sorted[c].take(perm)
+                mine[k] = rows[unsafe_offset=self.lo + k]
+                identity = identity and mine[k] == k
+            var gathered = List[Series](capacity=count)
+            for key in self.keys:
+                gathered.append(
+                    key.copy() if identity
+                    and n == len(key) else key.take(mine)
+                )
+            var perm = sort_key_rows(
+                gathered, self.descending, self.nulls_last, self.stable
+            )
             for k in range(n):
                 order[unsafe_offset=self.lo + k] = mine[perm[k]]
-        for k in range(n):
-            flags[unsafe_offset=k] = 0
+            for k in range(n):
+                flags[unsafe_offset=k] = 0
+        var sorted_rows = self.order + self.lo * size_of[Int]()
         for c in range(self.partition_keys):
-            mark_changes(sorted[c], self.flags + self.lo, 0, n, PARTITION_START)
+            mark_changes(
+                self.keys[c], flags_at, 0, n, PARTITION_START, sorted_rows
+            )
         for k in range(n):
             if flags[unsafe_offset=k] != 0:
                 flags[unsafe_offset=k] = PARTITION_START | PEER_START
         for c in range(self.partition_keys, count):
-            mark_changes(sorted[c], self.flags + self.lo, 0, n, PEER_START)
+            mark_changes(self.keys[c], flags_at, 0, n, PEER_START, sorted_rows)
         flags[unsafe_offset=0] = PARTITION_START | PEER_START
 
 
@@ -281,12 +385,17 @@ struct _MaskJob(Job):
     var lo: Int
     var hi: Int
     var flags: Int
+    # The sorted order (address): keys are read through it.
+    var rows: Int
 
-    def __init__(out self, keys: List[Series], lo: Int, hi: Int, flags: Int):
+    def __init__(
+        out self, keys: List[Series], lo: Int, hi: Int, flags: Int, rows: Int
+    ):
         self.keys = keys.copy()
         self.lo = lo
         self.hi = hi
         self.flags = flags
+        self.rows = rows
 
     def run(mut self) raises:
         var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.flags)
@@ -294,7 +403,9 @@ struct _MaskJob(Job):
             flags[unsafe_offset=k] = 0
         var from_ = max(self.lo - 1, 0)
         for key in self.keys:
-            mark_changes(key, self.flags, from_, self.hi, PEER_START)
+            mark_changes(
+                key, self.flags, from_, self.hi, PEER_START, self.rows
+            )
 
 
 def window_layout(
@@ -368,6 +479,7 @@ def window_layout(
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
+                    Int(partitioner.hashes.unsafe_ptr()),
                 )
             )
         run_jobs(jobs)
@@ -376,25 +488,23 @@ def window_layout(
                 bounds.append(parts.bounds[b])
         _ = parts^
     elif len(order_keys) > 0:
-        # FullSort: one group, sorted on every thread.
-        var perm = sort_key_rows(order_keys, descending, nulls_last, stable)
+        # FullSort: one group, sorted on every thread; peers are marked
+        # in parallel ranges, reading the keys through the sorted order.
+        order = sort_key_rows(order_keys, descending, nulls_last, stable)
         var keys = List[Series](capacity=len(order_keys))
-        var identity = True
-        for k in range(height):
-            identity = identity and perm[k] == k
         for key in order_keys:
-            keys.append(key.copy())
-        if not identity:
-            keys = take_parallel(keys, perm.copy(), workers)
-        for k in range(height):
-            order[k] = perm[k]
-        var ranges = partitions(height, workers, 4096)
+            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        var ranges = partitions(height, workers, STANDARD_VECTOR_SIZE)
         var jobs = List[_MaskJob](capacity=workers)
         for w in range(workers):
             if ranges[w + 1] > ranges[w]:
                 jobs.append(
                     _MaskJob(
-                        keys, ranges[w], ranges[w + 1], Int(flags.unsafe_ptr())
+                        keys,
+                        ranges[w],
+                        ranges[w + 1],
+                        Int(flags.unsafe_ptr()),
+                        Int(order.unsafe_ptr()),
                     )
                 )
         run_jobs(jobs)
