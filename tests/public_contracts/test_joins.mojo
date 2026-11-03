@@ -9,6 +9,10 @@ from tests.support.reference_model import (
 )
 from tests.support.coverage_generators import frame_from_model, chunk_layout
 from tests.support.coverage_compare import assert_join_model
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 
 
 def test_all_equality_join_kinds_match_nested_loops() raises:
@@ -155,6 +159,22 @@ def test_a_coalesced_right_join_keeps_the_right_key_names() raises:
         )
         assert_equal(picked.columns(), List[String](["bk_right", "k"]))
         assert_equal(picked.height(), 3)
+        # The lazy join runs as the right join keeping both keys, which
+        # streams, with the left keys dropped.
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var traced = (
+            left.lazy()
+            .join(right.lazy(), left_on=["k"], right_on=["bk"], how="right")
+            .collect()
+        )
+        assert_true(
+            "dataframe-path: lazy.lower_right_join\n" in observed.text(),
+            "the right join was not lowered",
+        )
+        _ = observed^
+        _ = trace^
+        assert_equal(traced.columns(), names)
         # Keys named alike come out once, after the left's other columns.
         var same = left.drop(["bk"]).join(
             right.drop(["k"]).rename({"bk": "k"}), on="k", how="right"

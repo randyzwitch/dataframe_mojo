@@ -33,7 +33,7 @@ from tests.support.coverage_compare import (
     assert_float,
     assert_model,
 )
-from dataframe.lazy import JOIN, FILTER, AGG
+from dataframe.lazy import JOIN, FILTER, AGG, SELECT
 from dataframe.expr import CAST, LIT_INT
 from dataframe.join_type import JOIN_INNER
 
@@ -360,16 +360,26 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
         }
     )
     for how in ["inner", "left", "semi", "anti", "right", "full"]:
+        # A right join's output key is the right one (Polars).
+        var key = String("right_key" if how == "right" else "i")
         var plan = (
             source.lazy()
             .join(right.lazy(), left_on=["i"], right_on=["right_key"], how=how)
-            .filter(col("i") > 0)
+            .filter(col(key) > 0)
             ._optimized()
         )
         ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
         if how in ["inner", "left", "semi", "anti"]:
             assert_equal(root.kind, JOIN)
             assert_equal(plan._plan._nodes[root.left].kind, FILTER)
+        elif how == "right":
+            # It runs as the right join keeping both keys under the
+            # selection that drops the left ones; the filter moves
+            # through the selection and stays above the join.
+            assert_equal(root.kind, SELECT)
+            ref under = plan._plan._nodes[root.left]
+            assert_equal(under.kind, FILTER)
+            assert_equal(plan._plan._nodes[under.left].kind, JOIN)
         else:
             assert_equal(root.kind, FILTER)
             assert_equal(plan._plan._nodes[root.left].kind, JOIN)

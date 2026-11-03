@@ -119,6 +119,7 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     var plan = self.copy()
     plan_fold_casts(plan)
     plan_unique_as_aggregate(plan)
+    plan_lower_right_joins(plan)
     plan_split_filters(plan)
     plan_filter_shared_subplans(plan)
     # From predicate to projection pushdown, a node keeps the schema it
@@ -138,6 +139,72 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
         raise e^
     plan._schema_memo = None
     return plan^
+
+
+def plan_lower_right_joins(mut self: QueryContext) raises:
+    """Run each coalesced right join as the right join that keeps both
+    sides' keys, under a selection that drops the left keys and names
+    the right columns as the coalesced join does (`join_frames`): its
+    output is that join's, without the left keys. The kept-keys right
+    join streams, building on the right and emitting its unmatched rows
+    last, as DuckDB's RIGHT OUTER join does; the coalesced one ran
+    outside the pipeline. A join whose kept-keys names would collide, or
+    whose keys repeat or are missing, is left to raise as it is."""
+    var changed = False
+    for i in range(len(self._nodes)):
+        if (
+            self._nodes[i].kind != JOIN
+            or self._nodes[i].how != JOIN_RIGHT
+            or not self._nodes[i].coalesce
+            or len(self._nodes[i].names) == 0
+            or len(self._nodes[i].names) != len(self._nodes[i].right_keys)
+        ):
+            continue
+        var node = self._nodes[i].copy()
+        var left_cols = plan_columns_of(self, node.left)
+        var right_cols = plan_columns_of(self, node.right)
+        var suffix = node.join_suffix()
+        var valid = True
+        for k in range(len(node.names)):
+            if (
+                node.names[k] not in left_cols
+                or node.right_keys[k] not in right_cols
+            ):
+                valid = False
+            for j in range(k):
+                if node.names[j] == node.names[k]:
+                    valid = False
+        if not valid:
+            continue
+        # Names as the kept-keys join gives them (`kept`) and as the
+        # coalesced one does (`exprs`); both must be free of collisions.
+        var kept = Dict[String, Bool]()
+        var named = Dict[String, Bool]()
+        var exprs = List[Expr]()
+        for c in left_cols:
+            kept[c] = True
+            if c not in node.names:
+                named[c] = True
+                exprs.append(col(c))
+        var others = named.copy()
+        for c in right_cols:
+            var held = c + suffix if c in left_cols else c
+            var shown = c + suffix if c in others else c
+            if held in kept or shown in named:
+                valid = False
+                break
+            kept[held] = True
+            named[shown] = True
+            exprs.append(col(held).alias(shown) if held != shown else col(held))
+        if not valid:
+            continue
+        node.coalesce = False
+        self._nodes.append(node^)
+        self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=exprs)
+        changed = True
+    if changed:
+        trace_path("lazy.lower_right_join")
+        plan_reorder(self)
 
 
 def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
@@ -1235,7 +1302,10 @@ def plan_join_input_columns(
     var membership = node.how == JOIN_SEMI or node.how == JOIN_ANTI
     # A coalesced right join outputs the right keys and drops the left
     # ones (`join_frames`), so only the left's other columns take names.
-    var right_join = node.how == JOIN_RIGHT
+    var right_join = node.how == JOIN_RIGHT and node.coalesce
+    # The right keys are outputs of a right join and of any join that
+    # keeps both sides' keys, named as the right's other columns are.
+    var right_keys_out = right_join or not node.coalesce
     var outputs = Dict[String, Bool]()
     for c in left_cols:
         if not (right_join and c in node.names):
@@ -1244,9 +1314,6 @@ def plan_join_input_columns(
     var want = Dict[String, Bool]()
     for w in wanted:
         want[w] = True
-    if not node.coalesce:
-        # Right keys then appear in the output as well; do not prune.
-        return None
     var keep_left = Dict[String, Bool]()
     var keep_right = Dict[String, Bool]()
     for k in node.names:
@@ -1258,7 +1325,7 @@ def plan_join_input_columns(
             keep_left[c] = True
     if not membership:
         for c in right_cols:
-            if c in keep_right and not right_join:
+            if c in keep_right and not right_keys_out:
                 continue
             var name = c + suffix if c in left_names else c
             if name in outputs:
