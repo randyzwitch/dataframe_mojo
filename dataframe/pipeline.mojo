@@ -4155,8 +4155,11 @@ def _run_pipeline(
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker.
+    var t0 = Int(perf_counter_ns())
     var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    var t1 = Int(perf_counter_ns())
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
+    var t2 = Int(perf_counter_ns())
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
     var layout = List[AggregateLayout]()
@@ -4363,9 +4366,12 @@ def _run_pipeline(
         ):
             for w in range(len(jobs)):
                 jobs[w].finishes = False
+    var t3 = Int(perf_counter_ns())
     try:
         run_jobs(jobs)
         _emit_unmatched(jobs, steps, joins, indexes, batch_size)
+        if getenv("DATAFRAME_PIPE_TIMES"):
+            print("pipe", len(steps), frame.height(), len(ranges[]) // 2, (t1 - t0) // 1000, (t2 - t1) // 1000, (t3 - t2) // 1000, (Int(perf_counter_ns()) - t3) // 1000)
     except e:
         cursor.free()
         shared_bound.free()
