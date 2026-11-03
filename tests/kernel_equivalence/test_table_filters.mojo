@@ -28,6 +28,10 @@ from dataframe.table_filter import (
 )
 from dataframe.table_scan import zonemap_rows
 from dataframe.storage.string import StringColumn
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 
 
 def _without_statistics(frame: DataFrame) raises -> DataFrame:
@@ -288,3 +292,55 @@ def test_eager_join_skips_probe_vectors_outside_the_build_key_range() raises:
         assert_equal(
             joined.item(row, "id").int64(), plain.item(row, "id").int64()
         )
+
+
+def test_pipeline_skips_ruled_out_vectors_and_matches_a_frame_without_statistics() raises:
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    # Two row groups: the filter keeps vector 5 of the first (500..599)
+    # only, so the row-group check keeps the first and the chunk loop
+    # skips its other vectors.
+    var x = _ints(2 * 60 * STATISTICS_VECTOR_SIZE, True)
+    ensure_statistics(x)
+    var ids = List[Int64]()
+    for i in range(len(x)):
+        ids.append(Int64(i % 13))
+    var frame = DataFrame([x^, Series("g", Column[Int64](ids^))])
+    var plain = _without_statistics(frame)
+    for threads in [1, 4]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        var observed = StrategyTrace()
+        var actual = (
+            frame.lazy()
+            .filter(
+                (col("x") >= lit(Int64(510))) & (col("x") < lit(Int64(540)))
+            )
+            .group_by(["g"])
+            .agg([col("x").sum().alias("s"), col("x").count().alias("n")])
+            .sort(["g"])
+            .collect()
+        )
+        assert_true(
+            "dataframe-path: scan.vector_skip\n" in observed.text(),
+            "no vector skipped",
+        )
+        _ = observed^
+        var expected = (
+            plain.lazy()
+            .filter(
+                (col("x") >= lit(Int64(510))) & (col("x") < lit(Int64(540)))
+            )
+            .group_by(["g"])
+            .agg([col("x").sum().alias("s"), col("x").count().alias("n")])
+            .sort(["g"])
+            .collect()
+        )
+        assert_equal(actual.height(), expected.height())
+        for row in range(actual.height()):
+            assert_equal(
+                actual.item(row, "s").int64(), expected.item(row, "s").int64()
+            )
+            assert_equal(
+                actual.item(row, "n").int64(), expected.item(row, "n").int64()
+            )
+        _ = workers^
+    _ = trace^

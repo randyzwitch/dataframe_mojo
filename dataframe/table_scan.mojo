@@ -355,17 +355,7 @@ def scan_filtered(
 ) raises -> Optional[FilteredScan]:
     """The rows of `frame` the table filters among `parts` can keep, and the
     parts left to evaluate; None when statistics change nothing."""
-    # Constants are only evaluated when a column the parts read has
-    # statistics: most frames filtered are not stored tables.
-    var any = False
-    for part in parts:
-        for node in part._nodes:
-            if node.op != COL or any:
-                continue
-            for column in frame._columns:
-                if column.name() == node.text and _has_statistics(column):
-                    any = True
-    if not any:
+    if not _reads_statistics(frame, parts):
         return None
     var filters = table_filters(parts, frame._columns)
     if not filters.has_filters():
@@ -391,6 +381,33 @@ def scan_filtered(
     return FilteredScan(
         rows_of(frame, found.ranges), remaining^, found.ranges.copy()
     )
+
+
+def _reads_statistics(frame: DataFrame, parts: List[Expr]) -> Bool:
+    """Whether a column the parts read has statistics: constants are only
+    evaluated then, as most frames filtered are not stored tables."""
+    for part in parts:
+        for node in part._nodes:
+            if node.op != COL:
+                continue
+            for column in frame._columns:
+                if column.name() == node.text and _has_statistics(column):
+                    return True
+    return False
+
+
+def scan_filter_info(
+    frame: DataFrame, parts: List[Expr]
+) raises -> Optional[ScanFilterInfo]:
+    """The table filters among a scan's first filter's `parts`, with their
+    answers per vector of `frame`, or None when no filtered column has
+    statistics."""
+    if frame.height() == 0 or not _reads_statistics(frame, parts):
+        return None
+    var filters = table_filters(parts, frame._columns)
+    if not filters.has_filters():
+        return None
+    return ScanFilterInfo(filters, frame._columns)
 
 
 def _has_statistics(column: Series) -> Bool:
