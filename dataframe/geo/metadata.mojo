@@ -1,10 +1,10 @@
 """Translate GeoParquet 1.x metadata to and from geometry column metadata."""
 from dataframe.json.value import JsonValue, json_quote
-from .frame import DataFrame
-from .series import Series
-from .dtype import DataType
-from .geometry import _geometry_summary
-from .geometry import from_wkb, _validate_geoparquet_wkb
+from dataframe.frame import DataFrame
+from dataframe.series import Series
+from dataframe.dtype import DataType
+from dataframe.geo.geometry import _geometry_summary
+from dataframe.geo.geometry import from_wkb, _validate_geoparquet_wkb
 
 
 def apply_geoparquet_metadata(

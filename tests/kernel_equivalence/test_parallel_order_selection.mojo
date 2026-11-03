@@ -6,22 +6,28 @@ from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col, lit
 from dataframe.binding import bind
-from dataframe.bool_column import BoolColumn
-from dataframe.top_k import top_k_mask, _pattern
-from dataframe.aggregate_table import TOP_ROWS_INLINE
+from dataframe.storage.boolean import BoolColumn
+from dataframe.kernels.top_k import (
+    top_k_mask,
+    _pattern,
+)
+from dataframe.aggregation.hash_table import TOP_ROWS_INLINE
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
 )
 from dataframe.parallel import worker_count, configured_workers, Pool
-from dataframe.comparison_sort import (
+from dataframe.kernels.comparison_sort import (
     _co_rank,
     _merge_slice,
     _prefix_buckets,
     comparison_arg_sort,
 )
-from dataframe.packed_sort import packed_arg_sort, _sort_heavy
-from dataframe.row_sort import row_arg_sort
+from dataframe.kernels.packed_sort import (
+    packed_arg_sort,
+    _sort_heavy,
+)
+from dataframe.kernels.row_sort import row_arg_sort
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.parallel_key_reference import (
     ScalarParallelOrder,
@@ -332,7 +338,7 @@ def test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_sta
 
 
 def test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row() raises:
-    from dataframe.rank import rank_numeric
+    from dataframe.kernels.rank import rank_numeric
     from tests.support.parallel_key_reference import expected_parallel_ranks
 
     var setting = WorkerSetting(4)

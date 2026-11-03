@@ -21,7 +21,7 @@ abbreviation, formatting only), %b/%B (English month names), %a/%A
 number from Sunday/Monday), %u (ISO weekday), and %%. Any other character must match
 literally. A parsed offset makes the value UTC.
 """
-from .calendar import (
+from dataframe.time.calendar import (
     civil_from_days,
     days_from_civil,
     days_in_month,
@@ -29,8 +29,8 @@ from .calendar import (
     floor_mod,
     is_leap,
 )
-from .dtype import DataType
-from .timezone import TimeZone
+from dataframe.dtype import DataType
+from dataframe.time.timezone import TimeZone
 
 comptime SECONDS_PER_DAY = Int64(86400)
 comptime NANOS_PER_DAY = Int64(86400000000000)

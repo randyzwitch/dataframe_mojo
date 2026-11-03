@@ -1,5 +1,5 @@
 """Scalar Boolean state generator shared by bitmap operation contracts."""
-from dataframe.bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 
 
 def truth_state(row: Int, mode: Int, side: Int) -> Int:

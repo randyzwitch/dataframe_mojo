@@ -1,12 +1,12 @@
 """WKB geometry storage and coordinate accessors; no reprojection."""
-from .dtype import DataType
+from dataframe.dtype import DataType
 from dataframe.storage.field_metadata import _without_extensions
 from std.math import inf
-from .series import Series
+from dataframe.series import Series
 from dataframe.storage.string import StringColumn
-from .wkb import GeometryBounds, _WKBInfo, _wkb_info, validate_wkb
+from dataframe.geo.wkb import GeometryBounds, _WKBInfo, _wkb_info, validate_wkb
 from dataframe.storage.column import Column
-from .frame import DataFrame
+from dataframe.frame import DataFrame
 from dataframe.json.value import JsonValue
 
 

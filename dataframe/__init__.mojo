@@ -93,7 +93,7 @@ from .io.ipc import (
     write_ipc_stream,
 )
 
-from .geometry import (
+from .geo.geometry import (
     from_wkb,
     to_wkb,
     geometry_type,
@@ -101,7 +101,7 @@ from .geometry import (
     bounding_box,
     total_bounds,
 )
-from .wkb import GeometryBounds
+from .geo.wkb import GeometryBounds
 from .io.geojson import read_geojson, from_geojson
 
 from .io.shapefile import read_shapefile

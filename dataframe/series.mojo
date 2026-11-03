@@ -5,8 +5,13 @@ from dataframe.storage.field_metadata import (
     _equal_metadata,
     _without_extensions,
 )
-from .wkb import GeometryBounds
-from .geometry import geometry_type, crs, bounding_box, total_bounds
+from dataframe.geo.wkb import GeometryBounds
+from dataframe.geo.geometry import (
+    geometry_type,
+    crs,
+    bounding_box,
+    total_bounds,
+)
 from .dtype import DataType, NUMERIC_DTYPES, CategoricalDictionary
 from std.utils import Variant
 from dataframe.storage.boolean import BoolColumn

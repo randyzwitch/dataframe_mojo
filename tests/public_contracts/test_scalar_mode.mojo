@@ -15,7 +15,7 @@ from dataframe import (
 from tests.support.numeric_model import INTEGER_DTYPES, integer_bounds
 from tests.support.coverage_compare import assert_frame, assert_value
 from tests.support.coverage_generators import offset_layout, chunk_layout
-from dataframe.aggregate import Reducer
+from dataframe.aggregation.reducer import Reducer
 from dataframe.expr import MODE, VALUE_COUNTS, join_names
 
 

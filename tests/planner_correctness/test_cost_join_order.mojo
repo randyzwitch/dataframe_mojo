@@ -16,7 +16,7 @@ a join promises no row order."""
 from std.collections import Dict
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
-from dataframe.distinct_statistics import distinct_estimate
+from dataframe.kernels.distinct_statistics import distinct_estimate
 from dataframe.join_order import (
     FilterEdge,
     JoinEdge,

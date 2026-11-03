@@ -11,7 +11,7 @@ from dataframe import (
     ListColumn,
     col,
 )
-from dataframe.bool_column import BoolColumn
+from dataframe.storage.boolean import BoolColumn
 from dataframe.dtype import CategoricalDictionary
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.reduction_types_reference import (

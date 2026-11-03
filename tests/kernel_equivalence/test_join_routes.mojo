@@ -10,7 +10,7 @@ from dataframe.frame import (
     _parallel_join_rows,
     _JoinCountJob,
 )
-from dataframe.join_hash import int64_progression
+from dataframe.kernels.join_hash import int64_progression
 from dataframe.join_type import JOIN_LEFT
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting

@@ -3,9 +3,14 @@
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataType, Series, StringColumn
 from dataframe.dtype import CategoricalDictionary
-from dataframe.hashing import column_codes
-from dataframe.partition import encode_bucket, _KeyView, _KEY_VIEW, _KEY_STRING
-from dataframe.string_view import StringViewBuilder
+from dataframe.kernels.hashing import column_codes
+from dataframe.kernels.partition import (
+    encode_bucket,
+    _KeyView,
+    _KEY_VIEW,
+    _KEY_STRING,
+)
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.key_kernel_reference import KeyCell, expected_key_ids
 from tests.support.selection_types_reference import (
     selection_column,

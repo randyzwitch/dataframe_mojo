@@ -13,7 +13,7 @@ from .shapefile_binary import (
 from .shapefile_dbf import read_dbf
 from ..series import Series
 from ..frame import DataFrame
-from ..geometry import from_wkb
+from dataframe.geo.geometry import from_wkb
 from dataframe.json.value import json_quote
 
 

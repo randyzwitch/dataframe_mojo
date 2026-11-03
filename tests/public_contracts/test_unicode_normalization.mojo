@@ -2,7 +2,7 @@
 # contract-group: expr.unicode_normalization
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, DataType, col
-from dataframe.unicode_normalization import normalize_series
+from dataframe.text.unicode.normalization import normalize_series
 from tests.public_contracts.test_text_functions import _source
 
 

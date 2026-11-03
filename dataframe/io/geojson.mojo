@@ -4,7 +4,7 @@ from dataframe.json.value import JsonValue
 from dataframe.storage.column import Column
 from ..series import Series
 from ..frame import DataFrame
-from ..geometry import from_wkb
+from dataframe.geo.geometry import from_wkb
 from dataframe.text.parse import parse_integer
 
 

@@ -2,7 +2,10 @@
 # contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import BoolColumn, Column, DataType, Series
-from dataframe.cast import _cast_exact, cast_series
+from dataframe.kernels.cast import (
+    _cast_exact,
+    cast_series,
+)
 
 comptime CAST_NUMBERS = (
     DType.int8,

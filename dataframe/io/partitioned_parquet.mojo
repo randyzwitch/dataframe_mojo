@@ -7,7 +7,7 @@ from dataframe.categorical import decode
 from dataframe.frame import DataFrame
 from dataframe.kernels.hashing import encode_rows
 from dataframe.series import Series
-from dataframe.temporal import zone_of
+from dataframe.time.temporal import zone_of
 from .arrow import (
     ArrowArray,
     ArrowSchema,

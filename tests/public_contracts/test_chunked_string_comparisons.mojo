@@ -19,7 +19,7 @@ from dataframe.dtype import CategoricalDictionary
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.string import StringCodes
 from dataframe.kernels.binary import binary
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.parallel import worker_count
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import ScopedEnvironment

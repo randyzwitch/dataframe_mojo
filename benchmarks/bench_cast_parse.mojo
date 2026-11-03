@@ -6,7 +6,7 @@ binaries alternately on an idle machine. Each timing covers 12 casts of a
 """
 from std.time import monotonic
 from dataframe import Column, DataType, Series
-from dataframe.cast import cast_series
+from dataframe.kernels.cast import cast_series
 
 comptime ROWS = 100000
 comptime REPS = 12

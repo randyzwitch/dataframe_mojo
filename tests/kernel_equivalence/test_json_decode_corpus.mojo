@@ -3,8 +3,8 @@
 from std.testing import assert_equal, assert_true
 from std.memory import bitcast
 from dataframe import DataType, Series, Column
-from dataframe.column import SCALAR_DTYPES
-from dataframe.json_decode import decode_json
+from dataframe.storage.column import SCALAR_DTYPES
+from dataframe.json.decode import decode_json
 from tests.kernel_equivalence.test_jsonpath_corpus import _unhex
 
 

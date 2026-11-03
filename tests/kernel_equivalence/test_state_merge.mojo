@@ -3,7 +3,7 @@
 from std.math import abs, isnan, sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series
-from dataframe.reductions import (
+from dataframe.aggregation.scalar_states import (
     IntSumState,
     FloatSumState,
     LogicState,
@@ -11,7 +11,7 @@ from dataframe.reductions import (
     MomentState,
     CoMomentState,
 )
-from dataframe.aggregate import Reducer
+from dataframe.aggregation.reducer import Reducer
 from dataframe.expr import (
     FIRST,
     LAST,

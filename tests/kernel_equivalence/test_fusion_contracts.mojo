@@ -4,7 +4,7 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.execution import evaluate, FUSED_CONTIGUOUS_ROWS
-from dataframe.fusion import fused
+from dataframe.kernels.fusion import fused
 from tests.support.coverage_compare import assert_float
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
