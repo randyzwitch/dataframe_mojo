@@ -23,6 +23,7 @@ input order), as `over(order_by=...)` keeps input order on ties.
 """
 from std.ffi import external_call
 from std.memory import Pointer
+from std.sys import size_of
 
 from dataframe.storage.allocation import huge_uninit
 from dataframe.storage.boolean import BoolColumn
