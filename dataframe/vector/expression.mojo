@@ -1012,7 +1012,11 @@ struct VectorExpression(Copyable, Movable):
         var o = self.valid[index].unsafe_ptr()
         if left_whole or right_whole:
             var one = self.valid[right if left_whole else left].unsafe_ptr()
-            unsafe_memcpy(dest=o, src=one, count=count)
+            unsafe_memcpy(
+                dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=Int(o)),
+                src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=Int(one)),
+                count=count,
+            )
             return
         _and_bytes(
             Int(o),
@@ -1416,8 +1420,12 @@ struct VectorExpression(Copyable, Movable):
         self.whole[index] = self.whole[left]
         if not self.whole[left]:
             unsafe_memcpy(
-                dest=self.valid[index].unsafe_ptr(),
-                src=self.valid[left].unsafe_ptr(),
+                dest=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=Int(self.valid[index].unsafe_ptr())
+                ),
+                src=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=Int(self.valid[left].unsafe_ptr())
+                ),
                 count=count,
             )
 
