@@ -1,11 +1,11 @@
-"""A filter that keeps at least half of each morsel feeds the aggregate
-table its rows in place: dropped rows join no group and update a discarded
-one, and computed inputs run over every row, retried on the kept rows when
-that raises. Every result equals grouping the filtered frame eagerly: string
-and integer keys, nulls, float and decimal computed inputs, a key that only
-dropped rows hold, and a computed input that overflows only on dropped
-rows; one that overflows on a kept row still raises. A join that keeps most
-rows (as row indices) is read in place the same way."""
+"""A filter that keeps most of each morsel feeds the aggregate table its
+kept rows: the filter runs on vectors, dropped rows join no group, and
+computed inputs run on the kept rows alone. Every result equals grouping the
+filtered frame eagerly: string and integer keys, nulls, float and decimal
+computed inputs, a key that only dropped rows hold, and a computed input
+that overflows only on dropped rows; one that overflows on a kept row still
+raises. A join that keeps most rows keeps its probe side as dictionaries
+over the morsel the same way."""
 # contract-group: reduce.grouped
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
@@ -70,10 +70,10 @@ def test_kept_rows_group_as_the_filtered_frame_does() raises:
         .sort(["flag", "g"])
         .collect()
     )
-    var took = "dataframe-path: pipeline.table_in_place\n" in observed.text()
+    var took = "dataframe-path: pipeline.vector_filter\n" in observed.text()
     _ = observed^
     _ = trace^
-    assert_true(took, "the filtered rows were compacted, not read in place")
+    assert_true(took, "the filter did not run on vectors")
     var eager = (
         source.filter(kept)
         .group_by(["flag", "g"])
@@ -143,10 +143,10 @@ def test_a_joins_kept_rows_group_in_place() raises:
         .sort(["flag", "g"])
         .collect()
     )
-    var took = "dataframe-path: pipeline.table_in_place\n" in observed.text()
+    var took = "dataframe-path: pipeline.join_dictionary\n" in observed.text()
     _ = observed^
     _ = trace^
-    assert_true(took, "the joined rows were compacted, not read in place")
+    assert_true(took, "the join gathered its probe side")
     var eager = (
         source.filter(col("day") <= lit(Int64(95)))
         .with_columns(computed)

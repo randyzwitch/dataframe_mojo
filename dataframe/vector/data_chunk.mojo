@@ -230,7 +230,7 @@ struct DataChunk(Movable):
         else:
             var at = self.validity_caches[column].unsafe_ptr()
             for b in range(bytes):
-                at[b] = 255
+                at[unsafe_offset=b] = 255
         var address = Int(self.validity_caches[column].unsafe_ptr())
         self.data[column].validity = ValidityMask(address, 0)
         return address
@@ -492,3 +492,40 @@ def from_frame_window(
     for c in range(len(handles)):
         chunk.data[c] = flat_over(arena, handles[c], offset)
     chunk.count = count
+
+
+def gather_series(
+    mut chunk: DataChunk,
+    column: Int,
+    arena: ColumnArena,
+    rows: SelectionVector,
+    count: Int,
+    var name: String,
+    dtype: DataType,
+) raises -> Series:
+    """The `count` rows of column `column` that `rows` selects (every row
+    when unset), in order, as an at-rest column typed `dtype`."""
+    if not rows.is_set() and count == chunk.count:
+        return to_series(chunk, column, arena, name^, dtype)
+    var v = chunk.data[column]
+    if v.source >= 0 and v.vector_type != SEQUENCE_VECTOR:
+        var picked = List[Int](unsafe_uninit_length=count)
+        var out = picked.unsafe_ptr()
+        for k in range(count):
+            out[unsafe_offset=k] = v.source_offset + v.child_row(
+                rows.get_index(k)
+            )
+        return _typed(
+            arena.columns[v.source].take(picked).renamed(name^), dtype
+        )
+    var format = chunk.unified(column, arena)
+    var composed = List[UInt32](unsafe_uninit_length=max(count, 1))
+    var at = composed.unsafe_ptr()
+    for k in range(count):
+        at[unsafe_offset=k] = UInt32(format.sel.get_index(rows.get_index(k)))
+    var through = UnifiedVectorFormat(
+        SelectionVector(Int(at)), format.data, format.validity, format.physical
+    )
+    var result = _from_unified(through, count, name^)
+    _ = composed^
+    return _typed(result^, dtype)

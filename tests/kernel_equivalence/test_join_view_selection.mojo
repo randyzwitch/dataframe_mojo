@@ -1,9 +1,10 @@
 """A join's build-side string columns, read through the matched rows.
 
-A pipeline join step does not copy the view descriptors of a build-side
-string column: the joined column selects the build column's descriptors
-through the matched rows (`StringColumn._select_rows`), and carries its
-dictionary codes the same way. Every reader then sees the joined rows: row
+A pipeline join step does not copy a build-side string column: the joined
+column is a dictionary over the build column through the matched rows, and a
+reader that needs the column gathers it with its dictionary codes
+(`StringColumn._select_rows` selects descriptors without copying them).
+Every reader then sees the joined rows: row
 reads, gathers of the selection, flat copies, concatenation, grouping (by
 the codes and by the bytes), comparisons, string kernels and sorting are
 checked against a scalar model, with and without nulls."""
@@ -194,7 +195,7 @@ def test_joined_build_strings_match_the_scalar_model() raises:
             )
             var joined = plan.collect(batch_size=4096)
             assert_true(
-                "dataframe-path: pipeline.join_view_selection\n"
+                "dataframe-path: pipeline.join_dictionary\n"
                 in observed.text(),
                 "the join gathered the build strings",
             )

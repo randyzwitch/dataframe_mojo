@@ -1,0 +1,201 @@
+"""Expressions over data chunks against the eager evaluator: comparisons of
+integers, floats, decimals, dates and strings, Kleene AND / OR, NOT and null
+tests, arithmetic and casts in lanes, and nodes left to the at-rest
+evaluator, over flat chunks and over dictionaries through a selection, with
+nulls. A filter's selection and a projection's column equal filtering and
+projecting the frame eagerly."""
+# contract-group: expr.vectors
+from std.testing import assert_equal, assert_true
+
+from dataframe import Column, DataFrame, DataType, Expr, Series, StringColumn
+from dataframe import col, lit
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    from_frame_window,
+    to_series,
+)
+from dataframe.vector.expression import VectorExpression
+from dataframe.vector.types import SelectionVector
+from tests.support.coverage_compare import assert_frame
+
+comptime ROWS = 5000
+
+
+def frame() raises -> DataFrame:
+    var a = List[Int64]()
+    var a_valid = List[Bool]()
+    var b = List[Int32]()
+    var f = List[Float64]()
+    var day = List[Int64]()
+    var s = List[String]()
+    var s_valid = List[Bool]()
+    var price = List[String]()
+    for row in range(ROWS):
+        a.append(Int64((row * 37) % 101 - 50))
+        a_valid.append(row % 13 != 4)
+        b.append(Int32(row % 17))
+        f.append(Float64(row % 211) / 4.0 - 10.0)
+        day.append(Int64(row % 400))
+        s.append(
+            "k" + String(row % 9) if row % 3 else "a longer key " + String(
+                row % 5
+            )
+        )
+        s_valid.append(row % 11 != 6)
+        price.append(String(row % 997) + "." + String(row % 89 + 10))
+    return DataFrame(
+        [
+            Series("a", Column[Int64](a^, a_valid)),
+            Series("b", Column[Int32](b^)),
+            Series("f", Column[Float64](f^)),
+            Series("day", Column[Int64](day^)).cast(DataType.DATE),
+            Series("s", StringColumn(s, s_valid)),
+            Series("price", Column[String](price^)).cast(
+                DataType.decimal(7, 2)
+            ),
+        ]
+    )
+
+
+def predicates() raises -> List[Expr]:
+    return [
+        col("a") > lit(Int64(3)),
+        (col("a") <= col("b").cast(DataType.INT64)) | col("a").is_null(),
+        (col("f") >= lit(0.5)) & (col("s") != lit("k4")),
+        (col("s") == lit("a longer key 2")) | (col("b") == lit(Int32(3))),
+        ~(col("s") < lit("k5")),
+        col("price") > lit("500.00").cast(DataType.decimal(7, 2)),
+        col("day") < lit("1970-03-01").cast(DataType.DATE),
+        col("s").str().starts_with("k1") | col("a").is_not_null(),
+        col("s").is_null() & (col("a") > lit(Int64(0))),
+    ]
+
+
+def projections() raises -> List[Expr]:
+    return [
+        (col("a") * lit(Int64(3)) - col("b").cast(DataType.INT64)).alias("p"),
+        (col("f") * col("f") + lit(1.0)).alias("q"),
+        (col("price") * col("price")).alias("r"),
+        (col("price") + lit("0.5").cast(DataType.decimal(3, 1))).alias("t"),
+        col("price").cast(DataType.FLOAT64).alias("u"),
+        (col("a") > col("b").cast(DataType.INT64)).alias("v"),
+        col("s").str().len_bytes().alias("w"),
+        col("s").alias("x"),
+        lit(Int64(7)).alias("y"),
+    ]
+
+
+def chunk_of(
+    source: DataFrame,
+    mut arena: ColumnArena,
+    offset: Int,
+    count: Int,
+    keep_every: Int,
+) raises -> DataChunk:
+    """Rows [offset, offset + count) as a chunk; with `keep_every` above 1,
+    a chunk of dictionaries through every `keep_every`th row."""
+    var handles = List[Int]()
+    for c in source._columns:
+        handles.append(arena.add(c))
+    var flat = DataChunk()
+    from_frame_window(flat, arena, handles, offset, count)
+    if keep_every <= 1:
+        return flat^
+    var sliced = DataChunk()
+    var sel = sliced.new_selection()
+    var kept = 0
+    for i in range(count):
+        if i % keep_every == 0:
+            sel.set_index(kept, i)
+            kept += 1
+    sliced.slice(flat, sel, kept)
+    _ = flat^
+    return sliced^
+
+
+def expected_rows(source: DataFrame, offset: Int, count: Int, keep_every: Int) raises -> DataFrame:
+    var window = source.slice(offset, count)
+    if keep_every <= 1:
+        return window^
+    var rows = List[Int]()
+    for i in range(count):
+        if i % keep_every == 0:
+            rows.append(i)
+    return window.take(rows)
+
+
+def test_filters_select_what_the_eager_filter_keeps() raises:
+    var source = frame()
+    var schema = source.clear()._columns.copy()
+    for keep_every in [1, 3]:
+        for offset in [0, 61, 2900]:
+            var arena = ColumnArena()
+            var chunk = chunk_of(source, arena, offset, 2048, keep_every)
+            var rows = expected_rows(source, offset, 2048, keep_every)
+            for p in predicates():
+                var compiled = VectorExpression(p, schema)
+                var out = DataChunk()
+                var target = out.new_selection()
+                var kept = compiled.select(
+                    chunk, arena, SelectionVector(), chunk.count, target
+                )
+                var expected = rows.filter(p)
+                assert_equal(kept, expected.height())
+                var picked = List[Int]()
+                for k in range(kept):
+                    picked.append(target.get_index(k))
+                assert_frame(rows.take(picked), expected)
+                # The selection's entries are `out`'s.
+                _ = out^
+
+
+def test_projections_equal_the_eager_columns() raises:
+    var source = frame()
+    var schema = source.clear()._columns.copy()
+    for keep_every in [1, 4]:
+        for offset in [0, 777]:
+            var arena = ColumnArena()
+            var chunk = chunk_of(source, arena, offset, 2048, keep_every)
+            var rows = expected_rows(source, offset, 2048, keep_every)
+            for e in projections():
+                var compiled = VectorExpression(e, schema)
+                var out = DataChunk(1)
+                out.count = chunk.count
+                compiled.write(chunk, arena, out, 0)
+                # Every row's value, a constant's broadcast (with_columns).
+                var expected = rows.with_columns([e.copy()]).select(
+                    [e._name]
+                )
+                var got = to_series(
+                    out,
+                    0,
+                    arena,
+                    expected._columns[0].name(),
+                    expected._columns[0].dtype(),
+                )
+                assert_frame(DataFrame([got^]), expected)
+                # A constant's value is the compiled expression's.
+                _ = compiled^
+
+
+def test_a_dropped_rows_error_is_not_raised() raises:
+    # A decimal product past its precision on rows the selection drops.
+    var values = List[Int64]()
+    for row in range(2048):
+        values.append(Int64(999_999_999) if row % 2 else Int64(row % 7))
+    var source = DataFrame(
+        [Series("big", Column[Int64](values^)).cast(DataType.decimal(9, 0, 32))]
+    )
+    var schema = source.clear()._columns.copy()
+    var arena = ColumnArena()
+    var chunk = chunk_of(source, arena, 0, 2048, 2)
+    var compiled = VectorExpression(
+        (col("big") * col("big") * col("big")).alias("p"), schema
+    )
+    var out = DataChunk(1)
+    out.count = chunk.count
+    compiled.write(chunk, arena, out, 0)
+    var got = to_series(out, 0, arena, "p", compiled.root_dtype())
+    assert_equal(len(got), 1024)
+    assert_true(got.null_count() == 0)
