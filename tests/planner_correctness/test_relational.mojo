@@ -33,7 +33,7 @@ from tests.support.coverage_compare import (
     assert_float,
     assert_model,
 )
-from dataframe.lazy import JOIN, FILTER, AGG
+from dataframe.lazy import JOIN, FILTER, AGG, SELECT
 from dataframe.expr import CAST, LIT_INT
 from dataframe.join_type import JOIN_INNER
 
@@ -94,18 +94,22 @@ def test_join_predicates_preserve_outer_null_rows_and_side_dependencies() raises
                         )
                         assert_frame_unordered(optimized, raw)
                     # A differently named right key must not attract a predicate
-                    # referring to the output's coalesced left key.
+                    # referring to the output's coalesced left key. A right
+                    # join's output key is the right one (Polars), named back
+                    # for the model.
                     var renamed = right.rename({"i": "right_key"})
-                    var plan = (
-                        left.lazy()
-                        .join(
-                            renamed.lazy(),
-                            left_on=["i"],
-                            right_on=["right_key"],
-                            how=how,
-                        )
-                        .filter(col("i") > 0)
+                    var plan = left.lazy().join(
+                        renamed.lazy(),
+                        left_on=["i"],
+                        right_on=["right_key"],
+                        how=how,
                     )
+                    if how == "right":
+                        plan = plan.filter(col("right_key") > 0).rename(
+                            {"right_key": "i"}
+                        )
+                    else:
+                        plan = plan.filter(col("i") > 0)
                     var pairs = filtered_join_pairs(
                         left_model, right_model, ["i"], how, 4
                     )
@@ -140,11 +144,13 @@ def test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema() ra
                     var pairs = reference_join(
                         left_model, right_model, ["s"], how
                     )
+                    # A right join's key is the right one (Polars).
+                    var key = String("right_key" if how == "right" else "s")
                     for optimize in [False, True]:
                         var actual = _fixed(
-                            joined.select(["s", "b", "f_right"]), optimize
+                            joined.select([key, "b", "f_right"]), optimize
                         )
-                        assert_equal(actual.columns(), ["s", "b", "f_right"])
+                        assert_equal(actual.columns(), [key, "b", "f_right"])
                         assert_equal(
                             actual.dtypes(),
                             [DataType.STRING, DataType.BOOL, DataType.FLOAT64],
@@ -154,13 +160,13 @@ def test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema() ra
                             ref pair = pairs[row]
                             if how == "right" or pair.left < 0:
                                 assert_reference_cell(
-                                    actual.item(row, "s"),
+                                    actual.item(row, key),
                                     right_model.rows[pair.right],
                                     "s",
                                 )
                             else:
                                 assert_reference_cell(
-                                    actual.item(row, "s"),
+                                    actual.item(row, key),
                                     left_model.rows[pair.left],
                                     "s",
                                 )
@@ -354,16 +360,26 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
         }
     )
     for how in ["inner", "left", "semi", "anti", "right", "full"]:
+        # A right join's output key is the right one (Polars).
+        var key = String("right_key" if how == "right" else "i")
         var plan = (
             source.lazy()
             .join(right.lazy(), left_on=["i"], right_on=["right_key"], how=how)
-            .filter(col("i") > 0)
+            .filter(col(key) > 0)
             ._optimized()
         )
         ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
         if how in ["inner", "left", "semi", "anti"]:
             assert_equal(root.kind, JOIN)
             assert_equal(plan._plan._nodes[root.left].kind, FILTER)
+        elif how == "right":
+            # It runs as the right join keeping both keys under the
+            # selection that drops the left ones; the filter moves
+            # through the selection and stays above the join.
+            assert_equal(root.kind, SELECT)
+            ref under = plan._plan._nodes[root.left]
+            assert_equal(under.kind, FILTER)
+            assert_equal(plan._plan._nodes[under.left].kind, JOIN)
         else:
             assert_equal(root.kind, FILTER)
             assert_equal(plan._plan._nodes[root.left].kind, JOIN)
