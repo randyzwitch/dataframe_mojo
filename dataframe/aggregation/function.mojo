@@ -1847,8 +1847,8 @@ struct _Finalizer(Movable):
                 var saw_true = flags & 1 != 0
                 var saw_false = flags & 2 != 0
                 var saw_null = flags & 4 != 0
-                var ok = True
-                var value = False
+                var ok: Bool
+                var value: Bool
                 if self.op == ANY:
                     value = saw_true
                     ok = saw_true or ignore_nulls or not saw_null
