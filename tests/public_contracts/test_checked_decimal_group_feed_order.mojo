@@ -97,7 +97,7 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
     _ = parallel^
 
 
-def test_checked_decimal_over_partition_job_order_precedes_source_fault_order() raises:
+def test_checked_decimal_over_source_faults_precede_partition_faults() raises:
     var rows = 8192
     var groups = List[Int32](length=rows, fill=0)
     for row in range(rows):
@@ -132,10 +132,12 @@ def test_checked_decimal_over_partition_job_order_precedes_source_fault_order() 
         _ = frame.select(feed_expression().over("g"))
     _ = serial^
     var parallel = WorkerSetting(2)
-    # The first-seen key 1 is the first whole-partition job; its rows 0,2
-    # overflow a prefix before job 1 observes source row 1's product fault.
-    print("CPU OVER two workers: first-seen partition rows 0,2 prefix fault")
-    with assert_raises(contains="decimal precision 38"):
+    # A window's argument expressions are computed over the input rows
+    # before the rows are partitioned (DuckDB's projection below
+    # PhysicalWindow), so source row 1's product fault comes before any
+    # partition's prefix sum, with any number of workers.
+    print("CPU OVER two workers: source batch row 1 multiplication fault")
+    with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(feed_expression().over("g"))
     _ = parallel^
 

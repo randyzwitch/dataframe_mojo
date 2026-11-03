@@ -3270,12 +3270,10 @@ struct _OverJob(Job):
         )
 
 
-def _used_columns(
-    bound: BoundExpr, node_left: Int, columns: List[Series]
-) raises -> List[Bool]:
+def _used_columns(expr: Expr, columns: List[Series]) raises -> List[Bool]:
     """Which columns the expression under an over() reads, a nested
     over()'s partition and order columns included."""
-    var probe = bind(subtree(bound.expr, node_left), columns)
+    var probe = bind(expr, columns)
     var used = List[Bool](length=len(columns), fill=False)
     for source in probe.sources:
         if source >= 0:
@@ -3291,6 +3289,80 @@ def _used_columns(
                 if columns[c].name() == name:
                     used[c] = True
     return used^
+
+
+def _project_arguments[
+    width: Int
+](
+    inner: BoundExpr,
+    index: Int,
+    local: List[Bool],
+    source_columns: List[Series],
+    mut columns: List[Series],
+    mut nodes: List[Node],
+    height: Int,
+    batch_size: Int,
+) raises -> Int:
+    """Lower `inner` (the expression under an over()) so that every
+    largest row-local subexpression is computed once over the input rows,
+    in input order, and read back as a column: DuckDB evaluates a window's
+    argument expressions in a projection below PhysicalWindow, before the
+    rows are partitioned and sorted."""
+    var node = inner.expr._nodes[index].copy()
+    if local[index] and inner.shapes[index] == ROWS and node.op != COL:
+        var value = evaluate[width](
+            bind(subtree(inner.expr, index), source_columns),
+            source_columns,
+            height,
+            batch_size=batch_size,
+        )
+        var name = String("\x1fargument:") + String(len(columns))
+        var collision = True
+        while collision:
+            collision = False
+            for column in columns:
+                collision = collision or column.name() == name
+            if collision:
+                name += ":"
+        columns.append(value.renamed(name))
+        nodes.append(_node(COL, text=name))
+        return len(nodes) - 1
+    var children = node_children(node)
+    for k in range(len(children)):
+        children[k] = _project_arguments[width](
+            inner,
+            children[k],
+            local,
+            source_columns,
+            columns,
+            nodes,
+            height,
+            batch_size,
+        )
+    _set_node_children(node, children)
+    nodes.append(node^)
+    return len(nodes) - 1
+
+
+def _row_local_nodes(expr: Expr) -> List[Bool]:
+    """Per node: whether its value at a row depends only on that row (no
+    reduction, window, sequence, over() or row count beneath it)."""
+    var local = List[Bool](capacity=len(expr._nodes))
+    for i in range(len(expr._nodes)):
+        ref node = expr._nodes[i]
+        var ok = not (
+            is_reduction(node.op)
+            or is_sequence(node.op)
+            or is_window(node.op)
+            or node.op == OVER
+            or node.op == ROW_LEN
+            or node.op == IMPLODE
+            or node.op == _SCALAR_SOURCE
+        )
+        for child in node_children(node):
+            ok = ok and local[child]
+        local.append(ok)
+    return local^
 
 
 def _over_mapped[
@@ -3378,6 +3450,23 @@ def _over[
             inner, columns, height, batch_size=batch_size
         )
         return scalar._broadcast(height)
+    # Argument expressions over the input rows first (DuckDB's projection
+    # below the window), so their faults come before partitioning.
+    var inputs = columns.copy()
+    var argument_expr = inner.expr.copy()
+    if not mapped:
+        var nodes = List[Node]()
+        _ = _project_arguments[width](
+            inner,
+            len(inner.expr._nodes) - 1,
+            _row_local_nodes(inner.expr),
+            columns,
+            inputs,
+            nodes,
+            height,
+            batch_size,
+        )
+        argument_expr = Expr(nodes^, inner.expr._name)
     var owned = WindowLayouts()
     var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
     var at = _layout_index(node, columns, height, cache_address)
@@ -3392,15 +3481,15 @@ def _over[
         _ = owned^
         return result^
     var lanes = configured_workers()
-    var used = _used_columns(bound, node.left, columns)
+    var used = _used_columns(argument_expr, inputs)
     var reads = List[Series]()
-    for c in range(len(columns)):
+    for c in range(len(inputs)):
         if used[c]:
-            reads.append(columns[c].copy())
+            reads.append(inputs[c].copy())
     var gathered = reads.copy() if layout.in_place else take_parallel(
         reads, layout.order.copy(), lanes
     )
-    var local = bind(subtree(bound.expr, node.left), gathered)
+    var local = bind(argument_expr, gathered)
     # Hash groups in parallel, unless a nested over() reaches across
     # partitions: then all rows are evaluated together.
     var groups = len(layout.group_parts) - 1
