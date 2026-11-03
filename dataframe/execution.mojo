@@ -3112,6 +3112,10 @@ from .parallel import configured_workers
 from .window_sort import WindowLayout, window_layout
 
 
+# DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
+comptime _WINDOW_BLOCK = 2048
+
+
 struct WindowLayouts(Movable):
     """Window layouts for a frame's window expressions. Expressions with the
     same partition and order keys in a `with_columns` share one sorted
@@ -3508,9 +3512,26 @@ def _over[
             )
         )
     else:
-        for g in range(groups):
-            var first = layout.group_parts[g]
-            var last = layout.group_parts[g + 1]
+        # One task per thread over consecutive hash groups, each about
+        # an equal share of the rows; a thread gets at least one
+        # STANDARD_VECTOR_SIZE block (WindowGlobalSourceState::
+        # CreateTaskList sizes tasks in blocks per thread).
+        var blocks = (height + _WINDOW_BLOCK - 1) // _WINDOW_BLOCK
+        var tasks = max(1, min(lanes, blocks))
+        var share = (height + tasks - 1) // tasks
+        var cuts = List[Int]()
+        cuts.append(0)
+        for g in range(1, groups):
+            var at = layout.starts[layout.group_parts[g]]
+            if (
+                at - layout.starts[layout.group_parts[cuts[len(cuts) - 1]]]
+                >= share
+            ):
+                cuts.append(g)
+        cuts.append(groups)
+        for t in range(len(cuts) - 1):
+            var first = layout.group_parts[cuts[t]]
+            var last = layout.group_parts[cuts[t + 1]]
             jobs.append(
                 _OverJob(
                     local,
