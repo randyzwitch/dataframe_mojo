@@ -237,26 +237,31 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
 
 
 def _reads_column(bound: BoundExpr, index: Int) -> Bool:
-    ref node = bound.expr._nodes[index]
-    if node.op == COL:
-        return True
-    if node.left >= 0 and _reads_column(bound, node.left):
-        return True
-    return node.right >= 0 and _reads_column(bound, node.right)
+    """Whether node `index`'s subtree reads a column, by every node of the
+    subtree (constructors pack their fields' children outside `left` and
+    `right`)."""
+    for node in subtree(bound.expr, index)._nodes:
+        if node.op == COL:
+            return True
+    return False
 
 
-def _subtree_columns(bound: BoundExpr, index: Int, mut out: List[Int]):
-    """The input columns node `index`'s subtree reads (bound sources)."""
-    ref node = bound.expr._nodes[index]
-    if node.op == COL:
-        var source = bound.sources[index]
-        if source not in out:
-            out.append(source)
-        return
-    if node.left >= 0:
-        _subtree_columns(bound, node.left, out)
-    if node.right >= 0:
-        _subtree_columns(bound, node.right, out)
+def _subtree_columns(
+    bound: BoundExpr, index: Int, schema: List[Series], mut out: List[Int]
+) raises:
+    """The input columns node `index`'s subtree reads, by name."""
+    for node in subtree(bound.expr, index)._nodes:
+        if node.op != COL:
+            continue
+        var found = -1
+        for c in range(len(schema)):
+            if schema[c].name() == node.text:
+                found = c
+                break
+        if found < 0:
+            raise Error("Unknown expression column: " + node.text)
+        if found not in out:
+            out.append(found)
 
 
 @fieldwise_init
@@ -575,7 +580,7 @@ struct VectorExpression(Copyable, Movable):
                 file=RawFileDescriptor(2),
             )
         var reads = List[Int]()
-        _subtree_columns(self.bound, index, reads)
+        _subtree_columns(self.bound, index, self.schema, reads)
         var columns = List[Series](capacity=len(reads))
         for r in reads:
             columns.append(self.schema[r].copy())
