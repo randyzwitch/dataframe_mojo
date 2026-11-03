@@ -1974,52 +1974,102 @@ struct _FinishJob(Job):
                     _ = into.copy_row(final.at(g))
                 swap(final, into)
                 _ = into^
-        # The groups are scanned out a vector of rows at a time (DuckDB's
-        # `Scan`: each chunk of rows gathered into every output column, its
-        # states finalized), so each group's row is read from memory once,
-        # not once per reduction and key.
-        var count = final.count()
-        var outputs = List[_Finalizer](capacity=len(self.templates))
-        for s in range(len(self.templates)):
-            if self.slots[s].kind == _K_TOP_ROWS:
-                var w0 = final.states_at + self.slots[s].offset
-                var words = final.rows.unsafe_ptr()
-                for g in range(count):
-                    var w = g * final.stride + w0
-                    for p in range(Int(words[unsafe_offset=w])):
-                        self.top_rows.append(
-                            Int(words[unsafe_offset=w + 2 + 2 * p])
-                        )
-            outputs.append(
-                _Finalizer(self.slots[s], self.templates[s], count, held)
+        _scan_groups(
+            final,
+            self.slots,
+            self.templates,
+            self.key_templates,
+            held,
+            self.states,
+            self.keys,
+            self.firsts,
+            self.top_rows,
+        )
+
+
+def _scan_groups(
+    final: _Groups,
+    slots: List[AggregateFunction],
+    templates: List[ReducerSpec],
+    key_templates: List[Series],
+    held: _HeldBuffers,
+    mut states: List[Reducer],
+    mut keys: List[Series],
+    mut firsts_out: List[Int],
+    mut top_rows: List[Int],
+) raises:
+    """Merged groups read out a vector of rows at a time: each reduction's
+    `finalize` into `states`, the keys into `keys`, the first rows into
+    `firsts_out` and every top-rows state's rows into `top_rows`."""
+    # The groups are scanned out a vector of rows at a time (DuckDB's
+    # `Scan`: each chunk of rows gathered into every output column, its
+    # states finalized), so each group's row is read from memory once,
+    # not once per reduction and key.
+    var count = final.count()
+    var outputs = List[_Finalizer](capacity=len(templates))
+    for s in range(len(templates)):
+        if slots[s].kind == _K_TOP_ROWS:
+            var w0 = final.states_at + slots[s].offset
+            var words = final.rows.unsafe_ptr()
+            for g in range(count):
+                var w = g * final.stride + w0
+                for p in range(Int(words[unsafe_offset=w])):
+                    top_rows.append(Int(words[unsafe_offset=w + 2 + 2 * p]))
+        outputs.append(_Finalizer(slots[s], templates[s], count, held))
+    var key_columns = List[_KeyColumn](capacity=len(key_templates))
+    var w = 0
+    for c in range(len(key_templates)):
+        key_columns.append(
+            _KeyColumn(
+                key_templates[c],
+                w,
+                UInt64(1) << UInt64(c),
+                count,
+                held,
             )
-        var key_columns = List[_KeyColumn](capacity=len(self.key_templates))
-        var w = 0
-        for c in range(len(self.key_templates)):
-            key_columns.append(
-                _KeyColumn(
-                    self.key_templates[c],
-                    w,
-                    UInt64(1) << UInt64(c),
-                    count,
-                    held,
-                )
-            )
-            w += _width(self.key_templates[c])
-        self.firsts = List[Int](unsafe_uninit_length=count)
-        var firsts = self.firsts.unsafe_ptr()
-        for lo in range(0, count, _BATCH):
-            var hi = min(count, lo + _BATCH)
-            for s in range(len(outputs)):
-                outputs[s].scan(final, lo, hi, held)
-            for c in range(len(key_columns)):
-                key_columns[c].scan(final, lo, hi, held)
-            for g in range(lo, hi):
-                firsts[unsafe_offset=g] = final.first(g)
-        while len(outputs) > 0:
-            self.states.append(outputs.pop(0).reducer())
-        while len(key_columns) > 0:
-            self.keys.append(key_columns.pop(0).column())
+        )
+        w += _width(key_templates[c])
+    firsts_out = List[Int](unsafe_uninit_length=count)
+    var firsts = firsts_out.unsafe_ptr()
+    for lo in range(0, count, _BATCH):
+        var hi = min(count, lo + _BATCH)
+        for s in range(len(outputs)):
+            outputs[s].scan(final, lo, hi, held)
+        for c in range(len(key_columns)):
+            key_columns[c].scan(final, lo, hi, held)
+        for g in range(lo, hi):
+            firsts[unsafe_offset=g] = final.first(g)
+    while len(outputs) > 0:
+        states.append(outputs.pop(0).reducer())
+    while len(key_columns) > 0:
+        keys.append(key_columns.pop(0).column())
+
+
+def groups_result(
+    final: _Groups, layout: AggregateLayout, held: _HeldBuffers
+) raises -> AggregateResult:
+    """Merged groups (a perfect hash aggregate's occupied slots) read out
+    as one partition of a result, as the finish reads each of its own."""
+    var result = AggregateResult()
+    var states = List[Reducer]()
+    var keys = List[Series]()
+    var firsts = List[Int]()
+    _scan_groups(
+        final,
+        layout.slots,
+        layout.templates,
+        layout.key_templates,
+        held,
+        states,
+        keys,
+        firsts,
+        result.top_rows,
+    )
+    result.merged = final.count()
+    result.firsts.append(firsts^)
+    result.states.append(states^)
+    result.keys.append(keys^)
+    return result^
 
 
 def aggregate_table(

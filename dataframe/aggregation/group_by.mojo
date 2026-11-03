@@ -2,7 +2,19 @@
 from dataframe.aggregation.reducer import (
     Reducer,
 )
+from dataframe.aggregation.function import (
+    _BATCH,
+    _Groups,
+    _HeldBuffers,
+    _ValueArena,
+    _column_words,
+    _update_states,
+    combine,
+)
+from std.ffi import external_call
 from dataframe.aggregation.hash_table import (
+    _width,
+    groups_result,
     AggregateLayout,
     AggregateSink,
     _Cursor,
@@ -185,90 +197,134 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
-# Rows a perfect hash aggregate gives slots at a time. Their slots (8
-# bytes each) take 128 KB, within a core's L2, so every reduction reads
-# them back from cache, as DuckDB updates each aggregate from one vector's
-# group addresses before it takes the next vector.
-comptime _PERFECT_WINDOW = 16384
-
-
-struct _PerfectAggJob(Job):
-    """Reduce rows [start, end) into the slots of a perfect hash table
-    (`perfect_aggregate.mojo`): each window of rows gets its slots, then
-    every reduction folds the window in one vector at a time. `firsts` keeps
-    each slot's first row, -1 while it is empty."""
+struct _PerfectSinkJob(Job):
+    """One worker's rows [start, end) into its own perfect hash table
+    (DuckDB's `PerfectAggregateHashTable`): a group row for every slot the
+    keys' bits can name, its states the aggregate table's
+    (`AggregateFunction`s), updated a vector of rows at a time through the
+    rows' slots, with no probe. A slot's first word is 1 once a row has
+    reached it. Computed reduction inputs are evaluated `batch` rows at a
+    time, before those rows update the states."""
 
     var frame: DataFrame
     var keys: List[Series]
-    var layout: PerfectLayout
-    var plan: _ReductionPlan
+    var expressions: List[Expr]
+    var perfect: PerfectLayout
+    var layout: AggregateLayout
     var start: Int
     var end: Int
-    var states: List[Reducer]
-    var firsts: List[Int]
+    var batch: Int
+    var groups: List[_Groups]
+    # The arena of the job's quantile values, alive until the finish.
+    var values: List[_ValueArena]
 
     def __init__(
         out self,
         frame: DataFrame,
         keys: List[Series],
-        layout: PerfectLayout,
-        plan: _ReductionPlan,
+        expressions: List[Expr],
+        perfect: PerfectLayout,
+        layout: AggregateLayout,
         start: Int,
         end: Int,
+        batch: Int,
     ):
         self.frame = frame.copy()
         self.keys = keys.copy()
+        self.expressions = expressions.copy()
+        self.perfect = perfect.copy()
         self.layout = layout.copy()
-        self.plan = plan.copy()
         self.start = start
         self.end = end
-        self.states = List[Reducer](capacity=len(plan.bounds))
-        for r in range(len(plan.bounds)):
-            ref bound = plan.bounds[r]
-            self.states.append(
-                _new_reducer(
-                    bound, bound.expr._nodes[plan.nodes[r]], layout.slots()
-                )
-            )
-        self.firsts = List[Int](length=layout.slots(), fill=-1)
+        self.batch = max(1, batch)
+        self.groups = List[_Groups]()
+        self.values = List[_ValueArena]()
 
     def run(mut self) raises:
-        var slots = List[Int](length=_PERFECT_WINDOW, fill=0)
-        # Only the columns the reductions read are cut to each window.
-        var read = List[Int]()
-        for bound in self.plan.bounds:
-            for source in bound.sources:
-                if source >= 0 and source not in read:
-                    read.append(source)
-        var columns = self.frame._columns.copy()
-        var first = self.firsts.unsafe_ptr()
+        var slots_n = self.perfect.slots()
+        var groups = _Groups(
+            len(self.layout.addressed),
+            self.layout.addressed.copy(),
+            self.layout.state_words,
+            slots_n,
+        )
+        var stride = groups.stride
+        var base = Int(groups.rows.unsafe_ptr())
+        _ = external_call["memset", Int](base, 0, 8 * stride * slots_n)
+        groups.n = slots_n
+        self.values.append(_ValueArena())
+        var arena = Pointer[_ValueArena, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.values[0]))
+        )
+        var width = len(self.layout.addressed)
+        var words = List[List[UInt64]](capacity=width)
+        for _ in range(width):
+            words.append(List[UInt64](length=_BATCH, fill=0))
+        var nulls = List[UInt64](length=_BATCH, fill=0)
+        var slots = List[Int](length=_BATCH, fill=0)
+        var rows = List[Int](length=_BATCH, fill=0)
+        var scratch = List[UInt64](length=3 * _BATCH, fill=0)
+        var discard = List[UInt64](length=stride + 8, fill=0)
         var at = self.start
         while at < self.end:
-            var length = min(_PERFECT_WINDOW, self.end - at)
-            perfect_slots(self.keys, self.layout, at, length, slots)
-            var slot = slots.unsafe_ptr()
-            for i in range(length):
-                ref seen = first[unsafe_offset=slot[unsafe_offset=i]]
-                if seen < 0:
-                    seen = at + i
-            for c in read:
-                columns[c] = self.frame._columns[c].slice(at, length)
-            for r in range(len(self.states)):
-                ref bound = self.plan.bounds[r]
-                reduce_rows[8](
-                    self.states[r],
-                    bound,
-                    columns,
-                    List[Series](),
-                    bound.expr._nodes[self.plan.nodes[r]],
-                    0,
-                    length,
-                    _reduction_batch(True),
-                    True,
-                    slots,
-                    ArcPointer(List[_ColumnStats]()),
+            var length = min(self.batch, self.end - at)
+            var key_part = List[Series](capacity=len(self.keys))
+            for key in self.keys:
+                key_part.append(_one_chunk(key.slice(at, length)))
+            var inputs = table_inputs(
+                self.frame.slice(at, length), key_part, self.expressions
+            )
+            for i in range(len(inputs)):
+                inputs[i] = _one_chunk(inputs[i])
+            for lo in range(0, length, _BATCH):
+                var count = min(_BATCH, length - lo)
+                perfect_slots(self.keys, self.perfect, at + lo, count, slots)
+                var null_at = nulls.unsafe_ptr()
+                for k in range(count):
+                    null_at[unsafe_offset=k] = 0
+                var w = 0
+                for c in range(len(key_part)):
+                    var second = w + 1 if _width(key_part[c]) == 2 else w
+                    _column_words(
+                        key_part[c],
+                        lo,
+                        count,
+                        Int(words[w].unsafe_ptr()),
+                        Int(words[second].unsafe_ptr()),
+                        Int(null_at),
+                        UInt64(1) << UInt64(c),
+                    )
+                    w = second + 1
+                var slot_at = slots.unsafe_ptr()
+                var row_at = rows.unsafe_ptr()
+                for k in range(count):
+                    var address = base + 8 * stride * slot_at[unsafe_offset=k]
+                    row_at[unsafe_offset=k] = address
+                    var row = Pointer[UInt64, MutAnyOrigin](
+                        unsafe_from_address=address
+                    )
+                    if row[] != 0:
+                        continue
+                    # The slot's first row: its keys, and where it began.
+                    row[] = 1
+                    row[unsafe_offset=1] = null_at[unsafe_offset=k]
+                    row[unsafe_offset=2] = UInt64(at + lo + k)
+                    for v in range(width):
+                        row[unsafe_offset=3 + v] = words[v][k]
+                _update_states(
+                    self.layout.slots,
+                    inputs,
+                    lo,
+                    count,
+                    rows.unsafe_ptr(),
+                    groups.states_at,
+                    at,
+                    arena,
+                    Int(discard.unsafe_ptr()),
+                    Int(scratch.unsafe_ptr()),
                 )
             at += length
+        self.groups.append(groups^)
 
 
 def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
@@ -481,12 +537,9 @@ struct GroupBy(Copyable):
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
-        if _stream_reductions(expressions) and not self._counts_distinct(
-            expressions
-        ):
-            var perfect = self._agg_perfect(expressions, key_names, workers)
-            if perfect:
-                return perfect.take()
+        var perfect = self._agg_perfect(expressions, workers, batch_size)
+        if perfect:
+            return _pack_struct_keys(perfect.take())
         # Keys of a small dense domain went to the perfect hash above, as
         # DuckDB's do; any other grouping goes through the aggregate table
         # whatever its number of groups, whose per-thread tables adapt to
@@ -677,101 +730,117 @@ struct GroupBy(Copyable):
         return False
 
     def _agg_perfect(
-        self,
-        expressions: List[Expr],
-        key_names: Dict[String, Bool],
-        workers: Int,
+        self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
-        """Integer keys spanning few enough values (`perfect_layout`) give each
-        row its group's slot directly, with no table to probe and no group
-        ids to number or store; each worker reduces its range into its own
-        slots, the workers' slots merge in row order, and the occupied
-        slots come out in first-occurrence order. None when the keys do
-        not qualify."""
+        """DuckDB's perfect hash aggregate (`PhysicalPerfectHashAggregate`),
+        chosen as DuckDB chooses it, from the keys' statistics: integer
+        keys whose ranges (the segment statistics' minimum and maximum, or
+        a categorical's dictionary size) need at most `PERFECT_HASH_BITS`
+        bits together give each row its group's slot directly. Each worker
+        updates its own slots' states, the aggregate table's
+        `AggregateFunction`s, over its range of rows; the workers' slots
+        combine in order, and the occupied slots are read out as the
+        table's groups are. None when the keys do not qualify, or a
+        reduction counts distinct values (DuckDB's perfect hash aggregate
+        has no distinct tables)."""
         var height = self._frame.height()
-        if height == 0:
+        if height == 0 or self._counts_distinct(expressions):
             return None
-        var layout = perfect_layout(self._keys)
-        if not layout:
+        if not self._table_supported(expressions):
+            return None
+        var perfect = perfect_layout(self._keys)
+        if not perfect:
+            return None
+        var empty_keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            empty_keys.append(key.slice(0, 0))
+        var template = _StreamReduction(
+            self._frame.clear(), expressions, empty_keys, self._key_names()
+        )
+        var specs = table_specs(template)
+        var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
+        if not states_supported(specs, empty):
             return None
         trace_path("group_by.perfect_hash")
-        var plan = _ReductionPlan(self._frame, expressions, key_names)
+        var layout = aggregate_layout(empty_keys, empty, specs)
+        var frame = self._frame.rechunk()
+        var keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        # Plain columns are read where they are; computed inputs a batch at
+        # a time, as `batch_size` says (see `_agg_batches`).
+        var batch = height if _plain_inputs(expressions, frame) else batch_size
         var bounds = partitions(height, workers, 64)
-        var jobs = List[_PerfectAggJob](capacity=workers)
+        var jobs = List[_PerfectSinkJob](capacity=workers)
         for w in range(workers):
             if bounds[w] < bounds[w + 1]:
                 jobs.append(
-                    _PerfectAggJob(
-                        self._frame,
-                        self._keys,
-                        layout.value(),
-                        plan,
+                    _PerfectSinkJob(
+                        frame,
+                        keys,
+                        expressions,
+                        perfect.value(),
+                        layout,
                         bounds[w],
                         bounds[w + 1],
+                        batch,
                     )
                 )
-        try:
-            run_jobs(jobs)
-        except:
-            # Windows here span several feed batches, so the first error
-            # raised need not be the one the batch order raises first.
-            # A failing aggregation is left to the other routes, which
-            # feed batch by batch and raise the error in that order.
-            return None
+        run_jobs(jobs)
         # DuckDB's `Combine`: every worker's slots fold into the first's,
-        # in row order, so first and last keep a single pass's answer.
-        var merged = jobs.pop(0)
-        for w in range(len(jobs)):
-            ref job = jobs[w]
-            for r in range(len(merged.states)):
-                merged.states[r].merge(job.states[r])
-            for s in range(len(merged.firsts)):
-                if merged.firsts[s] < 0:
-                    merged.firsts[s] = job.firsts[s]
-        # DuckDB's `Scan` takes the occupied slots in slot order; these keep
-        # the first-occurrence order of the other routes.
-        var occupied = List[Int]()
-        var rows = List[Int]()
-        for s in range(len(merged.firsts)):
-            if merged.firsts[s] >= 0:
-                occupied.append(s)
-                rows.append(merged.firsts[s])
-        var order = sort_indices([rows.copy()])
-        var picked = List[Int](capacity=len(order))
-        var firsts = List[Int](capacity=len(order))
-        for o in order:
-            picked.append(occupied[o])
-            firsts.append(rows[o])
-        var count = len(picked)
-        var states = List[Reducer](capacity=len(merged.states))
-        for r in range(len(merged.states)):
-            ref source = merged.states[r]
-            var state = Reducer(
-                source.op,
-                source.input,
-                count,
-                source.min_count,
-                source.integer,
-                source.floating,
-                source.text,
-                source.logical,
-            )
-            state.merge(source, sources=picked)
-            states.append(state^)
-        var keys = List[Series](capacity=len(self._keys))
-        for key in self._keys:
-            keys.append(key.take(firsts))
-        var reduction = _StreamReduction(
-            keys=DataFrame(keys^, height=count),
-            states=states^,
-            names=plan.names,
-            dtypes=plan.dtypes,
-            outputs=plan.outputs,
-            grouped=True,
-            firsts=firsts^,
-            rows=height,
+        # in row order, so first and last keep their rows' order.
+        ref merged = jobs[0].groups[0]
+        var stride = merged.stride
+        var states_bytes = 8 * merged.states_at
+        for j in range(1, len(jobs)):
+            ref other = jobs[j].groups[0]
+            for g in range(merged.count()):
+                var theirs = other.at(g)
+                var row = Pointer[UInt64, MutAnyOrigin](
+                    unsafe_from_address=theirs
+                )
+                if row[] == 0:
+                    continue
+                var mine = merged.at(g)
+                var into = Pointer[UInt64, MutAnyOrigin](
+                    unsafe_from_address=mine
+                )
+                if into[] == 0:
+                    _ = external_call["memcpy", Int](mine, theirs, 8 * stride)
+                    continue
+                combine(
+                    layout.slots, mine + states_bytes, theirs + states_bytes
+                )
+                if row[unsafe_offset=2] < into[unsafe_offset=2]:
+                    into[unsafe_offset=2] = row[unsafe_offset=2]
+        # DuckDB's `Scan`: the occupied slots in slot order.
+        var occupied = 0
+        for g in range(merged.count()):
+            if (
+                Pointer[UInt64, MutAnyOrigin](
+                    unsafe_from_address=merged.at(g)
+                )[]
+                != 0
+            ):
+                occupied += 1
+        var final = _Groups(
+            len(layout.addressed),
+            layout.addressed.copy(),
+            layout.state_words,
+            occupied,
         )
-        return reduction.finish()
+        for g in range(merged.count()):
+            if (
+                Pointer[UInt64, MutAnyOrigin](
+                    unsafe_from_address=merged.at(g)
+                )[]
+                != 0
+            ):
+                _ = final.copy_row(merged.at(g))
+        var held = _HeldBuffers()
+        var result = groups_result(final, layout, held)
+        _ = jobs^
+        return table_frame(template, result^, self._maintain_order)
 
     def _agg_whole(
         self, bound: List[BoundExpr], batch_size: Int
