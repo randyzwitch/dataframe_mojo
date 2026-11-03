@@ -1,20 +1,16 @@
-"""Window partitions laid out contiguously and evaluated many at once: the
-layout is a stable sort of rows by partition id
-for any number of partitions, and `over()` on it gives each partition what
-the scalar window models give it: running sums both ways, shift, average
-rank, rolling mean, forward fill and broadcast sums and means, with string
-and integer keys, null keys and null values. Rows already in partition
-order are evaluated where they are; rows in a single partition keep the
-row-order route."""
+"""Window layouts (DuckDB's hash-partitioned, per-group sorted window
+input): every partition's rows are contiguous and in input order (or in
+order-key order, ties in input order), with partition and peer boundaries
+marked; and `over()` on them gives each partition what the scalar window
+models give it: running sums both ways, shift, average rank, rolling mean,
+forward fill and broadcast sums and means, with string and integer keys,
+null keys and null values, in many partitions and in one."""
 # contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col
-from dataframe.window_layout import partition_layout
-from tests.support.group_strategy_reference import (
-    ScopedEnvironment,
-    StrategyTrace,
-)
+from dataframe.window_sort import PARTITION_START, PEER_START, window_layout
+from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.window_reference import (
     WindowCells,
     cumulative,
@@ -27,22 +23,66 @@ from tests.support.window_reference import (
 comptime ROWS = 24_000
 
 
-def test_layout_groups_rows_by_id_in_row_order_for_any_count() raises:
+def test_layout_groups_rows_by_key_in_row_order_for_any_count() raises:
     for count in [1, 7, 256, 300, 5_000]:
-        var ids = List[Int]()
+        var ids = List[Int64]()
         for row in range(10_000):
-            ids.append((row * 7919 + row // 3) % count)
-        var layout = partition_layout(ids.copy(), count, 8)
+            ids.append(Int64((row * 7919) % count))
+        var key = Series("p", Column[Int64](ids.copy()))
+        var layout = window_layout(
+            [key^], List[Series](), List[Bool](), List[Bool](), 10_000
+        )
+        assert_equal(layout.count, count)
         assert_equal(layout.starts[0], 0)
         assert_equal(layout.starts[count], 10_000)
+        var seen = List[Bool](length=count, fill=False)
         for g in range(count):
             var previous = -1
+            var id = ids[layout.order[layout.starts[g]]]
+            assert_true(not seen[Int(id)], "a key in two partitions")
+            seen[Int(id)] = True
             for k in range(layout.starts[g], layout.starts[g + 1]):
                 var row = layout.order[k]
-                assert_equal(ids[row], g)
+                assert_equal(ids[row], id)
                 assert_true(row > previous, "rows out of order")
                 previous = row
-                assert_equal(layout.inverse[row], k)
+                assert_equal(layout.row_partition[row], g)
+                if not layout.in_place:
+                    assert_equal(layout.inverse[row], k)
+                assert_equal(
+                    (layout.flags[k] & PARTITION_START) != 0,
+                    k == layout.starts[g],
+                )
+
+
+def test_layout_orders_rows_by_two_keys_and_marks_peers() raises:
+    var parts = List[Int64]()
+    var a = List[Int64]()
+    var b = List[String]()
+    for row in range(6_000):
+        parts.append(Int64(row % 13))
+        a.append(Int64((row * 31) % 7))
+        b.append(String((row * 17) % 5))
+    var p = Series("p", Column[Int64](parts.copy()))
+    var sa = Series("a", Column[Int64](a.copy()))
+    var sb = Series("b", Column[String](b.copy()))
+    var layout = window_layout(
+        [p^], [sa^, sb^], [True, True], [False, False], 6_000
+    )
+    for g in range(layout.count):
+        for k in range(layout.starts[g] + 1, layout.starts[g + 1]):
+            var before = layout.order[k - 1]
+            var row = layout.order[k]
+            assert_equal(parts[row], parts[before])
+            var same = a[row] == a[before] and b[row] == b[before]
+            assert_true(
+                a[row] < a[before]
+                or (a[row] == a[before] and b[row] <= b[before]),
+                "not sorted descending",
+            )
+            if same:
+                assert_true(row > before, "ties out of input order")
+            assert_equal((layout.flags[k] & PEER_START) != 0, not same)
 
 
 def text_key(row: Int) -> String:
@@ -82,7 +122,6 @@ def test_over_on_contiguous_partitions_matches_the_scalar_models() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var input = frame()
-    var observed = StrategyTrace()
     var keys: List[String] = ["k", "j"]
     var actual = input.select_exprs(
         [
@@ -96,11 +135,6 @@ def test_over_on_contiguous_partitions_matches_the_scalar_models() raises:
             col("x").mean().over(keys).alias("mean"),
         ]
     )
-    assert_true(
-        "dataframe-path: window.contiguous\n" in observed.text(),
-        "over() did not lay out its partitions contiguously",
-    )
-    _ = observed^
     var members = Dict[String, List[Int]]()
     for row in range(ROWS):
         var key = key_of(row)
@@ -164,17 +198,11 @@ def test_over_on_contiguous_partitions_matches_the_scalar_models() raises:
     _ = workers^
 
 
-def test_one_partition_keeps_the_row_order_route() raises:
+def test_one_partition_runs_over_every_row() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var input = frame()
-    var observed = StrategyTrace()
     var actual = input.select_exprs([col("x").cum_sum().over("same")])
-    assert_true(
-        "dataframe-path: window.contiguous\n" not in observed.text(),
-        "a single partition was laid out",
-    )
-    _ = observed^
     ref x = input.column("x")._data[Column[Int64]]
     var running = Int64(0)
     for row in range(ROWS):
@@ -188,15 +216,7 @@ def test_one_partition_keeps_the_row_order_route() raises:
     _ = workers^
 
 
-def test_rows_already_in_partition_order_are_evaluated_in_place() raises:
-    # Ids that rise with the rows lay out as the rows themselves.
-    var grouped = List[Int]()
-    var scattered = List[Int]()
-    for row in range(10_000):
-        grouped.append(row // 40)
-        scattered.append((row * 7) % 250)
-    assert_true(partition_layout(grouped^, 250, 8).in_place)
-    assert_true(not partition_layout(scattered^, 250, 8).in_place)
+def test_rows_already_in_partition_order_restart_at_each_key() raises:
     # A frame sorted by its key: running sums restart at each key.
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -208,10 +228,7 @@ def test_rows_already_in_partition_order_are_evaluated_in_place() raises:
     var input = DataFrame(
         [Series("x", Column[Int64](x^)), Series("key", Column[Int64](key^))]
     )
-    var observed = StrategyTrace()
     var actual = input.select_exprs([col("x").cum_sum().over("key")])
-    assert_true("dataframe-path: window.contiguous\n" in observed.text())
-    _ = observed^
     var running = Int64(0)
     for row in range(ROWS):
         if row % 40 == 0:

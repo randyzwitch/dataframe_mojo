@@ -123,7 +123,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
-    return table^._with_statistics()
+    return table^._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -328,7 +328,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
-    return table^._with_statistics()
+    return table^._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -372,7 +372,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
-    return table^._with_statistics()
+    return table^._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -462,7 +462,7 @@ def read_csv(
         encoding=encoding,
         buffer_size=buffer_size,
     )
-    return table^._with_statistics()
+    return table^._with_statistics()._with_storage_statistics()
 
 
 def _needs_quotes(text: String, separator: UInt8, null_value: String) -> Bool:
@@ -791,7 +791,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()
+    return concat(frames)._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -878,7 +878,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()
+    return concat(frames)._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -965,7 +965,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()
+    return concat(frames)._with_statistics()._with_storage_statistics()
 
 
 def _dataset_csv_schema(
@@ -1021,11 +1021,15 @@ def _read_dataset_csv(
     var selected = Optional[List[String]]()
     if len(columns):
         selected = columns.copy()
-    return read_dataset(
-        spec,
-        False,
-        schema=schema,
-        scan=scan,
-        columns=selected,
-        limit=n_rows,
-    )._with_statistics()
+    return (
+        read_dataset(
+            spec,
+            False,
+            schema=schema,
+            scan=scan,
+            columns=selected,
+            limit=n_rows,
+        )
+        ._with_statistics()
+        ._with_storage_statistics()
+    )

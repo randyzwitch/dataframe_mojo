@@ -26,7 +26,8 @@ def check():
             if dependency in {'dataframe', 'dataframe.execution', 'dataframe.binding.bind'} or dependency.startswith((
                 'dataframe.execution.', 'dataframe.frame', 'dataframe.lazy',
                 'dataframe.planning', 'dataframe.optimizer', 'dataframe.query_execution',
-                'dataframe.streaming', 'dataframe.fused_compare', 'dataframe.sorted_range',
+                'dataframe.streaming', 'dataframe.fused_compare', 'dataframe.table_scan',
+                'dataframe.table_filter',
                 'dataframe_provider', 'dataframe._accel_provider',
             )):
                 failures.append(f'{name} imports expression/query execution: {dependency}')
