@@ -863,6 +863,15 @@ struct _Columns(Copyable, Movable):
             result.lists.append(made)
         return result^
 
+    def _picked(self, list: Int) -> List[Int]:
+        ref rows = self.row_lists[list]
+        var picked = List[Int](unsafe_uninit_length=self.height)
+        var out = picked.unsafe_ptr()
+        var at = rows.unsafe_ptr()
+        for k in range(self.height):
+            out[unsafe_offset=k] = Int(at[unsafe_offset=k])
+        return picked^
+
     def series(
         self, arena: ColumnArena, c: Int, var name: String
     ) raises -> Series:
@@ -891,9 +900,23 @@ struct _Columns(Copyable, Movable):
         """The named columns as a frame of `height` rows (each gathered
         through its rows): the adapter for operators that read frames."""
         var columns = List[Series](capacity=len(names))
+        # Each row list as gather indices once, for every column reading it.
+        var picked = List[Optional[List[Int]]](
+            length=len(self.row_lists), fill=None
+        )
         for name in names:
             var c = schema._index(name)
-            columns.append(self.series(arena, c, name))
+            var l = self.lists[c]
+            if l < 0:
+                columns.append(self.series(arena, c, name))
+                continue
+            if not picked[l]:
+                picked[l] = self._picked(l)
+            columns.append(
+                arena.columns[self.handles[c]]
+                .take(picked[l].value())
+                .renamed(name)
+            )
         return DataFrame(columns^, height=self.height)
 
     def whole(self, arena: ColumnArena, schema: DataFrame) raises -> DataFrame:
@@ -1005,7 +1028,7 @@ struct _Collector(Movable):
             self.parts.append(schema._columns[c].copy())
         self.height = 0
 
-    def append(mut self, mut chunk: DataChunk, arena: ColumnArena) raises:
+    def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
         var count = chunk.count
         for c in range(len(self.modes)):
             var v = chunk.data[c]
@@ -1084,10 +1107,27 @@ struct _Collector(Movable):
             elif mode == _COLLECT_ROWS:
                 result.handles.append(self.handles[c])
                 result.starts.append(0)
-                result.lists.append(len(result.row_lists))
                 var listed = List[UInt32]()
                 swap(listed, self.rows[c])
-                result.row_lists.append(listed^)
+                # Columns a filter sliced alike share one row list (one
+                # selection vector for the chunk, as DuckDB's slice).
+                var shared = -1
+                for l in range(len(result.row_lists)):
+                    if len(result.row_lists[l]) == len(listed) and (
+                        external_call["memcmp", Int32](
+                            Int(result.row_lists[l].unsafe_ptr()),
+                            Int(listed.unsafe_ptr()),
+                            4 * len(listed),
+                        )
+                        == 0
+                    ):
+                        shared = l
+                        break
+                if shared >= 0:
+                    result.lists.append(shared)
+                else:
+                    result.lists.append(len(result.row_lists))
+                    result.row_lists.append(listed^)
             else:
                 result.handles.append(arena.add(self.parts[c]))
                 result.starts.append(0)

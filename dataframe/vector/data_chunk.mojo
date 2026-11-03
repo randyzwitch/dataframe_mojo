@@ -67,9 +67,14 @@ struct ColumnArena(Movable):
     the columns added for one morsel."""
 
     var columns: List[Series]
+    # Per column, its values decoded once when a kernel first reads them:
+    # string_t for an Arrow string column, a byte a value for a packed
+    # Boolean one (DuckDB's string_t / bool vectors); empty until then.
+    var decoded: List[List[UInt8]]
 
     def __init__(out self):
         self.columns = List[Series]()
+        self.decoded = List[List[UInt8]]()
 
     def add(mut self, series: Series) raises -> Int:
         """Hold `series` as one contiguous array; its handle."""
@@ -80,6 +85,7 @@ struct ColumnArena(Movable):
                 self.columns.append(series.rechunk())
         else:
             self.columns.append(series.copy())
+        self.decoded.append(List[UInt8]())
         return len(self.columns) - 1
 
     def mark(self) -> Int:
@@ -88,6 +94,26 @@ struct ColumnArena(Movable):
     def truncate(mut self, mark: Int):
         while len(self.columns) > mark:
             _ = self.columns.pop()
+            _ = self.decoded.pop()
+
+    def values(mut self, handle: Int) raises -> Int:
+        """The address of column `handle`'s values decoded to their vector
+        layout (string_t, or a byte a Boolean), decoded on first use."""
+        if len(self.decoded[handle]) == 0 and len(self.columns[handle]) > 0:
+            ref series = self.columns[handle]
+            if series._data.isa[StringColumn]():
+                self.decoded[handle] = _decode_strings(
+                    series._data[StringColumn]
+                )
+            elif series._data.isa[BoolColumn]():
+                ref bools = series._data[BoolColumn]
+                var out = List[UInt8](unsafe_uninit_length=len(bools))
+                for i in range(len(bools)):
+                    out[i] = UInt8(1) if bools._get(i) else UInt8(0)
+                self.decoded[handle] = out^
+            else:
+                raise Error("vector: no unified format for this column type")
+        return Int(self.decoded[handle].unsafe_ptr())
 
 
 def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
@@ -287,7 +313,7 @@ struct DataChunk(Copyable, Movable):
         self.count = count
 
     def unified(
-        mut self, column: Int, arena: ColumnArena
+        mut self, column: Int, mut arena: ColumnArena
     ) raises -> UnifiedVectorFormat:
         """Vector::ToUnifiedFormat of column `column`. Flat, constant and
         dictionary vectors convert for free; a sequence is flattened, and
@@ -317,61 +343,18 @@ struct DataChunk(Copyable, Movable):
         )
 
     def _decoded(
-        mut self, v: Vector, arena: ColumnArena
+        mut self, v: Vector, mut arena: ColumnArena
     ) raises -> UnifiedVectorFormat:
-        """The rows an encoded vector reads, decoded: string_t for strings,
-        a byte a value for booleans. A constant decodes its one row; a flat
-        vector keeps its rows (and validity); a dictionary is flattened at
-        its selected rows, validity with them."""
-        ref series = arena.columns[v.source]
-        var rows = 1 if v.vector_type == CONSTANT_VECTOR else self.count
-        var flattened = v.vector_type == DICTIONARY_VECTOR
-        var validity = v.validity
-        var valid_bits = 0
-        if flattened and not v.validity.all_valid():
-            valid_bits = self._new_scratch(STANDARD_VECTOR_SIZE // 8)
-            var at = Pointer[UInt8, MutAnyOrigin](
-                unsafe_from_address=valid_bits
-            )
-            for b in range(STANDARD_VECTOR_SIZE // 8):
-                at[unsafe_offset=b] = 255
-            for i in range(rows):
-                if not v.validity.row_is_valid_unsafe(v.sel.get_index(i)):
-                    set_invalid(valid_bits, i)
-            validity = ValidityMask(valid_bits, 0)
-        if v.physical == PHYSICAL_VARCHAR:
-            ref strings = series._data[StringColumn]
-            var data = self._new_scratch(16 * STANDARD_VECTOR_SIZE)
-            var out = Pointer[StringT, MutAnyOrigin](unsafe_from_address=data)
-            for i in range(rows):
-                var row = v.source_offset + (
-                    v.sel.get_index(i) if flattened else i
-                )
-                if strings._valid(row):
-                    var text = strings._get(row)
-                    out[unsafe_offset=i] = StringT.make(
-                        Int(text.unsafe_ptr()), text.byte_length()
-                    )
-                else:
-                    out[unsafe_offset=i] = StringT(0, 0, 0)
-            var sel = SelectionVector()
-            if v.vector_type == CONSTANT_VECTOR:
-                sel = zero_selection()
-            return UnifiedVectorFormat(sel, data, validity, PHYSICAL_VARCHAR)
-        if v.physical == PHYSICAL_BOOL:
-            ref bools = series._data[BoolColumn]
-            var data = self._new_scratch(STANDARD_VECTOR_SIZE)
-            var out = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=data)
-            for i in range(rows):
-                var row = v.source_offset + (
-                    v.sel.get_index(i) if flattened else i
-                )
-                out[unsafe_offset=i] = UInt8(1) if bools._get(row) else UInt8(0)
-            var sel = SelectionVector()
-            if v.vector_type == CONSTANT_VECTOR:
-                sel = zero_selection()
-            return UnifiedVectorFormat(sel, data, validity, PHYSICAL_BOOL)
-        raise Error("vector: no unified format for this column type")
+        """An encoded vector read through its column's values decoded once
+        (`ColumnArena.values`): its selection and validity as they are."""
+        var size = 16 if v.physical == PHYSICAL_VARCHAR else 1
+        var data = arena.values(v.source) + size * v.source_offset
+        var sel = SelectionVector()
+        if v.vector_type == CONSTANT_VECTOR:
+            sel = zero_selection()
+        elif v.vector_type == DICTIONARY_VECTOR:
+            sel = v.sel
+        return UnifiedVectorFormat(sel, data, v.validity, v.physical)
 
 
 def _source_rows(v: Vector, count: Int) -> List[Int]:
@@ -393,7 +376,7 @@ def _source_rows(v: Vector, count: Int) -> List[Int]:
 def to_series(
     mut chunk: DataChunk,
     column: Int,
-    arena: ColumnArena,
+    mut arena: ColumnArena,
     var name: String,
     dtype: DataType,
 ) raises -> Series:
@@ -500,7 +483,7 @@ def from_frame_window(
 def gather_series(
     mut chunk: DataChunk,
     column: Int,
-    arena: ColumnArena,
+    mut arena: ColumnArena,
     rows: SelectionVector,
     count: Int,
     var name: String,
@@ -532,3 +515,62 @@ def gather_series(
     var result = _from_unified(through, count, name^)
     _ = composed^
     return _typed(result^, dtype)
+
+
+def _decode_strings(column: StringColumn) -> List[UInt8]:
+    """Every row of an Arrow string column as a 16-byte string_t pointing
+    into the column's own bytes (inline views are string_t already)."""
+    var n = len(column)
+    var out = List[UInt8](unsafe_uninit_length=16 * max(n, 1))
+    var target = Pointer[StringT, MutAnyOrigin](
+        unsafe_from_address=Int(out.unsafe_ptr())
+    )
+    var nulls = column.null_count() > 0
+    if (
+        column._is_view_storage()
+        and not column._view_storage.value()._selects()
+    ):
+        ref storage = column._view_storage.value()
+        var views = storage._views[].unsafe_ptr().unsafe_offset(column._offset)
+        ref buffers = storage._buffers[]
+        for i in range(n):
+            if nulls and not column._valid(i):
+                target[unsafe_offset=i] = StringT(0, 0, 0)
+                continue
+            var view = views[unsafe_offset=i].copy()
+            if view.is_inline():
+                target[unsafe_offset=i] = StringT(
+                    view.length,
+                    view.prefix,
+                    UInt64(view.buffer_index) | (UInt64(view.offset) << 32),
+                )
+            else:
+                var address = Int(
+                    buffers[Int(view.buffer_index)][].unsafe_ptr()
+                ) + Int(view.offset)
+                target[unsafe_offset=i] = StringT(
+                    view.length, view.prefix, UInt64(address)
+                )
+        return out^
+    if not column._is_view_storage():
+        var offsets = (
+            column._offsets[].unsafe_ptr().unsafe_offset(column._offset)
+        )
+        var base = Int(column._base())
+        for i in range(n):
+            if nulls and not column._valid(i):
+                target[unsafe_offset=i] = StringT(0, 0, 0)
+                continue
+            var start = Int(offsets[unsafe_offset=i])
+            var length = Int(offsets[unsafe_offset=i + 1]) - start
+            target[unsafe_offset=i] = StringT.make(base + start, length)
+        return out^
+    for i in range(n):
+        if nulls and not column._valid(i):
+            target[unsafe_offset=i] = StringT(0, 0, 0)
+            continue
+        var text = column._get(i)
+        target[unsafe_offset=i] = StringT.make(
+            Int(text.unsafe_ptr()), text.byte_length()
+        )
+    return out^
