@@ -124,7 +124,7 @@ def plan(
                 left_on=names(spec["lk"]),
                 right_on=names(spec["rk"]),
                 how=spec["how"],
-                coalesce=spec["how"] != "full",
+                coalesce=spec["how"] not in ("full", "right"),
             )
             .select(names(spec["select"]))
         )

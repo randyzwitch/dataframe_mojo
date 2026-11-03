@@ -192,7 +192,10 @@ def polars_plan(q, frames):
             left_on=q["lk"],
             right_on=q["rk"],
             how=how,
-            coalesce=False if how == "full" else None,
+            # Uncoalesced outer joins keep both sides' key columns under
+            # their own names, so the output schema does not depend on how
+            # an engine names a coalesced key.
+            coalesce=False if how in ("full", "right") else None,
         )
         return out.select(q["select"])
     if op == "agg":
