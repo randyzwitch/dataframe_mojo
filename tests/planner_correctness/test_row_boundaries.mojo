@@ -58,11 +58,15 @@ def test_stable_sort_and_clipped_slices_keep_filter_barriers() raises:
                 if layout == 2:
                     source = chunk_layout(source)
                 _check(
-                    source.lazy().sort("i", maintain_order=True).filter(col("i") > 0),
+                    source.lazy()
+                    .sort("i", maintain_order=True)
+                    .filter(col("i") > 0),
                     model.sort_i().filter_i_gt(0),
                 )
                 _check(
-                    source.lazy().filter(col("i") > 0).sort("i", maintain_order=True),
+                    source.lazy()
+                    .filter(col("i") > 0)
+                    .sort("i", maintain_order=True),
                     model.filter_i_gt(0).sort_i(),
                 )
                 for bounds in slices:
@@ -73,7 +77,9 @@ def test_stable_sort_and_clipped_slices_keep_filter_barriers() raises:
                         model.slice(bounds[0], bounds[1]).filter_i_gt(0),
                     )
                     _check(
-                        source.lazy().slice(bounds[0], bounds[1]).sort("i", maintain_order=True),
+                        source.lazy()
+                        .slice(bounds[0], bounds[1])
+                        .sort("i", maintain_order=True),
                         model.slice(bounds[0], bounds[1]).sort_i(),
                     )
                     _check(
