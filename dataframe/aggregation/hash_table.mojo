@@ -73,6 +73,8 @@ from dataframe.aggregation.function import (
     _K_COMOMENT,
     _K_DECIMAL_SUM,
     _K_DISTINCT,
+    _K_INT_SUM,
+    _K_NARROW_SUM,
     _K_LEN,
     _K_TOP_ROWS,
     _K_VALUES,
@@ -101,6 +103,8 @@ from dataframe.expr import (
     LEN,
 )
 from dataframe.storage.allocation import huge_list, huge_uninit
+from dataframe.kernels.segment_statistics import series_statistics
+from dataframe.storage.statistics import NUMERIC_STATS
 from dataframe.storage.nested import _leak, _reclaim
 from dataframe.parallel import Job, configured_workers, run_jobs
 from dataframe.kernels.partition import (
@@ -576,6 +580,25 @@ struct AggregateLayout(Copyable, Movable):
         )
 
 
+def _sum_fits_int64(input: Series) -> Bool:
+    """Whether a signed integer column's statistics prove that no sum of its
+    rows leaves Int64: its largest magnitude times its rows stays under
+    2^63 (DuckDB's `SumPropagateStats`, which then picks
+    `sum_no_overflow`). A column without statistics (one not loaded from a
+    file) keeps the 128-bit total."""
+    var dtype = input.dtype()
+    if not dtype.is_integer() or dtype.is_unsigned() or len(input) == 0:
+        return False
+    var stats = series_statistics(input)
+    if not stats:
+        return False
+    ref found = stats.value()
+    if found.stats_type != NUMERIC_STATS or not found.has_min_max:
+        return False
+    var largest = max(abs(found.int_min), abs(found.int_max))
+    return largest * Int128(len(input)) < Int128(Int64.MAX)
+
+
 def aggregate_layout(
     keys: List[Series], inputs: List[Series], templates: List[ReducerSpec]
 ) raises -> AggregateLayout:
@@ -609,6 +632,8 @@ def aggregate_layout(
             )
         else:
             kind = _slot_kind(templates[s], inputs[s])
+            if kind == _K_INT_SUM and _sum_fits_int64(inputs[s]):
+                kind = _K_NARROW_SUM
         if kind < 0:
             raise Error("aggregate table: a state that is not inline")
         var floating = False

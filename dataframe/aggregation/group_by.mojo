@@ -766,14 +766,21 @@ struct GroupBy(Copyable):
         if not states_supported(specs, empty):
             return None
         trace_path("group_by.perfect_hash")
-        var layout = aggregate_layout(empty_keys, empty, specs)
         var frame = self._frame.rechunk()
         var keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             keys.append(key.rechunk() if key.is_chunked() else key.copy())
-        # Plain columns are read where they are; computed inputs a batch at
-        # a time, as `batch_size` says (see `_agg_batches`).
-        var batch = height if _plain_inputs(expressions, frame) else batch_size
+        # Plain columns are read where they are, and their statistics can
+        # choose the states (an Int64 sum that cannot overflow); computed
+        # inputs are evaluated a batch at a time, as `batch_size` says
+        # (see `_agg_batches`).
+        var plain = _plain_inputs(expressions, frame)
+        var layout = aggregate_layout(
+            empty_keys,
+            table_inputs(frame, keys, expressions) if plain else empty,
+            specs,
+        )
+        var batch = height if plain else batch_size
         var bounds = partitions(height, workers, 64)
         var jobs = List[_PerfectSinkJob](capacity=workers)
         for w in range(workers):
