@@ -1,14 +1,14 @@
 """Expressions over data chunks against the eager evaluator: comparisons of
-integers, floats, decimals, dates and strings, Kleene AND / OR, NOT and null
-tests and IN lists, arithmetic and casts in lanes, and nodes left to the at-rest
-evaluator, over flat chunks and over dictionaries through a selection, with
-nulls. A filter's selection and a projection's column equal filtering and
-projecting the frame eagerly."""
+integers, floats, decimals, dates and strings, Kleene AND / OR, NOT, null
+tests, IN lists, string predicates and CASE WHEN, arithmetic and casts in
+lanes, and nodes left to the at-rest evaluator, over flat chunks and over
+dictionaries through a selection, with nulls. A filter's selection and a
+projection's column equal filtering and projecting the frame eagerly."""
 # contract-group: expr.vectors
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Expr, Series, StringColumn
-from dataframe import col, lit
+from dataframe import col, lit, when
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -72,6 +72,15 @@ def predicates() raises -> List[Expr]:
         col("s").is_in(["k1", "a longer key 3", "absent"]),
         col("b").is_in([lit(Int32(1)), lit(Int32(4)), lit(Int32(16))])
         | col("a").is_in([lit(Int64(-50)), lit(Int64(7))]),
+        col("s").str().like("%key%2")
+        | col("s").str().like("k_")
+        | col("s").str().like("a%"),
+        col("s").str().starts_with("a long")
+        | col("s").str().ends_with("4")
+        | col("s").str().contains("ey 1", literal=True),
+        when(col("a") > lit(Int64(0)))
+        .then(col("f") > lit(1.0))
+        .otherwise(col("s") == lit("k2")),
     ]
 
 
@@ -85,6 +94,13 @@ def projections() raises -> List[Expr]:
         (col("a") > col("b").cast(DataType.INT64)).alias("v"),
         col("s").str().len_bytes().alias("w"),
         col("s").alias("x"),
+        when(col("a") > lit(Int64(10)))
+        .then(col("a") * lit(Int64(2)))
+        .when(col("b") == lit(Int32(3)))
+        .then(lit(Int64(-1)))
+        .otherwise(col("a"))
+        .alias("z"),
+        when(col("f") < lit(0.0)).then(col("price")).alias("zz"),
         lit(Int64(7)).alias("y"),
     ]
 
