@@ -11,8 +11,8 @@ from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import AnyValue, Column, DataFrame, DataType, Series, col
 
-# Above _MIN_PARALLEL_ROWS (16,384) in packed_sort, and large enough that a
-# top_k of a few rows selects instead of sorting everything.
+# Large enough that a top_k of a few rows takes the top-N heap rather than
+# sorting everything.
 comptime _REPEAT = 3000
 
 
@@ -122,14 +122,19 @@ def _check_one_key(
     repeat: Int,
 ) raises:
     var expected = _repeated(small, _x_classes(), repeat)
-    assert_equal(_ids(frame.sort("x", descending, nulls_last)), expected)
+    assert_equal(
+        _ids(frame.sort("x", descending, nulls_last, maintain_order=True)),
+        expected,
+    )
     var source = frame.column("x")
     var order = source.argsort(descending, nulls_last)
     var as_ids = List[Int64]()
     for row in order:
         as_ids.append(Int64(row))
     assert_equal(as_ids, expected)
-    var lazy = frame.lazy().sort(["x"], descending, nulls_last)
+    var lazy = frame.lazy().sort(
+        ["x"], descending, nulls_last, maintain_order=True
+    )
     assert_equal(_ids(lazy.collect()), expected)
     assert_equal(_ids(lazy.collect(streaming=False)), expected)
     # A sort followed by a slice runs as a top-k.
@@ -175,11 +180,18 @@ def _check_keys(
 ) raises:
     var expected = _repeated(small, classes, repeat)
     assert_equal(
-        _ids(frame.sort(by, descending=descending, nulls_last=nulls_last)),
+        _ids(
+            frame.sort(
+                by,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=True,
+            )
+        ),
         expected,
     )
     var lazy = frame.lazy().sort(
-        by, descending=descending, nulls_last=nulls_last
+        by, descending=descending, nulls_last=nulls_last, maintain_order=True
     )
     assert_equal(_ids(lazy.collect()), expected)
     assert_equal(_ids(lazy.collect(streaming=False)), expected)

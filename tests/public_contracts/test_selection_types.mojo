@@ -248,7 +248,12 @@ def check_public_sort_type(kind: Int) raises:
                             kind, n, offset, mode, [descending], [nulls_last]
                         )
                         assert_public_order(
-                            source.sort(key, descending, nulls_last),
+                            source.sort(
+                                key,
+                                descending,
+                                nulls_last,
+                                maintain_order=True,
+                            ),
                             rows,
                             kind,
                             mode,
@@ -270,6 +275,7 @@ def check_public_sort_type(kind: Int) raises:
                                 keys,
                                 descending=directions,
                                 nulls_last=placements,
+                                maintain_order=True,
                             ),
                             rows,
                             kind,
@@ -335,6 +341,7 @@ def test_sorting_supported_keys_preserves_every_unrelated_logical_payload() rais
                         ["v16", "predicate"],
                         descending=[descending, not descending],
                         nulls_last=[True, False],
+                        maintain_order=True,
                     ),
                     rows,
                     mode,

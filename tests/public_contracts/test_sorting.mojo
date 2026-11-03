@@ -31,6 +31,7 @@ def test_sort_directions_nulls_stability_and_top_k() raises:
                                     key,
                                     descending=descending,
                                     nulls_last=nulls_last,
+                                    maintain_order=True,
                                 ),
                                 expected,
                             )
@@ -52,6 +53,7 @@ def test_sort_directions_nulls_stability_and_top_k() raises:
                         ["b", "i"],
                         descending=[True, False],
                         nulls_last=[False, True],
+                        maintain_order=True,
                     ),
                     sorted_model(
                         model, ["b", "i"], [True, False], [False, True]
@@ -97,7 +99,10 @@ def test_float_sort_specials_keep_row_associations() raises:
         for nulls_last in [False, True]:
             assert_model(
                 frame_from_model(model, 7).sort(
-                    "f", descending=descending, nulls_last=nulls_last
+                    "f",
+                    descending=descending,
+                    nulls_last=nulls_last,
+                    maintain_order=True,
                 ),
                 sorted_model(model, ["f"], [descending], [nulls_last]),
             )
