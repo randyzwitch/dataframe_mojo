@@ -90,8 +90,20 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
     # input fault each worker holds 6e37; only their merge exceeds precision.
     with assert_raises(contains="decimal precision 38"):
         _ = _frame(131072, -1, 65536).group_by("g").agg(feed_expression())
-    with assert_raises(contains="decimal multiplication overflow"):
+    # Morsels go to workers as they free up, as DuckDB hands them out, so
+    # one worker may take both 6e37 rows (0 and 65536) and fail precision
+    # before another reaches the operand fault at the last row: either
+    # decimal fault may come first.
+    var raised = String()
+    try:
         _ = _frame(131072, 131071, 65536).group_by("g").agg(feed_expression())
+    except e:
+        raised = String(e)
+    assert_true(
+        "decimal multiplication overflow" in raised
+        or "decimal precision 38" in raised,
+        "expected a decimal fault, got: " + raised,
+    )
     _ = parallel^
     # A batch's operands are evaluated before the batch updates the states,
     # and no later: on one worker the prefix of rows 0 and 1 exceeds
