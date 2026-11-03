@@ -15,6 +15,7 @@ from .expr import (
     Node,
     Expr,
     COL,
+    RANK,
     _SCALAR_SOURCE,
     ROW_LEN,
     INT_RANGE,
@@ -3109,7 +3110,12 @@ def _full[
 
 from dataframe.kernels.gather import take_parallel
 from .parallel import configured_workers
-from .window_sort import WindowLayout, window_layout
+from .window_sort import (
+    WindowLayout,
+    rank_from_layout,
+    rank_order_keys,
+    window_layout,
+)
 
 
 # DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
@@ -3145,6 +3151,53 @@ def _layout_key(node: Node) -> String:
     return key^
 
 
+def _partition_keys(node: Node, columns: List[Series]) -> List[Series]:
+    """The over() node's partition key columns (none when global)."""
+    var partition_keys = List[Series]()
+    if (node.integer & OVER_GLOBAL) == 0:
+        for name in split_names(node.text2):
+            for column in columns:
+                if column.name() == name:
+                    partition_keys.append(column.copy())
+    return partition_keys^
+
+
+def _over_rank(
+    node: Node,
+    argument_expr: Expr,
+    inputs: List[Series],
+    columns: List[Series],
+    height: Int,
+) raises -> Series:
+    """rank() directly under over(): DuckDB plans it as rank() OVER
+    (PARTITION BY keys ORDER BY value), so the value joins the layout's
+    order keys and the ranks are read off its peer boundaries, with no
+    second sort per partition."""
+    ref rank = argument_expr._nodes[len(argument_expr._nodes) - 1]
+    var name = argument_expr._nodes[rank.left].text
+    var value = Series("", Column[Int64](List[Int64]()))
+    for column in inputs:
+        if column.name() == name:
+            value = column.copy()
+    if value.dtype().is_categorical():
+        value = decode(value)
+    var keys = List[Series]()
+    var descending = List[Bool]()
+    var nulls_last = List[Bool]()
+    rank_order_keys(value, rank.min_count == 1, keys, descending, nulls_last)
+    var layout = window_layout(
+        _partition_keys(node, columns),
+        keys,
+        descending,
+        nulls_last,
+        height,
+        stable=rank.text == "ordinal",
+    )
+    var result = rank_from_layout(layout, value, rank.text)
+    result._name = argument_expr._name
+    return result^
+
+
 def _layout_index(
     node: Node, columns: List[Series], height: Int, cache_address: Int
 ) raises -> Int:
@@ -3157,12 +3210,7 @@ def _layout_index(
     var at = cache[].find(key)
     if at >= 0:
         return at
-    var partition_keys = List[Series]()
-    if (node.integer & OVER_GLOBAL) == 0:
-        for name in split_names(node.text2):
-            for column in columns:
-                if column.name() == name:
-                    partition_keys.append(column.copy())
+    var partition_keys = _partition_keys(node, columns)
     var order_keys = List[Series]()
     if node.min_count > 0:
         for name in split_names(node.text):
@@ -3471,6 +3519,13 @@ def _over[
             batch_size,
         )
         argument_expr = Expr(nodes^, inner.expr._name)
+        ref root = argument_expr._nodes[len(argument_expr._nodes) - 1]
+        if (
+            root.op == RANK
+            and node.min_count == 0
+            and argument_expr._nodes[root.left].op == COL
+        ):
+            return _over_rank(node, argument_expr, inputs, columns, height)
     var owned = WindowLayouts()
     var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
     var at = _layout_index(node, columns, height, cache_address)

@@ -33,6 +33,8 @@ from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
 from dataframe.sorting.sort import sort_rows
 from dataframe.kernels.gather import take_parallel
+from dataframe.kernels.binary import validity
+from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
 # hashed_sort.cpp, HashedSortGlobalSinkState::Rehash: partitions start at
 # 4 radix bits and grow by 2 while the average hash group holds more than
@@ -159,12 +161,13 @@ def sort_key_rows(
     keys: List[Series],
     descending: List[Bool],
     nulls_last: List[Bool],
+    stable: Bool = True,
 ) raises -> List[Int]:
-    """The stable sorted order of the key columns' rows: DuckDB's sort
-    (`sort_rows`) with ties in input order, as over(order_by=...) keeps
-    them. Threads come from the shared budget, so groups sorted on
-    several workers at once share it."""
-    return sort_rows(keys, descending, nulls_last, maintain_order=True)
+    """The sorted order of the key columns' rows: DuckDB's sort
+    (`sort_rows`), with ties in input order when `stable`, as
+    over(order_by=...) keeps them. Threads come from the shared budget, so
+    groups sorted on several workers at once share it."""
+    return sort_rows(keys, descending, nulls_last, maintain_order=stable)
 
 
 struct _GroupSortJob(Job):
@@ -182,6 +185,7 @@ struct _GroupSortJob(Job):
     # Output: order[lo:hi] and flags[lo:hi].
     var order: Int
     var flags: Int
+    var stable: Bool
 
     def __init__(
         out self,
@@ -194,6 +198,7 @@ struct _GroupSortJob(Job):
         hi: Int,
         order: Int,
         flags: Int,
+        stable: Bool,
     ):
         self.keys = keys.copy()
         self.partition_keys = partition_keys
@@ -204,6 +209,7 @@ struct _GroupSortJob(Job):
         self.hi = hi
         self.order = order
         self.flags = flags
+        self.stable = stable
 
     def run(mut self) raises:
         var n = self.hi - self.lo
@@ -244,7 +250,9 @@ struct _GroupSortJob(Job):
             for k in range(n):
                 order[unsafe_offset=self.lo + k] = mine[k]
         else:
-            var perm = sort_key_rows(sorted, self.descending, self.nulls_last)
+            var perm = sort_key_rows(
+                sorted, self.descending, self.nulls_last, self.stable
+            )
             var in_order = True
             for k in range(n):
                 in_order = in_order and perm[k] == k
@@ -295,10 +303,11 @@ def window_layout(
     descending: List[Bool],
     nulls_last: List[Bool],
     height: Int,
+    stable: Bool = True,
 ) raises -> WindowLayout:
     """Sort `height` rows by partition and order keys into hash groups and
     mark their boundaries. `descending` and `nulls_last` hold one flag per
-    order key."""
+    order key. Rows with equal keys keep input order when `stable`."""
     var layout = WindowLayout()
     layout.group_parts.append(0)
     if height == 0:
@@ -310,9 +319,18 @@ def window_layout(
     var bounds = List[Int]()
     if len(partition_keys) > 0:
         # HashedSort: radix-partition rows by their keys' hash.
-        var partitioner = Partitioner(partition_keys, workers)
+        # The sink runs a thread per source morsel (DEFAULT_ROW_GROUP_SIZE
+        # rows), each hashing and partitioning its own rows.
+        var sink = max(
+            1,
+            min(
+                workers,
+                (height + DEFAULT_ROW_GROUP_SIZE - 1) // DEFAULT_ROW_GROUP_SIZE,
+            ),
+        )
+        var partitioner = Partitioner(partition_keys, sink)
         var bits = radix_bits(height)
-        var parts = partitioner.scatter(workers, bucket_count=1 << bits)
+        var parts = partitioner.scatter(sink, bucket_count=1 << bits)
         var keys = partitioner.keys.copy()
         for key in order_keys:
             keys.append(key.rechunk() if key.is_chunked() else key.copy())
@@ -349,6 +367,7 @@ def window_layout(
                     parts.bounds[b + 1],
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
+                    stable,
                 )
             )
         run_jobs(jobs)
@@ -358,7 +377,7 @@ def window_layout(
         _ = parts^
     elif len(order_keys) > 0:
         # FullSort: one group, sorted on every thread.
-        var perm = sort_key_rows(order_keys, descending, nulls_last)
+        var perm = sort_key_rows(order_keys, descending, nulls_last, stable)
         var keys = List[Series](capacity=len(order_keys))
         var identity = True
         for k in range(height):
@@ -389,34 +408,431 @@ def window_layout(
         flags[0] = PARTITION_START | PEER_START
         bounds.append(0)
     bounds.append(height)
-    # Partition starts and the groups' partition ranges.
-    var fp = flags.unsafe_ptr()
-    var g = 0
-    for k in range(height):
-        if k == bounds[g + 1]:
-            g += 1
-            layout.group_parts.append(len(layout.starts))
-        if (fp[unsafe_offset=k] & PARTITION_START) != 0:
-            layout.starts.append(k)
+    # Partition starts, then each row's partition and sorted position, over
+    # ranges of sorted positions in parallel.
+    var ranges = partitions(height, workers, STANDARD_VECTOR_SIZE)
+    var finish = List[_FinishJob](capacity=workers)
+    for w in range(workers):
+        if ranges[w + 1] > ranges[w]:
+            finish.append(
+                _FinishJob(
+                    Int(flags.unsafe_ptr()),
+                    Int(order.unsafe_ptr()),
+                    ranges[w],
+                    ranges[w + 1],
+                )
+            )
+    if len(finish) > 1:
+        run_jobs(finish)
+    else:
+        finish[0].run()
+    layout.in_place = True
+    var first = List[Int](capacity=len(finish))
+    for j in range(len(finish)):
+        layout.in_place = layout.in_place and finish[j].in_place
+        first.append(len(layout.starts) - 1)
+        layout.starts.extend(Span(finish[j].starts))
     layout.count = len(layout.starts)
     layout.starts.append(height)
-    layout.group_parts.append(layout.count)
-    var op = order.unsafe_ptr()
-    layout.in_place = True
-    for k in range(height):
-        if op[unsafe_offset=k] != k:
-            layout.in_place = False
-            break
-    layout.row_partition = List[Int](unsafe_uninit_length=height)
-    var rp = layout.row_partition.unsafe_ptr()
+    # The groups' partition ranges: every group starts a partition.
+    var g = 1
     for p in range(layout.count):
-        for k in range(layout.starts[p], layout.starts[p + 1]):
-            rp[unsafe_offset=op[unsafe_offset=k]] = p
+        if g < len(bounds) - 1 and layout.starts[p] == bounds[g]:
+            layout.group_parts.append(p)
+            g += 1
+    layout.group_parts.append(layout.count)
+    layout.row_partition = List[Int](unsafe_uninit_length=height)
     if not layout.in_place:
         layout.inverse = List[Int](unsafe_uninit_length=height)
-        var ip = layout.inverse.unsafe_ptr()
-        for k in range(height):
-            ip[unsafe_offset=op[unsafe_offset=k]] = k
+    for j in range(len(finish)):
+        finish[j].partition = first[j]
+        finish[j].row_partition = Int(layout.row_partition.unsafe_ptr())
+        finish[j].inverse = 0 if layout.in_place else Int(
+            layout.inverse.unsafe_ptr()
+        )
+    if len(finish) > 1:
+        run_jobs(finish)
+    else:
+        finish[0].run()
     layout.order = order^
     layout.flags = flags^
     return layout^
+
+
+struct _FinishJob(Job):
+    """One range of sorted positions [lo, hi): first its partition starts
+    and whether order is the identity there; then (`row_partition` set)
+    each row's partition index and sorted position."""
+
+    var flags: Int
+    var order: Int
+    var lo: Int
+    var hi: Int
+    var starts: List[Int]
+    var in_place: Bool
+    # Second pass: the partition holding lo, and the outputs.
+    var partition: Int
+    var row_partition: Int
+    var inverse: Int
+
+    def __init__(out self, flags: Int, order: Int, lo: Int, hi: Int):
+        self.flags = flags
+        self.order = order
+        self.lo = lo
+        self.hi = hi
+        self.starts = List[Int]()
+        self.in_place = True
+        self.partition = 0
+        self.row_partition = 0
+        self.inverse = 0
+
+    def run(mut self) raises:
+        var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.flags)
+        var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        if self.row_partition == 0:
+            var identity = True
+            for k in range(self.lo, self.hi):
+                if (flags[unsafe_offset=k] & PARTITION_START) != 0:
+                    self.starts.append(k)
+                identity = identity and order[unsafe_offset=k] == k
+            self.in_place = identity
+            return
+        var rows = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.row_partition
+        )
+        var p = self.partition
+        if self.inverse == 0:
+            for k in range(self.lo, self.hi):
+                if (flags[unsafe_offset=k] & PARTITION_START) != 0:
+                    p += 1
+                rows[unsafe_offset=order[unsafe_offset=k]] = p
+            return
+        var inverse = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.inverse
+        )
+        for k in range(self.lo, self.hi):
+            if (flags[unsafe_offset=k] & PARTITION_START) != 0:
+                p += 1
+            var row = order[unsafe_offset=k]
+            rows[unsafe_offset=row] = p
+            inverse[unsafe_offset=row] = k
+
+
+# Rank methods (rank()'s `method`).
+comptime RANK_ORDINAL = 0
+comptime RANK_MIN = 1
+comptime RANK_MAX = 2
+comptime RANK_DENSE = 3
+comptime RANK_AVERAGE = 4
+
+
+def rank_method(method: String) raises -> Int:
+    if method == "ordinal":
+        return RANK_ORDINAL
+    if method == "min":
+        return RANK_MIN
+    if method == "max":
+        return RANK_MAX
+    if method == "dense":
+        return RANK_DENSE
+    if method == "average":
+        return RANK_AVERAGE
+    raise Error("unknown rank method: " + method)
+
+
+def rank_order_keys(
+    input: Series,
+    descending: Bool,
+    mut keys: List[Series],
+    mut key_descending: List[Bool],
+    mut key_nulls_last: List[Bool],
+) raises:
+    """Append the order keys that rank `input`: its value (a struct's
+    fields in turn), nulls first in each partition so that ranks count
+    from the first value. A struct field's nulls are its smallest values
+    (Polars); a null struct sorts before every value."""
+    var column = input.rechunk() if input.is_chunked() else input.copy()
+    if column.dtype().is_struct():
+        var structs = column.struct_column()
+        if column.null_count() > 0:
+            var present = validity(column)
+            var flags = List[UInt8](unsafe_uninit_length=len(present))
+            for k in range(len(present)):
+                flags[k] = UInt8(1) if present[k] else UInt8(0)
+            keys.append(Series("", Column[UInt8](flags^)))
+            key_descending.append(False)
+            key_nulls_last.append(False)
+        for k in range(structs.field_count()):
+            keys.append(structs.field(k))
+            key_descending.append(descending)
+            key_nulls_last.append(descending)
+        return
+    keys.append(column^)
+    key_descending.append(descending)
+    key_nulls_last.append(False)
+
+
+struct _RankScanJob(Job):
+    """Ranks over sorted positions [lo, hi) from the partition and peer
+    boundaries (WindowPeerLocalState::NextRank, and the peer end for max
+    and average). The first pass summarizes the range; the second writes
+    ranks from the state carried in from the ranges before it."""
+
+    var flags: Int
+    var order: Int
+    # Input row -> Bool validity (0: every row valid).
+    var valid: Int
+    var lo: Int
+    var hi: Int
+    var method: Int
+    var write: Bool
+    # Carried in (second pass): the partition's first valid position (-1
+    # while in its nulls), the current peer group's start, the dense rank.
+    var base: Int
+    var peer: Int
+    var dense: Int
+    # The first peer boundary at or after hi.
+    var next_start: Int
+    # Summary (first pass).
+    var has_partition: Bool
+    var first_peer: Int
+    var last_peer: Int
+    var first_valid_peer: Int
+    var local_base: Int
+    var local_dense: Int
+    # Outputs, by input row.
+    var ints: Int
+    var floats: Int
+    var out_valid: Int
+
+    def __init__(
+        out self,
+        flags: Int,
+        order: Int,
+        valid: Int,
+        lo: Int,
+        hi: Int,
+        method: Int,
+        ints: Int,
+        floats: Int,
+        out_valid: Int,
+    ):
+        self.flags = flags
+        self.order = order
+        self.valid = valid
+        self.lo = lo
+        self.hi = hi
+        self.method = method
+        self.write = False
+        self.base = -1
+        self.peer = lo
+        self.dense = 0
+        self.next_start = hi
+        self.has_partition = False
+        self.first_peer = -1
+        self.last_peer = -1
+        self.first_valid_peer = -1
+        self.local_base = -1
+        self.local_dense = 0
+        self.ints = ints
+        self.floats = floats
+        self.out_valid = out_valid
+
+    @always_inline
+    def _valid_at(self, position: Int) -> Bool:
+        if self.valid == 0:
+            return True
+        var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var valid = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.valid)
+        return valid[unsafe_offset=order[unsafe_offset=position]]
+
+    def run(mut self) raises:
+        var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.flags)
+        if not self.write:
+            for k in range(self.lo, self.hi):
+                var f = flags[unsafe_offset=k]
+                if (f & PEER_START) == 0:
+                    continue
+                if self.first_peer < 0:
+                    self.first_peer = k
+                self.last_peer = k
+                if (f & PARTITION_START) != 0:
+                    self.has_partition = True
+                    self.local_base = -1
+                    self.local_dense = 0
+                if self._valid_at(k):
+                    if self.has_partition:
+                        if self.local_base < 0:
+                            self.local_base = k
+                    elif self.first_valid_peer < 0:
+                        self.first_valid_peer = k
+                    self.local_dense += 1
+            return
+        var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var ints = Pointer[Int64, MutAnyOrigin](unsafe_from_address=self.ints)
+        var floats = Pointer[Float64, MutAnyOrigin](
+            unsafe_from_address=self.floats
+        )
+        var out_valid = Pointer[Bool, MutAnyOrigin](
+            unsafe_from_address=self.out_valid
+        )
+        var method = self.method
+        var base = self.base
+        var peer = self.peer
+        var dense = self.dense
+        var k = self.lo
+        while k < self.hi:
+            var f = flags[unsafe_offset=k]
+            var present: Bool
+            if (f & PEER_START) != 0:
+                if (f & PARTITION_START) != 0:
+                    base = -1
+                    dense = 0
+                peer = k
+                present = self._valid_at(k)
+                if present:
+                    if base < 0:
+                        base = k
+                    dense += 1
+            else:
+                # The peer group carried in from the range before.
+                present = base >= 0 and self._valid_at(k)
+            var e = k + 1
+            while e < self.hi and (flags[unsafe_offset=e] & PEER_START) == 0:
+                e += 1
+            var end = e if e < self.hi else self.next_start
+            if self.out_valid != 0:
+                for j in range(k, e):
+                    out_valid[unsafe_offset=order[unsafe_offset=j]] = present
+            if not present:
+                k = e
+                continue
+            if method == RANK_AVERAGE:
+                var value = Float64(peer + 1 + end - 2 * base) / 2
+                for j in range(k, e):
+                    floats[unsafe_offset=order[unsafe_offset=j]] = value
+            elif method == RANK_ORDINAL:
+                for j in range(k, e):
+                    ints[unsafe_offset=order[unsafe_offset=j]] = Int64(
+                        j - base + 1
+                    )
+            else:
+                var value: Int64
+                if method == RANK_MIN:
+                    value = Int64(peer - base + 1)
+                elif method == RANK_MAX:
+                    value = Int64(end - base)
+                else:
+                    value = Int64(dense)
+                for j in range(k, e):
+                    ints[unsafe_offset=order[unsafe_offset=j]] = value
+            k = e
+
+
+def rank_from_layout(
+    layout: WindowLayout, input: Series, method: String
+) raises -> Series:
+    """Every row's rank within its partition, read off a layout whose last
+    order keys are `rank_order_keys(input)`: runs of equal values are
+    peers, as DuckDB's rank executors read them from the order mask. Nulls
+    rank as null; ranks count from a partition's first value. Ordinal
+    ranks peers in layout order (input order when the layout is stable).
+    Ranges of sorted positions are ranked in parallel, each starting from
+    the state its predecessors carry in."""
+    var code = rank_method(method)
+    var n = len(layout.order)
+    var average = code == RANK_AVERAGE
+    var ints = List[Int64](unsafe_uninit_length=0 if average else n)
+    var floats = List[Float64](unsafe_uninit_length=n if average else 0)
+    var present = List[Bool]()
+    var has_nulls = input.null_count() > 0
+    if has_nulls:
+        present = validity(input)
+    var out_valid = List[Bool](unsafe_uninit_length=n if has_nulls else 0)
+    var workers = configured_workers()
+    var bounds = partitions(n, workers, STANDARD_VECTOR_SIZE)
+    var jobs = List[_RankScanJob](capacity=workers)
+    for w in range(workers):
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _RankScanJob(
+                    Int(layout.flags.unsafe_ptr()),
+                    Int(layout.order.unsafe_ptr()),
+                    Int(present.unsafe_ptr()) if has_nulls else 0,
+                    bounds[w],
+                    bounds[w + 1],
+                    code,
+                    Int(ints.unsafe_ptr()),
+                    Int(floats.unsafe_ptr()),
+                    Int(out_valid.unsafe_ptr()) if has_nulls else 0,
+                )
+            )
+    if len(jobs) > 1:
+        run_jobs(jobs)
+        # Carry the state across ranges, then the next boundary backwards.
+        var base = -1
+        var peer = 0
+        var dense = 0
+        for j in range(len(jobs)):
+            jobs[j].base = base
+            jobs[j].peer = peer
+            jobs[j].dense = dense
+            if jobs[j].has_partition:
+                base = jobs[j].local_base
+                dense = jobs[j].local_dense
+            else:
+                if base < 0 and jobs[j].first_valid_peer >= 0:
+                    base = jobs[j].first_valid_peer
+                dense += jobs[j].local_dense
+            if jobs[j].last_peer >= 0:
+                peer = jobs[j].last_peer
+        var next_start = n
+        for r in range(len(jobs)):
+            var j = len(jobs) - 1 - r
+            jobs[j].next_start = next_start
+            if jobs[j].first_peer >= 0:
+                next_start = jobs[j].first_peer
+    elif len(jobs) == 1:
+        jobs[0].next_start = n
+    for j in range(len(jobs)):
+        jobs[j].write = True
+    if len(jobs) > 1:
+        run_jobs(jobs)
+    elif len(jobs) == 1:
+        jobs[0].run()
+    _ = present^
+    if average:
+        if has_nulls:
+            return Series("", Column[Float64](floats^, out_valid))
+        return Series("", Column[Float64](floats^))
+    if has_nulls:
+        return Series("", Column[Int64](ints^, out_valid))
+    return Series("", Column[Int64](ints^))
+
+
+def rank_rows(
+    input: Series, ids: List[Int], method: String, descending: Bool
+) raises -> Series:
+    """Rank `input` within the partitions `ids` gives (none: one
+    partition), through the window layout: rank() OVER (PARTITION BY ids
+    ORDER BY input)."""
+    var n = len(input)
+    var partition_keys = List[Series]()
+    if len(ids) > 0:
+        var codes = List[Int64](unsafe_uninit_length=n)
+        for k in range(n):
+            codes[k] = Int64(ids[k])
+        partition_keys.append(Series("", Column[Int64](codes^)))
+    var keys = List[Series]()
+    var key_descending = List[Bool]()
+    var key_nulls_last = List[Bool]()
+    rank_order_keys(input, descending, keys, key_descending, key_nulls_last)
+    var layout = window_layout(
+        partition_keys,
+        keys,
+        key_descending,
+        key_nulls_last,
+        n,
+        stable=method == "ordinal",
+    )
+    return rank_from_layout(layout, input, method)
