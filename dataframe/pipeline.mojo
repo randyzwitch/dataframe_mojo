@@ -119,6 +119,7 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
+from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -1269,11 +1270,14 @@ struct _VectorStep(Copyable, Movable):
     # reads (>= 0) or the expression computing it (-1 - expression).
     var outputs: List[Int]
     var output: DataChunk
+    # FILTER: the order the conjuncts run in (DuckDB's AdaptiveFilter).
+    var adaptive: AdaptiveFilter
 
     def __init__(
         out self, step: Step, input: DataFrame, output: DataFrame
     ) raises:
         self.kind = step.kind
+        self.adaptive = AdaptiveFilter(0, True)
         self.expressions = List[VectorExpression]()
         self.outputs = List[Int]()
         self.output = DataChunk()
@@ -1295,6 +1299,10 @@ struct _VectorStep(Copyable, Movable):
                 if compiled.root_dtype() != DataType.BOOL:
                     raise Error("Filter expression must return Boolean values")
                 self.expressions.append(compiled^)
+            var can_throw = False
+            for e in range(len(self.expressions)):
+                can_throw = can_throw or self.expressions[e].can_throw()
+            self.adaptive = AdaptiveFilter(len(self.expressions), can_throw)
             return
         trace_path("pipeline.vector_projection")
         if step.kind == STEP_DROP:
@@ -1325,7 +1333,9 @@ struct _VectorStep(Copyable, Movable):
         if self.kind == STEP_FILTER:
             var rows = SelectionVector()
             var count = input.count
-            for e in range(len(self.expressions)):
+            var start = self.adaptive.begin()
+            for p in range(len(self.expressions)):
+                var e = self.adaptive.permutation[p]
                 var target = self.output.new_selection()
                 count = self.expressions[e].select(
                     input, arena, rows, count, target
@@ -1333,6 +1343,7 @@ struct _VectorStep(Copyable, Movable):
                 rows = target
                 if count == 0:
                     break
+            self.adaptive.end(start)
             if count == input.count:
                 self.output.set_columns(input.column_count())
                 for c in range(input.column_count()):

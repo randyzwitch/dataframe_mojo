@@ -316,6 +316,12 @@ struct VectorExpression(Copyable, Movable):
     var formats: List[UnifiedVectorFormat]
     var by_chunk_row: List[Bool]
     var ready: Bool
+    # A column read by several nodes is loaded once an evaluation: the
+    # evaluation that last loaded each column node, and for which rows.
+    var stamp: List[Int]
+    var stamp_rows: List[Int]
+    var stamp_count: List[Int]
+    var generation: Int
     # IN lists, per node: integer values, or string_t over `held`.
     var member_ints: List[List[Int64]]
     # WHEN nodes: the computed rows each branch takes and their chunk rows
@@ -367,8 +373,51 @@ struct VectorExpression(Copyable, Movable):
         # Lane buffers are made by each worker's copy when it first
         # evaluates (`_allocate`): the compiled template stays small to copy.
         self.ready = False
+        self.stamp = List[Int](length=n, fill=-1)
+        self.stamp_rows = List[Int](length=n, fill=0)
+        self.stamp_count = List[Int](length=n, fill=0)
+        self.generation = 0
         self._plan(self.root)
         self._narrow_decimals()
+        self._share_columns()
+
+    def _share_columns(mut self):
+        """Point every node reading a column at one node per column and
+        lane, so the column is loaded once (DuckDB binds one
+        BoundReferenceExpression per column read through the same input
+        vector). Not under CASE WHEN, whose branches load their own
+        rows."""
+        for node in self.bound.expr._nodes:
+            if node.op == WHEN:
+                return
+        var n = len(self.kinds)
+        var canonical = List[Int](length=n, fill=-1)
+        for i in range(n):
+            if self.kinds[i] != _KIND_COLUMN:
+                continue
+            canonical[i] = i
+            for j in range(i):
+                if (
+                    self.kinds[j] == _KIND_COLUMN
+                    and canonical[j] == j
+                    and self.bound.sources[j] == self.bound.sources[i]
+                    and self.lanes[j] == self.lanes[i]
+                ):
+                    canonical[i] = j
+                    break
+        for k in range(n):
+            if self.kinds[k] != _KIND_LANE:
+                continue
+            ref node = self.bound.expr._nodes[k]
+            if node.left >= 0 and canonical[node.left] >= 0:
+                node.left = canonical[node.left]
+            if node.right >= 0 and canonical[node.right] >= 0:
+                node.right = canonical[node.right]
+            if node.extra >= 0 and canonical[node.extra] >= 0:
+                node.extra = canonical[node.extra]
+        for i in range(n):
+            if canonical[i] >= 0 and canonical[i] != i:
+                self.kinds[i] = _KIND_UNUSED
 
     def _allocate(mut self):
         """The buffers every node computed in lanes or read in one writes,
@@ -669,6 +718,20 @@ struct VectorExpression(Copyable, Movable):
             if self.kinds[i] == _KIND_CONSTANT:
                 self.ints[i] = Int64(self.decimals[i])
 
+    def can_throw(self) -> Bool:
+        """Whether evaluating may raise (Expression::CanThrow): arithmetic
+        and casts check overflow, and the at-rest evaluator may raise for
+        anything; comparisons, logic, null tests and IN lists never do."""
+        for i in range(len(self.kinds)):
+            if self.kinds[i] == _KIND_FALLBACK:
+                return True
+            if self.kinds[i] != _KIND_LANE:
+                continue
+            var op = self.bound.expr._nodes[i].op
+            if op == ADD or op == SUB or op == MUL or op == DIV or op == CAST:
+                return True
+        return False
+
     def root_kind(self) -> Int:
         return self.kinds[self.root]
 
@@ -693,6 +756,7 @@ struct VectorExpression(Copyable, Movable):
         if not self.ready:
             self._allocate()
         self.scratch.reset()
+        self.generation += 1
         self._evaluate(self.root, input, arena, rows, count)
 
     def _evaluate(
@@ -715,6 +779,15 @@ struct VectorExpression(Copyable, Movable):
                 self.by_chunk_row[index] = False
             return
         if kind == _KIND_COLUMN:
+            if (
+                self.stamp[index] == self.generation
+                and self.stamp_rows[index] == rows.data
+                and self.stamp_count[index] == count
+            ):
+                return
+            self.stamp[index] = self.generation
+            self.stamp_rows[index] = rows.data
+            self.stamp_count[index] = count
             var column = self.bound.sources[index]
             if self.lanes[index] == _LANE_ANY:
                 # Only validity is read: no decode.
@@ -939,8 +1012,7 @@ struct VectorExpression(Copyable, Movable):
         var o = self.valid[index].unsafe_ptr()
         if left_whole or right_whole:
             var one = self.valid[right if left_whole else left].unsafe_ptr()
-            for k in range(count):
-                o[unsafe_offset=k] = one[unsafe_offset=k]
+            unsafe_memcpy(dest=o, src=one, count=count)
             return
         _and_bytes(
             Int(o),
@@ -1343,10 +1415,11 @@ struct VectorExpression(Copyable, Movable):
             out[unsafe_offset=k] = UInt8(1) - x[unsafe_offset=k]
         self.whole[index] = self.whole[left]
         if not self.whole[left]:
-            var a = self.valid[left].unsafe_ptr()
-            var o = self.valid[index].unsafe_ptr()
-            for k in range(count):
-                o[unsafe_offset=k] = a[unsafe_offset=k]
+            unsafe_memcpy(
+                dest=self.valid[index].unsafe_ptr(),
+                src=self.valid[left].unsafe_ptr(),
+                count=count,
+            )
 
     def _null_test(
         mut self,
@@ -1363,9 +1436,10 @@ struct VectorExpression(Copyable, Movable):
                 out[unsafe_offset=k] = UInt8(1) if not is_null else UInt8(0)
             return
         var a = self.valid[left].unsafe_ptr()
+        # Validity bytes are 0 or 1: a null test is the byte or its flip.
+        var flip = UInt8(1) if is_null else UInt8(0)
         for k in range(count):
-            var valid = a[unsafe_offset=k] != 0
-            out[unsafe_offset=k] = UInt8(1) if valid != is_null else UInt8(0)
+            out[unsafe_offset=k] = a[unsafe_offset=k] ^ flip
 
     def _compute(mut self, index: Int, count: Int) raises:
         """Arithmetic or a cast over the computed rows, in lanes."""
