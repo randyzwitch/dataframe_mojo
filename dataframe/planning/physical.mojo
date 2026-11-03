@@ -176,11 +176,14 @@ def plan_direct_key(
     for i in range(n):
         least = min(least, column._get(i))
         most = max(most, column._get(i))
-    if most - least >= Int64(_PERFECT_SPAN):
+    # Unsigned, as `_perfect_slots` takes it: a span over 2**63 overflows
+    # a signed difference.
+    var span = UInt64(most) - UInt64(least)
+    if span >= UInt64(_PERFECT_SPAN):
         return False
-    var seen = List[Bool](length=Int(most - least) + 1, fill=False)
+    var seen = List[Bool](length=Int(span) + 1, fill=False)
     for i in range(n):
-        var at = Int(column._get(i) - least)
+        var at = Int(UInt64(column._get(i)) - UInt64(least))
         if seen[at]:
             return False
         seen[at] = True
