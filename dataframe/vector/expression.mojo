@@ -26,6 +26,7 @@ to compute (`rows`, a selection over the chunk, or every row) and computes
 each node for exactly those rows, in order. A dropped row is never
 computed, so it never raises.
 """
+from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
 from std.ffi import external_call
@@ -36,12 +37,19 @@ from dataframe.decimal import divide_half_even, pow10, precision_limit
 from dataframe.dtype import DataType
 from dataframe.execution import evaluate
 from dataframe.expr import (
+    ABS,
     ADD,
     AND,
     CAST,
+    CEIL,
     COL,
     DIV,
+    DT_DAY,
+    DT_MONTH,
+    DT_YEAR,
     EQ,
+    FILL_NULL,
+    FLOOR,
     GE,
     GT,
     INT_IS_IN,
@@ -53,10 +61,12 @@ from dataframe.expr import (
     NE,
     NOT,
     OR,
+    ROUND,
     STR_CONTAINS,
     STR_ENDS_WITH,
     STR_IS_IN,
     STR_LIKE,
+    STR_SLICE,
     STR_STARTS_WITH,
     SUB,
     WHEN,
@@ -68,8 +78,10 @@ from dataframe.kernels.binary import (
     _checked_sub,
     _decimal_mul,
     _round_div,
+    _round_half_away,
     checked_add,
 )
+from dataframe.time.calendar import civil_from_days
 from dataframe.series import Series
 from dataframe.text.predicates import decode_values
 from dataframe.storage.boolean import BoolColumn
@@ -312,6 +324,8 @@ struct VectorExpression(Copyable, Movable):
     var lane_decimals: List[List[Int128]]
     var lane_floats: List[List[Float64]]
     var lane_bools: List[List[UInt8]]
+    # Computed strings (substrings): string_t into their input's bytes.
+    var lane_strings: List[List[StringT]]
     var valid: List[List[UInt8]]
     var whole: List[Bool]
     var formats: List[UnifiedVectorFormat]
@@ -355,6 +369,7 @@ struct VectorExpression(Copyable, Movable):
         self.lane_decimals = List[List[Int128]](length=n, fill=List[Int128]())
         self.lane_floats = List[List[Float64]](length=n, fill=List[Float64]())
         self.lane_bools = List[List[UInt8]](length=n, fill=List[UInt8]())
+        self.lane_strings = List[List[StringT]](length=n, fill=List[StringT]())
         self.valid = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.whole = List[Bool](length=n, fill=True)
         self.formats = List[UnifiedVectorFormat](
@@ -467,6 +482,10 @@ struct VectorExpression(Copyable, Movable):
                     length=STANDARD_VECTOR_SIZE,
                     fill=UInt8(1) if self.ints[i] != 0 else UInt8(0),
                 ) if constant else List[UInt8](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
+                )
+            elif lane == _LANE_STRING and kind == _KIND_LANE:
+                self.lane_strings[i] = List[StringT](
                     unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
             if constant:
@@ -591,6 +610,52 @@ struct VectorExpression(Copyable, Movable):
             if self.bound.dtypes[node.right] != dtype:
                 return False
             return node.extra < 0 or self.bound.dtypes[node.extra] == dtype
+        if node.op == FILL_NULL:
+            # Both operands of the result's type: a decimal fill of
+            # another scale widens first, at rest.
+            if node.left < 0 or node.right < 0:
+                return False
+            var lane = _lane(dtype)
+            if lane == _LANE_NONE or lane == _LANE_STRING:
+                return False
+            return (
+                self.bound.dtypes[node.left] == dtype
+                and self.bound.dtypes[node.right] == dtype
+            )
+        if node.op == ABS:
+            if node.left < 0 or node.right >= 0:
+                return False
+            if self.bound.dtypes[node.left] != dtype or dtype.is_temporal():
+                return False
+            var lane = _lane(dtype)
+            return (
+                lane == _LANE_INT
+                or lane == _LANE_FLOAT
+                or lane == _LANE_DECIMAL
+            )
+        if node.op == STR_SLICE:
+            return (
+                node.left >= 0
+                and node.right < 0
+                and self.bound.dtypes[node.left] == DataType.STRING
+                and dtype == DataType.STRING
+            )
+        if node.op == ROUND or node.op == FLOOR or node.op == CEIL:
+            # Floats only: an integer is unchanged and a decimal rounds at
+            # rest.
+            return (
+                node.left >= 0
+                and node.right < 0
+                and self.bound.dtypes[node.left] == dtype
+                and _lane(dtype) == _LANE_FLOAT
+            )
+        if node.op == DT_YEAR or node.op == DT_MONTH or node.op == DT_DAY:
+            return (
+                node.left >= 0
+                and node.right < 0
+                and self.bound.dtypes[node.left].is_date()
+                and dtype == DataType.INT64
+            )
         if node.op == STR_IS_IN:
             return (
                 node.left >= 0
@@ -753,6 +818,8 @@ struct VectorExpression(Copyable, Movable):
             var op = self.bound.expr._nodes[i].op
             if op == ADD or op == SUB or op == MUL or op == DIV or op == CAST:
                 return True
+            if op == ABS:
+                return True
         return False
 
     def root_kind(self) -> Int:
@@ -859,6 +926,16 @@ struct VectorExpression(Copyable, Movable):
             self._is_in(index, left, rows, count)
         elif _is_string_predicate(op):
             self._string_predicate(index, left, rows, count)
+        elif op == FILL_NULL:
+            self._fill_null(index, left, right, count)
+        elif op == ABS:
+            self._abs(index, left, count)
+        elif op == ROUND or op == FLOOR or op == CEIL:
+            self._round(index, left, count, op)
+        elif op == DT_YEAR or op == DT_MONTH or op == DT_DAY:
+            self._date_part(index, left, count, op)
+        elif op == STR_SLICE:
+            self._slice(index, left, rows, count)
         else:
             self._compute(index, count)
 
@@ -1457,6 +1534,207 @@ struct VectorExpression(Copyable, Movable):
                 count=count,
             )
 
+    def _lane_address(mut self, index: Int) -> Int:
+        """The address of node `index`'s lane values."""
+        var lane = self.lanes[index]
+        if lane == _LANE_DECIMAL:
+            return Int(self.lane_decimals[index].unsafe_ptr())
+        if lane == _LANE_FLOAT:
+            return Int(self.lane_floats[index].unsafe_ptr())
+        if lane == _LANE_BOOL:
+            return Int(self.lane_bools[index].unsafe_ptr())
+        return Int(self.lane_ints[index].unsafe_ptr())
+
+    def _fill_null(mut self, index: Int, left: Int, right: Int, count: Int):
+        """fill_null: the left value where it is valid, else the right
+        (DuckDB's COALESCE over two children), as the column kernel's
+        `(x & av) | (y & ~av)`."""
+        var lane = self.lanes[index]
+        var target = self._lane_address(index)
+        var x = self._lane_address(left)
+        var y = self._lane_address(right)
+        var size = 16 if lane == _LANE_DECIMAL else (
+            1 if lane == _LANE_BOOL else 8
+        )
+        if self.whole[left]:
+            unsafe_memcpy(
+                dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=target),
+                src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=x),
+                count=count * size,
+            )
+            self.whole[index] = True
+            return
+        var a = self.valid[left].unsafe_ptr()
+        var flags = self.valid[index].unsafe_ptr()
+        var right_whole = self.whole[right]
+        var b = self.valid[right].unsafe_ptr()
+        for k in range(count):
+            flags[unsafe_offset=k] = a[unsafe_offset=k] | (
+                UInt8(1) if right_whole else b[unsafe_offset=k]
+            )
+        self.whole[index] = right_whole
+        if lane == _LANE_DECIMAL:
+            _pick_values[DType.int128](x, y, Int(a), target, count)
+        elif lane == _LANE_FLOAT:
+            _pick_values[DType.float64](x, y, Int(a), target, count)
+        elif lane == _LANE_BOOL:
+            _pick_values[DType.uint8](x, y, Int(a), target, count)
+        else:
+            _pick_values[DType.int64](x, y, Int(a), target, count)
+
+    def _abs(mut self, index: Int, left: Int, count: Int) raises:
+        """abs, as the column kernel computes it: a signed integer's
+        minimum raises (\"Int64 abs overflow\"), unsigned values and
+        decimals within their precision keep their magnitude."""
+        var lane = self.lanes[index]
+        var dtype = self.bound.dtypes[index]
+        var whole = self.whole[left]
+        self.whole[index] = whole
+        var a = self.valid[left].unsafe_ptr()
+        if not whole:
+            var flags = self.valid[index].unsafe_ptr()
+            for k in range(count):
+                flags[unsafe_offset=k] = a[unsafe_offset=k]
+        if lane == _LANE_FLOAT:
+            var x = self.lane_floats[left].unsafe_ptr()
+            var out = self.lane_floats[index].unsafe_ptr()
+            for k in range(count):
+                out[unsafe_offset=k] = abs(x[unsafe_offset=k])
+            return
+        if lane == _LANE_DECIMAL:
+            var x = self.lane_decimals[left].unsafe_ptr()
+            var out = self.lane_decimals[index].unsafe_ptr()
+            for k in range(count):
+                var v = x[unsafe_offset=k]
+                out[unsafe_offset=k] = -v if v < 0 else v
+            return
+        var x = self.lane_ints[left].unsafe_ptr()
+        var out = self.lane_ints[index].unsafe_ptr()
+        var low = Int64.MIN
+        var name = String("Int64")
+        if dtype == DataType.INT32:
+            low = Int64(Int32.MIN)
+            name = String(DType.int32)
+        elif dtype == DataType.INT16:
+            low = Int64(Int16.MIN)
+            name = String(DType.int16)
+        elif dtype == DataType.INT8:
+            low = Int64(Int8.MIN)
+            name = String(DType.int8)
+        var signed = lane == _LANE_DECIMAL64 or (
+            dtype == DataType.INT64
+            or dtype == DataType.INT32
+            or dtype == DataType.INT16
+            or dtype == DataType.INT8
+        )
+        var overflow = False
+        for k in range(count):
+            var v = x[unsafe_offset=k]
+            if not whole and a[unsafe_offset=k] == 0:
+                v = 0
+            overflow |= signed and lane != _LANE_DECIMAL64 and v == low
+            out[unsafe_offset=k] = -v if signed and v < 0 else v
+        if overflow:
+            raise Error(name + " abs overflow")
+
+    def _copy_validity(mut self, index: Int, left: Int, count: Int):
+        """Node `index` is valid where its only child is."""
+        self.whole[index] = self.whole[left]
+        if not self.whole[left]:
+            unsafe_memcpy(
+                dest=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=Int(self.valid[index].unsafe_ptr())
+                ),
+                src=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=Int(self.valid[left].unsafe_ptr())
+                ),
+                count=count,
+            )
+
+    def _round(mut self, index: Int, left: Int, count: Int, op: Int):
+        """round (half away from zero, at `integer` decimals), floor and
+        ceil of floats, as the column kernels compute them."""
+        self._copy_validity(index, left, count)
+        var x = self.lane_floats[left].unsafe_ptr()
+        var out = self.lane_floats[index].unsafe_ptr()
+        if op == FLOOR:
+            for k in range(count):
+                out[unsafe_offset=k] = floor(x[unsafe_offset=k])
+        elif op == CEIL:
+            for k in range(count):
+                out[unsafe_offset=k] = ceil(x[unsafe_offset=k])
+        else:
+            var decimals = Int(self.bound.expr._nodes[index].integer)
+            for k in range(count):
+                out[unsafe_offset=k] = _round_half_away(
+                    x[unsafe_offset=k], decimals
+                )
+
+    def _slice(
+        mut self, index: Int, left: Int, rows: SelectionVector, count: Int
+    ):
+        """Code points [offset, offset + length) of each string, as
+        `_slice` clips them, without copying: a long result points into
+        its input's bytes, a short one is inlined (DuckDB's SubstringFun
+        returns string_t over the input the same way)."""
+        self._copy_validity(index, left, count)
+        var offset = Int(self.bound.expr._nodes[index].integer)
+        var length = self.bound.expr._nodes[index].min_count
+        var entries = self._entries(left, rows, count)
+        var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=entries)
+        var data = self.formats[left].data
+        var out = self.lane_strings[index].unsafe_ptr()
+        var flags = self.valid[left].unsafe_ptr()
+        var whole = self.whole[left]
+        for k in range(count):
+            if not whole and flags[unsafe_offset=k] == 0:
+                out[unsafe_offset=k] = StringT(0, 0, 0)
+                continue
+            var entry = data + 16 * (
+                k if entries == 0 else Int(at[unsafe_offset=k])
+            )
+            var size = Int(
+                Pointer[StringT, MutAnyOrigin](
+                    unsafe_from_address=entry
+                )[].length
+            )
+            var bytes = string_data(entry)
+            var p = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bytes)
+            var start = 0
+            if offset >= 0:
+                start = _advance(p, size, 0, offset)
+            else:
+                var points = 0
+                for b in range(size):
+                    points += Int((p[unsafe_offset=b] & 0xC0) != 0x80)
+                start = _advance(p, size, 0, max(points + offset, 0))
+            var end = size if length < 0 else _advance(p, size, start, length)
+            out[unsafe_offset=k] = StringT.make(bytes + start, end - start)
+        self.formats[index] = UnifiedVectorFormat(
+            SelectionVector(),
+            Int(self.lane_strings[index].unsafe_ptr()),
+            ValidityMask(),
+            PHYSICAL_VARCHAR,
+        )
+        self.by_chunk_row[index] = False
+
+    def _date_part(mut self, index: Int, left: Int, count: Int, op: Int):
+        """The year, month or day of dates (`_fields`' civil calendar)."""
+        self._copy_validity(index, left, count)
+        var x = self.lane_ints[left].unsafe_ptr()
+        var out = self.lane_ints[index].unsafe_ptr()
+        var flags = self.valid[left].unsafe_ptr()
+        var whole = self.whole[left]
+        var part = 0 if op == DT_YEAR else (1 if op == DT_MONTH else 2)
+        for k in range(count):
+            if not whole and flags[unsafe_offset=k] == 0:
+                out[unsafe_offset=k] = 0
+                continue
+            var ymd = civil_from_days(x[unsafe_offset=k])
+            out[unsafe_offset=k] = ymd[0] if part == 0 else (
+                ymd[1] if part == 1 else ymd[2]
+            )
+
     def _null_test(
         mut self,
         index: Int,
@@ -1780,8 +2058,22 @@ struct VectorExpression(Copyable, Movable):
         var lane = self.lanes[root]
         var dtype = self.bound.dtypes[root]
         var physical = _physical(dtype)
+        if lane == _LANE_STRING:
+            physical = PHYSICAL_VARCHAR
         var vector = output.writable(column, physical)
-        if lane == _LANE_BOOL:
+        if lane == _LANE_STRING:
+            unsafe_memcpy(
+                dest=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=vector.data
+                ),
+                src=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=Int(
+                        self.lane_strings[root].unsafe_ptr()
+                    )
+                ),
+                count=16 * count,
+            )
+        elif lane == _LANE_BOOL:
             unsafe_memcpy(
                 dest=Pointer[UInt8, MutAnyOrigin](
                     unsafe_from_address=vector.data
@@ -1892,6 +2184,38 @@ def _scatter_values[
     var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=positions)
     for j in range(count):
         o[unsafe_offset=Int(at[unsafe_offset=j])] = x[unsafe_offset=j]
+
+
+@always_inline
+def _advance(
+    p: Pointer[UInt8, MutAnyOrigin], size: Int, start: Int, points: Int
+) -> Int:
+    """The byte `points` UTF-8 code points after byte `start`, clipped to
+    `size`."""
+    var at = start
+    var left = points
+    while left > 0 and at < size:
+        at += 1
+        while at < size and (p[unsafe_offset=at] & 0xC0) == 0x80:
+            at += 1
+        left -= 1
+    return at
+
+
+def _pick_values[
+    T: DType
+](left: Int, right: Int, valid: Int, target: Int, count: Int):
+    """Per row, the value at `left` where the validity byte is set, else
+    the value at `right`, into `target`."""
+    var x = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=left)
+    var y = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=right)
+    var a = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid)
+    var o = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=target)
+    for k in range(count):
+        o[unsafe_offset=k] = (
+            x[unsafe_offset=k] if a[unsafe_offset=k]
+            != 0 else y[unsafe_offset=k]
+        )
 
 
 def _gather[
