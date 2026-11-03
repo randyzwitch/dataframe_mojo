@@ -767,7 +767,7 @@ def _string_prefixes(
     c: SortKeyColumn,
     first: Int,
     count: Int,
-    out: Pointer[UInt64, MutAnyOrigin],
+    words: Pointer[UInt64, MutAnyOrigin],
 ):
     """The first eight key bytes of string rows: the null/valid byte, then
     up to seven bytes of the value encoded as `_encode_varchar` does and
@@ -778,7 +778,7 @@ def _string_prefixes(
     for i in range(count):
         var row = first + i
         if nulls and not column._valid(row):
-            out[unsafe_offset=i] = UInt64(c.null_byte) << 56
+            words[unsafe_offset=i] = UInt64(c.null_byte) << 56
             continue
         var word = UInt64(c.valid_byte) << 56
         var bytes = rows.get(row)
@@ -792,11 +792,11 @@ def _string_prefixes(
             else:
                 break
             word |= UInt64(byte) << UInt64(48 - 8 * j)
-        out[unsafe_offset=i] = word
+        words[unsafe_offset=i] = word
 
 
 def key_prefixes(
-    layout: SortKeyLayout, lo: Int, hi: Int, mut out: List[UInt64]
+    layout: SortKeyLayout, lo: Int, hi: Int, mut prefixes: List[UInt64]
 ) raises -> Bool:
     """For rows [lo, hi), a lower bound of each key's first word (the
     record's `part0`) from the first key column alone, as unsigned
@@ -807,9 +807,9 @@ def key_prefixes(
     var n = hi - lo
     if c.encoding == _ENC_BLOB or c.encoding == _ENC_ROW:
         return False
-    out = List[UInt64](length=max(1, n), fill=0)
+    prefixes = List[UInt64](length=max(1, n), fill=0)
     var at = Pointer[UInt64, MutAnyOrigin](
-        unsafe_from_address=Int(out.unsafe_ptr())
+        unsafe_from_address=Int(prefixes.unsafe_ptr())
     )
     if c.encoding == _ENC_VARCHAR:
         for piece in _for_parts(c.series, lo, hi):
@@ -834,9 +834,9 @@ def key_prefixes(
         _encode_part(
             piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
         )
-    var words = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
+    var encoded = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
     for i in range(n):
-        at[unsafe_offset=i] = byte_swap(words[unsafe_offset=3 * i])
+        at[unsafe_offset=i] = byte_swap(encoded[unsafe_offset=3 * i])
     _ = cursors^
     _ = scratch^
     return True
