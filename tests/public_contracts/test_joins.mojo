@@ -1,6 +1,6 @@
 """Full join rows and schema against a nested-loop oracle; duplicates are pairs."""
 # contract-group: table.join
-from std.testing import assert_equal, assert_raises
+from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, Series
 from tests.support.reference_model import (
     generated_model,
@@ -110,3 +110,53 @@ def test_join_float_specials_and_validation() raises:
     assert_equal(different.columns(), same.columns())
     # Full expected data comes from the oracle, rather than the sibling join.
     assert_join_model(different, model, model, ["i"], "inner")
+
+
+def test_a_coalesced_right_join_keeps_the_right_key_names() raises:
+    # As Polars (a left join with the sides swapped): the left's non-key
+    # columns, then every right column, keys included under their own
+    # names; a right name the left's other columns hold takes the suffix.
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 3])),
+            Series("bk", Column[Int64]([7, 8, 9])),
+            Series("x", Column[Int64]([10, 20, 30])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("x", Column[String](["a", "b", "c"])),
+            Series("bk", Column[Int64]([4, 3, 2])),
+            Series("k", Column[Int64]([0, 0, 0])),
+        ]
+    )
+    var names: List[String] = ["bk", "x", "x_right", "bk_right", "k"]
+    for lazy in [False, True]:
+        var out = (
+            left.lazy()
+            .join(right.lazy(), left_on=["k"], right_on=["bk"], how="right")
+            .collect() if lazy else left.join(
+                right, left_on=["k"], right_on=["bk"], how="right"
+            )
+        )
+        assert_equal(out.columns(), names)
+        out = out.sort("bk_right")
+        assert_equal(out.item(0, "bk_right").int64(), 2)
+        assert_equal(out.item(0, "x").int64(), 20)
+        assert_equal(out.item(0, "x_right").string(), "c")
+        assert_true(out.item(2, "x").is_null())
+        assert_equal(out.item(2, "bk_right").int64(), 4)
+        # Selecting the right key reads it from the right input.
+        var picked = (
+            left.lazy()
+            .join(right.lazy(), left_on=["k"], right_on=["bk"], how="right")
+            .select(["bk_right", "k"])
+            .collect()
+        )
+        assert_equal(picked.columns(), List[String](["bk_right", "k"]))
+        assert_equal(picked.height(), 3)
+        # Keys named alike come out once, after the left's other columns.
+        var same = left.drop(["bk"]).join(
+            right.drop(["k"]).rename({"bk": "k"}), on="k", how="right"
+        )
+        assert_equal(same.columns(), List[String](["x", "x_right", "k"]))

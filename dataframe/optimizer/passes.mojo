@@ -36,6 +36,7 @@ from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_RIGHT,
     JOIN_SEMI,
 )
 from dataframe.optimizer.expressions import (
@@ -1232,9 +1233,13 @@ def plan_join_input_columns(
     var right_cols = plan_columns_of(self, node.right)
     var suffix = node.join_suffix()
     var membership = node.how == JOIN_SEMI or node.how == JOIN_ANTI
+    # A coalesced right join outputs the right keys and drops the left
+    # ones (`join_frames`), so only the left's other columns take names.
+    var right_join = node.how == JOIN_RIGHT
     var outputs = Dict[String, Bool]()
     for c in left_cols:
-        outputs[c] = True
+        if not (right_join and c in node.names):
+            outputs[c] = True
     var left_names = outputs.copy()
     var want = Dict[String, Bool]()
     for w in wanted:
@@ -1253,7 +1258,7 @@ def plan_join_input_columns(
             keep_left[c] = True
     if not membership:
         for c in right_cols:
-            if c in keep_right:
+            if c in keep_right and not right_join:
                 continue
             var name = c + suffix if c in left_names else c
             if name in outputs:

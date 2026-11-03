@@ -234,6 +234,9 @@ def test_relational_schema_preserves_key_coalescing_suffixes_and_reduction_types
             var expected: List[String] = ["left_key: int64", "value: int32"]
             if not coalesce:
                 expected.append("right_key: int64")
+            elif how == "right":
+                # A coalesced right join keeps the right key (Polars).
+                expected = ["value: int32", "right_key: int64"]
             expected.append("value_right: string")
             assert_equal(plan.collect_schema(), expected)
             var actual = plan.collect(streaming=False, engine="cpu")
