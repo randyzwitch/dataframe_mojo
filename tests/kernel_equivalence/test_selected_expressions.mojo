@@ -98,9 +98,7 @@ def selected(source: DataFrame, last: Int, join: Bool) raises -> DataFrame:
     else:
         plan = plan.filter(col("day") <= lit(Int64(last)))
     var piped = plan.with_columns(computed()).sort("id").collect()
-    var took = (
-        "dataframe-path: pipeline.vector_projection\n" in observed.text()
-    )
+    var took = "dataframe-path: pipeline.vector_projection\n" in observed.text()
     _ = observed^
     _ = trace^
     assert_true(took, "the expressions were not computed through the rows")

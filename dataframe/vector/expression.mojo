@@ -150,9 +150,7 @@ def _lane(dtype: DataType) -> Int:
 
 
 def _is_compare(op: Int) -> Bool:
-    return (
-        op == EQ or op == NE or op == LT or op == LE or op == GT or op == GE
-    )
+    return op == EQ or op == NE or op == LT or op == LE or op == GT or op == GE
 
 
 def _numeric_lane(lane: Int) -> Bool:
@@ -267,7 +265,7 @@ struct _Shape(Copyable, ImplicitlyCopyable, Movable):
     var right: Int
 
 
-struct VectorExpression(Movable):
+struct VectorExpression(Copyable, Movable):
     """One bound expression compiled for a step's input columns, with the
     per-node buffers it computes into (DuckDB's ExpressionState and its
     intermediate chunk), reused for every chunk."""
@@ -302,6 +300,8 @@ struct VectorExpression(Movable):
     var whole: List[Bool]
     var formats: List[UnifiedVectorFormat]
     var by_chunk_row: List[Bool]
+    # The composed selection `_entries` writes.
+    var composed: List[UInt32]
     var scratch: DataChunk
 
     def __init__(out self, expr: Expr, schema: List[Series]) raises:
@@ -323,12 +323,8 @@ struct VectorExpression(Movable):
         self.fallback_bound = List[Optional[BoundExpr]](length=n, fill=None)
         self.fallback_reads = List[List[Int]](length=n, fill=List[Int]())
         self.lane_ints = List[List[Int64]](length=n, fill=List[Int64]())
-        self.lane_decimals = List[List[Int128]](
-            length=n, fill=List[Int128]()
-        )
-        self.lane_floats = List[List[Float64]](
-            length=n, fill=List[Float64]()
-        )
+        self.lane_decimals = List[List[Int128]](length=n, fill=List[Int128]())
+        self.lane_floats = List[List[Float64]](length=n, fill=List[Float64]())
         self.lane_bools = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.valid = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.whole = List[Bool](length=n, fill=True)
@@ -339,6 +335,7 @@ struct VectorExpression(Movable):
             ),
         )
         self.by_chunk_row = List[Bool](length=n, fill=False)
+        self.composed = List[UInt32](length=2 * STANDARD_VECTOR_SIZE, fill=0)
         self.scratch = DataChunk(n)
         self._plan(self.root)
         self._narrow_decimals()
@@ -376,7 +373,11 @@ struct VectorExpression(Movable):
 
     def _plan(mut self, index: Int) raises:
         """Classify node `index` and, when it computes here, its children."""
-        var node = _Shape(self.bound.expr._nodes[index].op, self.bound.expr._nodes[index].left, self.bound.expr._nodes[index].right)
+        var node = _Shape(
+            self.bound.expr._nodes[index].op,
+            self.bound.expr._nodes[index].left,
+            self.bound.expr._nodes[index].right,
+        )
         var dtype = self.bound.dtypes[index]
         if node.op == COL:
             self.kinds[index] = _KIND_COLUMN
@@ -391,8 +392,15 @@ struct VectorExpression(Movable):
             return
         if self._native(index):
             self.kinds[index] = _KIND_LANE
-            if _is_compare(node.op) or node.op == AND or node.op == OR or (
-                node.op == NOT or node.op == IS_NULL or node.op == IS_NOT_NULL
+            if (
+                _is_compare(node.op)
+                or node.op == AND
+                or node.op == OR
+                or (
+                    node.op == NOT
+                    or node.op == IS_NULL
+                    or node.op == IS_NOT_NULL
+                )
             ):
                 self.lanes[index] = _LANE_BOOL
             else:
@@ -412,8 +420,11 @@ struct VectorExpression(Movable):
     def _native(self, index: Int) raises -> Bool:
         ref node = self.bound.expr._nodes[index]
         var dtype = self.bound.dtypes[index]
-        if node.op == CAST or node.op == ADD or node.op == SUB or (
-            node.op == MUL or node.op == DIV
+        if (
+            node.op == CAST
+            or node.op == ADD
+            or node.op == SUB
+            or (node.op == MUL or node.op == DIV)
         ):
             return _computed_supported(self.bound, index)
         if _is_compare(node.op):
@@ -530,18 +541,14 @@ struct VectorExpression(Movable):
     def _fallback(mut self, index: Int) raises:
         """Node `index` computed by the at-rest evaluator: its subtree
         bound to the columns it reads."""
-        if getenv("DATAFRAME_VECTOR_FALLBACKS"):
-            # DEVELOPMENT ONLY: remove before the PR.
-            var line = String("vector-fallback: ") + op_name(
-                self.bound.expr._nodes[index].op
+        if getenv("DATAFRAME_TRACE_PATHS"):
+            # Which nodes still take the adapter, per query (`trace_path`'s
+            # format, with the operator's name).
+            print(
+                "dataframe-path: vector.fallback."
+                + op_name(self.bound.expr._nodes[index].op),
+                file=RawFileDescriptor(2),
             )
-            for child in [
-                self.bound.expr._nodes[index].left,
-                self.bound.expr._nodes[index].right,
-            ]:
-                if child >= 0:
-                    line += " " + String(self.bound.dtypes[child])
-            print(line, file=RawFileDescriptor(2))
         var reads = List[Int]()
         _subtree_columns(self.bound, index, reads)
         var columns = List[Series](capacity=len(reads))
@@ -646,7 +653,11 @@ struct VectorExpression(Movable):
             self._run_fallback(index, input, arena, rows, count)
             self._load(index, rows, count)
             return
-        var node = _Shape(self.bound.expr._nodes[index].op, self.bound.expr._nodes[index].left, self.bound.expr._nodes[index].right)
+        var node = _Shape(
+            self.bound.expr._nodes[index].op,
+            self.bound.expr._nodes[index].left,
+            self.bound.expr._nodes[index].right,
+        )
         var left = node.left
         var right = node.right
         self._evaluate(left, input, arena, rows, count)
@@ -721,68 +732,93 @@ struct VectorExpression(Movable):
         var row = rows.get_index(k) if self.by_chunk_row[index] else k
         return format.sel.get_index(row)
 
+    def _entries(
+        mut self, index: Int, rows: SelectionVector, count: Int, slot: Int = 0
+    ) -> Int:
+        """The entries of node `index`'s unified format the computed rows
+        read, as the address of `count` UInt32 indices, or 0 when computed
+        row k reads entry k: the format's selection composed with the
+        rows' when both are set (SelectionVector::Slice), else whichever
+        is."""
+        var own = self.formats[index].sel
+        var through = self.by_chunk_row[index] and rows.is_set()
+        if not through:
+            return own.data
+        if not own.is_set():
+            return rows.data
+        var out = self.composed.unsafe_ptr().unsafe_offset(
+            slot * STANDARD_VECTOR_SIZE
+        )
+        var a = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
+        var b = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=own.data)
+        for k in range(count):
+            out[unsafe_offset=k] = b[unsafe_offset=Int(a[unsafe_offset=k])]
+        return Int(out)
+
     def _load(mut self, index: Int, rows: SelectionVector, count: Int):
         """Node `index`'s values for the computed rows into its lane (and
         validity bytes), from its unified format. Strings stay in their
         vector, read by the comparisons."""
         var lane = self.lanes[index]
-        ref format = self.formats[index]
+        var entries = self._entries(index, rows, count)
+        var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=entries)
+        var validity = self.formats[index].validity
         # Validity first.
         var flags = self.valid[index].unsafe_ptr()
-        if format.validity.all_valid():
+        if validity.all_valid():
             self.whole[index] = True
         else:
             self.whole[index] = False
-            for k in range(count):
-                flags[unsafe_offset=k] = UInt8(1) if (
-                    format.validity.row_is_valid_unsafe(self._at(index, rows, k))
-                ) else UInt8(0)
+            var bits = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=validity.bits
+            )
+            var offset = validity.offset
+            if entries == 0:
+                for k in range(count):
+                    var b = offset + k
+                    flags[unsafe_offset=k] = (
+                        bits[unsafe_offset=b >> 3] >> UInt8(b & 7)
+                    ) & 1
+            else:
+                for k in range(count):
+                    var b = offset + Int(at[unsafe_offset=k])
+                    flags[unsafe_offset=k] = (
+                        bits[unsafe_offset=b >> 3] >> UInt8(b & 7)
+                    ) & 1
         if lane == _LANE_STRING or lane == _LANE_ANY:
             return
+        var physical = self.formats[index].physical
+        var data = self.formats[index].data
         if lane == _LANE_BOOL:
-            var out = self.lane_bools[index].unsafe_ptr()
-            var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
-            for k in range(count):
-                out[unsafe_offset=k] = data[unsafe_offset=self._at(index, rows, k)]
+            _gather[DType.uint8, DType.uint8](
+                data, entries, count, Int(self.lane_bools[index].unsafe_ptr())
+            )
             return
         comptime for s in range(len(_LANE_STORAGE)):
             comptime D = _LANE_STORAGE[s]
-            if format.physical == physical_of[D]():
+            if physical == physical_of[D]():
                 if lane == _LANE_FLOAT:
-                    self._load_as[D, DType.float64](
-                        index, rows, count, self.lane_floats[index]
+                    _gather[D, DType.float64](
+                        data,
+                        entries,
+                        count,
+                        Int(self.lane_floats[index].unsafe_ptr()),
                     )
                 elif lane == _LANE_DECIMAL:
-                    self._load_as[D, DType.int128](
-                        index, rows, count, self.lane_decimals[index]
+                    _gather[D, DType.int128](
+                        data,
+                        entries,
+                        count,
+                        Int(self.lane_decimals[index].unsafe_ptr()),
                     )
                 else:
-                    self._load_as[D, DType.int64](
-                        index, rows, count, self.lane_ints[index]
+                    _gather[D, DType.int64](
+                        data,
+                        entries,
+                        count,
+                        Int(self.lane_ints[index].unsafe_ptr()),
                     )
                 return
-
-    def _load_as[
-        D: DType, T: DType
-    ](
-        self,
-        index: Int,
-        rows: SelectionVector,
-        count: Int,
-        mut values: List[Scalar[T]],
-    ):
-        ref format = self.formats[index]
-        var data = format.values[D]()
-        var out = values.unsafe_ptr()
-        var through = self.by_chunk_row[index] and rows.is_set()
-        if not format.sel.is_set() and not through:
-            for k in range(count):
-                out[unsafe_offset=k] = data[unsafe_offset=k].cast[T]()
-            return
-        for k in range(count):
-            out[unsafe_offset=k] = data[
-                unsafe_offset=self._at(index, rows, k)
-            ].cast[T]()
 
     def _combine(mut self, left: Int, right: Int, index: Int, count: Int):
         """Node `index` valid where both children are."""
@@ -817,11 +853,18 @@ struct VectorExpression(Movable):
         var out = self.lane_bools[index].unsafe_ptr()
         var lane = self.lanes[left]
         if lane == _LANE_STRING:
+            var la = self._entries(left, rows, count, 0)
+            var ra = self._entries(right, rows, count, 1)
+            var target = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=Int(self.lane_bools[index].unsafe_ptr())
+            )
+            var lp = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=la)
+            var rp = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=ra)
+            var ld = self.formats[left].data
+            var rd = self.formats[right].data
             for k in range(count):
-                var a = self.formats[left].data + 16 * self._at(left, rows, k)
-                var b = self.formats[right].data + 16 * self._at(
-                    right, rows, k
-                )
+                var a = ld + 16 * (k if la == 0 else Int(lp[unsafe_offset=k]))
+                var b = rd + 16 * (k if ra == 0 else Int(rp[unsafe_offset=k]))
                 var result: Bool
                 if op == EQ:
                     result = string_equals(a, b)
@@ -837,7 +880,7 @@ struct VectorExpression(Movable):
                         result = c > 0
                     else:
                         result = c >= 0
-                out[unsafe_offset=k] = UInt8(1) if result else UInt8(0)
+                target[unsafe_offset=k] = UInt8(1) if result else UInt8(0)
             return
         if lane == _LANE_FLOAT:
             _compare_lanes(
@@ -862,7 +905,11 @@ struct VectorExpression(Movable):
             var rs = self.bound.dtypes[right].scale()
             if ls == rs:
                 _compare_lanes(
-                    op, self.lane_ints[left], self.lane_ints[right], Int(out), count
+                    op,
+                    self.lane_ints[left],
+                    self.lane_ints[right],
+                    Int(out),
+                    count,
                 )
             else:
                 var common = max(ls, rs)
@@ -956,7 +1003,11 @@ struct VectorExpression(Movable):
 
     def _compute(mut self, index: Int, count: Int) raises:
         """Arithmetic or a cast over the computed rows, in lanes."""
-        var node = _Shape(self.bound.expr._nodes[index].op, self.bound.expr._nodes[index].left, self.bound.expr._nodes[index].right)
+        var node = _Shape(
+            self.bound.expr._nodes[index].op,
+            self.bound.expr._nodes[index].left,
+            self.bound.expr._nodes[index].right,
+        )
         var dtype = self.bound.dtypes[index]
         var left = node.left
         var lane = self.lanes[index]
@@ -1078,9 +1129,9 @@ struct VectorExpression(Movable):
                     value = a * b
                 else:
                     value = a / b
-                out[unsafe_offset=k] = value if whole or flags[
-                    unsafe_offset=k
-                ] != 0 else 0
+                out[unsafe_offset=k] = (
+                    value if whole or flags[unsafe_offset=k] != 0 else 0
+                )
             return
         if lane == _LANE_INT:
             var x = self.lane_ints[left].unsafe_ptr()
@@ -1201,17 +1252,28 @@ struct VectorExpression(Movable):
                 return count
             return 0
         var values = self.lane_bools[root].unsafe_ptr()
-        if self.whole[root]:
-            for k in range(count):
-                if values[unsafe_offset=k] != 0:
-                    target.set_index(kept, rows.get_index(k))
-                    kept += 1
-            return kept
         var flags = self.valid[root].unsafe_ptr()
+        var whole = self.whole[root]
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target.data)
+        # Branch-free: every row is written, and the next slot advances by
+        # whether it is kept (DuckDB's SelectGenericLoop with a true_sel).
+        if rows.is_set():
+            var from_rows = Pointer[UInt32, MutAnyOrigin](
+                unsafe_from_address=rows.data
+            )
+            for k in range(count):
+                var keep = values[unsafe_offset=k]
+                if not whole:
+                    keep &= flags[unsafe_offset=k]
+                out[unsafe_offset=kept] = from_rows[unsafe_offset=k]
+                kept += Int(keep)
+            return kept
         for k in range(count):
-            if values[unsafe_offset=k] & flags[unsafe_offset=k] != 0:
-                target.set_index(kept, rows.get_index(k))
-                kept += 1
+            var keep = values[unsafe_offset=k]
+            if not whole:
+                keep &= flags[unsafe_offset=k]
+            out[unsafe_offset=kept] = UInt32(k)
+            kept += Int(keep)
         return kept
 
     def write(
@@ -1244,7 +1306,9 @@ struct VectorExpression(Movable):
         var vector = output.writable(column, physical)
         if lane == _LANE_BOOL:
             unsafe_memcpy(
-                dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=vector.data),
+                dest=Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=vector.data
+                ),
                 src=self.lane_bools[root].unsafe_ptr(),
                 count=count,
             )
@@ -1266,6 +1330,24 @@ struct VectorExpression(Movable):
             for k in range(count):
                 if flags[unsafe_offset=k] == 0:
                     set_invalid(bits, k)
+
+
+def _gather[
+    D: DType, T: DType
+](data: Int, entries: Int, count: Int, target: Int):
+    """`count` values of type D at `data`, at the UInt32 indices at
+    `entries` (or rows 0, 1, 2, ... when 0), cast to T into `target`."""
+    var source = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=data)
+    var out = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=target)
+    if entries == 0:
+        for k in range(count):
+            out[unsafe_offset=k] = source[unsafe_offset=k].cast[T]()
+        return
+    var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=entries)
+    for k in range(count):
+        out[unsafe_offset=k] = source[
+            unsafe_offset=Int(at[unsafe_offset=k])
+        ].cast[T]()
 
 
 comptime _LANE_STORAGE = [
@@ -1320,19 +1402,31 @@ def _compare_lanes[
     var y = b.unsafe_ptr()
     if op == EQ:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] == y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] == y[unsafe_offset=k]
+            )
     elif op == NE:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] != y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] != y[unsafe_offset=k]
+            )
     elif op == LT:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] < y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] < y[unsafe_offset=k]
+            )
     elif op == LE:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] <= y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] <= y[unsafe_offset=k]
+            )
     elif op == GT:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] > y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] > y[unsafe_offset=k]
+            )
     else:
         for k in range(count):
-            target[unsafe_offset=k] = UInt8(x[unsafe_offset=k] >= y[unsafe_offset=k])
+            target[unsafe_offset=k] = UInt8(
+                x[unsafe_offset=k] >= y[unsafe_offset=k]
+            )

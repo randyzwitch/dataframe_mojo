@@ -38,9 +38,9 @@ def frame() raises -> DataFrame:
         f.append(Float64(row % 211) / 4.0 - 10.0)
         day.append(Int64(row % 400))
         s.append(
-            "k" + String(row % 9) if row % 3 else "a longer key " + String(
-                row % 5
-            )
+            "k"
+            + String(row % 9) if row % 3 else "a longer key "
+            + String(row % 5)
         )
         s_valid.append(row % 11 != 6)
         price.append(String(row % 997) + "." + String(row % 89 + 10))
@@ -114,7 +114,9 @@ def chunk_of(
     return sliced^
 
 
-def expected_rows(source: DataFrame, offset: Int, count: Int, keep_every: Int) raises -> DataFrame:
+def expected_rows(
+    source: DataFrame, offset: Int, count: Int, keep_every: Int
+) raises -> DataFrame:
     var window = source.slice(offset, count)
     if keep_every <= 1:
         return window^
@@ -164,9 +166,7 @@ def test_projections_equal_the_eager_columns() raises:
                 out.count = chunk.count
                 compiled.write(chunk, arena, out, 0)
                 # Every row's value, a constant's broadcast (with_columns).
-                var expected = rows.with_columns([e.copy()]).select(
-                    [e._name]
-                )
+                var expected = rows.with_columns([e.copy()]).select([e._name])
                 var got = to_series(
                     out,
                     0,

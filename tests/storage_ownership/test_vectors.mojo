@@ -183,9 +183,7 @@ def test_string_t_compares_by_bytes() raises:
     ]
     var entries = List[StringT]()
     for w in words:
-        entries.append(
-            StringT.make(Int(w.unsafe_ptr()), w.byte_length())
-        )
+        entries.append(StringT.make(Int(w.unsafe_ptr()), w.byte_length()))
     var base = Int(entries.unsafe_ptr())
     for i in range(len(words)):
         for j in range(len(words)):
@@ -195,9 +193,7 @@ def test_string_t_compares_by_bytes() raises:
             )
             assert_equal(c < 0, expected < 0)
             assert_equal(c > 0, expected > 0)
-            assert_equal(
-                string_equals(base + 16 * i, base + 16 * j), i == j
-            )
+            assert_equal(string_equals(base + 16 * i, base + 16 * j), i == j)
     _ = entries^
     _ = words^
 
@@ -206,7 +202,9 @@ def test_constant_and_sequence_vectors() raises:
     var arena = ColumnArena()
     var chunk = DataChunk(2)
     var value = List[Int64](length=1, fill=42)
-    chunk.data[0] = Vector.constant(PHYSICAL_INT64, Int(value.unsafe_ptr()), True)
+    chunk.data[0] = Vector.constant(
+        PHYSICAL_INT64, Int(value.unsafe_ptr()), True
+    )
     chunk.data[1] = Vector.sequence(5, 3)
     chunk.count = 300
     var c = chunk.unified(0, arena)
@@ -222,7 +220,9 @@ def test_constant_and_sequence_vectors() raises:
     assert_equal(sliced.data[0].vector_type, CONSTANT_VECTOR)
     var flat = sliced.unified(1, arena)
     for i in range(10):
-        assert_equal(_int_at(flat.data, flat.sel.get_index(i)), Int64(5 + 87 * i))
+        assert_equal(
+            _int_at(flat.data, flat.sel.get_index(i)), Int64(5 + 87 * i)
+        )
     var null = Vector.constant(PHYSICAL_INT64, Int(value.unsafe_ptr()), False)
     assert_false(null.validity.row_is_valid(0))
     var back = to_series(sliced, 0, arena, "c", DataType.INT64)

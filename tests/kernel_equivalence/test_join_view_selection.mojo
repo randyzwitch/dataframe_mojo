@@ -195,8 +195,7 @@ def test_joined_build_strings_match_the_scalar_model() raises:
             )
             var joined = plan.collect(batch_size=4096)
             assert_true(
-                "dataframe-path: pipeline.join_dictionary\n"
-                in observed.text(),
+                "dataframe-path: pipeline.join_dictionary\n" in observed.text(),
                 "the join gathered the build strings",
             )
             _ = observed^

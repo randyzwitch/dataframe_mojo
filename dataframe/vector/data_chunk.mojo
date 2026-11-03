@@ -132,7 +132,7 @@ def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
     return result
 
 
-struct DataChunk(Movable):
+struct DataChunk(Copyable, Movable):
     """A set of vectors of equal length (DuckDB `DataChunk`), at most
     STANDARD_VECTOR_SIZE rows.
 
@@ -280,9 +280,10 @@ struct DataChunk(Movable):
                     unsafe_from_address=out.data
                 )
                 for i in range(count):
-                    values[unsafe_offset=i] = v.sequence_start + Int64(
-                        sel.get_index(i)
-                    ) * v.sequence_increment
+                    values[unsafe_offset=i] = (
+                        v.sequence_start
+                        + Int64(sel.get_index(i)) * v.sequence_increment
+                    )
         self.count = count
 
     def unified(
@@ -329,7 +330,9 @@ struct DataChunk(Movable):
         var valid_bits = 0
         if flattened and not v.validity.all_valid():
             valid_bits = self._new_scratch(STANDARD_VECTOR_SIZE // 8)
-            var at = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid_bits)
+            var at = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=valid_bits
+            )
             for b in range(STANDARD_VECTOR_SIZE // 8):
                 at[unsafe_offset=b] = 255
             for i in range(rows):

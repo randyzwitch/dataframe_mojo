@@ -187,12 +187,16 @@ struct ValidityMask(Copyable, ImplicitlyCopyable, Movable):
         if self.bits == 0:
             return True
         var bit = self.offset + row
-        return (_u8_at(self.bits)[unsafe_offset=bit >> 3] >> UInt8(bit & 7)) & 1 == 1
+        return (
+            _u8_at(self.bits)[unsafe_offset=bit >> 3] >> UInt8(bit & 7)
+        ) & 1 == 1
 
     @always_inline
     def row_is_valid_unsafe(self, row: Int) -> Bool:
         var bit = self.offset + row
-        return (_u8_at(self.bits)[unsafe_offset=bit >> 3] >> UInt8(bit & 7)) & 1 == 1
+        return (
+            _u8_at(self.bits)[unsafe_offset=bit >> 3] >> UInt8(bit & 7)
+        ) & 1 == 1
 
 
 @always_inline
@@ -438,10 +442,14 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
     def encoded(self) -> Bool:
         """Whether the values are still in their at-rest layout (an Arrow
         string or packed boolean column) and must be decoded to read."""
-        return self.data == 0 and self.source >= 0 and (
-            self.vector_type == FLAT_VECTOR
-            or self.vector_type == DICTIONARY_VECTOR
-            or self.vector_type == CONSTANT_VECTOR
+        return (
+            self.data == 0
+            and self.source >= 0
+            and (
+                self.vector_type == FLAT_VECTOR
+                or self.vector_type == DICTIONARY_VECTOR
+                or self.vector_type == CONSTANT_VECTOR
+            )
         )
 
     @always_inline

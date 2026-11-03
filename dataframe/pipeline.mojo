@@ -121,6 +121,7 @@ from dataframe.vector.data_chunk import (
 )
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
+    CONSTANT_VECTOR,
     DICTIONARY_VECTOR,
     FLAT_VECTOR,
     SEQUENCE_VECTOR,
@@ -953,6 +954,25 @@ struct _Columns(Copyable, Movable):
         chunk.count = count
 
 
+def _append_rows(mut listed: List[UInt32], v: Vector, count: Int):
+    """The at-rest rows of a vector over a source, appended."""
+    # Grown geometrically: an exact reservation per chunk copied the
+    # list again for every chunk.
+    if listed.capacity() < len(listed) + count:
+        listed.reserve(max(len(listed) + count, 2 * listed.capacity()))
+    var base = UInt32(v.source_offset)
+    if v.vector_type == DICTIONARY_VECTOR and v.sel.data != 0:
+        var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=v.sel.data)
+        for i in range(count):
+            listed.append(base + sel[unsafe_offset=i])
+    elif v.vector_type == CONSTANT_VECTOR:
+        for _ in range(count):
+            listed.append(base)
+    else:
+        for i in range(count):
+            listed.append(base + UInt32(i))
+
+
 comptime _COLLECT_NONE = 0
 comptime _COLLECT_RANGE = 1
 comptime _COLLECT_ROWS = 2
@@ -990,9 +1010,13 @@ struct _Collector(Movable):
         for c in range(len(self.modes)):
             var v = chunk.data[c]
             var mode = self.modes[c]
-            if v.source >= 0 and v.vector_type != SEQUENCE_VECTOR and (
-                mode == _COLLECT_NONE
-                or (mode != _COLLECT_VALUES and self.handles[c] == v.source)
+            if (
+                v.source >= 0
+                and v.vector_type != SEQUENCE_VECTOR
+                and (
+                    mode == _COLLECT_NONE
+                    or (mode != _COLLECT_VALUES and self.handles[c] == v.source)
+                )
             ):
                 if mode == _COLLECT_NONE:
                     self.handles[c] = v.source
@@ -1012,11 +1036,7 @@ struct _Collector(Movable):
                         listed.append(UInt32(self.starts[c] + r))
                     self.rows[c] = listed^
                     self.modes[c] = _COLLECT_ROWS
-                ref listed = self.rows[c]
-                for i in range(count):
-                    listed.append(
-                        UInt32(v.source_offset + v.child_row(i))
-                    )
+                _append_rows(self.rows[c], v, count)
                 continue
             if mode != _COLLECT_VALUES:
                 self.parts[c] = self._so_far(c, arena)
@@ -1075,7 +1095,7 @@ struct _Collector(Movable):
         return result^
 
 
-struct _VectorStep(Movable):
+struct _VectorStep(Copyable, Movable):
     """One row-local step compiled for its input columns, with its output
     chunk (DuckDB's operator state and output DataChunk), reused for
     every chunk a worker runs through it."""
@@ -1209,6 +1229,19 @@ def _step_schemas(
     return schemas^
 
 
+def _compile_steps(
+    steps: List[Step], schemas: List[DataFrame]
+) raises -> List[Optional[_VectorStep]]:
+    """Every row-local step compiled for its input columns."""
+    var compiled = List[Optional[_VectorStep]](capacity=len(steps))
+    for s in range(len(steps)):
+        if steps[s].kind == STEP_JOIN:
+            compiled.append(None)
+        else:
+            compiled.append(_VectorStep(steps[s], schemas[s], schemas[s + 1]))
+    return compiled^
+
+
 struct _ChunkRunner(Movable):
     """A worker's run of a pipeline's steps over data chunks of
     STANDARD_VECTOR_SIZE rows: each row-local step reads its input chunk
@@ -1221,6 +1254,10 @@ struct _ChunkRunner(Movable):
     var steps: List[Step]
     var schemas: ArcPointer[List[DataFrame]]
     var compiled: List[Optional[_VectorStep]]
+    # The steps compiled once for every worker (bound, constants
+    # evaluated); each worker copies its own (DuckDB's operator state is
+    # per thread, its expressions bound once).
+    var templates: ArcPointer[List[Optional[_VectorStep]]]
     var joins: ArcPointer[List[DataFrame]]
     var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
     var arena: ColumnArena
@@ -1242,9 +1279,17 @@ struct _ChunkRunner(Movable):
         joins: ArcPointer[List[DataFrame]],
         indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
         stop_empty: Bool,
+        templates: ArcPointer[List[Optional[_VectorStep]]] = ArcPointer(
+            List[Optional[_VectorStep]]()
+        ),
     ) raises:
         self.steps = steps.copy()
         self.schemas = schemas
+        self.templates = templates
+        if len(self.templates[]) != len(steps):
+            self.templates = ArcPointer(
+                List[Optional[_VectorStep]](length=len(steps), fill=None)
+            )
         self.joins = joins
         self.indexes = indexes
         self.compiled = List[Optional[_VectorStep]](capacity=len(steps))
@@ -1300,9 +1345,12 @@ struct _ChunkRunner(Movable):
 
     def _compiled(mut self, s: Int) raises:
         if not self.compiled[s]:
-            self.compiled[s] = _VectorStep(
-                self.steps[s], self.schemas[][s], self.schemas[][s + 1]
-            )
+            if self.templates[][s]:
+                self.compiled[s] = self.templates[][s].value().copy()
+            else:
+                self.compiled[s] = _VectorStep(
+                    self.steps[s], self.schemas[][s], self.schemas[][s + 1]
+                )
 
     def _vector_steps(
         mut self, columns: _Columns, first: Int, stop: Int
@@ -2704,8 +2752,11 @@ struct _PipelineJob(Job):
         workers: Int,
         key_ranges: List[_KeyRange],
         schemas: ArcPointer[List[DataFrame]],
+        templates: ArcPointer[List[Optional[_VectorStep]]],
     ) raises:
-        self.runner = _ChunkRunner(steps, schemas, joins, indexes, True)
+        self.runner = _ChunkRunner(
+            steps, schemas, joins, indexes, True, templates
+        )
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
@@ -2995,7 +3046,9 @@ struct _PipelineJob(Job):
                 continue
             var rows = Optional[List[Int]]()
             if keyed[1]:
-                rows = _mask_rows(keyed[1].value(), true_count(keyed[1].value()))
+                rows = _mask_rows(
+                    keyed[1].value(), true_count(keyed[1].value())
+                )
             if self.top > 0 and self.bounded:
                 self.shared_bound.tighten(
                     self.bound,
@@ -3929,8 +3982,10 @@ def _run_pipeline(
     and output rows when the aggregate table's finish ran them, and stays
     empty otherwise."""
     trace_path("pipeline.run")
-    # Every step's input columns and the output, typed once.
+    # Every step's input columns and the output, typed once, and the
+    # row-local steps compiled once for every worker.
     var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
     var layout = List[AggregateLayout]()
@@ -4126,6 +4181,7 @@ def _run_pipeline(
                 workers,
                 key_ranges,
                 schemas,
+                templates,
             )
         )
     # An outer join's unmatched build rows run after every morsel of the
