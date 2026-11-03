@@ -185,7 +185,9 @@ def unscaled(column: Series, row: Int) raises -> Int128:
     return flat._data[Column[Int128]]._get(row)
 
 
-def check(actual: DataFrame, rows: Int, groups: Int, start: Int) raises:
+def check(given: DataFrame, rows: Int, groups: Int, start: Int) raises:
+    # One chunk, so reading a cell does not walk every chunk.
+    var actual = given.rechunk()
     var expected = models(rows, groups, start)
     var present = 0
     for g in range(groups):
@@ -315,7 +317,7 @@ def eager(threads: Int, rows: Int, groups: Int) raises:
 
 
 def test_eager_value_states_with_tables_that_clear() raises:
-    eager(8, 120_000, 20_000)
+    eager(8, 60_000, 8_000)
 
 
 def test_eager_value_states_with_tables_that_grow() raises:

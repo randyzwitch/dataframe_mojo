@@ -9,6 +9,7 @@ from dataframe.aggregation.hash_table import (
     states_supported,
 )
 from dataframe.aggregation.expressions import (
+    count_rows_by,
     _bind_all,
     _stream_reductions,
 )
@@ -62,10 +63,6 @@ from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
     take_parallel,
     take_sorted_chunked,
-)
-from dataframe.aggregation.hash_reduce import (
-    hash_agg_eligible,
-    hash_aggregate,
 )
 from dataframe.kernels.hashing import (
     RowKeys,
@@ -547,10 +544,19 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         var prepared = List[Expr](capacity=len(expressions))
         var changed = False
+        var counted = len(self._keys) > 0 and (
+            self._keys[0].name() in self._frame.columns()
+        )
         for expression in expressions:
             if group_sequence_rows(expression):
                 prepared.append(expression.implode())
                 changed = True
+            elif counted:
+                var rows = count_rows_by(expression, self._keys[0].name())
+                changed = changed or len(rows._nodes) != len(
+                    expression._nodes
+                )
+                prepared.append(rows^)
             else:
                 prepared.append(expression.copy())
         if changed:
@@ -611,13 +617,6 @@ struct GroupBy(Copyable):
             var table = self._agg_table(expressions, workers)
             if table:
                 return _pack_struct_keys(table.value())
-        if (
-            workers > 1
-            and len(self._keys) == 1
-            and not whole
-            and hash_agg_eligible(self._keys[0], bound, self._frame._columns)
-        ):
-            return _pack_struct_keys(self._agg_hash(bound, workers))
         var ranged = Optional[DataFrame]()
         if (
             workers > 1
@@ -700,30 +699,6 @@ struct GroupBy(Copyable):
             start = end
         var result = aggregate_table(keys, inputs, specs, ranges, workers)
         return table_frame(template, result^, self._maintain_order)
-
-    def _agg_hash(
-        self, bound: List[BoundExpr], workers: Int
-    ) raises -> DataFrame:
-        """Many groups of one Int64 key: states updated in place per worker
-        range, then merged by hash part (`hash_agg.mojo`), with no column
-        gathered into bucket order."""
-        trace_path("group_by.hash_agg")
-        var parts = hash_aggregate(
-            self._keys[0], bound, self._frame._columns, workers
-        )
-        ref firsts = parts[0]
-        var columns = List[Series](capacity=len(bound) + 1)
-        columns.append(self._keys[0].take(firsts))
-        for j in range(len(bound)):
-            var pieces = List[Series](capacity=len(parts[1]))
-            for p in range(len(parts[1])):
-                pieces.append(parts[1][p][j].copy())
-            var merged = Series._from_chunks(pieces).rechunk()
-            columns.append(merged.renamed(bound[j].expr._name))
-        var grouped = DataFrame(columns^, height=len(firsts))
-        if not self._maintain_order:
-            return grouped^
-        return grouped.take(sort_indices([firsts.copy()]))
 
     def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
         """Whether some `n_unique` reads many distinct values (#336).

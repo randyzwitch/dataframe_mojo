@@ -173,7 +173,6 @@ streaming orchestration. Their names distinguish the state and table layouts:
 | --- | --- |
 | `scalar_states.mojo` | Mergeable integer, floating, logical and moment states |
 | `reducer.mojo` | Typed `Reducer` update/merge/finalize and reduction kernels |
-| `hash_reduce.mojo` | Per-worker high-cardinality Int64 grouped reductions |
 | `dense.mojo` | Perfect-hash layouts and dense group slots |
 | `hash_table.mojo` | Radix-partitioned aggregate tables and inline group states |
 | `selected_rows.mojo` | Reduction kernels reading inputs through selected row indices |
